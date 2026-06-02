@@ -443,39 +443,145 @@ export interface IEmbeddingProvider {
 - **本地**：BGE-M3 via [@huggingface/transformers](https://www.npmjs.com/package/@huggingface/transformers) (TS 原生)
 - **云端**：OpenAI 兼容接口（`text-embedding-3-small`、智谱 `embedding-3` 等）
 
-### 5.5 索引构建流程
+### 5.5 索引构建流程（渐进式）
+
+> **核心原则**：连接成功后用户**立刻能用**，不需要等完整索引（可能 10+ 分钟）。
+> 索引分三阶段，按优先级渐进进行，**Agent 在任意阶段都能查询**。
+
+#### 5.5.1 三阶段策略
+
+```
+连接成功
+  │
+  ▼
+┌─────────────────────────────────────────────┐
+│ Stage 1: Skeleton（5-30 秒）                │  ← 用户立刻可用
+│  - 提取 schema/table 名 + 注释（不含列）     │
+│  - 仅 FTS（不做 embedding）                 │
+│  - meta_tables 写入，row_estimate 走 PG     │
+│  → emit('rag:stage1-ready')                 │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│ Stage 2: Hot Tables（按使用度排序）          │  ← 后台异步
+│  - 默认排序：行数估算 desc + pg_stat_user_  │
+│    tables.seq_scan/idx_scan 高的优先         │
+│  - 取 top 100 表（可配置）                   │
+│  - 提取完整列、外键、索引                     │
+│  - embedding（向量索引可用）                 │
+│  → emit('rag:stage2-progress', {done, total})│
+│  → emit('rag:stage2-ready')                 │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│ Stage 3: Long Tail（其余表）                 │  ← 完全后台，低优先级
+│  - 剩下的所有表                               │
+│  - 队列分批 embedding（每批 32，间隔休眠）   │
+│  - 用户操作时自动让出 CPU                    │
+│  → emit('rag:stage3-progress', {done, total})│
+│  → emit('rag:fully-indexed')                │
+└─────────────────────────────────────────────┘
+```
+
+#### 5.5.2 各阶段的 RAG 行为
+
+| 阶段 | 检索策略 | 用户感知 |
+|---|---|---|
+| Stage 1 进行中 | 拒绝 search_schema，提示"正在初始化" | 顶部 spinner "连接中..." |
+| Stage 1 完成 | 仅 FTS（按表名/注释关键词） | "可以问问题了，但仅基于表名" |
+| Stage 2 进行中 | FTS + 已索引表的向量 | "已索引 N/100 个核心表" |
+| Stage 2 完成 | 完整 FTS + 向量 + 图扩展 | "已就绪" |
+| Stage 3 进行中 | 同上 + 后台扩充长尾 | 状态栏小图标 "正在扩充索引..." |
+| Stage 3 完成 | 全量 | 状态栏 ✓ |
+
+**关键设计**：用户在 Stage 1 后就可以发起 Agent 对话。如果 Agent 命中了**还没索引到**的表（用户问了冷门表），retriever 触发 **on-demand 索引**：
 
 ```typescript
-async function buildIndex(connectionId: string) {
-  // 1. 提取
-  const doc = await extractor.extractAll();
+async function searchSchema(query: string) {
+  const result = await retriever.retrieve({ text: query });
 
-  // 2. 写元数据
-  await db.transaction(async (tx) => {
-    await tx.bulkInsert('meta_tables', doc.tables);
-    await tx.bulkInsert('meta_columns', doc.columns);
-    await tx.bulkInsert('meta_relations', doc.relations);
-  });
+  // 如果用户提到了 @table_name 但该表还没索引，立即索引
+  for (const explicit of result.explicitTables) {
+    if (!isIndexed(explicit)) {
+      await indexer.indexSingleTable(explicit);  // 同步等待
+    }
+  }
 
-  // 3. 构造文本 + 批量 embedding
-  const tableTexts = doc.tables.map(buildTableText);
-  const tableVectors = await embedder.embedBatch(tableTexts, 32);
-
-  const columnTexts = doc.columns.map(buildColumnText);
-  const columnVectors = await embedder.embedBatch(columnTexts, 32);
-
-  // 4. 写向量索引
-  await writeVectors('vec_tables', doc.tables, tableVectors);
-  await writeVectors('vec_columns', doc.columns, columnVectors);
-
-  // 5. 写 FTS 索引
-  await writeFts('fts_tables', doc.tables, tableTexts);
-  await writeFts('fts_columns', doc.columns, columnTexts);
-
-  // 6. 通知 UI 完成
-  emit('rag:indexed', { connectionId, stats });
+  return result;
 }
 ```
+
+#### 5.5.3 实现示意
+
+```typescript
+class ProgressiveIndexer {
+  async build(connectionId: string) {
+    // Stage 1
+    emit('rag:stage1-start');
+    const skeleton = await extractor.extractSkeleton();   // 仅表名 + 注释
+    await db.bulkInsert('meta_tables', skeleton.tables);
+    await writeFts('fts_tables', skeleton.tables);
+    emit('rag:stage1-ready', { tableCount: skeleton.tables.length });
+
+    // Stage 2 - 后台
+    queueMicrotask(() => this.runStage2(connectionId));
+  }
+
+  async runStage2(connectionId: string) {
+    const hotTables = await this.pickHotTables(100);
+    const total = hotTables.length;
+    let done = 0;
+
+    for (const batch of chunk(hotTables, 10)) {
+      const details = await extractor.describeTablesBatch(batch);
+      const texts = details.map(buildTableText);
+      const vectors = await embedder.embedBatch(texts, 32);
+      await writeVectors('vec_tables', details, vectors);
+
+      done += batch.length;
+      emit('rag:stage2-progress', { done, total });
+
+      // 让出 CPU，避免影响 UI 响应
+      await sleep(50);
+    }
+
+    emit('rag:stage2-ready');
+    queueMicrotask(() => this.runStage3(connectionId));
+  }
+
+  async runStage3(connectionId: string) {
+    const remaining = await this.listUnindexedTables();
+    // 每批之间休眠 200ms，用户活跃时延长到 2s
+    for (const batch of chunk(remaining, 10)) {
+      if (this.isUserActive()) await sleep(2000);
+      else await sleep(200);
+      // ...
+    }
+    emit('rag:fully-indexed');
+  }
+
+  /** 按使用频率挑选热表 */
+  async pickHotTables(limit: number): Promise<TableNode[]> {
+    return await this.db.query(`
+      SELECT relname, n_tup_ins + n_tup_upd + seq_scan + idx_scan AS hotness
+      FROM pg_stat_user_tables
+      ORDER BY hotness DESC NULLS LAST, reltuples DESC
+      LIMIT $1
+    `, [limit]);
+  }
+}
+```
+
+#### 5.5.4 UI 状态展示
+
+底部状态栏：
+```
+[● 已连接] [RAG: Stage 2 · 67/100 ✓] [Token: 1.2k/40k]
+```
+
+点击 RAG 状态：弹出小面板显示三阶段进度，可暂停/重启长尾索引（适合移动用户省流量）。
 
 ### 5.6 增量更新
 
@@ -489,6 +595,47 @@ async function buildIndex(connectionId: string) {
 2. 对 added/modified 的对象重新 embedding 并 upsert
 3. 删除 removed 对象的索引
 4. **不全量重建**
+
+### 5.7 断开连接时清除 RAG
+
+> **决策**：用户主动断开连接时，**自动清除该连接的 RAG 索引**（可在设置中关闭）。
+
+**理由**：
+- 用户断开通常意味着"不想再用这个库"，保留索引浪费磁盘
+- 凭证可能已废弃，索引中的 schema 也可能过时
+- 重新连接时按渐进式策略重建，体验上几秒就能用 Stage 1
+
+**默认行为**：
+```typescript
+async function disconnectConnection(connectionId: string, opts?: { keepRag?: boolean }) {
+  await pool.close(connectionId);
+
+  if (opts?.keepRag !== true && settings.autoClearRagOnDisconnect) {
+    await fs.rm(`${appData}/rag/${connectionId}.db`, { force: true });
+    emit('rag:cleared', { connectionId });
+  }
+
+  emit('connection:disconnected', { connectionId });
+}
+```
+
+**例外**：
+- 应用启动后初次"未连接"状态不算断开（保留索引避免重复重建）
+- 网络抖动导致的临时断开不清除（区分"主动断开" vs "异常断开"）
+- 用户在设置中可关闭此行为：`settings.autoClearRagOnDisconnect = false`
+
+**UI**：
+- 连接节点右键 [断开]：默认清除
+- 连接节点右键 [断开并保留索引]：保留
+- 删除连接：永远清除 + 删除连接元信息
+
+### 5.8 不做的事（明确）
+
+- ❌ **PgBouncer / 跳板机 / IAM 等连接复杂场景的兼容**
+  - 我们的逻辑：用户复杂场景可以**自部署到内网**（私有化），自部署版本不在这个层面纠结
+  - MVP 仅支持标准 PG/MySQL 连接 + SSH 隧道
+- ❌ 跨连接共享 RAG（每个连接独立 sqlite 文件）
+- ❌ RAG 云同步（隐私冲突）
 
 ---
 
