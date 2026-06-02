@@ -321,40 +321,244 @@ async function bootstrap() {
 
 ## 6. 测试策略
 
-### 6.1 测试层次
+### 6.1 核心原则
 
-| 层 | 工具 | 覆盖目标 |
+> **不用 LLM Mock。Agent 和 RAG 的测试必须用真实 API key + 真实数据库。**
+
+**为什么不 mock**：
+- LLM 行为非确定，mock 测的是"我们假设 LLM 会怎么响应"，不是"LLM 真的怎么响应"
+- Agent loop 的真正风险来自**真实 LLM 的不稳定**：tool calling 失败、参数格式偏差、思维跳跃 —— 这些 mock 都测不出来
+- RAG 检索质量依赖真实 embedding 模型 + 真实 schema，mock 检索结果毫无意义
+- 我们是单干 + AI 编码代理，没必要为了"测试速度"维护两套 LLM 行为定义
+
+**真实测试的代价我们能承担**：
+- 每次 CI 跑一遍 agent E2E ≈ 几毛钱（DeepSeek 价格）
+- 时间慢一点（10-30 秒/case）但每天就跑几十次，能接受
+- 跨地域 / 网络波动是 CI 配置问题，不是不测的理由
+
+### 6.2 测试层次
+
+| 层 | 工具 | 覆盖目标 | 是否真实依赖 |
+|---|---|---|---|
+| 单元测试 | Vitest | 纯函数、算法、数据转换 | 否 |
+| 集成测试 | Vitest + Docker PG | RAG 索引、SQL 执行、连接池 | **真实 PG** |
+| RAG 检索测试 | Vitest + 真实 embedding | 检索质量、排序、图扩展 | **真实 embedding API** |
+| Agent 行为测试 | Vitest + 真实 LLM | tool calling、多轮决策、错误恢复 | **真实 LLM API** |
+| E2E | Playwright (Electron) | 用户旅程、UI 交互 | **真实 LLM + PG** |
+
+### 6.3 测试用 LLM 与 Embedding 配置
+
+#### 6.3.1 多模型矩阵测试
+
+每个 Agent 和 RAG 测试都对 **多个模型**跑一遍：
+
+| 用途 | 主测模型 | 兼容性测试模型 |
 |---|---|---|
-| 单元测试 | Vitest | core-* 包逻辑（核心算法、纯函数） |
-| 集成测试 | Vitest + 真实 PG (docker) | RAG 索引、SQL 执行 |
-| Agent 行为测试 | Vitest + LLM mock | 各种 prompt → tool call 路径 |
-| E2E | Playwright (Electron) | 用户旅程 |
+| Agent 主对话 | DeepSeek-V3（默认推荐） | Claude Sonnet 4、GPT-4o-mini |
+| Embedding | BGE-M3（本地） | OpenAI text-embedding-3-small |
 
-### 6.2 LLM Mock
+**理由**：
+- DeepSeek 是默认推荐，必须重点保证
+- Claude / GPT 跑通保证我们的 prompt 不锁死某个模型
+- 不同模型的 tool calling 表现差异大，必须真测
 
-测试 agent 行为时，不调真实 LLM：
+#### 6.3.2 测试环境的 API key 管理
 
-```typescript
-class MockLlmProvider implements ILlmProvider {
-  scripted: ChatChunk[][];
-
-  async *chatStream(req) {
-    const next = this.scripted.shift();
-    for (const chunk of next) yield chunk;
-  }
-}
-
-// 在测试中编排：
-const mock = new MockLlmProvider();
-mock.scripted = [
-  [{type: 'tool-call', data: { name: 'search_schema', args: { q: 'orders' } }}],
-  [{type: 'text-delta', data: '上周销量最高的是...'}],
-];
+```bash
+# .env.test （不入版本控制）
+TEST_DEEPSEEK_API_KEY=sk-xxx
+TEST_OPENAI_API_KEY=sk-xxx
+TEST_ANTHROPIC_API_KEY=sk-ant-xxx
+TEST_OLLAMA_ENDPOINT=http://localhost:11434/v1   # 可选：本地模型对照
 ```
 
-### 6.3 覆盖率目标
+**CI 环境**：用 GitHub Secrets 注入，限制：
+- 仅 `main` 分支和受信任的 PR 跑（防止 fork PR 偷 key）
+- 单次 PR 测试预算上限 ¥10（超过就告警）
+- 用专门的低额度测试 key（限速 / 月配额）
 
-- core-* 包：≥ 70% line coverage
+### 6.4 测试数据集
+
+#### 6.4.1 标准测试数据库
+
+`scripts/test-fixtures/` 提供可重复构造的测试 PG：
+
+```
+test-fixtures/
+├── 00-schema.sql              # DDL（10-20 张表，覆盖典型业务模式）
+├── 01-seed-small.sql          # 1 万行小数据集（CI 用）
+├── 02-seed-large.sql          # 100 万行大数据集（性能测试用）
+├── 03-comments.sql            # 字段注释（含中文）
+└── README.md                  # schema 说明
+```
+
+业务模式覆盖：
+- 用户 / 订单 / 商品（电商核心三表 + 多对多）
+- 含**加密字段**（phone_enc BYTEA + 注释标注）
+- 含**软删除**（deleted_at）
+- 含 **JSON 字段**（user_metadata JSONB）
+- 含**枚举**和**外键级联**
+- 一张**故意写得糟糕**的表（无主键、列名缩写）测 RAG/Agent 的鲁棒性
+
+#### 6.4.2 任务清单（manual-cases.md）
+
+`tests/manual-cases.md` 维护一份**真实任务清单**，每条对应一次 Agent 行为测试：
+
+```markdown
+## TC-001: 简单查询
+**Prompt**: 列出 users 表前 10 条记录
+**期望**:
+  - 调用 search_schema 或 describe_table（任一）
+  - 生成 SELECT * FROM users LIMIT 10
+  - 询问模式下出现确认弹窗
+**通过模型**: deepseek-v3 ✓ / claude-sonnet ✓ / gpt-4o-mini ✓
+
+## TC-002: 复杂 JOIN
+**Prompt**: 上周下单超过 3 次的用户的邮箱
+**期望**:
+  - 至少检索 users + orders 两表
+  - 生成含 GROUP BY + HAVING 的 SQL
+  - 时间过滤正确
+
+## TC-003: 加密字段
+**Prompt**: 按城市统计用户注册数（city 在加密的 phone_enc 里）
+**期望**:
+  - 识别 phone_enc 是加密字段
+  - 主动询问用户是否有 decrypt_phone 工具 / Skill
+  - 不要硬编码假设解密逻辑
+
+## TC-004: 危险操作
+**Prompt**: 把 status='inactive' 的用户全删了
+**期望**:
+  - 询问模式下绝不直接执行
+  - SQL 卡片显示影响行数预估
+  - 危险等级 high
+
+... (30-50 条覆盖各种场景)
+```
+
+#### 6.4.3 这份清单既是测试也是产品规范
+
+- 自动化部分进 `tests/agent-e2e/` 跑 CI
+- 手动验收部分作为 release 前 checklist
+- 用户报 bug 时新增 case，避免回归
+
+### 6.5 RAG 检索质量测试
+
+```typescript
+// tests/rag-quality.test.ts
+import { describe, it, expect } from 'vitest';
+
+describe('RAG retrieval quality', () => {
+  beforeAll(async () => {
+    await buildRagIndex(testConnectionId);  // 用真实 embedding
+  });
+
+  const cases = [
+    { query: '订单', mustInclude: ['orders', 'order_items'] },
+    { query: '用户邮箱',  mustInclude: ['users.email'] },
+    { query: '退款',  mustInclude: ['refunds', 'orders.refund_status'] },
+    { query: '上周销量', mustInclude: ['orders', 'products', 'order_items'] },
+  ];
+
+  for (const c of cases) {
+    it(`retrieves correct tables for "${c.query}"`, async () => {
+      const result = await retriever.retrieve({ text: c.query, topK: 10 });
+      const ids = result.tables.map(t => t.id).concat(result.columns.map(c => c.id));
+      for (const must of c.mustInclude) {
+        expect(ids.some(id => id.includes(must))).toBe(true);
+      }
+    });
+  }
+});
+```
+
+**评估指标**（手动观察，不卡死阈值）：
+- 必含项命中率（must include hit rate）
+- 噪声项（不相关的表占比）
+- 排序合理性（关键表是否在前 5）
+
+### 6.6 Agent 行为测试
+
+```typescript
+// tests/agent-behavior.test.ts
+import { describe, it, expect } from 'vitest';
+
+const MODELS_TO_TEST = ['deepseek:deepseek-chat', 'anthropic:claude-sonnet-4'];
+
+describe.each(MODELS_TO_TEST)('Agent behavior with %s', (modelRef) => {
+  it('TC-001: simple query generates SELECT with LIMIT', async () => {
+    const session = await createTestSession({ modelRef, mode: 'auto' });
+    const result = await runAgent(session, '列出 users 表前 10 条记录');
+
+    // 检查行为而非具体文本
+    expect(result.toolCalls).toContainEqual(
+      expect.objectContaining({ name: expect.stringMatching(/search_schema|describe_table|query_database/) })
+    );
+
+    const sqlCall = result.toolCalls.find(c => c.name === 'query_database');
+    expect(sqlCall.args.sql.toUpperCase()).toMatch(/SELECT.*FROM\s+USERS/);
+    expect(sqlCall.args.sql.toUpperCase()).toMatch(/LIMIT\s+10/);
+  });
+
+  it('TC-004: danger operation blocked in ask mode', async () => {
+    const session = await createTestSession({ modelRef, mode: 'ask' });
+
+    let approvalCalled = false;
+    session.onApprovalNeeded = (req) => {
+      approvalCalled = true;
+      return { approved: false };  // 拒绝
+    };
+
+    const result = await runAgent(session, "DELETE FROM users WHERE status = 'inactive'");
+    expect(approvalCalled).toBe(true);
+    expect(result.executedWrites).toEqual([]);  // 没真执行
+  });
+});
+```
+
+**断言原则**：
+- **断言行为，不断言文字**：检查"是否调了 search_schema"，不检查"agent 说了什么"
+- **断言结构，不断言精确 SQL**：用正则匹配关键模式，不写死 SQL 字符串
+- **接受多种合理路径**：模型 A 可能先 `search_schema`，模型 B 直接 `query_database`，都可
+- **明确"不应该做什么"**：TC-004 这种侧重"没有越权"
+
+### 6.7 测试预算与频率
+
+| 测试类型 | 何时跑 | 单次预算 | 时长 |
+|---|---|---|---|
+| 单元测试 | 每次提交 / pre-commit | ¥0 | < 10s |
+| 集成测试（Docker PG） | 每次 PR | ¥0 | < 1min |
+| RAG 检索测试 | 每次 PR（限主分支或 trigger 标签）| ~¥0.5 | < 2min |
+| Agent E2E（DeepSeek 单模型）| 每次 PR | ~¥1 | 3-5min |
+| Agent E2E（多模型矩阵）| 每天 nightly | ~¥10 | 10-20min |
+| Playwright UI E2E | 每次 PR | ~¥1 | 5min |
+| 完整发布前 checklist | release 候选 | ~¥30 | 30min |
+
+> CI 上配置预算监控，超额自动暂停。
+
+### 6.8 covering 与不 covering
+
+#### 6.8.1 必测
+
+- 所有内置工具的真实调用（query_database 真连 PG、search_schema 真用 RAG）
+- Agent loop 的关键决策路径（TC-001 ~ TC-050）
+- 询问/自动/只读三种模式的权限边界
+- SQL 预审（DELETE/DROP 必须被拦截）
+- 多模型兼容性（每个推荐模型至少跑核心 5 个 case）
+
+#### 6.8.2 不测
+
+- ❌ LLM 输出的具体文字
+- ❌ 不同模型谁更"聪明"
+- ❌ Token 用量精确数值（只测"是否记录了" / "是否在合理量级"）
+- ❌ MCP server 内部实现（信任协议）
+- ❌ Electron 自身（信任框架）
+
+### 6.9 覆盖率目标
+
+- core-* 包（纯逻辑）：≥ 70% line coverage
+- Agent / RAG：以**任务清单覆盖率**为准（不追求 line coverage）
 - UI：关键流程 E2E 覆盖即可
 - IPC handlers：每个 channel 至少一个测试
 
@@ -598,48 +802,113 @@ extraResources:
 
 ### 11.4 M2 任务清单
 
-- [ ] `packages/core-rag/extractors/postgres.ts`：schema 提取
+- [ ] `packages/core-rag/extractors/postgres.ts`：schema 提取（支持 skeleton-only 模式）
 - [ ] sqlite-vec 集成（packages/core-rag/storage）
 - [ ] embedding provider 抽象 + OpenAI 兼容实现
 - [ ] BGE-M3 本地推理集成（@huggingface/transformers）
-- [ ] indexer：批量构建索引
-- [ ] retriever：向量 + FTS + RRF 融合
+- [ ] **渐进式 indexer（详见 [02 §5.5](./02-rag-design.md)）**：
+  - [ ] Stage 1：仅表名 + 注释 + FTS（5-30 秒）
+  - [ ] Stage 2：top 100 热表（按 pg_stat_user_tables 排序）+ 向量
+  - [ ] Stage 3：长尾后台索引（让出 CPU、用户活跃时延迟）
+  - [ ] On-demand 索引：用户引用未索引表时即时索引
+- [ ] retriever：向量 + FTS + RRF 融合（各阶段表现不同）
 - [ ] context builder：组装 prompt 友好的上下文
-- [ ] IPC：`rag:rebuild / rag:status / rag:search`
-- [ ] UI：Schema 树（右侧栏）+ 索引进度
+- [ ] **断开连接清除 RAG**（详见 [02 §5.7](./02-rag-design.md)）
+- [ ] IPC：`rag:rebuild / rag:status / rag:search` + `rag:stage-progress`（流式）
+- [ ] UI：Schema 树（右侧栏）+ 三阶段索引进度
+- [ ] UI：底部 RAG 状态指示器（详见 [01 §2.4.1](./01-ui-design.md)）
 - [ ] 简陋对话：直接把 RAG 结果 + 用户问题塞 LLM 出答案（还不是完整 agent）
 
 ### 11.5 M3 任务清单
 
+#### Agent 核心
 - [ ] `packages/core-agent/loop.ts`：核心 ReAct loop
 - [ ] `packages/core-agent/permission.ts`：询问/审批
 - [ ] `packages/core-agent/strategies/react.ts`
-- [ ] `packages/core-tools/builtin/`：query_database, search_schema, describe_table, explain_sql
+- [ ] **`packages/core-agent/context-manager.ts`：Token 计数 + 渐进压缩**（详见 [03 §9.2](./03-agent-design.md)）
+  - [ ] tiktoken / js-tiktoken 集成做 token 估算
+  - [ ] Level 1-4 压缩策略实现
+  - [ ] 撤销窗口（5 分钟）
+  - [ ] 压缩用便宜模型（不计入用户配额）
 - [ ] SQL 预审（解析 + EXPLAIN + 危险等级）
-- [ ] IPC：`agent:run / agent:abort / agent:event`（流式）
-- [ ] UI：对话窗 + 流式渲染 + SQL 卡片 + 工具卡片 + 询问对话框
-- [ ] UI：Agent 模式切换（顶部栏）
-- [ ] UI：会话管理（新建/切换/重命名/删除）
+- [ ] IPC：`agent:run / agent:abort / agent:event`（流式）+ `agent:compressed`
+
+#### 内置工具（详见 [03 §5.2](./03-agent-design.md#52-内置工具清单开箱即用)）
+- [ ] `packages/core-tools/builtin/db/`：search_schema, describe_table, list_tables, list_schemas, get_relations, query_database, execute_sql, explain_sql, dry_run_sql, get_sample_rows, read_query_history
+- [ ] `packages/core-tools/builtin/workspace/`：read/write/edit/delete/list/glob/grep（依赖 workspace 模块，M3 可先做基础）
+- [ ] `packages/core-tools/builtin/shell/`：run_shell_command（含白/黑名单 + 询问拦截）
+- [ ] `packages/core-tools/builtin/web/`：web_fetch（基础）
+
+#### UI
+- [ ] 对话窗 + 流式渲染 + SQL 卡片 + 工具卡片 + 询问对话框
+- [ ] Agent 模式切换（顶部栏）
+- [ ] 会话管理（新建/切换/重命名/删除）
+- [ ] Shell 命令的"展开预览"卡片
+- [ ] **底部 Token 占比指示器**（详见 [01 §2.4.2](./01-ui-design.md)）：彩色条 + 占用分布弹窗 + 立即压缩 / 撤销 / 调整预算
 
 ### 11.6 M4 任务清单
 
+#### MCP Client
 - [ ] MCP Client（@modelcontextprotocol/sdk）
 - [ ] MCP Server 进程管理（启动/重启/停止）
 - [ ] MCP 工具适配为 ITool 注册到 ToolRegistry
 - [ ] mcp.json 持久化
 - [ ] IPC：`mcp:list / mcp:install / mcp:start / mcp:stop`
-- [ ] UI：Tools 面板（右侧栏）
+
+#### 默认内置 MCP（详见 [03 §5.3](./03-agent-design.md#53-默认安装的-mcp-server开箱即用)）
+- [ ] 默认 mcp.json 预置 builtin-memory / builtin-time / builtin-fetch（按需启动）
+- [ ] npx 拉取首次启动 + 国内镜像开关
+- [ ] 失败兜底：禁用 MCP 仍可用基础工具
+
+#### Market
 - [ ] Smithery API 对接（IMcpMarket）
+- [ ] UI：Tools 面板（右侧栏）
 - [ ] UI：MCP Market 浏览 + 安装流程
 
 ### 11.7 M5 任务清单
 
+#### Agent 高级策略
 - [ ] `packages/core-agent/strategies/plan-execute.ts`
 - [ ] `packages/core-agent/subagent.ts`：spawn_subagents 工具实现
 - [ ] Plan 数据模型 + 持久化
 - [ ] UI：Plan 面板（右侧栏）+ 子 agent 状态
+
+#### Skill 系统
 - [ ] `packages/core-skills/`：Skill yaml schema + loader + executor
-- [ ] UI：Skills 设置页 + 触发方式（slash command）
+- [ ] 内置 Skill 四件套（详见 [03 §6.4](./03-agent-design.md#64-内置-skill-清单开箱即用)）：
+  - [ ] `resources/skills/generate-schema-doc.yaml`
+  - [ ] `resources/skills/generate-er-diagram.yaml`
+  - [ ] `resources/skills/optimize-sql.yaml`
+  - [ ] `resources/skills/data-analysis.yaml` ★ 核心：指导 Agent 写 Python 脚本
+- [ ] Skill `auto_inject_when` 机制（让 data_analysis 在合适场景自动激活）
+- [ ] save_session_as_skill 工具
+- [ ] UI：Skills 设置页 + 触发方式（slash command + 命令面板）
+
+#### 工作空间 + Python
+- [ ] `packages/core-workspace/`：workspace 创建/打开/切换
+- [ ] **多连接管理**（详见 [08 §2.6](./08-workspace-design.md)）：
+  - [ ] WorkspaceConnection 数据模型（关联多连接）
+  - [ ] 三状态（disconnected / connecting / active）
+  - [ ] 激活 / 断开 / 取消关联三种操作
+  - [ ] 断开时自动清除该连接 RAG（呼应 M2）
+  - [ ] UI：左侧连接面板支持多连接 + 状态颜色点
+  - [ ] SQL 编辑器顶部连接选择器（支持临时切到其他已激活连接）
+- [ ] **SQL 库**（详见 [08 §2.3](./08-workspace-design.md) sql/ 目录）：
+  - [ ] SQL 文件 frontmatter 注释解析（@name / @description / @params / @tags / @connection）
+  - [ ] 命令面板搜索 SQL（按 name/tags）
+  - [ ] `:param` 参数化执行（运行时弹窗输入）
+  - [ ] `_drafts/` 不进 RAG / Agent 上下文
+- [ ] Python Runtime 检测 + venv 管理（uv 优先）
+- [ ] 工作空间模板：minimal / standard / full / ml / dl / rl（详见 [08 §4.6.4](./08-workspace-design.md)）
+- [ ] `dbagent-sdk` Python 包（详见 [08 §4.6.5](./08-workspace-design.md)）
+  - [ ] `db.query / query_stream / engine / connection`
+  - [ ] `save / load`（按扩展名分发：csv/parquet/json/yaml/pkl/pt/png/...）
+  - [ ] `workspace.print / show_image / show_dataframe / show_markdown / progress / ask_user`
+  - [ ] `workspace.call_tool / list_tools`
+  - [ ] sys.path 自动注入 workspace 根，支持 `from scripts.xxx import yyy`
+- [ ] 内置工具：run_python_script, python_repl, install_python_deps
+- [ ] 工作空间脚本注册为 Tool 的机制（解析 `@tool` docstring）
+- [ ] UI：工作空间侧栏 + Python 编辑器 Tab + 运行输出（含图片/表格/进度条渲染）
 
 ### 11.8 M6 任务清单
 
