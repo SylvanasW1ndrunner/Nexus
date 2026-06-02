@@ -359,23 +359,159 @@ class StrategySelector {
 | **Market MCP** | 从 Smithery 等市场下载 | filesystem, github |
 | **Skill** | 用户/团队自定义流程（含 prompt + tools） | "导出每日报表" |
 
-### 5.2 内置工具清单
+### 5.2 内置工具清单（自带，开箱即用）
 
-| 工具 | 描述 | 危险等级 |
-|---|---|---|
-| `search_schema` | RAG 检索 schema | 安全 |
-| `describe_table` | 获取表详细 schema | 安全 |
-| `list_tables` | 列出表 | 安全 |
-| `query_database` | 执行 SELECT | 中（影响行数） |
-| `execute_sql` | 执行任意 SQL（含写） | 高（写操作） |
-| `explain_sql` | EXPLAIN 分析 | 安全 |
-| `dry_run_sql` | 预估影响行数 | 安全 |
-| `get_sample_rows` | 获取样本数据 | 安全（脱敏） |
-| `read_query_history` | 读取历史查询 | 安全 |
-| `spawn_subagents` | 创建子 agent | 中 |
-| `web_search` | 网页搜索（可选） | 安全 |
+> **设计原则**：MVP 必须有一套"开箱即用"的内置工具。能用开源 MCP 适配的优先，性能/安全敏感的自写。
 
-### 5.3 统一工具接口
+#### 5.2.1 数据库类（自写，与 core-db / core-rag 紧耦合）
+
+| 工具 | 描述 | 危险等级 | 实现来源 |
+|---|---|---|---|
+| `search_schema` | RAG 检索 schema | safe | 自写（依赖 core-rag） |
+| `describe_table` | 获取表详细 schema | safe | 自写 |
+| `list_tables` | 列出表 | safe | 自写 |
+| `list_schemas` | 列出 schema/database | safe | 自写 |
+| `get_relations` | 获取表的外键关系 | safe | 自写 |
+| `query_database` | 执行 SELECT | medium | 自写 |
+| `execute_sql` | 执行任意 SQL（含写） | high | 自写（含 SQL 预审） |
+| `explain_sql` | EXPLAIN 分析 | safe | 自写 |
+| `dry_run_sql` | 预估影响行数 | safe | 自写 |
+| `get_sample_rows` | 获取样本数据（脱敏） | safe | 自写 |
+| `read_query_history` | 读取历史查询 | safe | 自写 |
+
+#### 5.2.2 工作空间 / 文件类（自写，需要 workspace 沙箱）
+
+| 工具 | 描述 | 危险等级 | 实现来源 |
+|---|---|---|---|
+| `read_workspace_file` | 读 workspace 内文件 | safe | 自写 |
+| `write_workspace_file` | 写文件（含 diff 预览） | medium | 自写 |
+| `edit_workspace_file` | 精确编辑（patch） | medium | 自写 |
+| `list_workspace_dir` | 列目录 | safe | 自写 |
+| `delete_workspace_file` | 删文件（5s 内可撤销） | medium | 自写 |
+| `glob_workspace` | 文件名 glob 搜索 | safe | 自写（用 fast-glob） |
+| `grep_workspace` | 内容搜索 | safe | 自写（用 ripgrep 子进程） |
+
+> **说明**：理论上 `@modelcontextprotocol/server-filesystem` 可以替代这些，但内置版本：1) 自动锁定到当前 workspace 目录；2) 与 UI 的 diff 预览深度集成；3) 不需要起额外子进程，更轻量。
+
+#### 5.2.3 脚本执行类（自写，依赖工作空间运行时）
+
+| 工具 | 描述 | 危险等级 | 实现来源 |
+|---|---|---|---|
+| `run_python_script` | 执行 workspace/scripts/*.py | high | 自写（详见 [08 §4](./08-workspace-design.md)） |
+| `python_repl` | 执行短 Python 代码片段（无需建文件） | high | 自写 |
+| `install_python_deps` | 安装/更新 requirements.txt | high | 自写 |
+| `run_shell_command` | 执行 shell 命令 | **high** | 自写（详见 §5.2.4） |
+
+#### 5.2.4 Shell 工具的安全约束
+
+`run_shell_command` 是高风险工具，**默认行为**：
+
+- **询问模式下**：每次执行前必须用户确认，显示完整命令
+- **自动模式下**：仅命令在白名单（`ls/cat/grep/find/git/python/node/...`）才自动执行
+- **完全自动模式下**：黑名单匹配（`rm -rf / | sudo / curl ... | sh / dd / mkfs / shutdown ...`）一律拒绝
+- **路径不限制**（用户决策）：可在 workspace 外执行，但有黑名单兜底
+- **超时**：默认 60s，可配置
+- **Capture**：stdout/stderr 限 100KB，超出截断
+- **环境变量**：默认继承用户环境，敏感变量（`API_KEY` / `SECRET` / `PASSWORD`）默认 mask
+
+```typescript
+// 设置中可调
+shell: {
+  whitelist: ['ls', 'cat', 'head', 'tail', 'grep', 'find', 'wc', 'git', 'python', 'pip', 'uv', 'node', 'npm', 'pnpm', 'curl'],
+  blacklist: ['rm -rf /', 'sudo', 'shutdown', 'mkfs', 'dd', '> /dev/'],
+  timeoutSec: 60,
+  maxOutputBytes: 100_000,
+  maskEnvVars: ['*KEY*', '*SECRET*', '*PASSWORD*', '*TOKEN*'],
+}
+```
+
+#### 5.2.5 元能力类（自写）
+
+| 工具 | 描述 | 危险等级 | 实现来源 |
+|---|---|---|---|
+| `spawn_subagents` | 创建子 agent | medium | 自写 |
+| `save_session_as_skill` | 当前会话→Skill yaml | safe | 自写 |
+| `web_search` | 网页搜索（可选）| safe | 集成 Tavily / Bing API |
+| `web_fetch` | 抓取 URL 文本 | safe | 集成现成 fetch MCP |
+
+---
+
+### 5.3 默认安装的 MCP Server（开箱即用）
+
+> 应用首次启动时自动注册以下 MCP（可在设置中禁用）：
+
+#### 5.3.1 不打包，按需启动（npx 拉取）
+
+| MCP Server | 提供能力 | 包名 | 启动方式 |
+|---|---|---|---|
+| **memory** | Agent 跨会话记忆 | `@modelcontextprotocol/server-memory` | `npx -y @modelcontextprotocol/server-memory` |
+| **time** | 时间/时区/日期计算 | `@modelcontextprotocol/server-time` | `npx -y @modelcontextprotocol/server-time` |
+| **fetch** | HTTP 请求（带超时） | `@modelcontextprotocol/server-fetch` | `npx -y @modelcontextprotocol/server-fetch` |
+| **everything**（开发期）| 测试 / debug 用，不发布 | `@modelcontextprotocol/server-everything` | 仅 dev 模式 |
+
+#### 5.3.2 不集成 / 用户按需从 Market 安装
+
+| MCP | 不内置原因 |
+|---|---|
+| `server-filesystem` | 已有内置等价工具（workspace 锁定） |
+| `server-github` | 用户场景差异大（要 token），从 Market 装 |
+| `server-postgres` | 我们的 core-db 自带能力，避免重复 |
+| `server-puppeteer` | 体积大、用得少 |
+| `server-slack` / `server-gdrive` | 业务场景，从 Market 装 |
+
+#### 5.3.3 启动策略
+
+```typescript
+// 默认 mcp.json 预置
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "builtin-memory",
+      "name": "Memory",
+      "source": "builtin",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "enabled": true,
+      "autoStart": false  // 按需启动，节省内存
+    },
+    {
+      "id": "builtin-time",
+      "name": "Time",
+      "source": "builtin",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-time"],
+      "enabled": true,
+      "autoStart": false
+    },
+    {
+      "id": "builtin-fetch",
+      "name": "Fetch",
+      "source": "builtin",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "enabled": true,
+      "autoStart": false
+    }
+  ]
+}
+```
+
+**首次调用时 npx 拉取**，本地缓存后续秒启。
+
+#### 5.3.4 离线兜底
+
+考虑到国内用户可能 npx 慢/被墙，提供：
+- 设置中"使用国内镜像"开关（npm 镜像 → 淘宝/腾讯）
+- 用户可手动指定本地路径（已 npm i 过的包）
+- 失败时降级：禁用 MCP，仅用内置工具，提示用户
+
+---
+
+### 5.4 统一工具接口
 
 无论来源，所有工具走同一接口：
 
@@ -411,9 +547,9 @@ export interface ToolResult {
 }
 ```
 
-### 5.4 MCP 集成
+### 5.5 MCP 集成
 
-#### 5.4.1 MCP Client 架构
+#### 5.5.1 MCP Client 架构
 
 ```
 ┌────────────────────────────────────────────┐
@@ -456,7 +592,7 @@ class MCPToolAdapter implements ITool {
 }
 ```
 
-#### 5.4.3 Smithery / mcp.so 市场对接
+#### 5.5.3 Smithery / mcp.so 市场对接
 
 参考 [Smithery Registry API](https://smithery.ai)：
 - `GET /servers` 拉取列表
@@ -480,20 +616,20 @@ interface IMcpMarket {
 4. 启动 MCP 进程，list_tools，注册到 ToolRegistry
 5. 出现在 UI 的 Tools 面板
 
-### 5.5 工具调用的安全控制
+### 5.6 工具调用的安全控制
 
-#### 5.5.1 工具白名单
+#### 5.6.1 工具白名单
 每个 session / 模式有独立的工具白名单：
 - 只读模式：只允许 `*_read`, `*_describe`, `query_database` (限 SELECT)
 - 询问模式：所有工具可调，但 `danger_level >= medium` 必须用户确认
 - 自动模式：所有工具自动执行，但 `danger_level == high` 仍要求确认
 
-#### 5.5.2 工具调用配额
+#### 5.6.2 工具调用配额
 - 单 session 工具调用上限：默认 50 次
 - 单 tool 调用超时：默认 60 秒
 - MCP 进程内存限制：默认 512MB
 
-#### 5.5.3 工具沙箱（未来）
+#### 5.6.3 工具沙箱（未来）
 MVP 阶段：MCP 作为子进程，依赖进程隔离
 v1.1+：考虑 Docker / WASM 加强隔离
 
@@ -576,6 +712,432 @@ async function runSkill(skill: Skill, args: any, parent: Session) {
   return await strategy.run(subSession, renderTemplate(skill, args));
 }
 ```
+
+### 6.4 内置 Skill 清单（开箱即用）
+
+> 应用自带 4 个核心 Skill，覆盖数据工程师最高频的场景。**全部以 yaml 文件随应用打包**，可被用户复制改写为模板。
+>
+> **特别强调 `data_analysis`**：让 Agent 写 Python 脚本做数据分析是我们的核心差异化（详见 [08 §1.3](./08-workspace-design.md)），必须开箱即用，不依赖用户每次自己写 prompt 引导。
+
+#### 6.4.1 `generate_schema_doc` — 生成 Schema 文档
+
+```yaml
+name: generate_schema_doc
+title: 生成 Schema 文档
+description: 扫描当前数据库的所有表，输出结构化的 Markdown 文档到 docs/schema.md
+
+trigger:
+  command: /schema-doc
+  natural_language_keywords: ['生成 schema 文档', '导出表结构', 'schema documentation']
+
+allowed_tools:
+  - list_tables
+  - describe_table
+  - get_relations
+  - get_sample_rows
+  - write_workspace_file
+
+parameters:
+  scope:
+    type: string
+    description: schema 名（留空则全部）
+    default: null
+  include_samples:
+    type: boolean
+    default: false
+  output_path:
+    type: string
+    default: 'docs/schema.md'
+
+system_addition: |
+  你是技术文档专家，输出标准、可读、对中文用户友好的 Schema 文档。
+  - 每张表一节，含：用途、字段表、关键索引、关联关系
+  - 字段表用 Markdown table，列：字段名 / 类型 / 是否空 / 默认值 / 描述
+  - 加密字段在描述中明确标注（如 ⚠ AES 加密）
+  - 关联关系用列表展示（1:N → other_table）
+
+steps:
+  - 用 list_tables 列出 {scope} 范围的所有表
+  - 对每张表用 describe_table 获取详细信息
+  - 用 get_relations 获取关联关系
+  - 组装 Markdown，调用 write_workspace_file 写入 {output_path}
+  - 返回写入路径和表数
+
+output_format: markdown
+```
+
+#### 6.4.2 `generate_er_diagram` — 生成 ER 图
+
+```yaml
+name: generate_er_diagram
+title: 生成 ER 图（mermaid）
+description: 基于外键自动生成 mermaid erDiagram 文本
+
+trigger:
+  command: /er-diagram
+  natural_language_keywords: ['生成 ER 图', '画关系图', 'entity relationship']
+
+allowed_tools:
+  - list_tables
+  - describe_table
+  - get_relations
+  - write_workspace_file
+
+parameters:
+  tables:
+    type: array
+    description: 指定表名列表（留空则全部）
+    default: null
+  output_path:
+    type: string
+    default: 'docs/er-diagram.mermaid'
+  max_columns_per_table:
+    type: integer
+    description: 每个表最多显示的字段数（避免图太复杂）
+    default: 10
+
+system_addition: |
+  你输出标准的 mermaid erDiagram 语法。
+  - 表节点显示主键 PK、外键 FK 标记
+  - 关系箭头用 ||--o{ 表示 1:N，||--|| 表示 1:1
+  - 标注关系名（约束名）
+  - 仅显示前 {max_columns_per_table} 个字段
+
+steps:
+  - 收集表和外键
+  - 生成 erDiagram 文本
+  - write_workspace_file 写入 {output_path}
+  - 返回 mermaid 文本（UI 直接渲染）
+
+output_format: mermaid
+```
+
+#### 6.4.3 `optimize_sql` — SQL 优化建议
+
+```yaml
+name: optimize_sql
+title: SQL 优化建议
+description: 对一条 SQL 跑 EXPLAIN ANALYZE，分析瓶颈并给出优化建议
+
+trigger:
+  command: /optimize
+  natural_language_keywords: ['SQL 优化', 'explain', '为什么慢', '优化查询']
+  context_aware: true   # 在 SQL 编辑器中选中 SQL 时显示菜单
+
+allowed_tools:
+  - explain_sql
+  - describe_table
+  - search_schema
+
+parameters:
+  sql:
+    type: string
+    description: 要优化的 SQL（必填）
+    required: true
+
+system_addition: |
+  你是资深 DBA。基于 EXPLAIN ANALYZE 输出，给出可执行的优化建议。
+  分析维度：
+  1. 索引使用：是否走了合适的索引？是否需要新建？
+  2. JOIN 顺序：是否最优？
+  3. 子查询/CTE：是否能改写为更高效的形式？
+  4. 行数估算：planner 估算与实际差异大吗？（可能要 ANALYZE）
+  5. 数据类型：是否有隐式转换？
+
+  输出格式：
+  - 性能瓶颈（最多 3 条，按影响排序）
+  - 建议（每条含：改动 / 预期收益 / 实施 SQL 或 DDL）
+  - 重写后的 SQL（如适用）
+
+steps:
+  - 用 explain_sql 跑 EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+  - 解析输出找出高耗时节点
+  - 必要时用 describe_table 确认相关表的索引
+  - 输出结构化分析
+
+output_format: markdown
+```
+
+#### 6.4.4 `data_analysis` — Python 数据分析（核心 Skill）
+
+> **这是 DBAgent 区别于普通 Text2SQL 工具的核心 Skill**。它指导 Agent 用 Python 脚本完成 SQL 单独无法完成的任务：复杂统计、可视化、机器学习、深度学习、强化学习、特征工程、加解密、跨表 ETL、报告生成等。
+>
+> **不是模板化、不是只会画图**：真正的数据科学家会用 scikit-learn / PyTorch / TensorFlow / Optuna / Stable-Baselines3 等高级库。本 Skill 给 Agent 的是**约定与边界**，不是"必须长什么样"的死模板。
+
+```yaml
+name: data_analysis
+title: Python 数据分析与建模
+description: 让 Agent 用 Python 脚本完成 SQL 之外的所有数据任务，从简单 EDA 到深度学习训练，自动生成可复用、可组合的脚本
+
+trigger:
+  command: /analyze
+  natural_language_keywords:
+    # 描述/EDA
+    - '分布', '统计', '画图', 'EDA', '探索性'
+    # 处理/ETL
+    - '处理', '清洗', '导出', '解密', '跨表'
+    # 建模
+    - '训练', '模型', '预测', '分类', '回归', '聚类'
+    - '深度学习', '神经网络', '强化学习', 'NLP', '推荐'
+    # 报告
+    - '报告', '汇总', '分析原因'
+  # 当 Agent 自主判断需要 Python 时，自动加载本 Skill 的 system_addition 作为引导
+  auto_inject_when:
+    - 'sql_alone_insufficient'      # SQL 表达力不足
+    - 'requires_visualization'       # 需要画图
+    - 'requires_decryption'          # 涉及加密字段
+    - 'requires_iteration'           # 需要逐行/迭代处理
+    - 'requires_modeling'            # 需要 ML/DL 建模
+    - 'requires_multi_step_pipeline' # 需要多脚本组合的 pipeline
+
+allowed_tools:
+  # 数据库
+  - search_schema
+  - describe_table
+  - query_database
+  # 工作空间文件
+  - read_workspace_file
+  - write_workspace_file
+  - edit_workspace_file
+  - list_workspace_dir
+  - glob_workspace
+  - grep_workspace
+  # Python 执行
+  - run_python_script
+  - python_repl
+  - install_python_deps
+
+parameters:
+  task:
+    type: string
+    description: 用户的分析/建模需求描述
+    required: true
+  output_dir:
+    type: string
+    default: 'outputs'
+  script_dir:
+    type: string
+    default: 'scripts'
+  reuse_existing:
+    type: boolean
+    description: 优先复用 scripts/ 中已有的相似脚本与函数
+    default: true
+
+system_addition: |
+  你是一个全栈数据科学助手，可以用 Python 完成从 EDA 到深度学习的任意任务。
+  你不是只会跑 pandas+matplotlib 的初级脚本工 —— 当任务需要时，主动用 scikit-learn、
+  PyTorch、Stable-Baselines3、Optuna、NetworkX、statsmodels、HuggingFace 等专业库。
+
+  ## 工作流程（自主决策，不必僵化遵循）
+
+  1. **理解任务的真实复杂度**
+     - 用 search_schema / describe_table 弄清楚数据
+     - 任务是 EDA 还是要建模？需要 GPU 吗？数据量多大？
+     - 不确定的业务口径先问用户
+
+  2. **盘点工作空间已有资产**
+     - list_workspace_dir scripts/ 看现有脚本
+     - grep_workspace 搜关键词（如 "decrypt_phone", "load_orders"）
+     - **能复用就复用，能调用就调用**：组合优于重写
+
+  3. **决定脚本架构**
+     根据任务复杂度选择：
+
+     - **单文件脚本**（简单任务）：一次性 EDA、报表、小转换
+     - **多文件 pipeline**（复杂任务）：拆成可复用模块
+       例如训练任务可拆：
+         scripts/data/load_orders.py       # 数据加载
+         scripts/features/build_features.py # 特征工程
+         scripts/models/train_lgb.py        # 训练
+         scripts/models/evaluate.py         # 评估
+         scripts/run_pipeline.py            # 编排（调用上面所有）
+
+  ## 脚本编写约定（不是模板，是边界）
+
+  以下是**必须遵守的约定**，但函数怎么写、用什么库由你判断：
+
+  ### A. 必用 dbagent SDK 做受控操作
+
+  ```python
+  from dbagent import db, save, load, workspace
+
+  df = db.query("SELECT ...")          # 数据库查询（凭证自动注入）
+  save("outputs/result.parquet", df)   # 写文件（路径锁定在 workspace）
+  cfg = load("config/model.yaml")      # 读文件（同样锁定）
+  workspace.print("✓ 进度信息")         # 流式输出到 chat
+  ```
+
+  **不要绕过**：不要用裸 `psycopg.connect()` / `open()` / `print()` 替代上面这些。
+  这些 SDK 函数提供了凭证注入、路径沙箱、流式日志，**绕过会破坏安全保证**。
+
+  ### B. 脚本间互相调用（关键能力）
+
+  脚本不是孤立的。同一个 workspace 内的脚本可以**互相 import**：
+
+  ```python
+  # scripts/models/train_lgb.py
+  from scripts.data.load_orders import load_recent_orders   # 直接 import
+  from scripts.features.build_features import build_features
+
+  df = load_recent_orders(days=30)
+  X, y = build_features(df)
+  model = train(X, y)
+  save("outputs/models/lgb_v1.pkl", model)
+  ```
+
+  也可以把脚本注册为 **workspace tool**（其他 Agent / 脚本可调用）：
+
+  ```python
+  # scripts/decrypt_phone.py
+  """
+  @tool decrypt_phone
+  @param encrypted: bytes
+  @returns: str
+  对 AES 加密的手机号解密。
+  """
+  def main(encrypted: bytes) -> str:
+      ...
+  ```
+
+  注册后，**任何其他脚本**都能调用：
+
+  ```python
+  from dbagent import workspace
+  phone = workspace.call_tool("decrypt_phone", encrypted=row['phone_enc'])
+  ```
+
+  这样**复用 + 组合**会让工作空间逐渐沉淀成一个领域工具库。
+
+  ### C. 模块化原则
+
+  - 每个文件单一职责（加载 / 特征 / 训练 / 评估 / 编排分开）
+  - 公开函数有 type hints + 简短 docstring
+  - 主入口用 `if __name__ == '__main__': main()`，便于命令行单跑
+  - 重型计算（训练、推理）放函数里，不要写在 module 顶层（避免被 import 时执行）
+  - 共享配置放 `config/*.yaml`，不要硬编码在脚本里
+
+  ### D. 库的选择 —— 按任务量级用对工具
+
+  | 任务 | 推荐 |
+  |---|---|
+  | EDA / 简单画图 | pandas + matplotlib / seaborn |
+  | 大数据量 (>10M 行) | polars / duckdb |
+  | 经典 ML | scikit-learn / lightgbm / xgboost |
+  | 调参 | optuna |
+  | 深度学习 | pytorch（首选）/ tensorflow |
+  | NLP / LLM | transformers / sentence-transformers |
+  | 强化学习 | stable-baselines3 / cleanrl |
+  | 时序 | statsmodels / prophet / darts |
+  | 图算法 | networkx / pyg |
+  | 交互可视化 | plotly / altair |
+
+  默认环境**没有这些重型库**，用前先 `install_python_deps`。
+  深度学习库装机器需要 1-5 分钟，建议 install 后**用 python_repl 验一下 import 成功** 再写大段代码。
+
+  ### E. 大数据 / 长任务的处理
+
+  - 拉数大于 100 万行时用 `chunksize` 或 `LIMIT + 分页`
+  - 训练时用 `workspace.print` 输出进度（loss、epoch 等）
+  - 长任务（> 5 分钟）拆成阶段：每阶段保存中间产物到 outputs/checkpoints/，
+    崩溃后能从 checkpoint 续跑
+  - GPU 任务前先用 python_repl 跑 `torch.cuda.is_available()` 探测
+
+  ## 执行循环
+
+  - run_python_script → 看 stdout/stderr
+  - 失败：分析错误 → edit_workspace_file 修脚本 → 重跑（最多 3 次）
+  - 长任务：用户可中断，保留中间产物
+  - 完成：用 chat 内嵌渲染图片 / 表格
+
+  ## 解读与产出
+
+  - **不要只说"完成了"**：给业务结论 + 数字 + 建议
+  - 模型训练完，给指标（accuracy / AUC / RMSE）+ 业务含义
+  - 长任务给执行摘要：耗时、产物、关键中间结果路径
+
+  ## 沉淀
+
+  - 用户说"以后还要这么做" → 建议 save_session_as_skill
+  - 高复用脚本 → 在 docstring 加 @tool 标记，注册为 workspace tool
+  - 复杂 pipeline → 建议拆成多脚本 + 一个编排脚本
+
+  ## 安全红线（不可越过）
+
+  - 加密字段：优先调用 workspace 已注册的解密 tool，不要自己实现密钥逻辑
+  - SQL 写操作：不要在 Python 里直接 INSERT/UPDATE/DELETE，回到 chat 让用户走 SQL 路径确认
+  - 不要 `import os; os.system(...)` / `subprocess.run(...)` 逃逸沙箱
+  - 不要 `open()` 任意路径，统一走 `save()` / `load()`
+  - 模型文件 / 训练数据若包含敏感信息，保存到 workspace 内即可（不要 push 到外部）
+
+  ## 输出风格
+
+  - 中文回复，技术术语保留原文（如 "AUC"、"epoch"、"PPO"）
+  - 关键步骤简短说明
+  - 文件路径用相对路径
+  - 不要把脚本全文贴回 chat（用户能在 Tab 里看），只总结关键改动
+
+output_format: markdown
+```
+
+**关键设计点**：
+
+1. **不是模板，是约定**
+   不强制 Agent "必须长什么样"，给的是边界（必用 SDK / 必用相对路径 / 不许 os.system）。脚本结构由 Agent 根据任务复杂度判断。
+
+2. **支持深度学习 / 强化学习 / NLP**
+   明确告诉 Agent 任务到了那一层，就用 PyTorch / SB3 / transformers，不要硬塞 pandas+matplotlib。库不在默认 venv 里，用前 `install_python_deps`。
+
+3. **`auto_inject_when` 扩展**
+   新增 `requires_modeling` / `requires_multi_step_pipeline` 触发条件，Agent 主动判断"这事 SQL 干不了"时自动加载本 Skill。
+
+4. **脚本互相调用是一等公民**
+   - **import**：同 workspace 内 `from scripts.data.load_orders import load_recent_orders`
+   - **call_tool**：通过 `workspace.call_tool(name, ...)` 调用注册了 `@tool` docstring 的脚本
+   - **目录约定**：`scripts/data/`, `scripts/features/`, `scripts/models/` 等子目录鼓励模块化
+
+5. **大型/长任务的工程化指导**
+   - chunksize / 分页 / checkpoint
+   - 进度流式输出
+   - GPU 探测
+   - 崩溃续跑
+
+6. **dbagent-sdk 扩展**
+   原来只有 `db / save / workspace`，新增 `load`（读 yaml/json/csv 配置文件）。需要在 [08 §4.6.5](./08-workspace-design.md) 的 SDK 设计中同步。
+
+7. **明确的安全红线**
+   - 写 DB 走 chat（避免 Agent 在 Python 里偷偷写库）
+   - 加密走已注册 tool（不让 Agent hallucinate 解密逻辑）
+   - 不许逃逸沙箱
+
+8. **不复制脚本到 chat**
+   引导 Agent 简短汇报，不要把整个脚本回贴 —— 用户能在 Python Tab 里看，避免污染对话上下文。
+
+#### 6.4.5 加载与注册
+
+```typescript
+// 内置 Skill 加载逻辑
+const BUILTIN_SKILLS_DIR = path.join(app.getAppPath(), 'resources', 'skills');
+
+async function loadBuiltinSkills(): Promise<Skill[]> {
+  const files = await fs.readdir(BUILTIN_SKILLS_DIR);
+  return Promise.all(
+    files
+      .filter(f => f.endsWith('.yaml'))
+      .map(f => loadSkillFromYaml(path.join(BUILTIN_SKILLS_DIR, f)))
+  );
+}
+```
+
+加载顺序：内置 → 用户级（`~/.dbagent/skills/`）→ 工作空间级（覆盖前者）。用户可通过 `命令面板 → 复制内置 Skill 到工作空间` 一键派生改写。
+
+#### 6.4.6 不进 MVP 的 Skill
+
+以下后续版本再加，避免膨胀：
+
+- ❌ `data_quality_check`（空值/重复/异常值检查）
+- ❌ `daily_report`（每日报表，需要调度系统）
+- ❌ `migrate_schema`（schema 迁移辅助）
+- ❌ `seed_test_data`（生成测试数据）
 
 ---
 
@@ -728,15 +1290,119 @@ interface ISessionManager {
 
 ### 9.2 上下文压缩策略
 
-当 token 接近上限时：
+#### 9.2.1 阈值与触发
+
+每个 session 维护实时 token 计数，按预算（默认 40k）有三档触发：
+
+| 占比 | 状态 | 行为 |
+|---|---|---|
+| < 60% | 健康 | 不做任何动作 |
+| 60-80% | 警告 | UI 状态栏黄色，建议用户"考虑新开会话" |
+| 80-95% | 主动压缩 | **后台自动压缩**（用户可见，可撤销） |
+| > 95% | 强制压缩 | 必须压缩，否则下一轮会失败；压缩前提示用户 |
+
+#### 9.2.2 压缩策略（按优先级从轻到重）
+
+**Level 1：折叠已完成子 agent 日志**
+- 子 agent 的中间 tool calls / thoughts 全部折叠成一句话总结："子 Agent A 完成了订单数分析，结论 X"
+- 保留主 agent 看到的 final result，丢弃过程
+
+**Level 2：去重 schema 注入**
+- 同一个表的 schema 在 context 中只保留最近一次完整版
+- 早期出现的同表 schema 替换成 `[schema of users (see above)]`
+
+**Level 3：工具结果摘要化**
+- 大型 tool result（如 `query_database` 返回 100 行）→ 用小模型（如 deepseek-chat）写 50 字摘要 + 行数
+- 原始数据落盘到 `~/.dbagent/sessions/{id}/tool_results/`，UI 上仍可点击查看完整版
+- LLM 看到的是摘要
+
+**Level 4：早期消息归档**
+- 保留：system prompt + 最近 K 轮（默认 8 轮）+ 中间一段 summary
+- 中间被归档的消息用一段 LLM 生成的"前情提要"替代
+- 用户在 UI 上能看到"📜 已归档 12 条消息 [展开查看]"
+
+#### 9.2.3 用户感知与撤销
 
 ```
-策略优先级（从轻到重）：
-1. 折叠"已完成"的子 agent 详细日志
-2. 压缩重复的 schema 注入（已检索过的不重复）
-3. 工具结果摘要化（用 LLM 写 summary 替代原始数据）
-4. 早期消息归档（保留 system + 最近 N 轮 + summary）
+顶部状态栏：
+[Token: ████████████░░░░ 32k/40k (80%) ⚠]
+              ↑ 点击展开
+
+点击后弹出小面板：
+┌─ Token 使用情况 ───────────────────────┐
+│ 当前 32,123 / 40,000 (80%)             │
+│                                        │
+│ 占用分布：                               │
+│  System Prompt    1.2k                 │
+│  Tool 定义        2.1k                 │
+│  消息历史         24.5k  ← 主要         │
+│  最近 RAG 结果    4.3k                  │
+│                                        │
+│ [🗜 立即压缩]  [📤 新开会话]  [⚙ 调整预算] │
+│                                        │
+│ ☑ 自动压缩（80% 触发）                  │
+└────────────────────────────────────────┘
 ```
+
+压缩后：
+```
+┌─ ✓ 已压缩 ─────────────────────────────┐
+│ 释放了 18.2k tokens                     │
+│ 归档了 12 条早期消息 + 3 个 tool result  │
+│ [↶ 撤销压缩]   [👁 查看归档内容]         │
+└────────────────────────────────────────┘
+```
+
+**撤销窗口**：5 分钟内可撤销（归档内容暂存内存）。
+
+#### 9.2.4 压缩成本
+
+- Level 1-2：纯本地操作，0 成本
+- Level 3-4：需要调用 LLM 写摘要，**用最便宜的模型**（如 `deepseek-chat`），不用主对话模型
+- 压缩本身的 token 消耗也计入 usage 但单独标记类型 `'compression'`，不计入用户配额（订阅模式下我们承担）
+
+#### 9.2.5 实现要点
+
+```typescript
+class ContextManager {
+  async checkAndCompress(session: Session): Promise<void> {
+    const usage = session.estimateTokens();
+    const ratio = usage / session.tokenBudget;
+
+    if (ratio < 0.6) return;
+    if (ratio < 0.8) return this.warnUser(session, ratio);
+    if (ratio < 0.95) return this.softCompress(session);
+    return this.hardCompress(session);
+  }
+
+  async softCompress(session: Session) {
+    // 静默走 Level 1-2
+    await this.foldSubAgentLogs(session);
+    await this.dedupSchemaInjection(session);
+
+    // 仍超过 80% → 走 Level 3
+    if (session.estimateTokens() / session.tokenBudget > 0.8) {
+      await this.summarizeToolResults(session);
+    }
+
+    session.appendCompressionEvent({ canUndo: true, ttlMs: 5 * 60_000 });
+    emit('agent:compressed', session.id);
+  }
+
+  async hardCompress(session: Session) {
+    // 用户提示
+    const ok = await session.ui.confirmCompression();
+    if (!ok) throw new BudgetExceededError();
+
+    await this.foldSubAgentLogs(session);
+    await this.dedupSchemaInjection(session);
+    await this.summarizeToolResults(session);
+    await this.archiveEarlyMessages(session, { keepRecent: 8 });
+  }
+}
+```
+
+`session.estimateTokens()` 用 `tiktoken` / `js-tiktoken` 估算（不同模型用不同 encoder）。
 
 ### 9.3 长期记忆（跨 Session）
 
