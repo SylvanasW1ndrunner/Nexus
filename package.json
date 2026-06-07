@@ -1,0 +1,30 @@
+{
+  "name": "dbagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-native database IDE for data engineers.",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "turbo dev --filter=@dbagent/desktop",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck",
+    "lint": "turbo lint",
+    "test": "turbo test",
+    "smoke": "node scripts/smoke.mjs",
+    "ci": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.2",
+    "vitest": "^2.1.8"
+  }
+}
