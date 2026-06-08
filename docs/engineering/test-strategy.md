@@ -77,6 +77,7 @@ pnpm db:down
 - `apps/desktop/src/main/workspace-state-store.test.ts` 覆盖 SQL 草稿恢复、活动连接恢复、缺失文件、损坏 JSON 和结构不合法状态。
 - `apps/desktop/src/renderer/src/connection-draft.test.ts` 覆盖已保存连接回填到编辑表单时不回填密码，并保留远程连接配置。
 - `apps/desktop/src/renderer/src/diagnostics.test.ts` 覆盖远程连接错误提示和 SQL 性能告警汇总。
+- `packages/shared/test/ipc-contract.test.ts` 覆盖 IPC channel 快照，并用编译期断言保证 request/response map 对齐。
 - `packages/shared/test/csv.test.ts` 覆盖真实表格导出边界。
 - `packages/shared/test/export.test.ts` 覆盖 JSON 结果导出边界。
 - `packages/core-auth/test/auth-service.test.ts` 覆盖认证状态和会话持久化。

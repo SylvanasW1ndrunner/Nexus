@@ -1,6 +1,6 @@
 # M0-M1.5 阶段验收记录
 
-> 当前记录基于分支 `codex/m0-m1-foundation`，最近审计提交为 `5f2766a`。本文档用于阶段验收，不替代每次候选发布前重新执行质量门禁。
+> 当前记录基于分支 `codex/m0-m1-foundation`，最近审计提交为 `f3e3fa9`，后续增量提交会继续刷新质量证据。本文档用于阶段验收，不替代每次候选发布前重新执行质量门禁。
 
 ## 阶段范围
 
@@ -19,7 +19,7 @@ Agent、RAG、MCP、Python 工作空间、表编辑器、表设计器、ER 图�
 | 初始化 monorepo | `pnpm-workspace.yaml`、`turbo.json`、根 `package.json` | 已完成 |
 | TS / ESLint / 测试门禁 | `tsconfig.base.json`、`eslint.config.mjs`、`pnpm run ci` | 已完成 |
 | Electron + Vite + React 桌面骨架 | `apps/desktop`，`pnpm dev`，`pnpm package:dir` | 已完成 |
-| shared IPC 契约 | `packages/shared/src/ipc.ts` | 已完成 |
+| shared IPC 契约 | `packages/shared/src/ipc.ts`、`packages/shared/test/ipc-contract.test.ts` | 已完成 |
 | core 包骨架 | `packages/core-db`、`core-auth`、`core-usage`、`core-llm` | 已完成 |
 | GitHub Actions | `.github/workflows/ci.yml` 的 `verify` job | 已完成 |
 
@@ -61,6 +61,8 @@ Agent、RAG、MCP、Python 工作空间、表编辑器、表设计器、ER 图�
 | 工作区状态恢复 | `WorkspaceStateStore`、损坏 JSON 降级 | 已完成 |
 | 凭证存储边界 | `CredentialVault`、`safeStorage`/fallback 测试 | 已完成 |
 | 本地 JSON 状态韧性 | `json-file.ts`、连接/历史损坏 JSON 降级测试 | 已完成 |
+| EXPLAIN 安全入口 | `explain-workflow.ts`、`explain-workflow.test.ts` | 已完成 |
+| IPC 契约快照 | `ipc-contract.test.ts` | 已完成 |
 
 ## 测试证据
 

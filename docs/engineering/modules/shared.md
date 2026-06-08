@@ -23,7 +23,7 @@
 
 - `packages/shared/test/csv.test.ts`：覆盖逗号、引号、换行、对象值和 `NULL`。
 - `packages/shared/test/export.test.ts`：覆盖 JSON metadata、列顺序、`Date`、`bigint`、`Buffer` 和嵌套对象。
-- 类型契约当前通过 `pnpm typecheck` 兜底。后续如果 IPC channel 增多，应增加契约快照测试，避免破坏 renderer 与 main 的约定。
+- `packages/shared/test/ipc-contract.test.ts` 覆盖 IPC 契约：运行时快照固定 M0-M1.5 channel 集合，编译期断言保证 `IpcRequestMap` 和 `IpcResponseMap` 键集合一致。新增 channel 时必须同步更新该测试，避免 renderer、preload 和 main 只改一侧。
 
 ## 后续扩展
 

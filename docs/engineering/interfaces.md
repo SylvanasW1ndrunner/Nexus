@@ -100,7 +100,11 @@ Renderer 在创建连接后不会再收到已保存密码；删除连接时也�
 - `CARTESIAN_JOIN`：逗号连接可能产生意外笛卡尔积。
 - `FUNCTION_ON_FILTER_COLUMN`：过滤列上套函数可能阻止索引使用。
 
-这些提示不阻止执行，只为 M1.5 的结果区和后续 M2 Agent 解释 SQL 风险提供结构化输入。`db:explain-query` 当前在主进程中通过给原 SQL 添加 `EXPLAIN (FORMAT JSON)` 实现，仍复用执行链路和历史记录边界。
+这些提示不阻止执行，只为 M1.5 的结果区和后续 M2 Agent 解释 SQL 风险提供结构化输入。`db:explain-query` 进入独立 `explain-workflow` 校验后，再给单条只读 SQL 添加 `EXPLAIN (FORMAT JSON)`，并复用执行链路和历史记录边界。
+
+## IPC 契约校验
+
+`packages/shared/test/ipc-contract.test.ts` 固化当前 M0-M1.5 IPC channel 集合，并用 TypeScript 编译期断言保证 `IpcRequestMap` 与 `IpcResponseMap` 的键集合一致。新增、删除或重命名 channel 时，必须同时更新 `ipcChannels`、request map、response map、主进程 handler、renderer 调用点和该契约测试。
 
 ## Schema 与 SQL builder
 
