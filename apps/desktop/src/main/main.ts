@@ -175,6 +175,28 @@ function registerIpcHandlers(): void {
   });
   handle(ipcChannels.workspace.listRecent, async () => ok(await workspaceProjectStore.listRecent()));
   handle(ipcChannels.workspace.loadActive, async () => ok(await workspaceProjectStore.loadActive()));
+  handle(ipcChannels.workspace.listFiles, async ({ rootPath }) => {
+    try {
+      return ok(await workspaceProjectStore.listFiles(rootPath));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to list workspace files.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
+  handle(ipcChannels.workspace.saveSqlFile, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.saveSqlFile(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to save SQL file.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
 }
 
 void app.whenReady().then(() => {

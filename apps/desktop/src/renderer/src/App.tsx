@@ -11,6 +11,7 @@ import {
   type TableSummary,
   type WorkspaceProject,
   type WorkspaceRecentState,
+  type WorkspaceFileEntry,
   type WorkspaceTemplate,
 } from '@dbagent/shared';
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
@@ -62,6 +63,7 @@ export function App() {
   const [workspaceDraft, setWorkspaceDraft] = useState<WorkspaceDraft>(defaultWorkspaceDraft);
   const [recentWorkspaces, setRecentWorkspaces] = useState<WorkspaceRecentState>({ workspaces: [] });
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceProject | undefined>();
+  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileEntry[]>([]);
   const [chatDraft, setChatDraft] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
@@ -121,7 +123,20 @@ export function App() {
       window.dbagent.invoke(ipcChannels.workspace.loadActive, undefined),
     ]);
     if (recentResponse.ok) setRecentWorkspaces(recentResponse.data);
-    if (activeResponse.ok) setActiveWorkspace(activeResponse.data);
+    if (activeResponse.ok) {
+      setActiveWorkspace(activeResponse.data);
+      if (activeResponse.data) await refreshWorkspaceFiles(activeResponse.data.rootPath);
+    }
+  }
+
+  async function refreshWorkspaceFiles(rootPath: string) {
+    const response = await window.dbagent.invoke(ipcChannels.workspace.listFiles, { rootPath });
+    if (response.ok) {
+      setWorkspaceFiles(response.data);
+    } else {
+      setWorkspaceFiles([]);
+      setMessage(formatAppError(response.error));
+    }
   }
 
   async function chooseWorkspaceDirectory() {
@@ -144,6 +159,7 @@ export function App() {
       return;
     }
     setActiveWorkspace(response.data);
+    await refreshWorkspaceFiles(response.data.rootPath);
     setWorkspaceDraft({ ...defaultWorkspaceDraft, rootPath: response.data.rootPath });
     setMessage(language === 'zh-CN' ? `已打开项目 ${response.data.name}` : `Opened ${response.data.name}`);
     await refreshWorkspace();
@@ -157,6 +173,7 @@ export function App() {
       return;
     }
     setActiveWorkspace(response.data);
+    await refreshWorkspaceFiles(response.data.rootPath);
     setMessage(language === 'zh-CN' ? `已打开项目 ${response.data.name}` : `Opened ${response.data.name}`);
     await refreshWorkspace();
   }
@@ -363,6 +380,29 @@ export function App() {
     );
   }
 
+  async function saveCurrentSql() {
+    if (!activeWorkspace) {
+      setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
+      return;
+    }
+    const name = window.prompt(language === 'zh-CN' ? 'SQL 名称' : 'SQL name', activeWorkspace.name);
+    if (!name) return;
+    const response = await window.dbagent.invoke(ipcChannels.workspace.saveSqlFile, {
+      rootPath: activeWorkspace.rootPath,
+      name,
+      sql,
+      ...(activeConnectionId ? { connectionId: activeConnectionId } : {}),
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    await refreshWorkspaceFiles(activeWorkspace.rootPath);
+    setMessage(
+      language === 'zh-CN' ? `已保存 ${response.data.relativePath}` : `Saved ${response.data.relativePath}`,
+    );
+  }
+
   function sendChatMessage() {
     const content = chatDraft.trim();
     if (!content) return;
@@ -390,6 +430,7 @@ export function App() {
             <ProjectPanel
               activeWorkspace={activeWorkspace}
               draft={workspaceDraft}
+              files={workspaceFiles}
               recent={recentWorkspaces}
               setDraft={setWorkspaceDraft}
               t={t}
@@ -431,6 +472,7 @@ export function App() {
               onExplain={() => void explain()}
               onExportCsv={exportCsv}
               onExportJson={exportJson}
+              onSaveSql={() => void saveCurrentSql()}
             />
           </section>
         </ErrorBoundary>
@@ -493,6 +535,7 @@ function TopBar({
 function ProjectPanel({
   activeWorkspace,
   draft,
+  files,
   recent,
   setDraft,
   t,
@@ -502,6 +545,7 @@ function ProjectPanel({
 }: {
   activeWorkspace: WorkspaceProject | undefined;
   draft: WorkspaceDraft;
+  files: WorkspaceFileEntry[];
   recent: WorkspaceRecentState;
   setDraft: (draft: WorkspaceDraft) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
@@ -520,11 +564,17 @@ function ProjectPanel({
           <strong>{activeWorkspace.name}</strong>
           <span>{activeWorkspace.rootPath}</span>
           <div className="project-files">
-            <FileNode label=".dbagent/workspace.json" />
-            <FileNode label="sql/" />
-            <FileNode label="scripts/" />
-            <FileNode label="docs/" />
-            <FileNode label="outputs/" />
+            {files.length > 0 ? (
+              files.map((file) => <FileNode entry={file} key={file.relativePath} />)
+            ) : (
+              <>
+                <FileNode label=".dbagent/workspace.json" />
+                <FileNode label="sql/" />
+                <FileNode label="scripts/" />
+                <FileNode label="docs/" />
+                <FileNode label="outputs/" />
+              </>
+            )}
           </div>
         </div>
       ) : null}
@@ -584,12 +634,22 @@ function ProjectPanel({
   );
 }
 
-function FileNode({ label }: { label: string }) {
+function FileNode({ entry, label }: { entry?: WorkspaceFileEntry; label?: string }) {
+  const display = entry?.type === 'directory' ? `${entry.name}/` : (entry?.name ?? label ?? '');
   return (
-    <div className="file-node">
-      <span />
-      <small>{label}</small>
-    </div>
+    <>
+      <div className={`file-node ${entry?.type ?? 'file'}`}>
+        <span />
+        <small title={entry?.relativePath ?? label}>{display}</small>
+      </div>
+      {entry?.children?.length ? (
+        <div className="file-children">
+          {entry.children.map((child) => (
+            <FileNode entry={child} key={child.relativePath} />
+          ))}
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -856,6 +916,7 @@ function EditorPane({
   onExplain,
   onExportCsv,
   onExportJson,
+  onSaveSql,
 }: {
   activeConnection: SavedConnection | undefined;
   message: string;
@@ -867,6 +928,7 @@ function EditorPane({
   onExplain: () => void;
   onExportCsv: () => void;
   onExportJson: () => void;
+  onSaveSql: () => void;
 }) {
   return (
     <>
@@ -882,6 +944,9 @@ function EditorPane({
           <div className="toolbar-actions">
             <button className="secondary" type="button" onClick={onExplain}>
               {t('explain')}
+            </button>
+            <button className="secondary" type="button" onClick={onSaveSql}>
+              {t('saveSql')}
             </button>
             <button type="button" onClick={onExecute}>
               {t('runSql')}

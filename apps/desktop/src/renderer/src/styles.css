@@ -263,10 +263,18 @@ small {
   background: #7aa2f7;
 }
 
+.file-node.directory span {
+  background: #e0af68;
+}
+
 .file-node small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-children {
+  margin-left: 15px;
 }
 
 .workspace-form,

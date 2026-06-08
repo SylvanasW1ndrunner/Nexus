@@ -1,7 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import type { WorkspaceCreateRequest, WorkspaceProject, WorkspaceRecentState, WorkspaceSummary } from '@dbagent/shared';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import type {
+  WorkspaceCreateRequest,
+  WorkspaceFileEntry,
+  WorkspaceProject,
+  WorkspaceRecentState,
+  WorkspaceSavedFile,
+  WorkspaceSaveSqlFileRequest,
+  WorkspaceSummary,
+} from '@dbagent/shared';
 
 const workspaceConfigRelativePath = join('.dbagent', 'workspace.json');
 
@@ -56,6 +64,51 @@ export class WorkspaceProjectStore {
     const project = await this.loadProject(rootPath);
     await this.remember(project);
     return project;
+  }
+
+  async listFiles(rootPath: string): Promise<WorkspaceFileEntry[]> {
+    const project = await this.loadProject(rootPath);
+    const roots = ['sql', 'queries', 'scripts', 'docs', 'outputs'];
+    const entries = await Promise.all(
+      roots.map(async (directory) => {
+        const absolutePath = join(project.rootPath, directory);
+        try {
+          const info = await stat(absolutePath);
+          if (!info.isDirectory()) return undefined;
+          return readDirectoryTree(project.rootPath, absolutePath, 3);
+        } catch (error) {
+          if (isMissingFileError(error)) return undefined;
+          throw error;
+        }
+      }),
+    );
+    return entries.filter((entry): entry is WorkspaceFileEntry => Boolean(entry));
+  }
+
+  async saveSqlFile(request: WorkspaceSaveSqlFileRequest): Promise<WorkspaceSavedFile> {
+    const project = await this.loadProject(request.rootPath);
+    const sql = request.sql.trim();
+    if (!sql) throw new Error('SQL content is required.');
+    const displayName = normalizeName(request.name);
+    const relativePath = join('sql', 'analytics', `${slugify(displayName)}.sql`);
+    const absolutePath = resolveInside(project.rootPath, relativePath);
+    const content = buildSqlFileContent({
+      name: displayName,
+      sql,
+      ...(request.connectionId ? { connectionId: request.connectionId } : {}),
+      ...(request.description ? { description: request.description } : {}),
+      ...(request.tags ? { tags: request.tags } : {}),
+    });
+    await mkdir(dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, content, 'utf8');
+    const info = await stat(absolutePath);
+    return {
+      name: displayName,
+      relativePath: toPortablePath(relativePath),
+      absolutePath,
+      bytes: info.size,
+      updatedAt: info.mtime.toISOString(),
+    };
   }
 
   private async loadProject(rootPath: string): Promise<WorkspaceProject> {
@@ -200,6 +253,56 @@ async function writeStarterFiles(project: WorkspaceProject): Promise<void> {
   await Promise.all(files.map(([path, content]) => writeTextIfMissing(join(project.rootPath, path), content)));
 }
 
+async function readDirectoryTree(
+  workspaceRoot: string,
+  absolutePath: string,
+  depth: number,
+): Promise<WorkspaceFileEntry> {
+  const relativePath = toPortablePath(relative(workspaceRoot, absolutePath));
+  const name = relativePath.includes('/') ? relativePath.split('/').at(-1)! : relativePath;
+  if (depth <= 0) return { name, relativePath, type: 'directory', children: [] };
+  const children = await readdir(absolutePath, { withFileTypes: true });
+  const visibleChildren = children
+    .filter((entry) => !entry.name.startsWith('.'))
+    .sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name));
+  const childEntries = await Promise.all(
+    visibleChildren.map(async (entry) => {
+      const childPath = join(absolutePath, entry.name);
+      const childRelativePath = toPortablePath(relative(workspaceRoot, childPath));
+      if (entry.isDirectory()) return readDirectoryTree(workspaceRoot, childPath, depth - 1);
+      return {
+        name: entry.name,
+        relativePath: childRelativePath,
+        type: 'file' as const,
+      };
+    }),
+  );
+  return { name, relativePath, type: 'directory', children: childEntries };
+}
+
+function buildSqlFileContent({
+  name,
+  sql,
+  connectionId,
+  description,
+  tags,
+}: {
+  name: string;
+  sql: string;
+  connectionId?: string;
+  description?: string;
+  tags?: string[];
+}): string {
+  const metadata = [
+    `-- @name: ${name}`,
+    ...(description?.trim() ? [`-- @description: ${description.trim()}`] : []),
+    ...(connectionId ? [`-- @connection: ${connectionId}`] : []),
+    ...(tags?.length ? [`-- @tags: [${tags.map((tag) => tag.trim()).filter(Boolean).join(', ')}]`] : []),
+    `-- @updated: ${new Date().toISOString()}`,
+  ];
+  return `${metadata.join('\n')}\n\n${sql}\n`;
+}
+
 async function writeTextIfMissing(path: string, content: string): Promise<void> {
   try {
     await readFile(path, 'utf8');
@@ -236,6 +339,28 @@ function normalizeRootPath(rootPath: string): string {
   const normalized = rootPath.trim();
   if (!normalized) throw new Error('Workspace path is required.');
   return resolve(normalized);
+}
+
+function resolveInside(rootPath: string, relativePath: string): string {
+  const root = normalizeRootPath(rootPath);
+  const resolved = resolve(root, relativePath);
+  if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
+    throw new Error('Workspace path escapes are not allowed.');
+  }
+  return resolved;
+}
+
+function slugify(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || `query-${Date.now()}`;
+}
+
+function toPortablePath(path: string): string {
+  return path.split(sep).join('/');
 }
 
 function normalizeAgentMode(value: unknown): WorkspaceProject['defaults']['agentMode'] {

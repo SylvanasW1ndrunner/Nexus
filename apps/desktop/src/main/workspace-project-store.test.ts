@@ -47,6 +47,29 @@ describe('WorkspaceProjectStore', () => {
     await expect(store.loadActive()).resolves.toMatchObject({ id: first.id, name: '财务日报' });
   });
 
+  it('saves reusable SQL into the workspace library with searchable metadata', async () => {
+    const rootPath = join(await tempDir(), 'ecommerce-analytics');
+    const store = new WorkspaceProjectStore(join(await tempDir(), 'workspaces.json'));
+    const project = await store.create({ name: '电商分析项目', rootPath });
+
+    const saved = await store.saveSqlFile({
+      rootPath: project.rootPath,
+      name: '每日 GMV',
+      description: '统计昨日 GMV',
+      connectionId: 'prod_pg',
+      tags: ['gmv', 'daily'],
+      sql: 'select date(created_at) as day, sum(amount) as gmv from orders group by 1;',
+    });
+    const content = await readFile(saved.absolutePath, 'utf8');
+    const files = await store.listFiles(project.rootPath);
+
+    expect(saved.relativePath).toBe('sql/analytics/每日-gmv.sql');
+    expect(content).toContain('-- @name: 每日 GMV');
+    expect(content).toContain('-- @connection: prod_pg');
+    expect(content).toContain('-- @tags: [gmv, daily]');
+    expect(JSON.stringify(files)).toContain('每日-gmv.sql');
+  });
+
   it('rejects invalid workspace config when opening a normal folder', async () => {
     const rootPath = await tempDir();
     await writeFile(join(rootPath, 'notes.txt'), 'not a workspace', 'utf8');

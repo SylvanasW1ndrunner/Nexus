@@ -30,6 +30,8 @@ Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契
 - `workspace:open`
 - `workspace:list-recent`
 - `workspace:load-active`
+- `workspace:list-files`
+- `workspace:save-sql-file`
 
 所有响应统一使用 `packages/shared/src/result.ts` 中的 `Result<T>`，让 UI 显式处理业务失败，而不是捕获无类型异常。
 
@@ -121,10 +123,14 @@ BetaV0.1.1 新增项目级 Workspace IPC，目标是把 SQL、脚本、文档和
 - `workspace:open`：读取已有项目目录中的 `.dbagent/workspace.json`，校验后设为最近项目和当前项目。
 - `workspace:list-recent`：返回 `userData/data/workspaces.json` 中维护的最近项目列表。
 - `workspace:load-active`：加载最近项目中的当前活动项目。
+- `workspace:list-files`：列出项目中的 `sql/`、`queries/`、`scripts/`、`docs/`、`outputs/` 核心资产树。
+- `workspace:save-sql-file`：将当前 SQL 保存到 Workspace SQL 库，写入 `@name`、`@connection`、`@tags`、`@updated` 等头部元信息。
 
 Workspace 配置采用 `WorkspaceProject` 类型，当前包含 `id`、`name`、`rootPath`、`template`、时间戳、关联连接列表、默认 Agent 模式、启用 Skill/MCP 列表和标签。连接定义仍然是全局资源，Workspace 只保存连接关联关系；凭证不进入项目目录。
 
 主进程实现位于 `apps/desktop/src/main/workspace-project-store.ts`。创建项目时会生成 `.dbagent/`、`sql/`、`scripts/`、`docs/`、`outputs/` 等目录；`standard` 模板还会包含 `queries/`、`skills/`、`notebooks/` 和报告/脚本运行输出子目录。最近项目列表写入 Electron `userData/data/workspaces.json`，不写入用户项目目录。
+
+SQL 文件保存路径当前固定在 `sql/analytics/<slug>.sql`，文件名由用户输入名称 slug 化得到。主进程使用 `resolveInside` 约束写入路径，避免相对路径逃逸 Workspace 根目录。保存内容遵循产品文档中的 SQL 元信息约定，便于后续命令面板、Agent 和 RAG 检索。
 
 ## Schema 与 SQL builder
 

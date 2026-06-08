@@ -37,6 +37,8 @@ export const ipcChannels = {
     open: 'workspace:open',
     listRecent: 'workspace:list-recent',
     loadActive: 'workspace:load-active',
+    listFiles: 'workspace:list-files',
+    saveSqlFile: 'workspace:save-sql-file',
   },
   auth: {
     login: 'auth:login',
@@ -203,6 +205,30 @@ export type WorkspaceOpenRequest = {
   rootPath: string;
 };
 
+export type WorkspaceFileEntry = {
+  name: string;
+  relativePath: string;
+  type: 'directory' | 'file';
+  children?: WorkspaceFileEntry[];
+};
+
+export type WorkspaceSaveSqlFileRequest = {
+  rootPath: string;
+  name: string;
+  sql: string;
+  connectionId?: ConnectionId;
+  description?: string;
+  tags?: string[];
+};
+
+export type WorkspaceSavedFile = {
+  name: string;
+  relativePath: string;
+  absolutePath: string;
+  bytes: number;
+  updatedAt: string;
+};
+
 export type IpcRequestMap = {
   'connection:list': void;
   'connection:test': ConnectionInput;
@@ -228,6 +254,8 @@ export type IpcRequestMap = {
   'workspace:open': WorkspaceOpenRequest;
   'workspace:list-recent': void;
   'workspace:load-active': void;
+  'workspace:list-files': { rootPath: string };
+  'workspace:save-sql-file': WorkspaceSaveSqlFileRequest;
 };
 
 export type IpcResponseMap = {
@@ -255,6 +283,8 @@ export type IpcResponseMap = {
   'workspace:open': Result<WorkspaceProject>;
   'workspace:list-recent': Result<WorkspaceRecentState>;
   'workspace:load-active': Result<WorkspaceProject | undefined>;
+  'workspace:list-files': Result<WorkspaceFileEntry[]>;
+  'workspace:save-sql-file': Result<WorkspaceSavedFile>;
 };
 
 export type IpcChannel = keyof IpcRequestMap;
