@@ -1,30 +1,24 @@
-# Test Strategy
+# 测试策略
 
-## Test Pyramid
+## 测试分层
 
-- Unit tests cover pure business rules such as SQL safety, connection validation, usage windows,
-  and auth/session persistence.
-- Integration tests cover PostgreSQL behavior with a real database using Docker Compose once the
-  developer machine has Docker available.
-- E2E tests cover the desktop path: open app, create connection, execute SQL, inspect table output,
-  view query history, and verify read-only blocking.
-- Smoke tests are zero-dependency repository checks that can run even before Node package
-  installation is available.
+- 单元测试覆盖纯业务规则，例如 SQL 安全判断、连接校验、用量窗口、认证与会话持久化。
+- 集成测试覆盖真实 PostgreSQL 行为；本地或 CI 具备 Docker 后，通过 Docker Compose 启动测试库。
+- E2E 测试覆盖桌面端用户路径：打开应用、创建连接、执行 SQL、查看结果表、查看查询历史、验证只读拦截。
+- Smoke 测试是零外部依赖的仓库健康检查，即使 Node 包尚未完整安装，也应尽量能运行。
 
-## M1 Business Scenarios
+## M1/M1.5 业务场景
 
-- Analyst connects to PostgreSQL and runs a safe `SELECT`.
-- Analyst accidentally runs `DELETE` on a read-only connection and receives a blocked operation.
-- Engineer runs a malformed query and sees a useful error without losing the SQL text.
-- DBA reviews query history including status, elapsed time, row count, and safety classification.
-- BYOK user enters without login and usage still records local rounds.
-- Engineer opens a connected PostgreSQL schema tree, clicks a table, and gets a safely quoted
-  `select * ... limit 100` preview query.
-- Analyst exports a result set to CSV and spreadsheet-sensitive values such as commas, quotes,
-  newlines, JSON, and nulls survive import.
-- App restart restores the active connection id and SQL draft from the workspace state file.
+- 数据分析师连接 PostgreSQL 并执行安全的 `SELECT`。
+- 数据分析师误在只读连接上执行 `DELETE`，应用明确阻止操作。
+- 工程师执行语法错误 SQL，看到可理解的错误，同时 SQL 文本不丢失。
+- DBA 查看查询历史，包括状态、耗时、行数和安全等级。
+- BYOK 用户不登录也能进入应用，本地查询轮次仍会记录。
+- 工程师连接 PostgreSQL 后打开 Schema 树，点击表生成安全 quote 的 `select * ... limit 100` 预览查询。
+- 数据分析师将结果导出 CSV，逗号、引号、换行、JSON 和空值等表格敏感内容能正确导入。
+- 应用重启后恢复活动连接 id 和 SQL 草稿。
 
-## Required Gates
+## 必须通过的质量门禁
 
 ```bash
 pnpm typecheck
@@ -33,38 +27,27 @@ pnpm test
 pnpm smoke
 ```
 
-Current fast coverage:
+当前快速测试覆盖：
 
-- `packages/core-db/test/sql-builder.test.ts` covers PostgreSQL identifier quoting and preview
-  limit clamping.
-- `packages/shared/test/csv.test.ts` covers result CSV export behavior for realistic spreadsheet
-  edge cases.
-- Existing core tests cover SQL safety, connection persistence, query history, auth, and usage.
+- `packages/core-db/test/sql-builder.test.ts` 覆盖 PostgreSQL 标识符 quote 和预览 limit 上限。
+- `packages/shared/test/csv.test.ts` 覆盖真实表格导出边界。
+- 既有 core 测试覆盖 SQL 安全、连接持久化、查询历史、认证和用量记录。
 
-## M0-M1.5 Release Readiness Risks
+## M0-M1.5 发布风险
 
-- Electron dependencies can pass package-level tests while still failing in the final desktop
-  package because main-process code, preload code, native modules, and ASAR path handling are only
-  exercised by the packaged app.
-- PostgreSQL integration tests must run against a real PostgreSQL instance before a release
-  candidate. Unit tests are enough for SQL safety and persistence helpers, but they do not validate
-  driver behavior, SSL options, pool lifecycle, result type mapping, or error text from the server.
-- Docker-backed PostgreSQL tests should be opt-in for local development and required in release CI
-  once the CI environment has Docker. The test job should create an isolated database, apply any
-  fixtures, run read-only and write-path scenarios, and tear the database down after the run.
-- The packaged desktop app must be tested after `pnpm --filter @dbagent/desktop package`; a
-  renderer dev-server smoke test is not a substitute for checking installed app startup, IPC
-  registration, preload availability, and database connection behavior from the bundled artifact.
-- Usage and auth persistence should remain covered by fast unit tests because those flows gate both
-  BYOK mode and future subscription UX before the app has a full backend.
+- Electron 包级测试通过，不等于最终桌面包可启动。主进程、preload、ASAR 路径和运行时依赖必须通过打包产物验证。
+- PostgreSQL 集成测试必须在候选发布前跑真实数据库。单元测试足够覆盖 SQL 安全和本地持久化 helper，但不能证明驱动行为、SSL 选项、连接池生命周期、结果类型映射或服务器错误文本正确。
+- Docker PostgreSQL 测试在本地开发中可先作为 opt-in；等 CI 环境具备 Docker 后，应作为发布 CI 必跑项。
+- `pnpm --filter @dbagent/desktop package` 后必须验证打包产物启动；renderer dev server 或 Vitest 不能替代安装包验证。
+- 认证和用量持久化要保持快速单测覆盖，因为它们同时影响 BYOK 模式和后续订阅 UX。
 
-For release candidates:
+候选发布命令：
 
 ```bash
 pnpm --filter @dbagent/desktop package
 ```
 
-Recommended release candidate sequence:
+推荐候选发布顺序：
 
 ```bash
 pnpm run ci
@@ -72,19 +55,17 @@ pnpm --filter @dbagent/core-db test:postgres
 pnpm --filter @dbagent/desktop package
 ```
 
-`test:postgres` is the intended gate name for the Docker-backed PostgreSQL suite. If the script is
-not present yet, the release candidate should explicitly record that PostgreSQL integration testing
-was not completed.
+`test:postgres` 是后续 Docker PostgreSQL 集成测试的目标脚本名。如果脚本尚未实现，候选发布记录中必须明确 PostgreSQL 集成测试未完成。
 
-## PostgreSQL Integration Fixture
+## PostgreSQL 集成测试数据
 
-Use the local fixture in `scripts/dev-db` for M1 manual and automated integration checks:
+M1 手工和自动化集成测试使用 `scripts/dev-db` 中的本地 fixture：
 
 ```bash
 docker compose -f scripts/dev-db/docker-compose.yml up -d
 ```
 
-Default connection:
+默认连接：
 
 - Host: `127.0.0.1`
 - Port: `5432`
@@ -92,9 +73,8 @@ Default connection:
 - User: `postgres`
 - Password: `postgres`
 
-Business checks:
+业务检查：
 
-- `select * from users` returns seeded analyst-friendly data.
-- `select u.city, sum(o.total_amount) from users u join orders o on o.user_id = u.id group by u.city`
-  validates a realistic join.
-- `delete from users` is blocked when the connection is read-only.
+- `select * from users` 返回种子用户数据。
+- `select u.city, sum(o.total_amount) from users u join orders o on o.user_id = u.id group by u.city` 验证真实 join 场景。
+- 只读连接下 `delete from users` 必须被阻止。

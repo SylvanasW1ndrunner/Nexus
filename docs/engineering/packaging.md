@@ -1,70 +1,53 @@
-# Packaging Strategy
+# 打包策略
 
-DBAgent is a desktop product, so dependency choices must preserve a reliable Electron package.
+DBAgent 是桌面端产品，因此依赖选择必须服务于稳定、可验证的 Electron 打包。
 
-## Rules
+## 基本规则
 
-- Keep runtime dependencies narrow and explicit.
-- Keep test, lint, build, and Docker-only dependencies in `devDependencies`.
-- Do not bundle backend services into the desktop app.
-- Keep native modules isolated behind package boundaries so packaging problems are localized.
-- Prefer lazy loading for heavy capabilities such as future RAG embeddings, MCP servers, and Python.
-- Treat the packaged Electron app as the release artifact. Development-only success in Vite,
-  Vitest, or a renderer browser session does not prove the app bundle can start.
+- 运行时依赖要少而明确。
+- 测试、lint、构建、Docker 专用依赖放在 `devDependencies`。
+- 不把后端服务打进桌面应用。
+- 原生模块隔离在 package 边界内，让打包问题局部化。
+- RAG embedding、MCP server、Python 等重能力后续必须 lazy load。
+- 以打包后的 Electron 应用作为发布物。Vite、Vitest 或 renderer 浏览器里能跑，不代表最终应用能启动。
 
-## Current Runtime Dependencies
+## 当前运行时依赖
 
-- Electron and React for the desktop shell.
-- `pg` for PostgreSQL access.
-- Zustand for lightweight renderer state once UI state grows.
+- Electron 和 React：桌面壳与界面。
+- `pg`：PostgreSQL 访问。
+- Zustand：后续 renderer 状态变复杂时使用的轻量状态管理。
 
-## Electron Dependency Risks
+## Electron 依赖风险
 
-- Electron, preload scripts, and main-process modules run under a different resolution and file
-  layout after packaging. Any import that depends on source paths, workspace symlinks, or unbuilt
-  packages must be caught before release.
-- Native or optional dependencies must be checked in the packaged artifact on each target platform.
-  If a dependency requires rebuilds, the rebuild step belongs in the desktop packaging pipeline, not
-  in application startup.
-- PostgreSQL support should keep `pg` and related code inside the database package boundary so the
-  desktop app imports one stable interface instead of spreading driver-specific requirements across
-  main and renderer code.
-- Docker Compose, PostgreSQL test containers, fixture loaders, and CI-only helpers must never be
-  included in the final app bundle.
+- Electron、preload 脚本和主进程模块在打包后处于不同的解析路径和文件布局。任何依赖源码路径、workspace symlink 或未构建包的 import，都必须在发布前发现。
+- 原生或 optional dependency 必须在目标平台的打包产物中验证。如果依赖需要 rebuild，该步骤必须属于桌面打包流水线，而不是应用启动流程。
+- PostgreSQL 相关代码应收敛在数据库 package 边界内，桌面应用只导入稳定接口，避免驱动细节扩散到 main 和 renderer。
+- Docker Compose、PostgreSQL 测试容器、fixture loader、CI helper 绝不能进入最终应用包。
 
-## Final Bundle Constraints
+## 最终包约束
 
-- The bundle should include compiled application code, production runtime dependencies, static UI
-  assets, and Electron metadata only.
-- The bundle should exclude source maps intended only for internal debugging, integration-test
-  fixtures, Docker files, generated coverage, local database files, `.env` files, and developer
-  scripts that are not part of app startup.
-- No database server, model server, MCP server, Python runtime, or embedding index should be bundled
-  for M0-M1.5. Those capabilities can be installed or configured later through explicit user flows.
-- Packaged app verification must check startup, IPC handler registration, auth status, usage status,
-  and at least one PostgreSQL connection test from the installed artifact.
-- Password storage currently uses Electron `safeStorage`; release QA must verify encryption
-  availability on Windows, macOS, and Linux.
-- Renderer-only features such as CSV export should remain browser-native and dependency-free unless
-  a future export format genuinely requires a runtime package.
-- Workspace recovery state is stored as a small JSON file in Electron `userData`; it must stay out
-  of the packaged ASAR and should be treated as user data during installer/uninstaller QA.
+- 包内只应包含编译后的应用代码、生产运行时依赖、静态 UI 资源和 Electron 元数据。
+- 包内应排除仅供内部调试的 source map、集成测试 fixture、Docker 文件、coverage、local database、`.env` 文件，以及不参与应用启动的开发脚本。
+- M0-M1.5 不打包数据库服务器、模型服务器、MCP server、Python runtime 或 embedding index。这些能力后续通过明确的用户流程安装或配置。
+- 打包验证必须检查启动、IPC handler 注册、认证状态、用量状态，以及至少一次从打包产物发起的 PostgreSQL 连接测试。
+- 密码存储当前使用 Electron `safeStorage`；发布 QA 必须分别验证 Windows、macOS、Linux 上的加密可用性。
+- CSV 导出这类 renderer-only 功能优先使用浏览器原生能力，除非未来格式确实需要运行时依赖。
+- 工作区恢复状态是 Electron `userData` 下的小 JSON 文件，不能进入 ASAR；安装/卸载 QA 应把它视作用户数据。
 
-## Packaging Command
+## 打包命令
 
 ```bash
 pnpm --filter @dbagent/desktop build
 pnpm --filter @dbagent/desktop package
 ```
 
-The current `electron-builder` configuration packages `dist/**` into ASAR and emits platform
-installers under `apps/desktop/release`.
+当前 `electron-builder` 配置会把 `dist/**` 打进 ASAR，并在 `apps/desktop/release` 下输出平台安装包。
 
-## Current Verification
+## 当前验证结果
 
-On Windows, `pnpm --filter @dbagent/desktop package` produced:
+Windows 上 `pnpm --filter @dbagent/desktop package` 已生成：
 
 - `apps/desktop/release/DBAgent Setup 0.1.0.exe`
-- Installer size: 71.51 MB
+- 安装包大小：71.51 MB
 
-This is below the product target of a sub-200 MB installer for the M0-M1.5 baseline.
+这低于 M0-M1.5 基线阶段安装包小于 200 MB 的产品目标。

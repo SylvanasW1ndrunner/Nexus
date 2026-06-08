@@ -1,21 +1,21 @@
 # DBAgent
 
-DBAgent is an agent-native database IDE for data engineers. It starts as a local-first
-Electron desktop app for PostgreSQL, then grows into Schema RAG, agent execution, MCP tools,
-skills, and workspace-based Python artifacts.
+DBAgent 是面向数据工程师的 Agent 原生数据库 IDE。当前以本地优先的 Electron 桌面应用切入，先支持 PostgreSQL 连接、SQL 执行和结果展示，后续逐步扩展 Schema RAG、Agent 执行、MCP 工具、Skill 系统和工作区 Python 产物。
 
-## Repository Layout
+当前阶段文档统一使用中文；英文文档等产品主线开发完成后再集中整理。
 
-- `apps/desktop` - Electron + React desktop client.
-- `packages/shared` - shared domain types, result model, and IPC contracts.
-- `packages/core-db` - database driver abstraction, PostgreSQL driver, SQL safety, connection and query history stores.
-- `packages/core-auth` - local auth/session skeleton for subscription integration.
-- `packages/core-usage` - usage tracking skeleton shared by BYOK and subscription modes.
-- `packages/core-llm` - LLM routing boundary for BYOK and future gateway modes.
-- `docs/product` - original product and architecture design documents.
-- `docs/engineering` - implementation-facing interface, testing, packaging, and operations docs.
+## 仓库结构
 
-## Commands
+- `apps/desktop`：Electron + React 桌面客户端。
+- `packages/shared`：共享领域类型、Result 模型和 IPC 契约。
+- `packages/core-db`：数据库驱动抽象、PostgreSQL 驱动、SQL 安全、连接存储和查询历史。
+- `packages/core-auth`：订阅集成前的本地认证/会话骨架。
+- `packages/core-usage`：BYOK 与订阅模式共用的用量记录骨架。
+- `packages/core-llm`：BYOK 与后续 gateway 模式共用的 LLM 路由边界。
+- `docs/product`：产品与架构设计文档。
+- `docs/engineering`：接口、测试、打包和运维相关工程文档。
+
+## 常用命令
 
 ```bash
 pnpm install
@@ -29,6 +29,4 @@ pnpm --filter @dbagent/desktop build
 pnpm --filter @dbagent/desktop package
 ```
 
-The current workstation must have Node.js and pnpm installed or available through Corepack.
-The desktop package is designed so development and test-only dependencies stay outside the final
-Electron application bundle.
+当前开发机需要安装 Node.js 和 pnpm，或通过 Corepack 提供。桌面端打包策略要求开发/测试专用依赖留在最终 Electron 应用包之外。

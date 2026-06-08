@@ -1,11 +1,10 @@
-# Interfaces
+# 接口文档
 
-## IPC Boundary
+## IPC 边界
 
-Renderer code must call main-process capabilities through the typed IPC map in
-`packages/shared/src/ipc.ts`.
+Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契约调用主进程能力。
 
-Current M1 channels:
+当前 M1/M1.5 通道：
 
 - `connection:list`
 - `connection:test`
@@ -26,53 +25,43 @@ Current M1 channels:
 - `app:load-workspace-state`
 - `app:save-workspace-state`
 
-All responses use `Result<T>` from `packages/shared/src/result.ts` so UI code handles operational
-failures explicitly instead of catching untyped exceptions.
+所有响应统一使用 `packages/shared/src/result.ts` 中的 `Result<T>`，让 UI 显式处理业务失败，而不是捕获无类型异常。
 
-## Database Driver Boundary
+## 数据库驱动边界
 
-`IDatabaseDriver` is the stable boundary for M1. PostgreSQL is the only implemented engine, but
-the interface is deliberately engine-neutral:
+`IDatabaseDriver` 是 M1 阶段的稳定边界。目前只实现 PostgreSQL，但接口刻意保持数据库无关：
 
-- `test(config)` checks reachability.
-- `connect(config)` creates or restores an active pool.
-- `disconnect(connectionId)` shuts down resources.
-- `execute(request, connection)` runs SQL and returns rows, fields, elapsed time, and safety data.
-- `listTables(connectionId)` provides the initial Schema tree substrate for M1.5 and M2.
+- `test(config)`：检查连接可达性。
+- `connect(config)`：创建或恢复活动连接池。
+- `disconnect(connectionId)`：关闭连接池资源。
+- `execute(request, connection)`：执行 SQL，并返回字段、行数据、耗时和安全报告。
+- `listTables(connectionId)`：为 M1.5 Schema 树和后续 M2 RAG 提供表/视图列表。
 
-## Workspace State
+## 工作区状态
 
-M1.5 persists the active connection id and SQL editor draft through `app:*workspace-state` IPC
-channels. The state file lives under Electron `userData/data/workspace-state.json` and is written
-atomically through a temporary file plus rename.
+M1.5 通过 `app:*workspace-state` IPC 通道持久化当前活动连接和 SQL 编辑器草稿。
 
-This is intentionally small: it restores the daily SQL editing path without introducing a heavier
-workspace database before sessions, tabs, and Agent checkpoints exist.
+状态文件位于 Electron `userData/data/workspace-state.json`，写入方式为临时文件加 rename 的原子写，避免半写入状态。当前只保存最小恢复信息，先覆盖日常 SQL 编辑路径；完整 Session、Tab 和 Agent checkpoint 后续再进入独立存储。
 
-## Result Export
+## 结果导出
 
-`queryResultToCsv(result)` in `packages/shared/src/csv.ts` converts query results into RFC-friendly
-CSV for spreadsheet import. It preserves the returned column order and escapes commas, quotes,
-newlines, JSON values, and `NULL` values.
+`packages/shared/src/csv.ts` 中的 `queryResultToCsv(result)` 将查询结果转换为 CSV，供 Excel/WPS 等表格工具导入。
 
-## SQL Safety
+它会保持数据库返回的列顺序，并处理逗号、引号、换行、JSON 值和 `NULL` 等真实业务数据边界。
 
-`analyzeSqlSafety(sql, { readOnly })` classifies statements before execution.
+## SQL 安全
 
-- Read-only connections allow `SELECT`, `WITH`, `SHOW`, `EXPLAIN`, and `VALUES`.
-- Read-only connections block `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CALL`, and DDL.
-- Write and DDL statements require confirmation when the connection is not read-only.
-- Multiple statements require review because they increase blast radius.
+`analyzeSqlSafety(sql, { readOnly })` 会在执行前分类 SQL。
 
-This safety report is stored with query history and returned to the renderer.
+- 只读连接允许 `SELECT`、`WITH`、`SHOW`、`EXPLAIN` 和 `VALUES`。
+- 只读连接阻止 `INSERT`、`UPDATE`、`DELETE`、`MERGE`、`CALL` 和 DDL。
+- 非只读连接上的写操作和 DDL 需要用户确认。
+- 多语句 SQL 需要审查，因为影响范围更大。
 
-## Credential Handling
+安全报告会写入查询历史，并返回给 renderer。
 
-Connection metadata is stored separately from passwords. The desktop main process persists passwords
-in an encrypted local credential file using Electron `safeStorage` when available. Renderer code
-never receives stored passwords after creation, and deleting a connection also deletes its stored
-credential.
+## 凭证处理
 
-This is an M1 implementation step. Before public release, this boundary should move behind an OS
-keychain adapter so Windows Credential Manager, macOS Keychain, and Linux secret storage can be
-tested independently from IPC and UI code.
+连接元数据与密码分开存储。桌面主进程在本地凭证文件中保存密码，并优先使用 Electron `safeStorage` 加密。Renderer 在创建连接后不会再收到已保存密码；删除连接时也会删除对应凭证。
+
+这是 M1 的过渡实现。公开发布前，应将该边界迁移到 OS keychain adapter 后面，分别测试 Windows Credential Manager、macOS Keychain 和 Linux secret storage。

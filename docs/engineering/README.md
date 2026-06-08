@@ -1,7 +1,7 @@
-# Engineering Docs
+# 工程文档
 
-This directory contains implementation-facing documentation for DBAgent.
+本目录存放 DBAgent 的开发实现文档。当前阶段先统一使用中文；等产品主线开发完成后，再集中整理英文文档。
 
-- [Interfaces](./interfaces.md)
-- [Testing Strategy](./test-strategy.md)
-- [Packaging Strategy](./packaging.md)
+- [接口文档](./interfaces.md)
+- [测试策略](./test-strategy.md)
+- [打包策略](./packaging.md)
