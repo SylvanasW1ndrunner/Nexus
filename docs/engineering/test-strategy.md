@@ -72,6 +72,7 @@ pnpm db:down
 - `apps/desktop/src/main/credential-vault.test.ts` 覆盖密码凭证保存、读取、删除、`safeStorage` 可用路径和不可用 fallback。
 - `apps/desktop/src/main/query-confirmation.test.ts` 覆盖写操作确认握手，确保未确认 SQL 不会直接执行。
 - `apps/desktop/src/main/query-workflow.test.ts` 覆盖主进程查询业务链路：安全查询成功入历史和用量、只读写操作在 driver 前拦截、可写危险 SQL 未确认时要求确认、driver 失败时写失败历史。
+- `apps/desktop/src/main/schema-workflow.test.ts` 覆盖 Schema 主进程业务链路：连接不存在时不触碰 driver，连接存在时按保存连接的 `engine` 路由 `listTables` 和 `describeTable`。
 - `apps/desktop/src/main/workspace-state-store.test.ts` 覆盖 SQL 草稿恢复、活动连接恢复、缺失文件、损坏 JSON 和结构不合法状态。
 - `apps/desktop/src/renderer/src/connection-draft.test.ts` 覆盖已保存连接回填到编辑表单时不回填密码，并保留远程连接配置。
 - `apps/desktop/src/renderer/src/diagnostics.test.ts` 覆盖远程连接错误提示和 SQL 性能告警汇总。

@@ -19,6 +19,7 @@ import {
 import { validateConnectionInput } from './connection-validation.js';
 import { CredentialVault } from './credential-vault.js';
 import { createQueryWorkflow } from './query-workflow.js';
+import { createSchemaWorkflow } from './schema-workflow.js';
 import { WorkspaceStateStore } from './workspace-state-store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +39,10 @@ const executeQuery = createQueryWorkflow({
   connections: connectionStore,
   history: queryHistoryStore,
   usage: usageTracker,
+  driverForEngine: (engine) => databaseDrivers.get(engine),
+});
+const schemaWorkflow = createSchemaWorkflow({
+  connections: connectionStore,
   driverForEngine: (engine) => databaseDrivers.get(engine),
 });
 
@@ -166,16 +171,10 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.db.explainQuery, async (request) =>
     executeQuery({ ...request, sql: `EXPLAIN (FORMAT JSON) ${request.sql}` }),
   );
-  handle(ipcChannels.db.listTables, async ({ connectionId }) => {
-    const connection = (await connectionStore.list()).find((item) => item.id === connectionId);
-    if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-    return databaseDrivers.get(connection.engine).listTables(connectionId);
-  });
-  handle(ipcChannels.db.describeTable, async ({ connectionId, schema, table }) => {
-    const connection = (await connectionStore.list()).find((item) => item.id === connectionId);
-    if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-    return databaseDrivers.get(connection.engine).describeTable(connectionId, schema, table);
-  });
+  handle(ipcChannels.db.listTables, async ({ connectionId }) => schemaWorkflow.listTables(connectionId));
+  handle(ipcChannels.db.describeTable, async ({ connectionId, schema, table }) =>
+    schemaWorkflow.describeTable(connectionId, schema, table),
+  );
   handle(ipcChannels.db.queryHistory, async (request) => ok(await queryHistoryStore.list(request ?? {})));
 
   handle(ipcChannels.auth.status, async () => ok(await authService.status()));

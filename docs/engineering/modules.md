@@ -110,7 +110,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 测试重点：
 
-- 主进程可测试逻辑要尽量抽成纯模块，例如连接输入校验。
+- 主进程可测试逻辑要尽量抽成纯模块，例如连接输入校验、查询 workflow 和 Schema workflow。
 - Renderer 展示逻辑要抽成 helper，例如远程错误文案、性能提示汇总和连接草稿转换。
 - 打包后必须启动 `win-unpacked/DBAgent.exe`，不能只相信 Vite dev server。
 
