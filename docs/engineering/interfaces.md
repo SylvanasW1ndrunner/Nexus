@@ -60,7 +60,7 @@ Renderer 通过诊断 helper 将错误码转成用户可行动提示，例如检
 
 M1.5 通过 `app:load-workspace-state` 和 `app:save-workspace-state` IPC channel 持久化当前活动连接 id 和 SQL 编辑器草稿。
 
-状态文件位于 Electron `userData/data/workspace-state.json`，写入方式为临时文件加 `rename` 的原子写，避免半写入状态。当前只保存最小恢复信息，先覆盖日常 SQL 编辑路径；完整 session、tab 和 Agent checkpoint 后续再进入独立存储。
+状态文件位于 Electron `userData/data/workspace-state.json`，写入方式为临时文件加 `rename` 的原子写，避免半写入状态。加载时会校验 `sqlDraft` 和 `updatedAt`，并忽略缺失、损坏或结构不合法的状态文件，保证应用启动优先于恢复草稿。当前只保存最小恢复信息，先覆盖日常 SQL 编辑路径；完整 session、tab 和 Agent checkpoint 后续再进入独立存储。
 
 ## 连接与凭证
 

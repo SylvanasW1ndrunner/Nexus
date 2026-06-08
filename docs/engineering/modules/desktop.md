@@ -6,6 +6,7 @@
 - `apps/desktop/src/main/connection-validation.ts`：连接表单输入校验。
 - `apps/desktop/src/main/credential-vault.ts`：数据库密码本地凭证存储，封装 `safeStorage` 和 fallback。
 - `apps/desktop/src/main/query-confirmation.ts`：危险 SQL 确认握手判断。
+- `apps/desktop/src/main/workspace-state-store.ts`：SQL 草稿和活动连接恢复状态持久化。
 - `apps/desktop/src/preload/preload.ts`：受控 IPC 暴露。
 - `apps/desktop/src/renderer/src/App.tsx`：M1.5 主界面。
 - `apps/desktop/src/renderer/src/connection-draft.ts`：连接编辑草稿转换。
@@ -29,7 +30,7 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 
 结果区支持 CSV 和 JSON 导出。导出逻辑在 renderer 使用浏览器 `Blob` 下载，不引入桌面端额外运行时依赖。格式化逻辑来自 `@dbagent/shared`，保证 main、renderer 和测试使用同一结果结构。
 
-工作区状态保存活动连接 id 和 SQL 草稿，写入 Electron `userData/data/workspace-state.json`，采用临时文件加 rename 的原子写入方式，避免异常退出留下半截 JSON。
+工作区状态保存活动连接 id 和 SQL 草稿，写入 Electron `userData/data/workspace-state.json`，采用临时文件加 rename 的原子写入方式，避免异常退出留下半截 JSON。启动恢复时如果状态文件缺失、JSON 损坏或结构不合法，应用会忽略该恢复状态并继续启动，避免一个损坏草稿拖垮整个桌面应用。
 
 ## 测试覆盖
 
@@ -37,6 +38,7 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 - `credential-vault.test.ts`：凭证保存、读取、删除、`safeStorage` 可用和不可用 fallback。
 - `query-confirmation.test.ts`：危险 SQL 未确认时必须返回确认要求。
 - `query-workflow.test.ts`：主进程查询业务链路，包括成功执行、用量记录、历史写入、只读拦截、确认要求和失败历史。
+- `workspace-state-store.test.ts`：SQL 草稿恢复、活动连接恢复、缺失状态、损坏 JSON 和结构不合法状态。
 - `connection-draft.test.ts`：编辑连接不回填密码，并保留远程连接配置。
 - `diagnostics.test.ts`：远程连接错误提示和 SQL 性能告警汇总。
 - 打包验证：`pnpm package`。

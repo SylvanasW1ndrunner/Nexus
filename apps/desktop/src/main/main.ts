@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
 import { appendFileSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ConnectionStore, PostgresDriver, QueryHistoryStore } from '@dbagent/core-db';
@@ -15,11 +15,11 @@ import {
   type IpcChannel,
   type IpcRequestMap,
   type IpcResponseMap,
-  type WorkspaceState,
 } from '@dbagent/shared';
 import { validateConnectionInput } from './connection-validation.js';
 import { CredentialVault } from './credential-vault.js';
 import { createQueryWorkflow } from './query-workflow.js';
+import { WorkspaceStateStore } from './workspace-state-store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
@@ -29,6 +29,7 @@ const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
+const workspaceStateStore = new WorkspaceStateStore(workspaceStatePath);
 const authService = new AuthService(join(dataDir, 'auth-session.json'));
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
@@ -174,11 +175,9 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
   handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));
 
-  handle(ipcChannels.app.loadWorkspaceState, async () => ok(await loadWorkspaceState()));
+  handle(ipcChannels.app.loadWorkspaceState, async () => ok(await workspaceStateStore.load()));
   handle(ipcChannels.app.saveWorkspaceState, async (state) => {
-    const saved = { ...state, updatedAt: new Date().toISOString() };
-    await writeJsonAtomic(workspaceStatePath, saved);
-    return ok(saved);
+    return ok(await workspaceStateStore.save(state));
   });
 }
 
@@ -188,29 +187,6 @@ function toDbConfig(input: ConnectionInput) {
     readOnly: input.readOnly ?? true,
     maxClients: 5,
   };
-}
-
-async function loadWorkspaceState(): Promise<WorkspaceState | undefined> {
-  try {
-    const state = JSON.parse(await readFile(workspaceStatePath, 'utf8')) as Partial<WorkspaceState>;
-    if (typeof state.sqlDraft !== 'string' || typeof state.updatedAt !== 'string') return undefined;
-    const restored: WorkspaceState = {
-      sqlDraft: state.sqlDraft,
-      updatedAt: state.updatedAt,
-    };
-    if (typeof state.activeConnectionId === 'string') restored.activeConnectionId = state.activeConnectionId;
-    return restored;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
-  }
-}
-
-async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const tempPath = `${path}.${process.pid}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await rename(tempPath, path);
 }
 
 void app.whenReady().then(() => {
