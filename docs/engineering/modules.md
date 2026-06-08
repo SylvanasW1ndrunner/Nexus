@@ -37,7 +37,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 定义跨包共享的领域类型。
 - 定义 IPC channel、request/response map。
 - 定义 `Result<T>`、`AppError` 和错误码。
-- 提供 CSV 导出 helper。
+- 提供 CSV/JSON 导出 helper。
 
 开发逻辑：
 
@@ -48,6 +48,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 测试重点：
 
 - CSV 边界值：逗号、引号、换行、JSON、`NULL`。
+- JSON 导出边界值：列顺序、metadata、`Date`、`bigint`、`Buffer` 和嵌套对象。
 - IPC 类型当前通过 TypeScript 编译约束，后续可以增加契约快照测试。
 
 ## `packages/core-db`
@@ -85,7 +86,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 职责：
 
 - Electron 主进程注册 IPC handler，组合 core 包能力。
-- Renderer 提供 M1.5 桌面界面：连接、Schema、SQL 编辑、结果、历史、CSV 导出。
+- Renderer 提供 M1.5 桌面界面：连接、Schema、SQL 编辑、结果、历史、CSV/JSON 导出。
 - Preload 暴露受控 IPC 入口。
 - 打包配置和 ASAR 裁剪。
 

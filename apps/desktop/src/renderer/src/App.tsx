@@ -1,6 +1,7 @@
 import { Component, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from 'react';
 import {
   ipcChannels,
+  queryResultToJson,
   queryResultToCsv,
   type ConnectionInput,
   type QueryExecutionResult,
@@ -271,14 +272,18 @@ export function App() {
 
   function exportCsv() {
     if (!result) return;
-    const blob = new Blob([queryResultToCsv(result)], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `dbagent-result-${result.queryId}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadResult(`dbagent-result-${result.queryId}.csv`, queryResultToCsv(result), 'text/csv;charset=utf-8');
     setMessage(`Exported ${result.rowCount} rows to CSV.`);
+  }
+
+  function exportJson() {
+    if (!result) return;
+    downloadResult(
+      `dbagent-result-${result.queryId}.json`,
+      queryResultToJson(result),
+      'application/json;charset=utf-8',
+    );
+    setMessage(`Exported ${result.rowCount} rows to JSON.`);
   }
 
   return (
@@ -366,6 +371,9 @@ export function App() {
                   </span>
                   <button className="secondary" onClick={exportCsv}>
                     Export CSV
+                  </button>
+                  <button className="secondary" onClick={exportJson}>
+                    Export JSON
                   </button>
                 </div>
                 <PerformanceWarnings result={result} />
@@ -691,4 +699,14 @@ function buildPreviewSql(table: TableSummary): string {
 
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function downloadResult(filename: string, content: string, type: string): void {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }

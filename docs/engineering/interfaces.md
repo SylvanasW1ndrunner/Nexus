@@ -109,3 +109,5 @@ Renderer 可基于 `buildTablePreviewSql(schema, table, limit)` 生成预览 SQL
 `packages/shared/src/csv.ts` 中的 `queryResultToCsv(result)` 将查询结果转换为 CSV，供 Excel/WPS 等表格工具导入。
 
 它会保持数据库返回的列顺序，并处理逗号、引号、换行、JSON 值和 `NULL` 等真实业务数据边界。
+
+`packages/shared/src/export.ts` 中的 `queryResultToJson(result)` 将结果导出为带 metadata 的 JSON：包含 `queryId`、`rowCount`、`elapsedMs`、`columns`、`rows` 和 `safety`。行数据按结果列顺序重建，并把 `Date`、`bigint`、`Buffer` 和嵌套对象转成可序列化 JSON。

@@ -2,7 +2,7 @@
 
 ## 测试分层
 
-- 单元测试覆盖纯业务规则，例如 SQL 安全判断、PostgreSQL identifier quote、预览 SQL limit、连接校验、查询历史、CSV 导出、用量窗口、认证与会话持久化。
+- 单元测试覆盖纯业务规则，例如 SQL 安全判断、PostgreSQL identifier quote、预览 SQL limit、连接校验、查询历史、CSV/JSON 导出、用量窗口、认证与会话持久化。
 - 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts`。
 - 远程连接风险以可复现单测覆盖错误分类，以真实 PostgreSQL 集成测试覆盖成功连接、查询、断连和事务回滚。弱网、VPN、云安全组和跨系统防火墙场景后续进入发布前手工 QA 矩阵。
 - E2E 测试覆盖桌面端用户路径：打开应用、创建连接、执行 SQL、查看结果表、查看查询历史、验证只读拦截、导出 CSV、重启后恢复 SQL 草稿。
@@ -18,7 +18,7 @@
 - BYOK 用户不登录也能进入应用，本地查询轮次仍会记录。
 - 工程师连接 PostgreSQL 后打开 Schema 树，点击表生成安全 quote 的 `select * ... limit 100` 预览查询。
 - 工程师点击 Schema 树中的表名时，能看到列、类型、nullable、主键和外键引用；点击 `SQL` 时才生成数据预览查询。
-- 数据分析师将结果导出 CSV，逗号、引号、换行、JSON 和空值等表格敏感内容能正确导入。
+- 数据分析师将结果导出 CSV 或 JSON；CSV 要处理逗号、引号、换行、JSON 和空值，JSON 要保留 metadata、列顺序和安全报告。
 - 应用重启后恢复活动连接 id 和 SQL 草稿。
 - 用户能编辑已保存连接的 host、database、SSL 和超时配置；更新后连接池必须断开，避免继续使用旧连接。
 - 用户能删除已保存连接，同时删除对应凭证和活动连接池。
@@ -67,6 +67,7 @@ pnpm db:down
 - `apps/desktop/src/renderer/src/connection-draft.test.ts` 覆盖已保存连接回填到编辑表单时不回填密码，并保留远程连接配置。
 - `apps/desktop/src/renderer/src/diagnostics.test.ts` 覆盖远程连接错误提示和 SQL 性能告警汇总。
 - `packages/shared/test/csv.test.ts` 覆盖真实表格导出边界。
+- `packages/shared/test/export.test.ts` 覆盖 JSON 结果导出边界。
 - `packages/core-auth/test/auth-service.test.ts` 覆盖认证状态和会话持久化。
 - `packages/core-usage/test/usage-tracker.test.ts` 覆盖本地用量记录。
 

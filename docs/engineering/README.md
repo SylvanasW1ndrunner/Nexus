@@ -4,5 +4,6 @@
 
 - [接口文档](./interfaces.md)
 - [模块开发说明](./modules.md)
+- [分模块开发文档](./modules/README.md)
 - [测试策略](./test-strategy.md)
 - [打包策略](./packaging.md)

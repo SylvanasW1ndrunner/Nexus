@@ -1,0 +1,31 @@
+# shared 契约与导出模块
+
+## 代码入口
+
+- `packages/shared/src/domain.ts`：跨进程共享的领域模型，例如连接、查询结果、Schema 结构和安全报告。
+- `packages/shared/src/ipc.ts`：Renderer、preload、main 共同遵守的 IPC channel 与 request/response map。
+- `packages/shared/src/result.ts`：统一 `Result<T>`、`AppError` 和错误码。
+- `packages/shared/src/csv.ts`：查询结果导出 CSV。
+- `packages/shared/src/export.ts`：查询结果导出 JSON。
+- `packages/shared/src/index.ts`：包级导出边界。
+
+## 开发逻辑
+
+`shared` 是应用最稳定的契约层。主进程和 renderer 只能通过这里定义的数据结构对齐，避免 UI 依赖主进程内部类、数据库 driver 实例或异常对象。
+
+新增功能时先判断是否跨进程。如果功能只在 renderer 内使用，不应放进 IPC 契约；如果主进程需要返回给 UI，必须先在 `domain.ts` 或 `ipc.ts` 中定义稳定结构，再由具体模块实现。
+
+错误处理统一走 `Result<T>`。业务可恢复错误使用 `AppErrorCode`，例如远程连接失败、只读连接拦截、危险 SQL 需要确认。这样 renderer 可以写可测试的错误提示逻辑，而不是解析数据库驱动的原始异常文本。
+
+结果导出 helper 放在 `shared`，原因是导出格式依赖 `QueryExecutionResult` 的稳定结构，但不需要访问 DOM、文件系统或数据库连接。CSV 面向表格工具，JSON 面向审计、复现和后续 Agent 上下文复用。JSON 导出保留 `queryId`、`rowCount`、`elapsedMs`、`columns`、`rows` 和 `safety`，并把 `Date`、`bigint`、`Buffer` 和嵌套对象规范化为可序列化值。
+
+## 测试覆盖
+
+- `packages/shared/test/csv.test.ts`：覆盖逗号、引号、换行、对象值和 `NULL`。
+- `packages/shared/test/export.test.ts`：覆盖 JSON metadata、列顺序、`Date`、`bigint`、`Buffer` 和嵌套对象。
+- 类型契约当前通过 `pnpm typecheck` 兜底。后续如果 IPC channel 增多，应增加契约快照测试，避免破坏 renderer 与 main 的约定。
+
+## 后续扩展
+
+- 多数据库接入时，查询结果结构仍应保持数据库无关，数据库特有字段放入可选 metadata，而不是污染通用行数据。
+- 未来导出 Excel、Parquet 或审计包时，优先在 `shared` 增加纯函数格式化逻辑；涉及文件系统或压缩包写入时再交给 main。
