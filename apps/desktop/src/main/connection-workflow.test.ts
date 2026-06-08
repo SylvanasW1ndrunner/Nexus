@@ -51,6 +51,17 @@ describe('createConnectionWorkflow', () => {
     expect(harness.connections[0]).not.toHaveProperty('password');
   });
 
+  it('rejects invalid test input before touching the driver', async () => {
+    const harness = createHarness({ connections: [] });
+
+    const result = await harness.workflow.test({ ...baseInput, port: 70_000 });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(harness.driverCalls).toEqual([]);
+  });
+
   it('does not save credentials or touch drivers when updating a missing connection', async () => {
     const harness = createHarness({ connections: [] });
 
@@ -95,6 +106,19 @@ describe('createConnectionWorkflow', () => {
     expect(harness.connections[0]?.status).toBe('error');
   });
 
+  it('loads saved credentials for successful driver connection and marks connected', async () => {
+    const harness = createHarness({ connections: [baseConnection] });
+    harness.credentials.set(baseConnection.id, 'pg-secret');
+
+    const result = await harness.workflow.connect(baseConnection.id);
+
+    expect(result.ok).toBe(true);
+    expect(harness.driverCalls).toEqual([
+      { type: 'connect', engine: 'postgres', connectionId: baseConnection.id, password: 'pg-secret' },
+    ]);
+    expect(harness.connections[0]?.status).toBe('connected');
+  });
+
   it('disconnects, removes metadata, and deletes credentials when removing a connection', async () => {
     const harness = createHarness({ connections: [baseConnection] });
     harness.credentials.set(baseConnection.id, 'pg-secret');
@@ -116,7 +140,7 @@ function createHarness(options: {
   const credentials = new Map<string, string>();
   const driverCalls: Array<
     | { type: 'test'; engine: string; host: string }
-    | { type: 'connect'; engine: string; connectionId: string }
+    | { type: 'connect'; engine: string; connectionId: string; password?: string }
     | { type: 'disconnect'; engine: string; connectionId: string }
   > = [];
 
@@ -196,7 +220,12 @@ function createHarness(options: {
             return Promise.resolve(ok({ latencyMs: 12 }));
           },
           connect(config) {
-            driverCalls.push({ type: 'connect', engine, connectionId: config.id ?? '' });
+            driverCalls.push({
+              type: 'connect',
+              engine,
+              connectionId: config.id ?? '',
+              ...(config.password !== undefined ? { password: config.password } : {}),
+            });
             return Promise.resolve(options.connectResult ?? ok({ ...baseConnection, id: config.id ?? baseConnection.id }));
           },
           disconnect(connectionId) {
