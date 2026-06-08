@@ -96,7 +96,7 @@ pnpm package:verify:asar
 - 根打包脚本会先执行 `pnpm build`，避免 workspace 依赖包产物缺失。
 - `scripts/prune-asar.cjs` 裁剪 workspace 包源码、测试、source map 和构建缓存。
 - `scripts/verify-package.mjs` 检查 ASAR 入口文件、开发残留和当前平台打包产物启动。
-- 最近 Windows unpacked 验证显示 ASAR 文件数为 `314`，启动探活通过。
+- 最近 Windows unpacked 验证显示 ASAR 文件数为 `315`，启动探活通过。
 
 ## 文档证据
 

@@ -1,6 +1,7 @@
 import { analyzeSqlSafety, type IDatabaseDriver } from '@dbagent/core-db';
 import {
   err,
+  type DatabaseEngine,
   type QueryExecutionResult,
   type QueryHistoryItem,
   type QueryRequest,
@@ -33,14 +34,14 @@ export type QueryWorkflowDependencies = {
   connections: ConnectionReader;
   history: QueryHistoryWriter;
   usage: UsageRecorder;
-  driver: Pick<IDatabaseDriver, 'execute'>;
+  driverForEngine: (engine: DatabaseEngine) => Pick<IDatabaseDriver, 'execute'>;
 };
 
 export function createQueryWorkflow({
   connections,
   history,
   usage,
-  driver,
+  driverForEngine,
 }: QueryWorkflowDependencies): (request: QueryRequest) => Promise<Result<QueryExecutionResult>> {
   return async (request) => {
     const connection = (await connections.list()).find((item) => item.id === request.connectionId);
@@ -67,7 +68,7 @@ export function createQueryWorkflow({
       if (confirmationError) return err(confirmationError);
     }
 
-    const result = await driver.execute(request, connection);
+    const result = await driverForEngine(connection.engine).execute(request, connection);
     if (result.ok) {
       await usage.recordLocalQuery();
       await history.append({

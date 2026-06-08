@@ -15,6 +15,13 @@ describe('DatabaseDriverRegistry', () => {
     expect(registry.create('postgres')).toBeInstanceOf(PostgresDriver);
   });
 
+  it('reuses one driver instance per engine for active connection pools', () => {
+    const registry = createDefaultDatabaseDriverRegistry();
+
+    expect(registry.get('postgres')).toBe(registry.get('postgres'));
+    expect(registry.get('postgres')).toBeInstanceOf(PostgresDriver);
+  });
+
   it('exposes immutable capability snapshots for registered engines', () => {
     const registry = createDefaultDatabaseDriverRegistry();
     const capabilities = registry.listCapabilities();

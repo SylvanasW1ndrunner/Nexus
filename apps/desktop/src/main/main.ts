@@ -34,12 +34,11 @@ const authService = new AuthService(join(dataDir, 'auth-session.json'));
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
 const databaseDrivers = createDefaultDatabaseDriverRegistry();
-const postgres = databaseDrivers.create('postgres');
 const executeQuery = createQueryWorkflow({
   connections: connectionStore,
   history: queryHistoryStore,
   usage: usageTracker,
-  driver: postgres,
+  driverForEngine: (engine) => databaseDrivers.get(engine),
 });
 
 let mainWindow: InstanceType<typeof BrowserWindow> | undefined;
@@ -104,8 +103,10 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.connection.list, async () => ok(await connectionStore.list()));
 
   handle(ipcChannels.connection.test, async (input) => {
+    const validation = validateConnectionInput(input);
+    if (validation) return err(validation);
     const config = toDbConfig(input);
-    const result = await postgres.test(config);
+    const result = await databaseDrivers.get(input.engine).test(config);
     return result.ok ? ok({ success: true, latencyMs: result.data.latencyMs }) : result;
   });
 
@@ -121,13 +122,14 @@ function registerIpcHandlers(): void {
     const updated = await connectionStore.update(id, patch);
     if (patch.password) await credentialVault.save(id, patch.password);
     if (!updated) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-    await postgres.disconnect(id);
+    await databaseDrivers.get(updated.engine).disconnect(id);
     const disconnected = await connectionStore.markStatus(id, 'disconnected');
     return ok(disconnected ?? updated);
   });
 
   handle(ipcChannels.connection.remove, async ({ id }) => {
-    await postgres.disconnect(id);
+    const existing = (await connectionStore.list()).find((item) => item.id === id);
+    if (existing) await databaseDrivers.get(existing.engine).disconnect(id);
     const removed = await connectionStore.remove(id);
     if (removed) await credentialVault.remove(id);
     return removed ? ok({ id }) : err({ code: 'NOT_FOUND', message: 'Connection not found.' });
@@ -144,7 +146,7 @@ function registerIpcHandlers(): void {
     if (password !== undefined) {
       Object.assign(config, { password });
     }
-    const result = await postgres.connect(config);
+    const result = await databaseDrivers.get(connection.engine).connect(config);
     if (!result.ok) {
       await connectionStore.markStatus(id, 'error');
       return result;
@@ -154,7 +156,8 @@ function registerIpcHandlers(): void {
   });
 
   handle(ipcChannels.connection.disconnect, async ({ id }) => {
-    await postgres.disconnect(id);
+    const connection = (await connectionStore.list()).find((item) => item.id === id);
+    if (connection) await databaseDrivers.get(connection.engine).disconnect(id);
     const updated = await connectionStore.markStatus(id, 'disconnected');
     return updated ? ok(updated) : err({ code: 'NOT_FOUND', message: 'Connection not found.' });
   });
@@ -163,10 +166,16 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.db.explainQuery, async (request) =>
     executeQuery({ ...request, sql: `EXPLAIN (FORMAT JSON) ${request.sql}` }),
   );
-  handle(ipcChannels.db.listTables, async ({ connectionId }) => postgres.listTables(connectionId));
-  handle(ipcChannels.db.describeTable, async ({ connectionId, schema, table }) =>
-    postgres.describeTable(connectionId, schema, table),
-  );
+  handle(ipcChannels.db.listTables, async ({ connectionId }) => {
+    const connection = (await connectionStore.list()).find((item) => item.id === connectionId);
+    if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
+    return databaseDrivers.get(connection.engine).listTables(connectionId);
+  });
+  handle(ipcChannels.db.describeTable, async ({ connectionId, schema, table }) => {
+    const connection = (await connectionStore.list()).find((item) => item.id === connectionId);
+    if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
+    return databaseDrivers.get(connection.engine).describeTable(connectionId, schema, table);
+  });
   handle(ipcChannels.db.queryHistory, async (request) => ok(await queryHistoryStore.list(request ?? {})));
 
   handle(ipcChannels.auth.status, async () => ok(await authService.status()));

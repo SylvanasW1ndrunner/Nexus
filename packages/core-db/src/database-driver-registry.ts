@@ -12,6 +12,7 @@ export type DatabaseDriverRegistration = {
 
 export class DatabaseDriverRegistry {
   private readonly registrations = new Map<DatabaseEngine, DatabaseDriverRegistration>();
+  private readonly drivers = new Map<DatabaseEngine, IDatabaseDriver>();
 
   constructor(registrations: DatabaseDriverRegistration[] = []) {
     for (const registration of registrations) {
@@ -40,6 +41,14 @@ export class DatabaseDriverRegistry {
       throw new Error(`Database engine ${engine} is not registered.`);
     }
     return registration.create();
+  }
+
+  get(engine: DatabaseEngine): IDatabaseDriver {
+    const existing = this.drivers.get(engine);
+    if (existing) return existing;
+    const driver = this.create(engine);
+    this.drivers.set(engine, driver);
+    return driver;
   }
 
   listCapabilities(): DatabaseCapabilities[] {

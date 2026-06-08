@@ -16,7 +16,7 @@
 
 ## 开发逻辑
 
-桌面应用按 Electron 安全边界拆分。Main 持有文件路径、密码、连接池和数据库 driver；preload 只暴露 `window.dbagent.invoke(channel, request)`；renderer 只发送类型化请求并渲染 `Result<T>`。
+桌面应用按 Electron 安全边界拆分。Main 持有文件路径、密码、连接池和数据库 driver，并统一从 `DatabaseDriverRegistry` 按连接 `engine` 获取 driver；preload 只暴露 `window.dbagent.invoke(channel, request)`；renderer 只发送类型化请求并渲染 `Result<T>`。
 
 连接管理支持创建、编辑、删除、测试、连接和断开。保存连接后 renderer 不回填密码；编辑已有连接时只加载元数据，密码留空。更新连接会让 main 主动断开旧连接池并标记为 disconnected，避免用户修改 host、database、SSL 或超时配置后，查询仍落到旧连接。
 

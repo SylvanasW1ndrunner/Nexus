@@ -41,7 +41,7 @@ Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契
 
 `PostgresDriver` 使用 `pg`，连接参数由主进程从连接元数据和本地凭证组合生成；renderer 不直接接触驱动实例、连接池或密码。
 
-`DatabaseDriverRegistry` 是多数据库接入的工程入口。默认 registry 只注册 PostgreSQL，但会暴露每个 driver 的 `DatabaseCapabilities`，并由 main 按 `engine` 创建 driver。后续新增数据库时，先实现新的 `IDatabaseDriver`，再在 registry 注册对应工厂和能力声明；UI、IPC 和查询 workflow 不应直接依赖具体数据库 SDK。
+`DatabaseDriverRegistry` 是多数据库接入的工程入口。默认 registry 只注册 PostgreSQL，但会暴露每个 driver 的 `DatabaseCapabilities`，并由 main 按 `engine` 获取 driver。`get(engine)` 会复用同一个 driver 实例，避免连接池被重复创建；`create(engine)` 只用于需要新实例的测试或隔离场景。后续新增数据库时，先实现新的 `IDatabaseDriver`，再在 registry 注册对应工厂和能力声明；UI、IPC 和查询 workflow 不应直接依赖具体数据库 SDK。
 
 远程数据库连接默认按桌面端真实使用场景处理：连接超时默认为 10 秒，语句超时默认为 60 秒，TCP keepalive 开启。`ConnectionInput`、`SavedConnection` 和 `DatabaseConnectionConfig` 支持 `ssl`、`connectionTimeoutMs` 和 `statementTimeoutMs`，用于跨机房、VPN、堡垒机、云安全组或弱网环境。主进程会校验超时值必须在 `1,000..120,000` 毫秒之间。
 

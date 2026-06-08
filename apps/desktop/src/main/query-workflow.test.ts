@@ -34,6 +34,7 @@ describe('createQueryWorkflow', () => {
     });
 
     expect(result.ok).toBe(true);
+    expect(harness.resolvedEngines).toEqual(['postgres']);
     expect(harness.driverCalls).toHaveLength(1);
     expect(harness.usageCount).toBe(1);
     expect(harness.history).toEqual([
@@ -117,6 +118,7 @@ function createHarness(options: {
 }) {
   const history: QueryHistoryItem[] = [];
   const driverCalls: Array<{ sql: string; connection: SavedConnection }> = [];
+  const resolvedEngines: string[] = [];
   let usageCount = 0;
   const driverResult =
     options.driverResult ??
@@ -138,6 +140,7 @@ function createHarness(options: {
   return {
     history,
     driverCalls,
+    resolvedEngines,
     get usageCount() {
       return usageCount;
     },
@@ -164,11 +167,14 @@ function createHarness(options: {
           return Promise.resolve();
         },
       },
-      driver: {
-        execute(request, connection) {
-          driverCalls.push({ sql: request.sql, connection });
-          return Promise.resolve(driverResult);
-        },
+      driverForEngine(engine) {
+        resolvedEngines.push(engine);
+        return {
+          execute(request, connection) {
+            driverCalls.push({ sql: request.sql, connection });
+            return Promise.resolve(driverResult);
+          },
+        };
       },
     }),
   };
