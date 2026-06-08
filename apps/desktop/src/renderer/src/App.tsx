@@ -1810,6 +1810,22 @@ function ChatPanel({
             <span>{t('currentFile')}</span>
             <small title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</small>
           </div>
+          <div className="context-row">
+            <span>{t('documentLanguage')}</span>
+            <small>{document.language.toUpperCase()}</small>
+          </div>
+        </div>
+        <div className="assistant-prompts">
+          <div className="mini-section-title">{t('assistantShortcuts')}</div>
+          <button type="button" onClick={() => setDraft(t('assistantPromptExplainSql'))}>
+            {t('assistantPromptExplainSqlTitle')}
+          </button>
+          <button type="button" onClick={() => setDraft(t('assistantPromptOptimizeSql'))}>
+            {t('assistantPromptOptimizeSqlTitle')}
+          </button>
+          <button type="button" onClick={() => setDraft(t('assistantPromptPythonScript'))}>
+            {t('assistantPromptPythonScriptTitle')}
+          </button>
         </div>
         <div className="message-list">
           {messages.map((message) => (
@@ -1842,9 +1858,12 @@ function ChatPanel({
           history.map((item) => (
             <button className="history-item" key={item.id} type="button" onClick={() => onPickHistory(item)}>
               <span>{item.sql.replace(/\s+/g, ' ').slice(0, 90)}</span>
-              <small>
-                {item.status} / {item.safety.riskLevel} / {item.elapsedMs ?? '-'} ms
-              </small>
+              <div className="history-badges">
+                <small className={`history-status ${item.status}`}>{item.status}</small>
+                <small>{item.safety.riskLevel}</small>
+                <small>{item.elapsedMs ?? '-'} ms</small>
+                <small>{formatHistoryTime(item.createdAt)}</small>
+              </div>
             </button>
           ))
         ) : (
@@ -1853,6 +1872,17 @@ function ChatPanel({
       </section>
     </>
   );
+}
+
+function formatHistoryTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, {
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    month: '2-digit',
+  });
 }
 
 type ErrorBoundaryProps = {
