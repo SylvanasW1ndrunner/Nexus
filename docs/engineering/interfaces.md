@@ -83,7 +83,9 @@ Renderer 在创建连接后不会再收到已保存密码；删除连接时也�
 - 非只读连接上的写操作和 DDL 需要用户确认。
 - 多语句 SQL 需要审查，因为影响范围更大。
 
-安全报告会写入查询历史，并返回给 renderer。对于需要确认的写操作或 DDL，PostgreSQL 驱动会包裹在显式事务中执行：成功后 `COMMIT`，任一语句失败后 `ROLLBACK`，避免批量 SQL 在中途失败时留下半完成状态。
+主进程会在 `db:execute-query` 边界强制确认握手：当 `QuerySafetyReport.requiresConfirmation` 为 `true` 且 `QueryRequest.confirmed !== true` 时，返回 `CONFIRMATION_REQUIRED`，不执行 SQL，也不写查询历史。Renderer 收到该错误后弹出二次确认；用户确认后用同一 SQL 和 `confirmed: true` 重新提交。
+
+安全报告会写入查询历史，并返回给 renderer。对于已确认的写操作或 DDL，PostgreSQL 驱动会包裹在显式事务中执行：成功后 `COMMIT`，任一语句失败后 `ROLLBACK`，避免批量 SQL 在中途失败时留下半完成状态。
 
 `QuerySafetyReport.performanceWarnings` 会返回轻量 SQL 性能提示，当前覆盖：
 

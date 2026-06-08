@@ -78,6 +78,7 @@ export type QueryRequest = {
   sql: string;
   limit?: number;
   dryRun?: boolean;
+  confirmed?: boolean;
 };
 
 export type QuerySafetyReport = {

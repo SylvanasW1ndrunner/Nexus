@@ -19,6 +19,8 @@ export function formatAppError(error: AppError): string {
       return `Connection was interrupted. The server, proxy, VPN, or network link closed the connection.${detail}${retry}`;
     case 'READ_ONLY_VIOLATION':
       return `Blocked by read-only mode. ${error.detail ?? error.message}`;
+    case 'CONFIRMATION_REQUIRED':
+      return `${error.message} ${error.detail ?? ''}`.trim();
     default:
       return error.detail ?? error.message;
   }

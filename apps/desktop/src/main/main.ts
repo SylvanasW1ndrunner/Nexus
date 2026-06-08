@@ -19,6 +19,7 @@ import {
   type WorkspaceState,
 } from '@dbagent/shared';
 import { validateConnectionInput } from './connection-validation.js';
+import { confirmationRequiredError } from './query-confirmation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
@@ -192,6 +193,11 @@ async function executeQuery(request: QueryRequest): Promise<IpcResponseMap['db:e
       message: 'This query is blocked by read-only mode.',
       detail: safety.reasons.join(' '),
     });
+  }
+
+  if (!request.confirmed) {
+    const confirmationError = confirmationRequiredError(safety);
+    if (confirmationError) return err(confirmationError);
   }
 
   const result = await postgres.execute(request, connection);

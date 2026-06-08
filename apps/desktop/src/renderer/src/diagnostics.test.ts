@@ -26,6 +26,18 @@ describe('renderer diagnostics', () => {
     ).toBe('Blocked by read-only mode. DELETE is not allowed on a read-only connection.');
   });
 
+  it('formats confirmation-required errors with safety reasons', () => {
+    expect(
+      formatAppError({
+        code: 'CONFIRMATION_REQUIRED',
+        message: 'UPDATE requires explicit confirmation before execution.',
+        detail: 'UPDATE writes data and requires explicit confirmation.',
+      }),
+    ).toBe(
+      'UPDATE requires explicit confirmation before execution. UPDATE writes data and requires explicit confirmation.',
+    );
+  });
+
   it('summarizes mixed SQL performance warnings', () => {
     const warnings: SqlPerformanceWarning[] = [
       {

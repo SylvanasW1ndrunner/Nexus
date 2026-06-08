@@ -12,6 +12,7 @@
 
 - 数据分析师连接 PostgreSQL 并执行安全的 `SELECT`。
 - 数据分析师误在只读连接上执行 `DELETE`，应用明确阻止操作。
+- 数据分析师在可写连接上执行 `UPDATE`、`DELETE`、DDL 或多语句 SQL 时，主进程必须先返回确认要求；用户确认后才执行。
 - 工程师执行语法错误 SQL，看到可理解的错误，同时 SQL 文本不丢失。
 - DBA 查看查询历史，包括状态、耗时、行数和安全等级。
 - BYOK 用户不登录也能进入应用，本地查询轮次仍会记录。
@@ -62,6 +63,7 @@ pnpm db:down
 - `packages/core-db/test/connection-store.test.ts` 覆盖连接持久化和删除。
 - `packages/core-db/test/query-history.test.ts` 覆盖查询历史记录。
 - `apps/desktop/src/main/connection-validation.test.ts` 覆盖远程连接表单配置校验，例如 SSL、连接超时和语句超时。
+- `apps/desktop/src/main/query-confirmation.test.ts` 覆盖写操作确认握手，确保未确认 SQL 不会直接执行。
 - `apps/desktop/src/renderer/src/connection-draft.test.ts` 覆盖已保存连接回填到编辑表单时不回填密码，并保留远程连接配置。
 - `apps/desktop/src/renderer/src/diagnostics.test.ts` 覆盖远程连接错误提示和 SQL 性能告警汇总。
 - `packages/shared/test/csv.test.ts` 覆盖真实表格导出边界。

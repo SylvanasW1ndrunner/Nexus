@@ -189,18 +189,7 @@ export function App() {
       setMessage('Create and connect a PostgreSQL connection before running SQL.');
       return;
     }
-    setMessage('Running query...');
-    const response = await window.dbagent.invoke(ipcChannels.db.executeQuery, {
-      connectionId: activeConnectionId,
-      sql,
-    });
-    if (response.ok) {
-      setResult(response.data);
-      setMessage(`Returned ${response.data.rowCount} rows in ${response.data.elapsedMs} ms.`);
-    } else {
-      setMessage(formatAppError(response.error));
-    }
-    await refreshHistory();
+    await executeSql(sql);
   }
 
   async function explain() {
@@ -249,7 +238,7 @@ export function App() {
     setConnectionDraft(connectionToDraft(connection));
   }
 
-  async function executeSql(nextSql: string) {
+  async function executeSql(nextSql: string, confirmed = false) {
     if (!activeConnectionId) {
       setMessage('Create and connect a PostgreSQL connection before running SQL.');
       return;
@@ -258,11 +247,23 @@ export function App() {
     const response = await window.dbagent.invoke(ipcChannels.db.executeQuery, {
       connectionId: activeConnectionId,
       sql: nextSql,
+      confirmed,
     });
     if (response.ok) {
       setResult(response.data);
       setMessage(`Returned ${response.data.rowCount} rows in ${response.data.elapsedMs} ms.`);
     } else {
+      if (response.error.code === 'CONFIRMATION_REQUIRED' && !confirmed) {
+        const confirmedByUser = window.confirm(
+          `${response.error.message}\n\n${response.error.detail ?? ''}\n\nExecute this SQL now?`,
+        );
+        if (confirmedByUser) {
+          await executeSql(nextSql, true);
+        } else {
+          setMessage('Query was not executed because confirmation was cancelled.');
+        }
+        return;
+      }
       setMessage(formatAppError(response.error));
     }
     await refreshHistory();
