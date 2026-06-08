@@ -45,6 +45,10 @@ DBAgent is a desktop product, so dependency choices must preserve a reliable Ele
   and at least one PostgreSQL connection test from the installed artifact.
 - Password storage currently uses Electron `safeStorage`; release QA must verify encryption
   availability on Windows, macOS, and Linux.
+- Renderer-only features such as CSV export should remain browser-native and dependency-free unless
+  a future export format genuinely requires a runtime package.
+- Workspace recovery state is stored as a small JSON file in Electron `userData`; it must stay out
+  of the packaged ASAR and should be treated as user data during installer/uninstaller QA.
 
 ## Packaging Command
 

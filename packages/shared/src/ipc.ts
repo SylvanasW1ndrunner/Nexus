@@ -4,6 +4,7 @@ import type {
   DatabaseEngine,
   QueryResultRow,
   QueryRiskLevel,
+  TableSummary,
   UsageMode,
 } from './domain.js';
 import type { Result } from './result.js';
@@ -22,6 +23,11 @@ export const ipcChannels = {
     executeQuery: 'db:execute-query',
     queryHistory: 'db:query-history',
     explainQuery: 'db:explain-query',
+    listTables: 'db:list-tables',
+  },
+  app: {
+    loadWorkspaceState: 'app:load-workspace-state',
+    saveWorkspaceState: 'app:save-workspace-state',
   },
   auth: {
     login: 'auth:login',
@@ -114,6 +120,12 @@ export type UsageSnapshot = {
   byokTokenEstimate: number;
 };
 
+export type WorkspaceState = {
+  activeConnectionId?: string;
+  sqlDraft: string;
+  updatedAt: string;
+};
+
 export type IpcRequestMap = {
   'connection:list': void;
   'connection:test': ConnectionInput;
@@ -125,11 +137,14 @@ export type IpcRequestMap = {
   'db:execute-query': QueryRequest;
   'db:query-history': { connectionId?: ConnectionId; limit?: number };
   'db:explain-query': QueryRequest;
+  'db:list-tables': { connectionId: ConnectionId };
   'auth:login': { email: string; password: string };
   'auth:logout': void;
   'auth:status': void;
   'usage:current-quota': void;
   'usage:history': { limit?: number };
+  'app:load-workspace-state': void;
+  'app:save-workspace-state': WorkspaceState;
 };
 
 export type IpcResponseMap = {
@@ -143,11 +158,14 @@ export type IpcResponseMap = {
   'db:execute-query': Result<QueryExecutionResult>;
   'db:query-history': Result<QueryHistoryItem[]>;
   'db:explain-query': Result<QueryExecutionResult>;
+  'db:list-tables': Result<TableSummary[]>;
   'auth:login': Result<AuthStatus>;
   'auth:logout': Result<AuthStatus>;
   'auth:status': Result<AuthStatus>;
   'usage:current-quota': Result<UsageSnapshot>;
   'usage:history': Result<UsageSnapshot[]>;
+  'app:load-workspace-state': Result<WorkspaceState | undefined>;
+  'app:save-workspace-state': Result<WorkspaceState>;
 };
 
 export type IpcChannel = keyof IpcRequestMap;

@@ -17,11 +17,14 @@ Current M1 channels:
 - `db:execute-query`
 - `db:query-history`
 - `db:explain-query`
+- `db:list-tables`
 - `auth:login`
 - `auth:logout`
 - `auth:status`
 - `usage:current-quota`
 - `usage:history`
+- `app:load-workspace-state`
+- `app:save-workspace-state`
 
 All responses use `Result<T>` from `packages/shared/src/result.ts` so UI code handles operational
 failures explicitly instead of catching untyped exceptions.
@@ -36,6 +39,21 @@ the interface is deliberately engine-neutral:
 - `disconnect(connectionId)` shuts down resources.
 - `execute(request, connection)` runs SQL and returns rows, fields, elapsed time, and safety data.
 - `listTables(connectionId)` provides the initial Schema tree substrate for M1.5 and M2.
+
+## Workspace State
+
+M1.5 persists the active connection id and SQL editor draft through `app:*workspace-state` IPC
+channels. The state file lives under Electron `userData/data/workspace-state.json` and is written
+atomically through a temporary file plus rename.
+
+This is intentionally small: it restores the daily SQL editing path without introducing a heavier
+workspace database before sessions, tabs, and Agent checkpoints exist.
+
+## Result Export
+
+`queryResultToCsv(result)` in `packages/shared/src/csv.ts` converts query results into RFC-friendly
+CSV for spreadsheet import. It preserves the returned column order and escapes commas, quotes,
+newlines, JSON values, and `NULL` values.
 
 ## SQL Safety
 

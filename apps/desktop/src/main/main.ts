@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
 import { appendFileSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ConnectionStore, PostgresDriver, QueryHistoryStore, analyzeSqlSafety } from '@dbagent/core-db';
@@ -16,12 +16,14 @@ import {
   type IpcRequestMap,
   type IpcResponseMap,
   type QueryRequest,
+  type WorkspaceState,
 } from '@dbagent/shared';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
 const dataDir = join(userDataDir, 'data');
 const credentialPath = join(dataDir, 'credentials.json');
+const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const authService = new AuthService(join(dataDir, 'auth-session.json'));
@@ -147,6 +149,7 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.db.explainQuery, async (request) =>
     executeQuery({ ...request, sql: `EXPLAIN (FORMAT JSON) ${request.sql}` }),
   );
+  handle(ipcChannels.db.listTables, async ({ connectionId }) => postgres.listTables(connectionId));
   handle(ipcChannels.db.queryHistory, async (request) => ok(await queryHistoryStore.list(request ?? {})));
 
   handle(ipcChannels.auth.status, async () => ok(await authService.status()));
@@ -155,6 +158,13 @@ function registerIpcHandlers(): void {
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
   handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));
+
+  handle(ipcChannels.app.loadWorkspaceState, async () => ok(await loadWorkspaceState()));
+  handle(ipcChannels.app.saveWorkspaceState, async (state) => {
+    const saved = { ...state, updatedAt: new Date().toISOString() };
+    await writeJsonAtomic(workspaceStatePath, saved);
+    return ok(saved);
+  });
 }
 
 async function executeQuery(request: QueryRequest): Promise<IpcResponseMap['db:execute-query']> {
@@ -245,6 +255,29 @@ async function loadCredentials(): Promise<Record<string, { encrypted: string; sa
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
     throw error;
   }
+}
+
+async function loadWorkspaceState(): Promise<WorkspaceState | undefined> {
+  try {
+    const state = JSON.parse(await readFile(workspaceStatePath, 'utf8')) as Partial<WorkspaceState>;
+    if (typeof state.sqlDraft !== 'string' || typeof state.updatedAt !== 'string') return undefined;
+    const restored: WorkspaceState = {
+      sqlDraft: state.sqlDraft,
+      updatedAt: state.updatedAt,
+    };
+    if (typeof state.activeConnectionId === 'string') restored.activeConnectionId = state.activeConnectionId;
+    return restored;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tempPath = `${path}.${process.pid}.tmp`;
+  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await rename(tempPath, path);
 }
 
 function validateConnectionInput(input: ConnectionInput) {

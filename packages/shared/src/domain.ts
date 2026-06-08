@@ -14,3 +14,10 @@ export type UsageMode = 'byok' | 'subscription';
 export type DbColumnValue = string | number | boolean | null | Date | Buffer | Record<string, unknown>;
 
 export type QueryResultRow = Record<string, DbColumnValue>;
+
+export type TableSummary = {
+  schema: string;
+  name: string;
+  type: 'table' | 'view';
+  comment?: string;
+};

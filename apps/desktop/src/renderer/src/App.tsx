@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   ipcChannels,
+  queryResultToCsv,
   type ConnectionInput,
   type QueryExecutionResult,
   type QueryHistoryItem,
   type SavedConnection,
+  type TableSummary,
 } from '@dbagent/shared';
 
 const starterSql = `select
@@ -15,6 +17,7 @@ export function App() {
   const [connections, setConnections] = useState<SavedConnection[]>([]);
   const [activeConnectionId, setActiveConnectionId] = useState('');
   const [history, setHistory] = useState<QueryHistoryItem[]>([]);
+  const [tables, setTables] = useState<TableSummary[]>([]);
   const [sql, setSql] = useState(starterSql);
   const [result, setResult] = useState<QueryExecutionResult | undefined>();
   const [message, setMessage] = useState('Hello DBAgent');
@@ -36,7 +39,35 @@ export function App() {
   useEffect(() => {
     void refreshConnections();
     void refreshHistory();
+    void restoreWorkspaceState();
   }, []);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      const state = {
+        sqlDraft: sql,
+        updatedAt: new Date().toISOString(),
+        ...(activeConnectionId ? { activeConnectionId } : {}),
+      };
+      void window.dbagent.invoke(ipcChannels.app.saveWorkspaceState, state);
+    }, 600);
+    return () => window.clearTimeout(timeout);
+  }, [activeConnectionId, sql]);
+
+  useEffect(() => {
+    if (!activeConnectionId) {
+      setTables([]);
+      return;
+    }
+    void refreshTables(activeConnectionId);
+  }, [activeConnectionId, connections]);
+
+  async function restoreWorkspaceState() {
+    const response = await window.dbagent.invoke(ipcChannels.app.loadWorkspaceState, undefined);
+    if (!response.ok || !response.data) return;
+    setSql(response.data.sqlDraft);
+    if (response.data.activeConnectionId) setActiveConnectionId(response.data.activeConnectionId);
+  }
 
   async function refreshConnections() {
     const response = await window.dbagent.invoke(ipcChannels.connection.list, undefined);
@@ -51,6 +82,21 @@ export function App() {
   async function refreshHistory() {
     const response = await window.dbagent.invoke(ipcChannels.db.queryHistory, { limit: 20 });
     if (response.ok) setHistory(response.data);
+  }
+
+  async function refreshTables(connectionId: string) {
+    const connection = connections.find((item) => item.id === connectionId);
+    if (!connection || connection.status !== 'connected') {
+      setTables([]);
+      return;
+    }
+    const response = await window.dbagent.invoke(ipcChannels.db.listTables, { connectionId });
+    if (response.ok) {
+      setTables(response.data);
+    } else {
+      setTables([]);
+      setMessage(response.error.detail ?? response.error.message);
+    }
   }
 
   async function createConnection() {
@@ -76,6 +122,7 @@ export function App() {
     const response = await window.dbagent.invoke(ipcChannels.connection.connect, { id: activeConnectionId });
     setMessage(response.ok ? `Connected to ${response.data.name}.` : response.error.detail ?? response.error.message);
     await refreshConnections();
+    if (response.ok) await refreshTables(activeConnectionId);
   }
 
   async function disconnectActive() {
@@ -83,6 +130,7 @@ export function App() {
     const response = await window.dbagent.invoke(ipcChannels.connection.disconnect, { id: activeConnectionId });
     setMessage(response.ok ? `Disconnected from ${response.data.name}.` : response.error.message);
     await refreshConnections();
+    setTables([]);
   }
 
   async function execute() {
@@ -102,6 +150,61 @@ export function App() {
       setMessage(response.error.detail ?? response.error.message);
     }
     await refreshHistory();
+  }
+
+  async function explain() {
+    if (!activeConnectionId) {
+      setMessage('Create and connect a PostgreSQL connection before explaining SQL.');
+      return;
+    }
+    setMessage('Running EXPLAIN...');
+    const response = await window.dbagent.invoke(ipcChannels.db.explainQuery, {
+      connectionId: activeConnectionId,
+      sql,
+    });
+    if (response.ok) {
+      setResult(response.data);
+      setMessage(`EXPLAIN returned in ${response.data.elapsedMs} ms.`);
+    } else {
+      setMessage(response.error.detail ?? response.error.message);
+    }
+    await refreshHistory();
+  }
+
+  function previewTable(table: TableSummary) {
+    setSql(buildPreviewSql(table));
+    void executeSql(buildPreviewSql(table));
+  }
+
+  async function executeSql(nextSql: string) {
+    if (!activeConnectionId) {
+      setMessage('Create and connect a PostgreSQL connection before running SQL.');
+      return;
+    }
+    setMessage('Running query...');
+    const response = await window.dbagent.invoke(ipcChannels.db.executeQuery, {
+      connectionId: activeConnectionId,
+      sql: nextSql,
+    });
+    if (response.ok) {
+      setResult(response.data);
+      setMessage(`Returned ${response.data.rowCount} rows in ${response.data.elapsedMs} ms.`);
+    } else {
+      setMessage(response.error.detail ?? response.error.message);
+    }
+    await refreshHistory();
+  }
+
+  function exportCsv() {
+    if (!result) return;
+    const blob = new Blob([queryResultToCsv(result)], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `dbagent-result-${result.queryId}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setMessage(`Exported ${result.rowCount} rows to CSV.`);
   }
 
   return (
@@ -139,6 +242,7 @@ export function App() {
               </button>
             ))
           )}
+          <SchemaPanel tables={tables} onPreview={previewTable} />
         </aside>
 
         <section className="editor-pane">
@@ -154,6 +258,9 @@ export function App() {
               <button className="secondary" onClick={() => void disconnectActive()}>
                 Disconnect
               </button>
+              <button className="secondary" onClick={() => void explain()}>
+                Explain
+              </button>
               <button onClick={() => void execute()}>Run SQL</button>
             </div>
           </div>
@@ -163,11 +270,53 @@ export function App() {
         <section className="result-pane">
           <h2>Results</h2>
           <p className="status">{message}</p>
-          {result ? <ResultTable result={result} /> : <div className="empty-state">Query results appear here.</div>}
+          {result ? (
+            <>
+              <div className="result-actions">
+                <span>
+                  {result.rowCount} rows / {result.elapsedMs} ms / {result.safety.riskLevel}
+                </span>
+                <button className="secondary" onClick={exportCsv}>
+                  Export CSV
+                </button>
+              </div>
+              <ResultTable result={result} />
+            </>
+          ) : (
+            <div className="empty-state">Query results appear here.</div>
+          )}
           <QueryHistory history={history} onPick={(item) => setSql(item.sql)} />
         </section>
       </section>
     </main>
+  );
+}
+
+function SchemaPanel({ tables, onPreview }: { tables: TableSummary[]; onPreview: (table: TableSummary) => void }) {
+  const grouped = tables.reduce<Record<string, TableSummary[]>>((groups, table) => {
+    groups[table.schema] = [...(groups[table.schema] ?? []), table];
+    return groups;
+  }, {});
+
+  return (
+    <section className="schema-panel">
+      <h2>Schema</h2>
+      {tables.length === 0 ? (
+        <p className="muted">Connect to load tables and views.</p>
+      ) : (
+        Object.entries(grouped).map(([schema, schemaTables]) => (
+          <div className="schema-group" key={schema}>
+            <div className="schema-title">{schema}</div>
+            {schemaTables.map((table) => (
+              <button className="table-node" key={`${table.schema}.${table.name}`} onClick={() => onPreview(table)}>
+                <span>{table.name}</span>
+                <small>{table.type}</small>
+              </button>
+            ))}
+          </div>
+        ))
+      )}
+    </section>
   );
 }
 
@@ -298,4 +447,12 @@ function formatValue(value: unknown): string {
     return value.toString();
   }
   return JSON.stringify(value);
+}
+
+function buildPreviewSql(table: TableSummary): string {
+  return `select * from ${quoteIdentifier(table.schema)}.${quoteIdentifier(table.name)} limit 100;`;
+}
+
+function quoteIdentifier(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
 }

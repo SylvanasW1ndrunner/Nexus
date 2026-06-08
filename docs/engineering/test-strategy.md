@@ -18,6 +18,11 @@
 - Engineer runs a malformed query and sees a useful error without losing the SQL text.
 - DBA reviews query history including status, elapsed time, row count, and safety classification.
 - BYOK user enters without login and usage still records local rounds.
+- Engineer opens a connected PostgreSQL schema tree, clicks a table, and gets a safely quoted
+  `select * ... limit 100` preview query.
+- Analyst exports a result set to CSV and spreadsheet-sensitive values such as commas, quotes,
+  newlines, JSON, and nulls survive import.
+- App restart restores the active connection id and SQL draft from the workspace state file.
 
 ## Required Gates
 
@@ -27,6 +32,14 @@ pnpm lint
 pnpm test
 pnpm smoke
 ```
+
+Current fast coverage:
+
+- `packages/core-db/test/sql-builder.test.ts` covers PostgreSQL identifier quoting and preview
+  limit clamping.
+- `packages/shared/test/csv.test.ts` covers result CSV export behavior for realistic spreadsheet
+  edge cases.
+- Existing core tests cover SQL safety, connection persistence, query history, auth, and usage.
 
 ## M0-M1.5 Release Readiness Risks
 
