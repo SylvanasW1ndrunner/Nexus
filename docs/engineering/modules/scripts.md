@@ -19,7 +19,7 @@
 
 `prune-asar.cjs` 是打包质量的一部分。workspace 包在 Electron 打包时容易把源码、测试、`.turbo`、`tsconfig.tsbuildinfo` 和 source map 带进 ASAR；裁剪脚本负责把这些开发产物剔除，降低安装包体积和源码暴露风险。
 
-`verify-package.mjs` 把手工发布检查固化为脚本。它会检查当前平台的 unpacked 目录、`app.asar`、主进程/preload/renderer 入口、workspace 包源码/测试残留，并在默认模式下短时启动打包后的应用，确认最终产物不是只能构建、不能运行。
+`verify-package.mjs` 把手工发布检查固化为脚本。它会检查当前平台的 unpacked 目录、`app.asar`、主进程/preload/renderer 入口、workspace 包源码/测试残留，并确认 ASAR 不旧于当前构建输入；默认模式下还会短时启动打包后的应用，确认最终产物不是只能构建、不能运行。
 
 `dev-db` 提供标准开发 fixture，默认数据库是 `dbagent_demo`，用户、密码均为 `postgres`。这套 fixture 只服务开发和测试，不意味着用户需要本地安装 PostgreSQL；真实产品场景是桌面客户端连接本机或远程服务器数据库。
 

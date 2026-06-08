@@ -54,7 +54,7 @@ pnpm package:verify:asar
 `package:dir` 生成未安装目录，适合快速检查文件布局和 ASAR 内容；`package` 生成平台安装包。根目录脚本会先执行 workspace build，再转发到 `@dbagent/desktop`，避免桌面包构建时依赖包产物缺失，也避免开发者在不同 package 目录下使用不同命令。
 跨平台脚本是发布入口约定；是否能在当前机器上产出目标平台包，仍取决于 `electron-builder` 对该目标平台的支持、签名配置和系统工具链。
 
-`package:verify` 会检查当前平台的 unpacked 产物、ASAR 必要入口文件、workspace 包源码/测试残留，并短时启动打包后的应用确认主进程能存活。`package:verify:asar` 只做文件和 ASAR 检查，适合没有图形环境的 CI 或远程构建机。
+`package:verify` 会检查当前平台的 unpacked 产物、ASAR 必要入口文件、workspace 包源码/测试残留，并短时启动打包后的应用确认主进程能存活。它还会比较 `app.asar` 和当前构建输入的修改时间，防止开发者改完代码后误验证旧包；如果失败，应先重新运行 `pnpm package:dir` 或 `pnpm package`。`package:verify:asar` 只做文件、ASAR 和新鲜度检查，适合没有图形环境的 CI 或远程构建机。
 
 当前 `electron-builder` 配置会把 `dist/**` 和必要运行时文件打进 ASAR，并在 `apps/desktop/release` 下输出平台产物。`afterPack` 使用 `scripts/prune-asar.cjs` 二次裁剪 `node_modules/@dbagent/*` 中的 `src`、`test`、`.turbo`、`tsconfig*`、source map 和测试构建产物，避免 workspace 包源码被带入最终 ASAR。
 

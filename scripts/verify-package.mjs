@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
 
 const root = process.cwd();
 const skipLaunch = process.argv.includes('--skip-launch');
@@ -14,6 +14,7 @@ const asar = desktopRequire('@electron/asar');
 
 assert.ok(existsSync(appOutDir), `missing packaged app directory: ${appOutDir}`);
 assert.ok(existsSync(asarPath), `missing ASAR package: ${asarPath}`);
+const asarStats = statSync(asarPath);
 
 const files = asar.listPackage(asarPath).map((file) => file.replaceAll('\\', '/'));
 const requiredFiles = [
@@ -36,14 +37,21 @@ const executablePath = packagedExecutablePath(appOutDir);
 assert.ok(existsSync(executablePath), `missing packaged executable: ${executablePath}`);
 assert.ok(statSync(executablePath).size > 0, `packaged executable is empty: ${executablePath}`);
 
+const latestInput = latestPackageInputMtime();
+assert.ok(
+  asarStats.mtimeMs + 2000 >= latestInput.mtimeMs,
+  `ASAR is older than package input: ${latestInput.path}. Run pnpm package:dir before verification.`,
+);
+
 if (!skipLaunch) {
   await verifyLaunch(executablePath);
 }
 
 console.log('Packaged app verification passed.');
-console.log(`• appOutDir: ${appOutDir}`);
-console.log(`• asarFiles: ${files.length}`);
-console.log(`• executable: ${executablePath}`);
+console.log(`- appOutDir: ${appOutDir}`);
+console.log(`- asarFiles: ${files.length}`);
+console.log(`- executable: ${executablePath}`);
+console.log(`- latestPackageInput: ${latestInput.path}`);
 
 function packageOutputDir() {
   if (process.platform === 'win32') return join(root, 'apps', 'desktop', 'release', 'win-unpacked');
@@ -55,6 +63,39 @@ function packagedExecutablePath(outputDir) {
   if (process.platform === 'win32') return join(outputDir, 'DBAgent.exe');
   if (process.platform === 'darwin') return join(outputDir, 'Contents', 'MacOS', 'DBAgent');
   return join(outputDir, 'DBAgent');
+}
+
+function latestPackageInputMtime() {
+  const candidates = [
+    join(root, 'apps', 'desktop', 'dist'),
+    join(root, 'apps', 'desktop', 'package.json'),
+    join(root, 'packages', 'shared', 'dist'),
+    join(root, 'packages', 'core-db', 'dist'),
+    join(root, 'packages', 'core-auth', 'dist'),
+    join(root, 'packages', 'core-usage', 'dist'),
+    join(root, 'packages', 'core-llm', 'dist'),
+  ];
+  return candidates.reduce(
+    (latest, candidate) => {
+      const current = latestMtime(candidate);
+      return current.mtimeMs > latest.mtimeMs ? current : latest;
+    },
+    { path: '', mtimeMs: 0 },
+  );
+}
+
+function latestMtime(path) {
+  assert.ok(existsSync(path), `missing package input: ${path}`);
+  const stats = statSync(path);
+  if (!stats.isDirectory()) return { path, mtimeMs: stats.mtimeMs };
+
+  let latest = { path, mtimeMs: stats.mtimeMs };
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    const child = join(path, entry.name);
+    const current = entry.isDirectory() ? latestMtime(child) : { path: child, mtimeMs: statSync(child).mtimeMs };
+    if (current.mtimeMs > latest.mtimeMs) latest = current;
+  }
+  return latest;
 }
 
 async function verifyLaunch(executablePath) {
