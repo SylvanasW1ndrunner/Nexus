@@ -36,6 +36,7 @@ describe('ipc contract', () => {
       'workspace:load-active',
       'workspace:list-files',
       'workspace:read-file',
+      'workspace:write-file',
       'workspace:save-sql-file',
       'workspace:update-settings',
       'auth:login',

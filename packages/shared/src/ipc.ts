@@ -39,6 +39,7 @@ export const ipcChannels = {
     loadActive: 'workspace:load-active',
     listFiles: 'workspace:list-files',
     readFile: 'workspace:read-file',
+    writeFile: 'workspace:write-file',
     saveSqlFile: 'workspace:save-sql-file',
     updateSettings: 'workspace:update-settings',
   },
@@ -260,6 +261,12 @@ export type WorkspaceReadFileRequest = {
   relativePath: string;
 };
 
+export type WorkspaceWriteFileRequest = {
+  rootPath: string;
+  relativePath: string;
+  content: string;
+};
+
 export type WorkspaceFileContent = {
   name: string;
   relativePath: string;
@@ -295,6 +302,7 @@ export type IpcRequestMap = {
   'workspace:load-active': void;
   'workspace:list-files': { rootPath: string };
   'workspace:read-file': WorkspaceReadFileRequest;
+  'workspace:write-file': WorkspaceWriteFileRequest;
   'workspace:save-sql-file': WorkspaceSaveSqlFileRequest;
   'workspace:update-settings': WorkspaceUpdateSettingsRequest;
 };
@@ -326,6 +334,7 @@ export type IpcResponseMap = {
   'workspace:load-active': Result<WorkspaceProject | undefined>;
   'workspace:list-files': Result<WorkspaceFileEntry[]>;
   'workspace:read-file': Result<WorkspaceFileContent>;
+  'workspace:write-file': Result<WorkspaceSavedFile>;
   'workspace:save-sql-file': Result<WorkspaceSavedFile>;
   'workspace:update-settings': Result<WorkspaceProject>;
 };

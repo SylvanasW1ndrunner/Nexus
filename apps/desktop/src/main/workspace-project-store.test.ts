@@ -87,6 +87,36 @@ describe('WorkspaceProjectStore', () => {
     );
   });
 
+  it('writes edited Python scripts inside the workspace and blocks protected paths', async () => {
+    const rootPath = join(await tempDir(), 'ecommerce-analytics');
+    const store = new WorkspaceProjectStore(join(await tempDir(), 'workspaces.json'));
+    const project = await store.create({ name: 'Python Script Project', rootPath });
+
+    const saved = await store.writeFile({
+      rootPath: project.rootPath,
+      relativePath: 'scripts/clean_orders.py',
+      content: 'import pandas as pd\n\nprint("clean orders")\n',
+    });
+    const reopened = await store.readFile({ rootPath: project.rootPath, relativePath: saved.relativePath });
+
+    expect(saved.relativePath).toBe('scripts/clean_orders.py');
+    expect(reopened.content).toContain('clean orders');
+    await expect(
+      store.writeFile({
+        rootPath: project.rootPath,
+        relativePath: '../escape.py',
+        content: 'print("escape")',
+      }),
+    ).rejects.toThrow('managed project directory');
+    await expect(
+      store.writeFile({
+        rootPath: project.rootPath,
+        relativePath: '.dbagent/workspace.json',
+        content: '{}',
+      }),
+    ).rejects.toThrow('managed project directory');
+  });
+
   it('updates workspace SQL library settings and saves future SQL there', async () => {
     const rootPath = join(await tempDir(), 'ecommerce-analytics');
     const store = new WorkspaceProjectStore(join(await tempDir(), 'workspaces.json'));

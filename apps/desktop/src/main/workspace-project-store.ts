@@ -12,6 +12,7 @@ import type {
   WorkspaceSaveSqlFileRequest,
   WorkspaceSummary,
   WorkspaceUpdateSettingsRequest,
+  WorkspaceWriteFileRequest,
 } from '@dbagent/shared';
 
 const workspaceConfigRelativePath = join('.dbagent', 'workspace.json');
@@ -111,6 +112,22 @@ export class WorkspaceProjectStore {
       name: basename(relativePath),
       relativePath: toPortablePath(relativePath),
       content: await readFile(absolutePath, 'utf8'),
+      bytes: info.size,
+      updatedAt: info.mtime.toISOString(),
+    };
+  }
+
+  async writeFile(request: WorkspaceWriteFileRequest): Promise<WorkspaceSavedFile> {
+    const project = await this.loadProject(request.rootPath);
+    const relativePath = normalizeWorkspaceRelativePath(request.relativePath);
+    const absolutePath = resolveInside(project.rootPath, relativePath);
+    await mkdir(dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, request.content, 'utf8');
+    const info = await stat(absolutePath);
+    return {
+      name: basename(relativePath),
+      relativePath: toPortablePath(relativePath),
+      absolutePath,
       bytes: info.size,
       updatedAt: info.mtime.toISOString(),
     };

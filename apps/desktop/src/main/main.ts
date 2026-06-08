@@ -197,6 +197,17 @@ function registerIpcHandlers(): void {
       });
     }
   });
+  handle(ipcChannels.workspace.writeFile, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.writeFile(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to write workspace file.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
   handle(ipcChannels.workspace.saveSqlFile, async (request) => {
     try {
       return ok(await workspaceProjectStore.saveSqlFile(request));

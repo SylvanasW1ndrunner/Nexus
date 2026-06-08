@@ -486,6 +486,31 @@ export function App() {
     );
   }
 
+  async function saveCurrentDocument() {
+    if (!activeWorkspace) {
+      setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
+      return;
+    }
+    if (!editorDocument.relativePath) {
+      requestSaveSql();
+      return;
+    }
+    const response = await window.dbagent.invoke(ipcChannels.workspace.writeFile, {
+      rootPath: activeWorkspace.rootPath,
+      relativePath: editorDocument.relativePath,
+      content: sql,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    await refreshWorkspaceFiles(activeWorkspace.rootPath);
+    setEditorDocument((document) => ({ ...document, dirty: false }));
+    setMessage(
+      language === 'zh-CN' ? `已保存 ${response.data.relativePath}` : `Saved ${response.data.relativePath}`,
+    );
+  }
+
   function requestSaveSql() {
     if (editorLanguage !== 'sql') {
       setMessage(language === 'zh-CN' ? '当前编辑器不是 SQL 文件。' : 'Current editor is not a SQL file.');
@@ -625,7 +650,7 @@ export function App() {
             setWorkspaceDialogMode('settings');
             setWorkspaceDialogOpen(true);
           }
-          if (action === 'save-sql') requestSaveSql();
+          if (action === 'save-sql') void saveCurrentDocument();
           if (action === 'run-sql') void execute();
           if (action === 'explain-sql') void explain();
         }}
@@ -663,7 +688,7 @@ export function App() {
               onExplain={() => void explain()}
               onExportCsv={exportCsv}
               onExportJson={exportJson}
-              onSaveSql={requestSaveSql}
+              onSaveSql={() => void saveCurrentDocument()}
             />
           </section>
         </ErrorBoundary>
@@ -769,7 +794,7 @@ function TopBar({
             items={[
               { label: t('createProject'), onClick: () => onAction('new-project') },
               { label: t('openProject'), onClick: () => onAction('open-project') },
-              { label: t('saveSql'), onClick: () => onAction('save-sql') },
+              { label: t('saveFile'), onClick: () => onAction('save-sql') },
             ]}
           />
           <MenuButton
@@ -800,7 +825,7 @@ function TopBar({
       </div>
       <div className="topbar-actions">
         <button className="quick-command secondary" type="button" onClick={() => onAction('save-sql')}>
-          {t('saveSql')}
+          {t('saveFile')}
         </button>
         <button className="quick-command primary-action" type="button" onClick={() => onAction('run-sql')}>
           {t('runSql')}
@@ -1790,7 +1815,7 @@ function EditorPane({
               {t('explain')}
             </button>
             <button className="secondary" type="button" onClick={onSaveSql}>
-              {t('saveSql')}
+              {t('saveFile')}
             </button>
             <button type="button" onClick={onExecute}>
               {t('runSql')}
@@ -1958,13 +1983,13 @@ function ChatPanel({
             ...
           </button>
           <button type="button" title="Refresh">
-            ○
+            o
           </button>
           <button type="button" title={t('settings')}>
-            ⚙
+            *
           </button>
           <button type="button" title="New chat">
-            ✎
+            +
           </button>
         </div>
       </div>
@@ -1999,7 +2024,7 @@ function ChatPanel({
             <span title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</span>
           </div>
           <button className="agent-send" type="button" onClick={onSend}>
-            ↑
+            ^
           </button>
         </div>
       </div>
