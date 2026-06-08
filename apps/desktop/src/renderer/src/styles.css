@@ -322,6 +322,50 @@ small {
   padding-top: 8px;
 }
 
+.project-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border: 1px solid #303743;
+  border-radius: 8px;
+  background: #1a1f27;
+  padding: 12px;
+}
+
+.project-empty strong {
+  color: #f2f7ff;
+  font-size: 13px;
+}
+
+.project-empty span {
+  color: #98a2b3;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.project-empty-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-top: 2px;
+}
+
+.workspace-scaffold {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.workspace-scaffold > span,
+.mini-section-title {
+  color: #7f8b9c;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+
 .file-node {
   display: grid;
   grid-template-columns: 10px minmax(0, 1fr);
@@ -422,6 +466,14 @@ small {
   flex-direction: column;
   gap: 6px;
   margin-top: 10px;
+}
+
+.empty-inline {
+  border: 1px dashed #303743;
+  border-radius: 6px;
+  color: #7f8b9c;
+  font-size: 12px;
+  padding: 10px;
 }
 
 .recent-workspace,

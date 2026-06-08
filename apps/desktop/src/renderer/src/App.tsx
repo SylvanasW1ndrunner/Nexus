@@ -639,7 +639,12 @@ export function App() {
               recent={recentWorkspaces}
               t={t}
               {...(editorDocument.relativePath ? { activeFilePath: editorDocument.relativePath } : {})}
+              onCreateProject={() => {
+                setWorkspaceDialogMode('create');
+                setWorkspaceDialogOpen(true);
+              }}
               onOpenFile={(file) => void openWorkspaceFile(file)}
+              onOpenProject={() => void chooseAndOpenWorkspace()}
               onOpen={(rootPath) => void openWorkspace(rootPath)}
             />
             <ConnectionPanel
@@ -775,7 +780,6 @@ function TopBar({
           label={t('settings')}
           items={[
             { label: t('projectSettings'), onClick: () => onAction('project-settings') },
-            { label: t('languageSettings'), onClick: () => undefined },
           ]}
         />
       </nav>
@@ -1124,7 +1128,9 @@ function ProjectPanel({
   files,
   recent,
   t,
+  onCreateProject,
   onOpenFile,
+  onOpenProject,
   onOpen,
 }: {
   activeWorkspace: WorkspaceProject | undefined;
@@ -1132,7 +1138,9 @@ function ProjectPanel({
   files: WorkspaceFileEntry[];
   recent: WorkspaceRecentState;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onCreateProject: () => void;
   onOpenFile: (file: WorkspaceFileEntry) => void;
+  onOpenProject: () => void;
   onOpen: (rootPath: string) => void;
 }) {
   return (
@@ -1156,24 +1164,43 @@ function ProjectPanel({
                 />
               ))
             ) : (
-              <>
+              <div className="workspace-scaffold">
+                <span>{t('standardFolders')}</span>
                 <FileNode label=".dbagent/workspace.json" />
                 <FileNode label="sql/" />
                 <FileNode label="scripts/" />
                 <FileNode label="docs/" />
                 <FileNode label="outputs/" />
-              </>
+              </div>
             )}
           </div>
         </div>
-      ) : null}
+      ) : (
+        <div className="project-empty">
+          <strong>{t('projectEmptyTitle')}</strong>
+          <span>{t('projectEmptyDescription')}</span>
+          <div className="project-empty-actions">
+            <button className="primary-action" type="button" onClick={onCreateProject}>
+              {t('createProject')}
+            </button>
+            <button className="secondary" type="button" onClick={onOpenProject}>
+              {t('openProject')}
+            </button>
+          </div>
+        </div>
+      )}
       <div className="recent-list">
-        {recent.workspaces.map((workspace) => (
-          <button className="recent-workspace" key={workspace.id} type="button" onClick={() => onOpen(workspace.rootPath)}>
-            <span>{workspace.name}</span>
-            <small>{workspace.rootPath}</small>
-          </button>
-        ))}
+        <div className="mini-section-title">{t('recentProjects')}</div>
+        {recent.workspaces.length > 0 ? (
+          recent.workspaces.map((workspace) => (
+            <button className="recent-workspace" key={workspace.id} type="button" onClick={() => onOpen(workspace.rootPath)}>
+              <span>{workspace.name}</span>
+              <small>{workspace.rootPath}</small>
+            </button>
+          ))
+        ) : (
+          <div className="empty-inline">{t('noRecentProjects')}</div>
+        )}
       </div>
     </section>
   );
