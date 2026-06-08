@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 const root = process.cwd();
 const skipLaunch = process.argv.includes('--skip-launch');
@@ -27,6 +27,16 @@ const requiredFiles = [
 for (const file of requiredFiles) {
   assert.ok(files.includes(file), `ASAR missing required file: ${file}`);
 }
+
+const rendererHtml = asar.extractFile(asarPath, ['dist', 'renderer', 'index.html'].join(sep)).toString('utf8');
+assert.ok(
+  !/(?:src|href)="\/assets\//.test(rendererHtml),
+  'Renderer HTML uses absolute /assets paths, which fail under file:// packaged loading.',
+);
+assert.ok(
+  /(?:src|href)="\.\/assets\//.test(rendererHtml),
+  'Renderer HTML does not reference packaged assets with relative ./assets paths.',
+);
 
 const suspicious = files.filter((file) =>
   /\/node_modules\/@dbagent\/.*(\/src\/|\/test\/|\/\.turbo|tsconfig\.tsbuildinfo|\.ts$|\.map$)/.test(file),
