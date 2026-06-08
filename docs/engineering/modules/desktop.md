@@ -34,7 +34,7 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 - `query-confirmation.test.ts`：危险 SQL 未确认时必须返回确认要求。
 - `connection-draft.test.ts`：编辑连接不回填密码，并保留远程连接配置。
 - `diagnostics.test.ts`：远程连接错误提示和 SQL 性能告警汇总。
-- 打包验证：`pnpm --filter @dbagent/desktop package`。
+- 打包验证：`pnpm package`。
 - 启动验证：直接启动 `apps/desktop/release/win-unpacked/DBAgent.exe`，确认打包产物能进入主进程并写入日志。
 
 ## 打包约束

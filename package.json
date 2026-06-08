@@ -17,6 +17,12 @@
     "test:postgres": "pnpm --filter @dbagent/core-db test:postgres",
     "smoke": "node scripts/smoke.mjs",
     "ci": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke",
+    "package": "pnpm --filter @dbagent/desktop package",
+    "package:dir": "pnpm --filter @dbagent/desktop package:dir",
+    "package:win": "pnpm --filter @dbagent/desktop package -- --win",
+    "package:mac": "pnpm --filter @dbagent/desktop package -- --mac",
+    "package:linux": "pnpm --filter @dbagent/desktop package -- --linux",
+    "package:all": "pnpm --filter @dbagent/desktop package -- --win --mac --linux",
     "db:up": "docker compose -f scripts/dev-db/docker-compose.yml up -d",
     "db:down": "docker compose -f scripts/dev-db/docker-compose.yml down -v"
   },

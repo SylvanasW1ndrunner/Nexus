@@ -28,6 +28,8 @@
 pnpm run ci
 ```
 
+GitHub Actions 中的 `verify` job 会执行同一门禁，使用 `pnpm install --frozen-lockfile` 保证依赖图与锁文件一致。
+
 真实 PostgreSQL：
 
 ```bash
@@ -36,10 +38,12 @@ pnpm test:postgres
 pnpm db:down
 ```
 
+GitHub Actions 中的 `postgres-integration` job 会启动 PostgreSQL 16 service、加载 `scripts/dev-db/init.sql`，再运行 `pnpm test:postgres`。这保证事务回滚、Schema metadata、复杂 join 和只读拦截至少在 Linux CI 上持续被真实数据库覆盖。
+
 桌面打包：
 
 ```bash
-pnpm --filter @dbagent/desktop package
+pnpm package
 ```
 
 打包后还必须启动 `win-unpacked/DBAgent.exe` 并检查 ASAR 内容，不能只相信 build 成功。

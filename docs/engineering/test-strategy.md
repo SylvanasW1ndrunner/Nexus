@@ -44,7 +44,13 @@ pnpm run ci
 pnpm typecheck && pnpm lint && pnpm test && pnpm smoke
 ```
 
-真实 PostgreSQL 集成测试当前没有包含在 `pnpm run ci` 中。优先使用 Docker：
+真实 PostgreSQL 集成测试不放入本地 `pnpm run ci`，避免没有数据库的开发机无法执行；但 GitHub Actions 已有独立 `postgres-integration` job，会启动 PostgreSQL 16 service、加载 `scripts/dev-db/init.sql`，然后运行：
+
+```bash
+pnpm test:postgres
+```
+
+本地优先使用 Docker：
 
 ```bash
 pnpm db:up
@@ -99,15 +105,15 @@ pnpm db:up
 - `disconnect(connectionId)` 后再次 `describeTable(connectionId, ...)` 必须返回 `CONNECTION_FAILED`。
 - 可写连接中批量 SQL 先插入数据、再执行错误语句时必须失败，并且前序插入后的计数仍为 `0`，证明事务已回滚。
 
-环境变量 `DBAGENT_TEST_PG_HOST`、`DBAGENT_TEST_PG_PORT`、`DBAGENT_TEST_PG_DATABASE`、`DBAGENT_TEST_PG_USER` 和 `DBAGENT_TEST_PG_PASSWORD` 可覆盖默认连接。CI 环境具备 Docker 后，应评估是否把 `pnpm test:postgres` 加入发布门禁。
+环境变量 `DBAGENT_TEST_PG_HOST`、`DBAGENT_TEST_PG_PORT`、`DBAGENT_TEST_PG_DATABASE`、`DBAGENT_TEST_PG_USER` 和 `DBAGENT_TEST_PG_PASSWORD` 可覆盖默认连接。CI 已把 `pnpm test:postgres` 作为独立真实数据库门禁；候选发布仍建议在目标操作系统上额外跑一次本地或远程 PostgreSQL 验证。
 
 ## M0-M1.5 发布风险
 
 - Electron 包级测试通过，不等于最终桌面包可启动。主进程、preload、ASAR 路径和运行时依赖必须通过打包产物验证。
-- PostgreSQL 自动化集成测试已作为 `pnpm test:postgres` 落地，但尚未包含在 `pnpm run ci`；候选发布前必须显式运行或在发布记录中说明未运行原因。
+- PostgreSQL 自动化集成测试已作为 `pnpm test:postgres` 落地，并在 GitHub Actions `postgres-integration` job 中连接真实 PostgreSQL 16 service；候选发布前仍必须显式确认该 job 通过。
 - 远程数据库连接不是单一问题：DNS、端口、防火墙、VPN、SSL、认证、数据库名和连接中断都可能失败。M1.5 已有错误分类和超时/keepalive 默认值，发布 QA 仍需覆盖 Windows 客户端连接 Linux PostgreSQL、Windows 客户端连接 Windows PostgreSQL、Linux 客户端连接 Linux PostgreSQL 等组合。
 - Docker Compose、PostgreSQL 测试容器、fixture loader 和 CI helper 不能进入最终应用包。
-- `pnpm --filter @dbagent/desktop package` 后必须验证打包产物启动；renderer dev server 或 Vitest 不能替代安装包验证。
+- `pnpm package` 后必须验证打包产物启动；renderer dev server 或 Vitest 不能替代安装包验证。
 - `@dbagent/desktop` 的 Vitest 配置必须同时覆盖 `src/main` 和 `src/renderer`；否则主进程纯逻辑测试会被漏跑。
 - 认证和用量持久化要保持快速单测覆盖，因为它们同时影响 BYOK 模式和后续订阅 UX。
 
@@ -117,7 +123,7 @@ pnpm db:up
 pnpm run ci
 pnpm db:up
 pnpm test:postgres
-pnpm --filter @dbagent/desktop package
+pnpm package
 pnpm db:down
 ```
 

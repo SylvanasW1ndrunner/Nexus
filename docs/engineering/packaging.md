@@ -41,11 +41,16 @@ DBAgent 是桌面端产品，因此依赖选择必须服务于稳定、可验证
 
 ```bash
 pnpm --filter @dbagent/desktop build
-pnpm --filter @dbagent/desktop package:dir
-pnpm --filter @dbagent/desktop package
+pnpm package:dir
+pnpm package
+pnpm package:win
+pnpm package:mac
+pnpm package:linux
+pnpm package:all
 ```
 
-`package:dir` 生成未安装目录，适合快速检查文件布局和 ASAR 内容；`package` 生成平台安装包。
+`package:dir` 生成未安装目录，适合快速检查文件布局和 ASAR 内容；`package` 生成平台安装包。根目录脚本会转发到 `@dbagent/desktop`，避免开发者在不同 package 目录下使用不同命令。
+跨平台脚本是发布入口约定；是否能在当前机器上产出目标平台包，仍取决于 `electron-builder` 对该目标平台的支持、签名配置和系统工具链。
 
 当前 `electron-builder` 配置会把 `dist/**` 和必要运行时文件打进 ASAR，并在 `apps/desktop/release` 下输出平台产物。`afterPack` 使用 `scripts/prune-asar.cjs` 二次裁剪 `node_modules/@dbagent/*` 中的 `src`、`test`、`.turbo`、`tsconfig*`、source map 和测试构建产物，避免 workspace 包源码被带入最终 ASAR。
 
@@ -55,7 +60,7 @@ pnpm --filter @dbagent/desktop package
 
 ```bash
 pnpm run ci
-pnpm --filter @dbagent/desktop package
+pnpm package
 ```
 
 如需在真实 PostgreSQL 上验证连接路径，先启动 fixture：
@@ -66,4 +71,4 @@ pnpm test:postgres
 pnpm db:down
 ```
 
-Windows 上曾通过 `pnpm --filter @dbagent/desktop package` 生成 `apps/desktop/release/DBAgent Setup 0.1.0.exe`，安装包约 71.51 MB，低于 M0-M1.5 基线阶段小于 200 MB 的产品目标。该数值是历史验证结果，不应替代每次候选发布的重新打包和启动验证。
+Windows 上曾通过 `pnpm package` 生成 `apps/desktop/release/DBAgent Setup 0.1.0.exe`，安装包约 71.51 MB，低于 M0-M1.5 基线阶段小于 200 MB 的产品目标。该数值是历史验证结果，不应替代每次候选发布的重新打包和启动验证。

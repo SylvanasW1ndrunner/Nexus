@@ -184,7 +184,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 - `pnpm run ci`
 - `pnpm test:postgres`
-- `pnpm --filter @dbagent/desktop package`
+- `pnpm package`
 - 打包产物启动和 ASAR 内容检查。
 
 ## 后续模块化方向
