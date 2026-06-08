@@ -612,6 +612,9 @@ export function App() {
   return (
     <main className="app-shell">
       <TopBar
+        activeConnection={activeConnection}
+        activeWorkspace={activeWorkspace}
+        document={editorDocument}
         language={language}
         setLanguage={setLanguage}
         t={t}
@@ -751,11 +754,17 @@ export function App() {
 }
 
 function TopBar({
+  activeConnection,
+  activeWorkspace,
+  document,
   language,
   onAction,
   setLanguage,
   t,
 }: {
+  activeConnection: SavedConnection | undefined;
+  activeWorkspace: WorkspaceProject | undefined;
+  document: EditorDocument;
   language: AppLanguage;
   onAction: (action: TopBarAction) => void;
   setLanguage: (language: AppLanguage) => void;
@@ -764,39 +773,55 @@ function TopBar({
   return (
     <header className="topbar">
       <div className="brand-lockup">
+        <span className="brand-mark">DB</span>
         <strong>DBAgent</strong>
         <span>{t('appSubtitle')}</span>
       </div>
-      <nav className="menu-strip" aria-label="Application menu">
-        <MenuButton
-          label={t('file')}
-          items={[
-            { label: t('createProject'), onClick: () => onAction('new-project') },
-            { label: t('openProject'), onClick: () => onAction('open-project') },
-            { label: t('saveSql'), onClick: () => onAction('save-sql') },
-          ]}
-        />
-        <MenuButton
-          label={t('run')}
-          items={[
-            { label: t('runCurrentSql'), onClick: () => onAction('run-sql') },
-            { label: t('explainQuery'), onClick: () => onAction('explain-sql') },
-          ]}
-        />
-        <MenuButton
-          label={t('settings')}
-          items={[
-            { label: t('projectSettings'), onClick: () => onAction('project-settings') },
-          ]}
-        />
-      </nav>
-      <label className="language-switch">
-        <span>{t('language')}</span>
-        <select value={language} onChange={(event) => setLanguage(normalizeLanguage(event.target.value))}>
-          <option value="zh-CN">中文</option>
-          <option value="en">English</option>
-        </select>
-      </label>
+      <div className="topbar-main">
+        <nav className="menu-strip" aria-label="Application menu">
+          <MenuButton
+            label={t('file')}
+            items={[
+              { label: t('createProject'), onClick: () => onAction('new-project') },
+              { label: t('openProject'), onClick: () => onAction('open-project') },
+              { label: t('saveSql'), onClick: () => onAction('save-sql') },
+            ]}
+          />
+          <MenuButton
+            label={t('run')}
+            items={[
+              { label: t('runCurrentSql'), onClick: () => onAction('run-sql') },
+              { label: t('explainQuery'), onClick: () => onAction('explain-sql') },
+            ]}
+          />
+          <MenuButton
+            label={t('settings')}
+            items={[
+              { label: t('projectSettings'), onClick: () => onAction('project-settings') },
+            ]}
+          />
+        </nav>
+        <div className="command-context" aria-label="Workspace command context">
+          <span title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</span>
+          <span title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</span>
+          <span title={activeConnection?.name ?? t('noConnection')}>{activeConnection?.name ?? t('noConnection')}</span>
+        </div>
+      </div>
+      <div className="topbar-actions">
+        <button className="quick-command secondary" type="button" onClick={() => onAction('save-sql')}>
+          {t('saveSql')}
+        </button>
+        <button className="quick-command primary-action" type="button" onClick={() => onAction('run-sql')}>
+          {t('runSql')}
+        </button>
+        <label className="language-switch">
+          <span>{t('language')}</span>
+          <select value={language} onChange={(event) => setLanguage(normalizeLanguage(event.target.value))}>
+            <option value="zh-CN">中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+      </div>
     </header>
   );
 }

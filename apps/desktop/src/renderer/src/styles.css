@@ -80,10 +80,10 @@ small {
 }
 
 .topbar {
-  height: 42px;
-  flex: 0 0 42px;
+  height: 48px;
+  flex: 0 0 48px;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 190px;
+  grid-template-columns: 250px minmax(360px, 1fr) 390px;
   align-items: center;
   gap: 12px;
   padding: 0 12px;
@@ -94,8 +94,22 @@ small {
 .brand-lockup {
   min-width: 0;
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: 9px;
+}
+
+.brand-lockup .brand-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  border: 1px solid #4c6f8e;
+  border-radius: 7px;
+  background: #203044;
+  color: #d7ebff;
+  font-size: 10px;
+  font-weight: 800;
 }
 
 .brand-lockup strong {
@@ -110,6 +124,14 @@ small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.topbar-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
 }
 
 .menu-strip {
@@ -127,6 +149,13 @@ small {
   color: #b8c0cc;
   min-height: 28px;
   padding: 4px 10px;
+}
+
+.menu-button::after {
+  content: "v";
+  margin-left: 6px;
+  color: #6f7a8a;
+  font-size: 10px;
 }
 
 .menu-popover {
@@ -160,6 +189,40 @@ small {
 
 .menu-item:hover {
   background: #303743;
+}
+
+.command-context {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.command-context span {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #303743;
+  border-radius: 999px;
+  background: #171b22;
+  color: #aeb8c6;
+  font-size: 11px;
+  padding: 5px 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-actions {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto minmax(150px, 1fr);
+  align-items: center;
+  justify-content: end;
+  gap: 8px;
+}
+
+.quick-command {
+  min-height: 30px;
+  white-space: nowrap;
 }
 
 .language-switch {
@@ -1296,7 +1359,15 @@ td {
   }
 
   .topbar {
-    grid-template-columns: 240px minmax(0, 1fr) 170px;
+    grid-template-columns: 220px minmax(300px, 1fr) 320px;
+  }
+
+  .command-context {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .command-context span:last-child {
+    display: none;
   }
 }
 
