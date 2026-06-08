@@ -8,3 +8,4 @@
 - [测试策略](./test-strategy.md)
 - [打包策略](./packaging.md)
 - [M0-M1.5 阶段验收记录](./m0-m15-acceptance.md)
+- [M0-M1.5 候选验收审计](./m0-m15-final-audit.md)

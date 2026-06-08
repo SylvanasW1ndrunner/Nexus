@@ -49,7 +49,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 - CSV 边界值：逗号、引号、换行、JSON、`NULL`。
 - JSON 导出边界值：列顺序、metadata、`Date`、`bigint`、`Buffer` 和嵌套对象。
-- IPC 类型当前通过 TypeScript 编译约束，后续可以增加契约快照测试。
+- IPC 类型通过 TypeScript 编译约束和 `ipc-contract.test.ts` 双重兜底，避免新增 channel 时 request/response map 或运行时 channel 快照不一致。
 
 ## `packages/core-db`
 
