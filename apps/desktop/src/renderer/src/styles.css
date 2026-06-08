@@ -301,19 +301,87 @@ small {
   margin-bottom: 10px;
 }
 
-.active-project strong {
+.project-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  border: 1px solid #303743;
+  border-radius: 8px;
+  background: #1a1f27;
+  padding: 10px;
+}
+
+.project-card strong {
   display: block;
   margin-bottom: 4px;
   color: #ffffff;
   font-size: 13px;
 }
 
-.active-project > span {
+.project-card span {
   display: block;
   color: #98a2b3;
   font-size: 11px;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+.compact-button {
+  min-height: 26px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.project-summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.project-summary-item {
+  min-width: 0;
+  border: 1px solid #303743;
+  border-radius: 6px;
+  background: #171b22;
+  padding: 7px;
+}
+
+.project-summary-item span {
+  display: block;
+  color: #7f8b9c;
+  font-size: 10px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+
+.project-summary-item small {
+  display: block;
+  overflow: hidden;
+  color: #d8dee8;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-runtime-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.project-runtime-row span {
+  min-width: 0;
+  border: 1px solid #303743;
+  border-radius: 999px;
+  background: #222730;
+  color: #aeb8c6;
+  font-size: 11px;
+  line-height: 1.3;
+  padding: 4px 8px;
 }
 
 .project-files {

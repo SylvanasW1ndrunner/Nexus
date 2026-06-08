@@ -645,6 +645,10 @@ export function App() {
               }}
               onOpenFile={(file) => void openWorkspaceFile(file)}
               onOpenProject={() => void chooseAndOpenWorkspace()}
+              onOpenSettings={() => {
+                setWorkspaceDialogMode('settings');
+                setWorkspaceDialogOpen(true);
+              }}
               onOpen={(rootPath) => void openWorkspace(rootPath)}
             />
             <ConnectionPanel
@@ -1134,6 +1138,7 @@ function ProjectPanel({
   onCreateProject,
   onOpenFile,
   onOpenProject,
+  onOpenSettings,
   onOpen,
 }: {
   activeWorkspace: WorkspaceProject | undefined;
@@ -1144,6 +1149,7 @@ function ProjectPanel({
   onCreateProject: () => void;
   onOpenFile: (file: WorkspaceFileEntry) => void;
   onOpenProject: () => void;
+  onOpenSettings: () => void;
   onOpen: (rootPath: string) => void;
 }) {
   return (
@@ -1154,8 +1160,29 @@ function ProjectPanel({
       </div>
       {activeWorkspace ? (
         <div className="active-project">
-          <strong>{activeWorkspace.name}</strong>
-          <span>{activeWorkspace.rootPath}</span>
+          <div className="project-card">
+            <div>
+              <strong>{activeWorkspace.name}</strong>
+              <span>{activeWorkspace.rootPath}</span>
+            </div>
+            <button className="secondary compact-button" type="button" onClick={onOpenSettings}>
+              {t('projectSettings')}
+            </button>
+          </div>
+          <div className="project-summary-grid">
+            <ProjectSummaryItem label={t('sqlLibrary')} value={activeWorkspace.assetPaths.sqlLibrary} />
+            <ProjectSummaryItem label={t('scriptsPath')} value={activeWorkspace.assetPaths.scripts} />
+            <ProjectSummaryItem label={t('outputsPath')} value={activeWorkspace.assetPaths.outputs} />
+            <ProjectSummaryItem label={t('requirementsPath')} value={activeWorkspace.python.requirementsPath} />
+          </div>
+          <div className="project-runtime-row">
+            <span>
+              {t('pythonEnvironment')}: {formatPythonMode(activeWorkspace.python.mode, t)}
+            </span>
+            <span>
+              {t('workspaceConnections')}: {activeWorkspace.connections.length}
+            </span>
+          </div>
           <div className="project-files">
             {files.length > 0 ? (
               files.map((file) => (
@@ -1207,6 +1234,24 @@ function ProjectPanel({
       </div>
     </section>
   );
+}
+
+function ProjectSummaryItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="project-summary-item">
+      <span>{label}</span>
+      <small title={value}>{value}</small>
+    </div>
+  );
+}
+
+function formatPythonMode(
+  mode: WorkspacePythonConfig['mode'],
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string,
+): string {
+  if (mode === 'venv') return t('pythonModeVenv');
+  if (mode === 'conda') return t('pythonModeConda');
+  return t('pythonModeSystem');
 }
 
 function FileNode({
