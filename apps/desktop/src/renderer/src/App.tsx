@@ -1,4 +1,14 @@
-import { Component, useEffect, useMemo, useState, type ErrorInfo, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import {
+  Component,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ErrorInfo,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
+import type { editor as MonacoEditor } from 'monaco-editor';
 import { Editor } from '@monaco-editor/react';
 import {
   ipcChannels,
@@ -37,11 +47,9 @@ type ChatMessage = {
   content: string;
 };
 
-type TopBarAction = 'save-sql' | 'run-sql';
-
 type EditorLanguage = 'sql' | 'python' | 'markdown' | 'plaintext';
 
-type WorkspaceDialogMode = 'create' | 'settings';
+type WorkspaceDialogMode = 'create' | 'project-settings' | 'ide-settings';
 
 type EditorDocument = {
   title: string;
@@ -152,7 +160,7 @@ export function App() {
         return;
       }
       if (command === 'project-settings') {
-        openProjectSettingsDialog();
+        openSettingsDialog();
         return;
       }
       if (command === 'save-file') {
@@ -182,8 +190,8 @@ export function App() {
     setWorkspaceDialogOpen(true);
   }
 
-  function openProjectSettingsDialog() {
-    setWorkspaceDialogMode('settings');
+  function openSettingsDialog() {
+    setWorkspaceDialogMode(activeWorkspace ? 'project-settings' : 'ide-settings');
     setWorkspaceDialogOpen(true);
   }
 
@@ -560,6 +568,15 @@ export function App() {
     );
   }
 
+  function exportExcel() {
+    if (!result) return;
+    downloadResult(
+      `dbagent-result-${result.queryId}.xls`,
+      queryResultToExcelHtml(result),
+      'application/vnd.ms-excel;charset=utf-8',
+    );
+  }
+
   async function saveCurrentDocument() {
     if (!activeWorkspace) {
       setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
@@ -714,10 +731,6 @@ export function App() {
         language={language}
         setLanguage={setLanguage}
         t={t}
-        onAction={(action) => {
-          if (action === 'save-sql') void saveCurrentDocument();
-          if (action === 'run-sql') void execute();
-        }}
       />
       <section
         className={`workbench${leftSidebarCollapsed ? ' left-collapsed' : ''}${rightSidebarCollapsed ? ' right-collapsed' : ''}`}
@@ -771,9 +784,10 @@ export function App() {
               sql={sql}
               t={t}
               onChangeSql={handleEditorChange}
-              onExecute={() => void execute()}
+              onExecuteSql={(nextSql) => void executeSql(nextSql)}
               onExplain={() => void explain()}
               onExportCsv={exportCsv}
+              onExportExcel={exportExcel}
               onExportJson={exportJson}
               onSaveSql={() => void saveCurrentDocument()}
               setBottomPanel={setBottomPanel}
@@ -831,8 +845,10 @@ export function App() {
           selectedDatabaseEngine={selectedDatabaseEngine}
           selectedTable={selectedTable}
           settingsDraft={workspaceSettingsDraft}
+          language={language}
           setConnectionDraft={setConnectionDraft}
           setCreateConnection={setCreateConnectionDuringWorkspace}
+          setLanguage={setLanguage}
           setSelectedDatabaseEngine={setSelectedDatabaseEngine}
           setSettingsDraft={setWorkspaceSettingsDraft}
           setWorkspaceDraft={setWorkspaceDraft}
@@ -877,7 +893,6 @@ function TopBar({
   activeWorkspace,
   document,
   language,
-  onAction,
   setLanguage,
   t,
 }: {
@@ -885,7 +900,6 @@ function TopBar({
   activeWorkspace: WorkspaceProject | undefined;
   document: EditorDocument;
   language: AppLanguage;
-  onAction: (action: TopBarAction) => void;
   setLanguage: (language: AppLanguage) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
 }) {
@@ -905,12 +919,6 @@ function TopBar({
         </div>
       </div>
       <div className="topbar-actions">
-        <button className="quick-command secondary" type="button" onClick={() => onAction('save-sql')}>
-          {t('saveFile')}
-        </button>
-        <button className="quick-command primary-action" type="button" onClick={() => onAction('run-sql')}>
-          {t('runSql')}
-        </button>
         <div className="language-switch" aria-label={t('language')} role="group">
           <button
             className={language === 'zh-CN' ? 'active' : ''}
@@ -1046,12 +1054,14 @@ function WorkspaceDialog({
   connectionDraft,
   connections,
   createConnection,
+  language,
   mode,
   selectedDatabaseEngine,
   selectedTable,
   settingsDraft,
   setConnectionDraft,
   setCreateConnection,
+  setLanguage,
   setSelectedDatabaseEngine,
   setSettingsDraft,
   setWorkspaceDraft,
@@ -1079,12 +1089,14 @@ function WorkspaceDialog({
   connectionDraft: ConnectionInput;
   connections: SavedConnection[];
   createConnection: boolean;
+  language: AppLanguage;
   mode: WorkspaceDialogMode;
   selectedDatabaseEngine: ConnectionInput['engine'];
   selectedTable: TableDetail | undefined;
   settingsDraft: WorkspaceProject['assetPaths'];
   setConnectionDraft: (draft: ConnectionInput) => void;
   setCreateConnection: (enabled: boolean) => void;
+  setLanguage: (language: AppLanguage) => void;
   setSelectedDatabaseEngine: (engine: ConnectionInput['engine']) => void;
   setSettingsDraft: (draft: WorkspaceProject['assetPaths']) => void;
   setWorkspaceDraft: (draft: WorkspaceDraft) => void;
@@ -1108,13 +1120,20 @@ function WorkspaceDialog({
   onUpdateConnection: () => void;
 }) {
   const isCreate = mode === 'create';
+  const isProjectSettings = mode === 'project-settings';
   const [settingsSection, setSettingsSection] = useState<'assets' | 'python' | 'connections'>('assets');
+  const [ideSettingsSection, setIdeSettingsSection] = useState<'appearance' | 'editor' | 'terminal'>('appearance');
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-panel" role="dialog" aria-modal="true" aria-label={isCreate ? t('createProject') : t('projectSettings')}>
+      <section
+        className="modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isCreate ? t('createProject') : isProjectSettings ? t('projectSettings') : t('ideSettings')}
+      >
         <div className="modal-heading">
           <div>
-            <strong>{isCreate ? t('createProject') : t('projectSettings')}</strong>
+            <strong>{isCreate ? t('createProject') : isProjectSettings ? t('projectSettings') : t('ideSettings')}</strong>
             <small>{activeWorkspace?.rootPath ?? t('noProject')}</small>
           </div>
           <button className="secondary" type="button" onClick={onClose}>
@@ -1261,7 +1280,7 @@ function WorkspaceDialog({
               </button>
             </div>
           </>
-        ) : (
+        ) : isProjectSettings ? (
           <>
             <div className="settings-layout">
               <aside className="settings-nav" aria-label={t('projectSettings')}>
@@ -1354,6 +1373,100 @@ function WorkspaceDialog({
             <div className="modal-actions">
               <button className="primary-action" disabled={!activeWorkspace} type="button" onClick={onSaveSettings}>
                 {t('saveSettings')}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="settings-layout">
+              <aside className="settings-nav" aria-label={t('ideSettings')}>
+                <button
+                  className={ideSettingsSection === 'appearance' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setIdeSettingsSection('appearance')}
+                >
+                  {t('appearance')}
+                </button>
+                <button
+                  className={ideSettingsSection === 'editor' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setIdeSettingsSection('editor')}
+                >
+                  {t('editorSettings')}
+                </button>
+                <button
+                  className={ideSettingsSection === 'terminal' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setIdeSettingsSection('terminal')}
+                >
+                  {t('terminalSettings')}
+                </button>
+              </aside>
+              <div className="settings-content">
+                {ideSettingsSection === 'appearance' ? (
+                  <section className="settings-card">
+                    <div className="subform-heading">
+                      <strong>{t('appearance')}</strong>
+                      <small>{t('appearanceHint')}</small>
+                    </div>
+                    <div className="modal-grid two">
+                      <label>
+                        <span>{t('language')}</span>
+                        <select value={language} onChange={(event) => setLanguage(event.target.value as AppLanguage)}>
+                          <option value="zh-CN">中文</option>
+                          <option value="en">English</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>{t('theme')}</span>
+                        <select value="dark" disabled>
+                          <option value="dark">{t('themeDark')}</option>
+                        </select>
+                      </label>
+                    </div>
+                  </section>
+                ) : null}
+                {ideSettingsSection === 'editor' ? (
+                  <section className="settings-card">
+                    <div className="subform-heading">
+                      <strong>{t('editorSettings')}</strong>
+                      <small>{t('editorSettingsHint')}</small>
+                    </div>
+                    <div className="modal-grid two">
+                      <label>
+                        <span>{t('fontFamily')}</span>
+                        <input disabled value="JetBrains Mono, Consolas" />
+                      </label>
+                      <label>
+                        <span>{t('fontSize')}</span>
+                        <input disabled type="number" value={13} />
+                      </label>
+                    </div>
+                  </section>
+                ) : null}
+                {ideSettingsSection === 'terminal' ? (
+                  <section className="settings-card">
+                    <div className="subform-heading">
+                      <strong>{t('terminalSettings')}</strong>
+                      <small>{t('terminalSettingsHint')}</small>
+                    </div>
+                    <div className="modal-grid two">
+                      <label>
+                        <span>{t('defaultShell')}</span>
+                        <input disabled value="PowerShell / bash" />
+                      </label>
+                      <label>
+                        <span>{t('terminalCount')}</span>
+                        <input disabled type="number" value={1} />
+                      </label>
+                    </div>
+                  </section>
+                ) : null}
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button className="primary-action" type="button" onClick={onClose}>
+                {t('close')}
               </button>
             </div>
           </>
@@ -1830,9 +1943,10 @@ function EditorPane({
   sql,
   t,
   onChangeSql,
-  onExecute,
+  onExecuteSql,
   onExplain,
   onExportCsv,
+  onExportExcel,
   onExportJson,
   onSaveSql,
   setBottomPanel,
@@ -1846,13 +1960,50 @@ function EditorPane({
   sql: string;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   onChangeSql: (sql: string) => void;
-  onExecute: () => void;
+  onExecuteSql: (sql: string) => void;
   onExplain: () => void;
   onExportCsv: () => void;
+  onExportExcel: () => void;
   onExportJson: () => void;
   onSaveSql: () => void;
   setBottomPanel: (panel: 'results' | 'console') => void;
 }) {
+  const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedSql: string } | undefined>();
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const isSqlDocument = editorLanguage === 'sql';
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    const closeMenu = () => setContextMenu(undefined);
+    window.addEventListener('click', closeMenu);
+    window.addEventListener('keydown', closeMenu);
+    return () => {
+      window.removeEventListener('click', closeMenu);
+      window.removeEventListener('keydown', closeMenu);
+    };
+  }, [contextMenu]);
+
+  function getSelectedSql(): string {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    const selection = editor?.getSelection();
+    if (!editor || !model || !selection || selection.isEmpty()) return '';
+    return model.getValueInRange(selection).trim();
+  }
+
+  function openSqlContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
+    if (!isSqlDocument) return;
+    event.preventDefault();
+    setContextMenu({ x: event.clientX, y: event.clientY, selectedSql: getSelectedSql() });
+  }
+
+  function runSqlText(nextSql: string) {
+    setContextMenu(undefined);
+    if (!nextSql.trim()) return;
+    onExecuteSql(nextSql);
+  }
+
   return (
     <>
       <section className="editor-pane">
@@ -1864,24 +2015,13 @@ function EditorPane({
           </button>
           {document.relativePath ? <div className="editor-path">{document.relativePath}</div> : null}
         </div>
-        <div className="pane-toolbar">
+        <div className="pane-toolbar compact">
           <div>
             <span>{t('editor')}</span>
             <small>
               {activeConnection?.name ?? t('noConnection')}
               {activeConnection?.readOnly ? ` / ${t('readOnly')}` : ''}
             </small>
-          </div>
-          <div className="toolbar-actions">
-            <button className="secondary" type="button" onClick={onExplain}>
-              {t('explain')}
-            </button>
-            <button className="secondary" type="button" onClick={onSaveSql}>
-              {t('saveFile')}
-            </button>
-            <button type="button" onClick={onExecute}>
-              {t('runSql')}
-            </button>
           </div>
         </div>
         <div className="editor-context-strip" aria-label="Editor context">
@@ -1894,7 +2034,7 @@ function EditorPane({
           <span>{document.dirty ? t('statusUnsaved') : t('statusSaved')}</span>
           {activeConnection?.readOnly ? <span>{t('readOnly')}</span> : null}
         </div>
-        <div className="monaco-shell">
+        <div className="monaco-shell" onContextMenu={openSqlContextMenu}>
           <Editor
             height="100%"
             language={editorLanguage}
@@ -1909,7 +2049,38 @@ function EditorPane({
             theme="vs-dark"
             value={sql}
             onChange={(value: string | undefined) => onChangeSql(value ?? '')}
+            onMount={(editor) => {
+              editorRef.current = editor;
+            }}
           />
+          {contextMenu ? (
+            <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+              <button disabled={!contextMenu.selectedSql} type="button" onClick={() => runSqlText(contextMenu.selectedSql)}>
+                {t('runSelectedSql')}
+              </button>
+              <button type="button" onClick={() => runSqlText(sql)}>
+                {t('runFileSql')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setContextMenu(undefined);
+                  onExplain();
+                }}
+              >
+                {t('explain')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setContextMenu(undefined);
+                  onSaveSql();
+                }}
+              >
+                {t('saveFile')}
+              </button>
+            </div>
+          ) : null}
         </div>
       </section>
       <section className="result-pane">
@@ -1929,22 +2100,56 @@ function EditorPane({
             {t('console')}
           </button>
           <small>{message}</small>
+          <div className="bottom-panel-tools">
+            <button
+              className="icon-tool"
+              disabled={!result}
+              title={t('exportResult')}
+              type="button"
+              onClick={() => setExportMenuOpen((open) => !open)}
+            >
+              ⇩
+            </button>
+            {exportMenuOpen && result ? (
+              <div className="tool-menu">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportMenuOpen(false);
+                    onExportCsv();
+                  }}
+                >
+                  {t('exportCsv')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportMenuOpen(false);
+                    onExportExcel();
+                  }}
+                >
+                  {t('exportExcel')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportMenuOpen(false);
+                    onExportJson();
+                  }}
+                >
+                  {t('exportJson')}
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
         {bottomPanel === 'results' ? (
           <div className="bottom-panel-body">
-            <div className="bottom-panel-actions">
-              <button className="secondary" disabled={!result} type="button" onClick={onExportCsv}>
-                {t('exportCsv')}
-              </button>
-              <button className="secondary" disabled={!result} type="button" onClick={onExportJson}>
-                {t('exportJson')}
-              </button>
-            </div>
             {result ? (
               <>
                 <ResultSummary result={result} t={t} />
                 <PerformanceWarnings result={result} />
-                <ResultTable result={result} />
+                <ResultTable result={result} t={t} />
               </>
             ) : (
               <div className="result-empty">
@@ -2012,27 +2217,91 @@ function PerformanceWarnings({ result }: { result: QueryExecutionResult }) {
   );
 }
 
-function ResultTable({ result }: { result: QueryExecutionResult }) {
+function ResultTable({
+  result,
+  t,
+}: {
+  result: QueryExecutionResult;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+}) {
+  const [searchText, setSearchText] = useState('');
+  const [columnMenuOpen, setColumnMenuOpen] = useState(false);
+  const [visibleColumns, setVisibleColumns] = useState<string[]>(() => result.columns.map((column) => column.name));
+  const activeColumns = useMemo(() => {
+    const selected = result.columns.filter((column) => visibleColumns.includes(column.name));
+    return selected.length > 0 ? selected : result.columns;
+  }, [result.columns, visibleColumns]);
+  const filteredRows = useMemo(() => {
+    const keyword = searchText.trim().toLowerCase();
+    if (!keyword) return result.rows;
+    return result.rows.filter((row) =>
+      activeColumns.some((column) => formatValue(row[column.name]).toLowerCase().includes(keyword)),
+    );
+  }, [activeColumns, result.rows, searchText]);
+
+  useEffect(() => {
+    setVisibleColumns(result.columns.map((column) => column.name));
+    setSearchText('');
+    setColumnMenuOpen(false);
+  }, [result.queryId, result.columns]);
+
+  function toggleColumn(columnName: string) {
+    setVisibleColumns((current) => {
+      if (current.includes(columnName)) return current.filter((name) => name !== columnName);
+      return [...current, columnName];
+    });
+  }
+
   return (
-    <div className="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            {result.columns.map((column) => (
-              <th key={column.name}>{column.name}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {result.rows.map((row, index) => (
-            <tr key={index}>
+    <div className="result-table-shell">
+      <div className="result-table-tools">
+        <input
+          aria-label={t('searchResults')}
+          placeholder={t('searchResults')}
+          value={searchText}
+          onChange={(event) => setSearchText(event.target.value)}
+        />
+        <div className="column-filter">
+          <button className="icon-tool" title={t('filterColumns')} type="button" onClick={() => setColumnMenuOpen((open) => !open)}>
+            ⛃
+          </button>
+          {columnMenuOpen ? (
+            <div className="tool-menu column-menu">
               {result.columns.map((column) => (
-                <td key={column.name}>{formatValue(row[column.name])}</td>
+                <label key={column.name}>
+                  <input
+                    checked={visibleColumns.includes(column.name)}
+                    type="checkbox"
+                    onChange={() => toggleColumn(column.name)}
+                  />
+                  <span>{column.name}</span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              {activeColumns.map((column) => (
+                <th key={column.name}>{column.name}</th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {filteredRows.map((row, index) => (
+              <tr key={index}>
+                {activeColumns.map((column) => (
+                  <td key={column.name}>{formatValue(row[column.name])}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {filteredRows.length === 0 ? <div className="result-filter-empty">{t('noFilteredRows')}</div> : null}
+      </div>
     </div>
   );
 }
@@ -2160,6 +2429,26 @@ function formatValue(value: unknown): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return value.toString();
   return JSON.stringify(value);
+}
+
+function queryResultToExcelHtml(result: QueryExecutionResult): string {
+  const header = result.columns.map((column) => `<th>${escapeHtml(column.name)}</th>`).join('');
+  const rows = result.rows
+    .map(
+      (row) =>
+        `<tr>${result.columns.map((column) => `<td>${escapeHtml(formatValue(row[column.name]))}</td>`).join('')}</tr>`,
+    )
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${header ? `<thead><tr>${header}</tr></thead>` : ''}<tbody>${rows}</tbody></table></body></html>`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function buildPreviewSql(table: TableSummary): string {

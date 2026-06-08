@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, type MenuItemConstructorOptions } from 'electron';
+﻿import { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, type MenuItemConstructorOptions } from 'electron';
 import { appendFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -64,59 +64,56 @@ function sendMenuCommand(command: string): void {
 function installApplicationMenu(): void {
   const template: MenuItemConstructorOptions[] = [
     {
-      label: '文件',
+      label: '\u6587\u4ef6',
       submenu: [
-        { label: '新建项目', accelerator: 'CmdOrCtrl+N', click: () => sendMenuCommand('new-project') },
-        { label: '打开项目...', accelerator: 'CmdOrCtrl+O', click: () => sendMenuCommand('open-project') },
+        { label: '\u65b0\u5efa\u9879\u76ee', accelerator: 'CmdOrCtrl+N', click: () => sendMenuCommand('new-project') },
+        { label: '\u6253\u5f00\u9879\u76ee...', accelerator: 'CmdOrCtrl+O', click: () => sendMenuCommand('open-project') },
         { type: 'separator' },
-        { label: '保存文件', accelerator: 'CmdOrCtrl+S', click: () => sendMenuCommand('save-file') },
+        { label: '\u4fdd\u5b58\u6587\u4ef6', accelerator: 'CmdOrCtrl+S', click: () => sendMenuCommand('save-file') },
         { type: 'separator' },
-        { label: '退出', role: 'quit' },
+        { label: '\u9000\u51fa', role: 'quit' },
       ],
     },
     {
-      label: '编辑',
+      label: '\u7f16\u8f91',
       submenu: [
-        { label: '撤销', role: 'undo' },
-        { label: '重做', role: 'redo' },
+        { label: '\u64a4\u9500', role: 'undo' },
+        { label: '\u91cd\u505a', role: 'redo' },
         { type: 'separator' },
-        { label: '剪切', role: 'cut' },
-        { label: '复制', role: 'copy' },
-        { label: '粘贴', role: 'paste' },
-        { label: '全选', role: 'selectAll' },
+        { label: '\u526a\u5207', role: 'cut' },
+        { label: '\u590d\u5236', role: 'copy' },
+        { label: '\u7c98\u8d34', role: 'paste' },
+        { label: '\u5168\u9009', role: 'selectAll' },
       ],
     },
     {
-      label: '运行',
+      label: '\u8fd0\u884c',
       submenu: [
-        { label: '运行当前 SQL', accelerator: 'F5', click: () => sendMenuCommand('run-sql') },
-        { label: '分析当前 SQL', accelerator: 'CmdOrCtrl+Enter', click: () => sendMenuCommand('explain-sql') },
+        { label: '\u8fd0\u884c\u5f53\u524d SQL', accelerator: 'F5', click: () => sendMenuCommand('run-sql') },
+        { label: '\u5206\u6790\u5f53\u524d SQL', accelerator: 'CmdOrCtrl+Enter', click: () => sendMenuCommand('explain-sql') },
       ],
     },
     {
-      label: '视图',
+      label: '\u89c6\u56fe',
       submenu: [
-        { label: '切换左侧栏', accelerator: 'CmdOrCtrl+B', click: () => sendMenuCommand('toggle-left-sidebar') },
-        { label: '切换 Agent', accelerator: 'CmdOrCtrl+Shift+A', click: () => sendMenuCommand('toggle-right-sidebar') },
+        { label: '\u5207\u6362\u5de6\u4fa7\u680f', accelerator: 'CmdOrCtrl+B', click: () => sendMenuCommand('toggle-left-sidebar') },
+        { label: '\u5207\u6362 Agent', accelerator: 'CmdOrCtrl+Shift+A', click: () => sendMenuCommand('toggle-right-sidebar') },
         { type: 'separator' },
-        { label: '重新加载', role: 'reload' },
-        { label: '开发者工具', role: 'toggleDevTools' },
+        { label: '\u91cd\u65b0\u52a0\u8f7d', role: 'reload' },
+        { label: '\u5f00\u53d1\u8005\u5de5\u5177', role: 'toggleDevTools' },
       ],
     },
     {
-      label: '设置',
-      submenu: [
-        { label: '项目设置...', accelerator: 'CmdOrCtrl+,', click: () => sendMenuCommand('project-settings') },
-      ],
+      label: '\u8bbe\u7f6e',
+      submenu: [{ label: '\u8bbe\u7f6e...', accelerator: 'CmdOrCtrl+,', click: () => sendMenuCommand('project-settings') }],
     },
     {
-      label: '帮助',
-      submenu: [{ label: '关于 DBAgent', click: () => sendMenuCommand('about') }],
+      label: '\u5e2e\u52a9',
+      submenu: [{ label: '\u5173\u4e8e DBAgent', click: () => sendMenuCommand('about') }],
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
-
 function logMain(message: string, error?: unknown): void {
   const detail = serializeLogDetail(error);
   appendFileSync(join(userDataDir, 'main.log'), `[${new Date().toISOString()}] ${message} ${detail}\n`, 'utf8');

@@ -171,7 +171,22 @@ const dictionary = {
     sqlName: 'SQL Name',
     explainQuery: 'Explain Query Plan',
     runCurrentSql: 'Run Current SQL',
+    runSelectedSql: 'Run Selected SQL',
+    runFileSql: 'Run SQL File',
     projectSettings: 'Project Settings',
+    ideSettings: 'IDE Settings',
+    appearance: 'Appearance',
+    appearanceHint: 'Configure workspace language, theme, and visual style.',
+    editorSettings: 'Editor',
+    editorSettingsHint: 'Configure code font, size, and editing behavior. The beta keeps product defaults for now.',
+    terminalSettings: 'Terminal',
+    terminalSettingsHint: 'Configure script terminals. Multiple real shell sessions will be connected in a later version.',
+    theme: 'Theme',
+    themeDark: 'Professional Dark',
+    fontFamily: 'Font Family',
+    fontSize: 'Font Size',
+    defaultShell: 'Default Shell',
+    terminalCount: 'Terminal Count',
     languageSettings: 'Language Settings',
     createConnectionNow: 'Create database connection now',
     skipConnection: 'Skip connection for now',
@@ -203,7 +218,12 @@ const dictionary = {
     saveSettings: 'Save Settings',
     close: 'Close',
     exportCsv: 'Export CSV',
+    exportExcel: 'Export Excel',
     exportJson: 'Export JSON',
+    exportResult: 'Export Result',
+    filterColumns: 'Filter Columns',
+    searchResults: 'Search results',
+    noFilteredRows: 'No matching rows',
     noProject: 'No project open',
     noConnection: 'No connection selected',
     noResults: 'No results',
@@ -254,12 +274,45 @@ const dictionary = {
   },
 } satisfies Record<AppLanguage, Record<string, string>>;
 
-export type TranslationKey = keyof (typeof dictionary)[typeof defaultLanguage];
+const dictionaryOverrides = {
+  'zh-CN': {
+    runSelectedSql: '运行选中 SQL',
+    runFileSql: '运行整个 SQL 文件',
+    ideSettings: 'IDE 设置',
+    appearance: '外观',
+    appearanceHint: '配置工作台语言、主题和整体视觉风格。',
+    editorSettings: '编辑器',
+    editorSettingsHint: '配置代码字体、字号和编辑体验。当前测试版先固定为产品默认值。',
+    terminalSettings: '终端',
+    terminalSettingsHint: '配置脚本执行终端。多终端和真实 shell 会在后续版本接入。',
+    theme: '主题',
+    themeDark: '深色专业主题',
+    fontFamily: '字体',
+    fontSize: '字号',
+    defaultShell: '默认 Shell',
+    terminalCount: '终端数量',
+    exportExcel: '导出 Excel',
+    exportResult: '导出结果',
+    filterColumns: '筛选列',
+    searchResults: '搜索结果',
+    noFilteredRows: '没有匹配的结果',
+  },
+  en: {},
+} satisfies Record<AppLanguage, Record<string, string>>;
+
+export type TranslationKey =
+  | keyof (typeof dictionary)['en']
+  | keyof (typeof dictionaryOverrides)[typeof defaultLanguage];
 
 export function normalizeLanguage(value: string | null | undefined): AppLanguage {
   return value === 'en' ? 'en' : 'zh-CN';
 }
 
 export function createTranslator(language: AppLanguage): (key: TranslationKey) => string {
-  return (key) => dictionary[language][key] ?? dictionary[defaultLanguage][key] ?? key;
+  return (key) => {
+    const overrides = dictionaryOverrides[language] as Record<string, string>;
+    const activeDictionary = dictionary[language] as Record<string, string>;
+    const defaultDictionary = dictionary[defaultLanguage] as Record<string, string>;
+    return overrides[key] ?? activeDictionary[key] ?? defaultDictionary[key] ?? key;
+  };
 }
