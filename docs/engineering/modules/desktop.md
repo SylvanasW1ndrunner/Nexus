@@ -57,3 +57,12 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 
 - Agent、RAG、workspace 文件和多 tab 不应直接堆进 `App.tsx`；进入 M2 后应拆出稳定的 renderer 状态模块和页面级组件。
 - 如果后续加入真实 E2E，应优先从打包产物启动，而不是只测 Vite dev server。
+## 2026-06-08 增量：EXPLAIN workflow
+
+新增 `apps/desktop/src/main/explain-workflow.ts`，把 EXPLAIN 从 `main.ts` 的内联拼接拆成独立主进程业务模块。该模块只做三件事：
+
+- 使用 `stripSqlComments`、`containsMultipleStatements`、`firstStatementKind` 对原始 SQL 做轻量安全判断。
+- 只允许单条读查询进入解释计划路径。
+- 构造 `EXPLAIN (FORMAT JSON)` 后交给现有 `createQueryWorkflow` 执行。
+
+这个拆分让 `main.ts` 继续保持组合层职责，查询执行、危险 SQL 确认、连接 driver 路由和 EXPLAIN 安全边界分别有独立测试。当前测试文件是 `apps/desktop/src/main/explain-workflow.test.ts`，覆盖只读查询包装、`WITH`/`VALUES` 允许、空 SQL 拒绝、多语句拒绝、写操作/DDL 拒绝，以及被拒绝 SQL 不触发下游查询 workflow。

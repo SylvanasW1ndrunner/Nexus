@@ -135,3 +135,12 @@ pnpm db:down
 ```
 
 如果跳过 `pnpm test:postgres`，候选发布记录中必须明确原因和替代验证方式。
+## 2026-06-08 增量：EXPLAIN 安全测试
+
+本轮补充 `apps/desktop/src/main/explain-workflow.test.ts`，用于覆盖“解释执行计划”这一真实业务路径。重点不是只验证字符串拼接，而是验证 EXPLAIN 不能成为危险 SQL 的绕行入口：
+
+- `SELECT`、`WITH`、`VALUES` 会被包装为 `EXPLAIN (FORMAT JSON)` 并进入普通查询 workflow。
+- 空 SQL、多语句 SQL、`UPDATE`、`DROP` 等输入会返回 `VALIDATION_ERROR`。
+- 被拒绝的 SQL 不会调用 driver，不会消耗用量，也不会写查询历史。
+
+该测试补齐了 M1.5 SQL 执行链中的一个边界：普通执行走 `query-workflow.test.ts`，解释计划走 `explain-workflow.test.ts`，二者共同保证只读连接、危险 SQL 确认和性能分析入口的行为一致。

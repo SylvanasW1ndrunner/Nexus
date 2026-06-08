@@ -115,3 +115,14 @@ Renderer 可基于 `buildTablePreviewSql(schema, table, limit)` 生成预览 SQL
 它会保持数据库返回的列顺序，并处理逗号、引号、换行、JSON 值和 `NULL` 等真实业务数据边界。
 
 `packages/shared/src/export.ts` 中的 `queryResultToJson(result)` 将结果导出为带 metadata 的 JSON：包含 `queryId`、`rowCount`、`elapsedMs`、`columns`、`rows` 和 `safety`。行数据按结果列顺序重建，并把 `Date`、`bigint`、`Buffer` 和嵌套对象转成可序列化 JSON。
+## 2026-06-08 增量：EXPLAIN 查询接口边界
+
+`db:explain-query` 不再由 `main.ts` 直接拼接 SQL，而是进入 `apps/desktop/src/main/explain-workflow.ts`。该 workflow 先校验原始 SQL，再把通过校验的单条只读查询转换为 `EXPLAIN (FORMAT JSON) <原 SQL>`，最后复用 `db:execute-query` 的连接、历史、用量和 driver 路径。
+
+M1.5 阶段的接口约束如下：
+
+- 允许：单条 `SELECT`、`WITH`、`VALUES` 查询。
+- 拒绝：空 SQL、多语句 SQL、`INSERT`、`UPDATE`、`DELETE`、`MERGE`、`CALL`、DDL 等非只读语句。
+- 拒绝结果：返回 `VALIDATION_ERROR`，不进入数据库 driver，也不写查询历史。
+
+这样做的原因是 EXPLAIN 在产品语义上属于“分析查询计划”，不是危险 SQL 的绕行入口。后续接入更多数据库时，每个 driver 可以继续实现自己的 explain 方言，但主进程的安全入口必须保持一致。

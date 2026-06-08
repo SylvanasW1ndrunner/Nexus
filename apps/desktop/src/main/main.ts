@@ -16,6 +16,7 @@ import {
 } from '@dbagent/shared';
 import { createConnectionWorkflow } from './connection-workflow.js';
 import { CredentialVault } from './credential-vault.js';
+import { createExplainWorkflow } from './explain-workflow.js';
 import { createQueryWorkflow } from './query-workflow.js';
 import { createSchemaWorkflow } from './schema-workflow.js';
 import { WorkspaceStateStore } from './workspace-state-store.js';
@@ -44,6 +45,7 @@ const executeQuery = createQueryWorkflow({
   usage: usageTracker,
   driverForEngine: (engine) => databaseDrivers.get(engine),
 });
+const explainQuery = createExplainWorkflow({ executeQuery });
 const schemaWorkflow = createSchemaWorkflow({
   connections: connectionStore,
   driverForEngine: (engine) => databaseDrivers.get(engine),
@@ -117,9 +119,7 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.connection.disconnect, async ({ id }) => connectionWorkflow.disconnect(id));
 
   handle(ipcChannels.db.executeQuery, async (request) => executeQuery(request));
-  handle(ipcChannels.db.explainQuery, async (request) =>
-    executeQuery({ ...request, sql: `EXPLAIN (FORMAT JSON) ${request.sql}` }),
-  );
+  handle(ipcChannels.db.explainQuery, async (request) => explainQuery(request));
   handle(ipcChannels.db.listTables, async ({ connectionId }) => schemaWorkflow.listTables(connectionId));
   handle(ipcChannels.db.describeTable, async ({ connectionId, schema, table }) =>
     schemaWorkflow.describeTable(connectionId, schema, table),
