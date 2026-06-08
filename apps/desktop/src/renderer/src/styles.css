@@ -97,7 +97,7 @@ small {
   height: 46px;
   flex: 0 0 46px;
   display: grid;
-  grid-template-columns: minmax(360px, auto) minmax(360px, 1fr) auto;
+  grid-template-columns: 180px minmax(360px, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 0 10px;
@@ -109,7 +109,7 @@ small {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
 }
 
 .brand-lockup {
@@ -282,6 +282,18 @@ small {
   grid-template-columns: 268px minmax(520px, 1fr) 360px;
 }
 
+.workbench.left-collapsed {
+  grid-template-columns: 32px minmax(520px, 1fr) 360px;
+}
+
+.workbench.right-collapsed {
+  grid-template-columns: 268px minmax(520px, 1fr) 32px;
+}
+
+.workbench.left-collapsed.right-collapsed {
+  grid-template-columns: 32px minmax(520px, 1fr) 32px;
+}
+
 .statusbar {
   flex: 0 0 24px;
   min-height: 24px;
@@ -333,11 +345,58 @@ small {
 
 .left-rail {
   border-right: 1px solid var(--border-subtle);
+  position: relative;
 }
 
 .right-rail {
   display: block;
   border-left: 1px solid var(--border-subtle);
+  position: relative;
+}
+
+.workbench.left-collapsed .project-panel,
+.workbench.right-collapsed .chat-panel {
+  display: none;
+}
+
+.sidebar-collapse {
+  position: absolute;
+  top: 8px;
+  z-index: 5;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  border-radius: 4px;
+  padding: 0;
+}
+
+.sidebar-collapse.left {
+  right: 5px;
+}
+
+.sidebar-collapse.right {
+  left: 5px;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 4;
+  width: 5px;
+  cursor: col-resize;
+}
+
+.sidebar-resizer.left {
+  right: -3px;
+}
+
+.sidebar-resizer.right {
+  left: -3px;
+}
+
+.sidebar-resizer:hover {
+  background: rgba(88, 166, 255, 0.35);
 }
 
 .center-stage {
@@ -972,6 +1031,108 @@ small {
   flex-direction: column;
   overflow: hidden;
   background: #f8fcfa;
+}
+
+.bottom-panel-tabs {
+  flex: 0 0 34px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: #252526;
+  padding: 0 8px;
+}
+
+.bottom-panel-tabs button {
+  position: relative;
+  min-height: 32px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #969696;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.bottom-panel-tabs button.active {
+  color: #ffffff;
+}
+
+.bottom-panel-tabs button.active::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  left: 10px;
+  height: 1px;
+  background: #58a6ff;
+}
+
+.bottom-panel-tabs small {
+  min-width: 0;
+  overflow: hidden;
+  color: #969696;
+  font-size: 12px;
+  margin-left: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bottom-panel-body {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 10px 12px 12px;
+}
+
+.bottom-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.console-panel {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.terminal-tabs {
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 0 8px;
+}
+
+.terminal-tabs button {
+  min-height: 24px;
+  border-color: transparent;
+  background: transparent;
+  color: #cccccc;
+  font-size: 12px;
+}
+
+.terminal-tabs button.active {
+  background: #2d2d30;
+}
+
+.console-panel pre {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  color: #cccccc;
+  background: #1e1e1e;
+  padding: 12px;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 textarea {

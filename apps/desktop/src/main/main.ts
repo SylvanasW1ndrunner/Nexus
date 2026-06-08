@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, type MenuItemConstructorOptions } from 'electron';
 import { appendFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -56,6 +56,66 @@ const schemaWorkflow = createSchemaWorkflow({
 });
 
 let mainWindow: InstanceType<typeof BrowserWindow> | undefined;
+
+function sendMenuCommand(command: string): void {
+  mainWindow?.webContents.send('app:menu-command', command);
+}
+
+function installApplicationMenu(): void {
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: '文件',
+      submenu: [
+        { label: '新建项目', accelerator: 'CmdOrCtrl+N', click: () => sendMenuCommand('new-project') },
+        { label: '打开项目...', accelerator: 'CmdOrCtrl+O', click: () => sendMenuCommand('open-project') },
+        { type: 'separator' },
+        { label: '保存文件', accelerator: 'CmdOrCtrl+S', click: () => sendMenuCommand('save-file') },
+        { type: 'separator' },
+        { label: '退出', role: 'quit' },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { label: '撤销', role: 'undo' },
+        { label: '重做', role: 'redo' },
+        { type: 'separator' },
+        { label: '剪切', role: 'cut' },
+        { label: '复制', role: 'copy' },
+        { label: '粘贴', role: 'paste' },
+        { label: '全选', role: 'selectAll' },
+      ],
+    },
+    {
+      label: '运行',
+      submenu: [
+        { label: '运行当前 SQL', accelerator: 'F5', click: () => sendMenuCommand('run-sql') },
+        { label: '分析当前 SQL', accelerator: 'CmdOrCtrl+Enter', click: () => sendMenuCommand('explain-sql') },
+      ],
+    },
+    {
+      label: '视图',
+      submenu: [
+        { label: '切换左侧栏', accelerator: 'CmdOrCtrl+B', click: () => sendMenuCommand('toggle-left-sidebar') },
+        { label: '切换 Agent', accelerator: 'CmdOrCtrl+Shift+A', click: () => sendMenuCommand('toggle-right-sidebar') },
+        { type: 'separator' },
+        { label: '重新加载', role: 'reload' },
+        { label: '开发者工具', role: 'toggleDevTools' },
+      ],
+    },
+    {
+      label: '设置',
+      submenu: [
+        { label: '项目设置...', accelerator: 'CmdOrCtrl+,', click: () => sendMenuCommand('project-settings') },
+      ],
+    },
+    {
+      label: '帮助',
+      submenu: [{ label: '关于 DBAgent', click: () => sendMenuCommand('about') }],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
 
 function logMain(message: string, error?: unknown): void {
   const detail = serializeLogDetail(error);
@@ -234,6 +294,7 @@ function registerIpcHandlers(): void {
 
 void app.whenReady().then(() => {
   logMain('app:ready');
+  installApplicationMenu();
   registerIpcHandlers();
   void llmRouter;
   void createWindow().catch((error) => {

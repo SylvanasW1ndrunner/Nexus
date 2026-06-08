@@ -13,6 +13,8 @@ const dictionary = {
     schema: '结构',
     editor: '编辑器',
     results: '结果',
+    console: '控制台',
+    consoleHint: '项目脚本终端将在后续版本接入。当前面板用于承载日志、脚本输出和多终端会话。',
     chat: '对话',
     history: '历史',
     createProject: '新建项目',
@@ -135,6 +137,9 @@ const dictionary = {
     schema: 'Schema',
     editor: 'Editor',
     results: 'Results',
+    console: 'Console',
+    consoleHint:
+      'Project script terminals will be connected in a later version. This panel is reserved for logs, script output, and multiple terminal sessions.',
     chat: 'Chat',
     history: 'History',
     createProject: 'New Project',

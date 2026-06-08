@@ -1,4 +1,4 @@
-import { Component, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from 'react';
+import { Component, useEffect, useMemo, useState, type ErrorInfo, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Editor } from '@monaco-editor/react';
 import {
   ipcChannels,
@@ -18,9 +18,7 @@ import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 
-const starterSql = `select
-  now() as checked_at,
-  current_database() as database_name;`;
+const starterSql = '';
 
 const storageKeys = {
   language: 'dbagent.language',
@@ -39,7 +37,7 @@ type ChatMessage = {
   content: string;
 };
 
-type TopBarAction = 'new-project' | 'open-project' | 'save-sql' | 'run-sql' | 'explain-sql' | 'project-settings';
+type TopBarAction = 'save-sql' | 'run-sql';
 
 type EditorLanguage = 'sql' | 'python' | 'markdown' | 'plaintext';
 
@@ -71,8 +69,8 @@ const defaultWorkspacePythonDraft: WorkspacePythonConfig = {
 };
 
 const defaultEditorDocument: EditorDocument = {
-  title: 'Scratch.sql',
-  language: 'sql',
+  title: '欢迎',
+  language: 'plaintext',
   dirty: false,
 };
 
@@ -104,6 +102,11 @@ export function App() {
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileEntry[]>([]);
   const [workspaceDialogMode, setWorkspaceDialogMode] = useState<WorkspaceDialogMode>('create');
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
+  const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(false);
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(268);
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(360);
+  const [bottomPanel, setBottomPanel] = useState<'results' | 'console'>('results');
   const [saveSqlDialogOpen, setSaveSqlDialogOpen] = useState(false);
   const [saveSqlNameDraft, setSaveSqlNameDraft] = useState('');
   const [createConnectionDuringWorkspace, setCreateConnectionDuringWorkspace] = useState(false);
@@ -135,9 +138,73 @@ export function App() {
 
   useEffect(() => {
     void refreshConnections();
-    void restoreWorkspaceState();
     void refreshWorkspace();
   }, []);
+
+  useEffect(() => {
+    return window.dbagent.onMenuCommand((command) => {
+      if (command === 'new-project') {
+        openCreateProjectDialog();
+        return;
+      }
+      if (command === 'open-project') {
+        void chooseAndOpenWorkspace();
+        return;
+      }
+      if (command === 'project-settings') {
+        openProjectSettingsDialog();
+        return;
+      }
+      if (command === 'save-file') {
+        void saveCurrentDocument();
+        return;
+      }
+      if (command === 'run-sql') {
+        void execute();
+        return;
+      }
+      if (command === 'explain-sql') {
+        void explain();
+        return;
+      }
+      if (command === 'toggle-left-sidebar') {
+        setLeftSidebarCollapsed((collapsed) => !collapsed);
+        return;
+      }
+      if (command === 'toggle-right-sidebar') {
+        setRightSidebarCollapsed((collapsed) => !collapsed);
+      }
+    });
+  }, [activeConnectionId, activeWorkspace, editorDocument, editorLanguage, saveSqlNameDraft, sql]);
+
+  function openCreateProjectDialog() {
+    setWorkspaceDialogMode('create');
+    setWorkspaceDialogOpen(true);
+  }
+
+  function openProjectSettingsDialog() {
+    setWorkspaceDialogMode('settings');
+    setWorkspaceDialogOpen(true);
+  }
+
+  function startSidebarResize(side: 'left' | 'right', startEvent: ReactMouseEvent<HTMLDivElement>) {
+    startEvent.preventDefault();
+    const startX = startEvent.clientX;
+    const startWidth = side === 'left' ? leftSidebarWidth : rightSidebarWidth;
+    const onMove = (event: MouseEvent) => {
+      const delta = event.clientX - startX;
+      const nextWidth = side === 'left' ? startWidth + delta : startWidth - delta;
+      const clamped = Math.min(520, Math.max(220, nextWidth));
+      if (side === 'left') setLeftSidebarWidth(clamped);
+      else setRightSidebarWidth(clamped);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -165,7 +232,7 @@ export function App() {
     if (!response.ok || !response.data) return;
     setSql(response.data.sqlDraft);
     setEditorLanguage('sql');
-    setEditorDocument({ ...defaultEditorDocument, dirty: false });
+    setEditorDocument({ title: 'Scratch.sql', language: 'sql', dirty: false });
     if (response.data.activeConnectionId) setActiveConnectionId(response.data.activeConnectionId);
   }
 
@@ -193,6 +260,13 @@ export function App() {
         setWorkspaceSettingsDraft(activeResponse.data.assetPaths);
         setWorkspacePythonDraft(activeResponse.data.python);
         await refreshWorkspaceFiles(activeResponse.data.rootPath);
+        await restoreWorkspaceState();
+      } else {
+        setWorkspaceFiles([]);
+        setSql('');
+        setEditorLanguage('plaintext');
+        setEditorDocument(defaultEditorDocument);
+        setResult(undefined);
       }
     }
   }
@@ -641,35 +715,47 @@ export function App() {
         setLanguage={setLanguage}
         t={t}
         onAction={(action) => {
-          if (action === 'new-project') {
-            setWorkspaceDialogMode('create');
-            setWorkspaceDialogOpen(true);
-          }
-          if (action === 'open-project') void chooseAndOpenWorkspace();
-          if (action === 'project-settings') {
-            setWorkspaceDialogMode('settings');
-            setWorkspaceDialogOpen(true);
-          }
           if (action === 'save-sql') void saveCurrentDocument();
           if (action === 'run-sql') void execute();
-          if (action === 'explain-sql') void explain();
         }}
       />
-      <section className="workbench">
+      <section
+        className={`workbench${leftSidebarCollapsed ? ' left-collapsed' : ''}${rightSidebarCollapsed ? ' right-collapsed' : ''}`}
+        style={{
+          gridTemplateColumns: `${leftSidebarCollapsed ? 32 : leftSidebarWidth}px minmax(520px, 1fr) ${
+            rightSidebarCollapsed ? 32 : rightSidebarWidth
+          }px`,
+        }}
+      >
         <ErrorBoundary label="Project">
           <aside className="left-rail">
+            <button
+              className="sidebar-collapse left"
+              title={leftSidebarCollapsed ? '展开项目栏' : '收起项目栏'}
+              type="button"
+              onClick={() => setLeftSidebarCollapsed((collapsed) => !collapsed)}
+            >
+              {leftSidebarCollapsed ? '>' : '<'}
+            </button>
             <ProjectPanel
               activeWorkspace={activeWorkspace}
               files={workspaceFiles}
               t={t}
               {...(editorDocument.relativePath ? { activeFilePath: editorDocument.relativePath } : {})}
               onCreateProject={() => {
-                setWorkspaceDialogMode('create');
-                setWorkspaceDialogOpen(true);
+                openCreateProjectDialog();
               }}
               onOpenFile={(file) => void openWorkspaceFile(file)}
               onOpenProject={() => void chooseAndOpenWorkspace()}
             />
+            {!leftSidebarCollapsed ? (
+              <div
+                aria-label="Resize project sidebar"
+                className="sidebar-resizer left"
+                role="separator"
+                onMouseDown={(event) => startSidebarResize('left', event)}
+              />
+            ) : null}
           </aside>
         </ErrorBoundary>
 
@@ -677,6 +763,7 @@ export function App() {
           <section className="center-stage">
             <EditorPane
               activeConnection={activeConnection}
+              bottomPanel={bottomPanel}
               document={editorDocument}
               editorLanguage={editorLanguage}
               message={message}
@@ -689,12 +776,21 @@ export function App() {
               onExportCsv={exportCsv}
               onExportJson={exportJson}
               onSaveSql={() => void saveCurrentDocument()}
+              setBottomPanel={setBottomPanel}
             />
           </section>
         </ErrorBoundary>
 
         <ErrorBoundary label="Chat">
           <aside className="right-rail">
+            <button
+              className="sidebar-collapse right"
+              title={rightSidebarCollapsed ? '展开 Agent' : '收起 Agent'}
+              type="button"
+              onClick={() => setRightSidebarCollapsed((collapsed) => !collapsed)}
+            >
+              {rightSidebarCollapsed ? '<' : '>'}
+            </button>
             <ChatPanel
               activeConnection={activeConnection}
               activeWorkspace={activeWorkspace}
@@ -705,6 +801,14 @@ export function App() {
               t={t}
               onSend={sendChatMessage}
             />
+            {!rightSidebarCollapsed ? (
+              <div
+                aria-label="Resize agent sidebar"
+                className="sidebar-resizer right"
+                role="separator"
+                onMouseDown={(event) => startSidebarResize('right', event)}
+              />
+            ) : null}
           </aside>
         </ErrorBoundary>
       </section>
@@ -788,29 +892,6 @@ function TopBar({
   return (
     <header className="topbar">
       <div className="topbar-left">
-        <nav className="menu-strip" aria-label="Application menu">
-          <MenuButton
-            label={t('file')}
-            items={[
-              { label: t('createProject'), onClick: () => onAction('new-project') },
-              { label: t('openProject'), onClick: () => onAction('open-project') },
-              { label: t('saveFile'), onClick: () => onAction('save-sql') },
-            ]}
-          />
-          <MenuButton
-            label={t('run')}
-            items={[
-              { label: t('runCurrentSql'), onClick: () => onAction('run-sql') },
-              { label: t('explainQuery'), onClick: () => onAction('explain-sql') },
-            ]}
-          />
-          <MenuButton
-            label={t('settings')}
-            items={[
-              { label: t('projectSettings'), onClick: () => onAction('project-settings') },
-            ]}
-          />
-        </nav>
         <div className="brand-lockup compact">
           <span className="brand-mark">DB</span>
           <strong>DBAgent</strong>
@@ -888,29 +969,6 @@ function StatusBar({
         </span>
       </div>
     </footer>
-  );
-}
-
-function MenuButton({
-  items,
-  label,
-}: {
-  items: Array<{ label: string; onClick: () => void }>;
-  label: string;
-}) {
-  return (
-    <div className="menu-group">
-      <button className="menu-button" type="button">
-        {label}
-      </button>
-      <div className="menu-popover">
-        {items.map((item) => (
-          <button className="menu-item" key={item.label} type="button" onClick={item.onClick}>
-            {item.label}
-          </button>
-        ))}
-      </div>
-    </div>
   );
 }
 
@@ -1764,6 +1822,7 @@ function TableDetailPanel({ detail }: { detail: TableDetail }) {
 
 function EditorPane({
   activeConnection,
+  bottomPanel,
   document,
   editorLanguage,
   message,
@@ -1776,8 +1835,10 @@ function EditorPane({
   onExportCsv,
   onExportJson,
   onSaveSql,
+  setBottomPanel,
 }: {
   activeConnection: SavedConnection | undefined;
+  bottomPanel: 'results' | 'console';
   document: EditorDocument;
   editorLanguage: EditorLanguage;
   message: string;
@@ -1790,6 +1851,7 @@ function EditorPane({
   onExportCsv: () => void;
   onExportJson: () => void;
   onSaveSql: () => void;
+  setBottomPanel: (panel: 'results' | 'console') => void;
 }) {
   return (
     <>
@@ -1851,30 +1913,55 @@ function EditorPane({
         </div>
       </section>
       <section className="result-pane">
-        <div className="pane-toolbar">
-          <div>
-            <span>{t('results')}</span>
-            <small>{message}</small>
-          </div>
-          <div className="toolbar-actions">
-            <button className="secondary" disabled={!result} type="button" onClick={onExportCsv}>
-              {t('exportCsv')}
-            </button>
-            <button className="secondary" disabled={!result} type="button" onClick={onExportJson}>
-              {t('exportJson')}
-            </button>
-          </div>
+        <div className="bottom-panel-tabs">
+          <button
+            className={bottomPanel === 'results' ? 'active' : ''}
+            type="button"
+            onClick={() => setBottomPanel('results')}
+          >
+            {t('results')}
+          </button>
+          <button
+            className={bottomPanel === 'console' ? 'active' : ''}
+            type="button"
+            onClick={() => setBottomPanel('console')}
+          >
+            {t('console')}
+          </button>
+          <small>{message}</small>
         </div>
-        {result ? (
-          <>
-            <ResultSummary result={result} t={t} />
-            <PerformanceWarnings result={result} />
-            <ResultTable result={result} />
-          </>
+        {bottomPanel === 'results' ? (
+          <div className="bottom-panel-body">
+            <div className="bottom-panel-actions">
+              <button className="secondary" disabled={!result} type="button" onClick={onExportCsv}>
+                {t('exportCsv')}
+              </button>
+              <button className="secondary" disabled={!result} type="button" onClick={onExportJson}>
+                {t('exportJson')}
+              </button>
+            </div>
+            {result ? (
+              <>
+                <ResultSummary result={result} t={t} />
+                <PerformanceWarnings result={result} />
+                <ResultTable result={result} />
+              </>
+            ) : (
+              <div className="result-empty">
+                <strong>{t('resultEmptyTitle')}</strong>
+                <span>{t('resultEmptyDescription')}</span>
+              </div>
+            )}
+          </div>
         ) : (
-          <div className="result-empty">
-            <strong>{t('resultEmptyTitle')}</strong>
-            <span>{t('resultEmptyDescription')}</span>
+          <div className="console-panel">
+            <div className="terminal-tabs">
+              <button className="active" type="button">
+                Terminal 1
+              </button>
+              <button type="button">+</button>
+            </div>
+            <pre>{`DBAgent console\n\n${t('consoleHint')}`}</pre>
           </div>
         )}
       </section>
@@ -1975,7 +2062,7 @@ function ChatPanel({
         <div className="agent-tabs" aria-label={t('chat')}>
           <button type="button">CHAT</button>
           <button className="active" type="button">
-            CODEX
+            AGENT
           </button>
         </div>
         <div className="agent-toolbar" aria-label="Agent toolbar">

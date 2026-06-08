@@ -10,6 +10,11 @@ const api = {
   ): Promise<IpcResponseMap[Channel]> {
     return ipcRenderer.invoke(channel, request);
   },
+  onMenuCommand(listener: (command: string) => void): () => void {
+    const handler = (_event: Electron.IpcRendererEvent, command: string) => listener(command);
+    ipcRenderer.on('app:menu-command', handler);
+    return () => ipcRenderer.off('app:menu-command', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('dbagent', api);
