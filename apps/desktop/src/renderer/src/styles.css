@@ -979,6 +979,34 @@ td {
   gap: 8px;
 }
 
+.assistant-context {
+  border: 1px solid #303743;
+  border-radius: 8px;
+  background: #1a1f27;
+  margin-bottom: 10px;
+  padding: 9px;
+}
+
+.context-row {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.context-row span {
+  color: #8f9aaa;
+}
+
+.context-row small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-message {
   max-width: 92%;
   border: 1px solid #303743;

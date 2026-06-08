@@ -691,6 +691,9 @@ export function App() {
         <ErrorBoundary label="Chat">
           <aside className="right-rail">
             <ChatPanel
+              activeConnection={activeConnection}
+              activeWorkspace={activeWorkspace}
+              document={editorDocument}
               draft={chatDraft}
               history={history}
               messages={chatMessages}
@@ -1649,6 +1652,9 @@ function ResultTable({ result }: { result: QueryExecutionResult }) {
 }
 
 function ChatPanel({
+  activeConnection,
+  activeWorkspace,
+  document,
   draft,
   history,
   messages,
@@ -1657,6 +1663,9 @@ function ChatPanel({
   onPickHistory,
   onSend,
 }: {
+  activeConnection: SavedConnection | undefined;
+  activeWorkspace: WorkspaceProject | undefined;
+  document: EditorDocument;
   draft: string;
   history: QueryHistoryItem[];
   messages: ChatMessage[];
@@ -1671,6 +1680,21 @@ function ChatPanel({
         <div className="panel-heading">
           <span>{t('chat')}</span>
           <small>Assistant</small>
+        </div>
+        <div className="assistant-context">
+          <div className="mini-section-title">{t('assistantContext')}</div>
+          <div className="context-row">
+            <span>{t('project')}</span>
+            <small>{activeWorkspace?.name ?? t('noProject')}</small>
+          </div>
+          <div className="context-row">
+            <span>{t('connections')}</span>
+            <small>{activeConnection?.name ?? t('noConnection')}</small>
+          </div>
+          <div className="context-row">
+            <span>{t('currentFile')}</span>
+            <small title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</small>
+          </div>
         </div>
         <div className="message-list">
           {messages.map((message) => (
@@ -1699,14 +1723,18 @@ function ChatPanel({
           <span>{t('queryHistory')}</span>
           <small>{history.length}</small>
         </div>
-        {history.map((item) => (
-          <button className="history-item" key={item.id} type="button" onClick={() => onPickHistory(item)}>
-            <span>{item.sql.replace(/\s+/g, ' ').slice(0, 90)}</span>
-            <small>
-              {item.status} / {item.safety.riskLevel} / {item.elapsedMs ?? '-'} ms
-            </small>
-          </button>
-        ))}
+        {history.length > 0 ? (
+          history.map((item) => (
+            <button className="history-item" key={item.id} type="button" onClick={() => onPickHistory(item)}>
+              <span>{item.sql.replace(/\s+/g, ' ').slice(0, 90)}</span>
+              <small>
+                {item.status} / {item.safety.riskLevel} / {item.elapsedMs ?? '-'} ms
+              </small>
+            </button>
+          ))
+        ) : (
+          <div className="empty-inline">{t('queryHistoryEmpty')}</div>
+        )}
       </section>
     </>
   );
