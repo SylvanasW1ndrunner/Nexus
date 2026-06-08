@@ -1,6 +1,9 @@
 node_modules/
 dist/
+dist-types/
 coverage/
+release/
+apps/*/release/
 .turbo/
 .vite/
 *.log

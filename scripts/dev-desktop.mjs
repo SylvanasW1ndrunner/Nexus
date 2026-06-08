@@ -41,7 +41,7 @@ run('main', ['exec', 'vite', 'build', '--mode', 'main', '--watch']);
 run('preload', ['exec', 'vite', 'build', '--mode', 'preload', '--watch']);
 run('renderer', ['exec', 'vite', '--host', '127.0.0.1']);
 
-const mainEntry = join(appDir, 'dist', 'main', 'main.js');
+const mainEntry = join(appDir, 'dist', 'main', 'main.cjs');
 for (let i = 0; i < 80; i += 1) {
   if (existsSync(mainEntry)) break;
   await delay(250);

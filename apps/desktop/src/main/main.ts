@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { appendFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ConnectionStore, PostgresDriver, QueryHistoryStore, analyzeSqlSafety } from '@dbagent/core-db';
 import { AuthService } from '@dbagent/core-auth';
@@ -17,7 +18,7 @@ import {
   type QueryRequest,
 } from '@dbagent/shared';
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
 const dataDir = join(userDataDir, 'data');
 const credentialPath = join(dataDir, 'credentials.json');
@@ -28,9 +29,33 @@ const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
 const postgres = new PostgresDriver();
 
-let mainWindow: BrowserWindow | undefined;
+let mainWindow: InstanceType<typeof BrowserWindow> | undefined;
+
+function logMain(message: string, error?: unknown): void {
+  const detail = serializeLogDetail(error);
+  appendFileSync(join(userDataDir, 'main.log'), `[${new Date().toISOString()}] ${message} ${detail}\n`, 'utf8');
+}
+
+function serializeLogDetail(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack ?? ''}`;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return value.toString();
+  }
+  return JSON.stringify(value);
+}
+
+process.on('uncaughtException', (error) => {
+  logMain('uncaughtException', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logMain('unhandledRejection', reason);
+});
 
 async function createWindow(): Promise<void> {
+  logMain('createWindow:start');
   await mkdir(dataDir, { recursive: true });
 
   mainWindow = new BrowserWindow({
@@ -40,7 +65,7 @@ async function createWindow(): Promise<void> {
     minHeight: 720,
     title: 'DBAgent',
     webPreferences: {
-      preload: join(__dirname, '../preload/preload.js'),
+      preload: join(__dirname, '../preload/preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -52,6 +77,7 @@ async function createWindow(): Promise<void> {
   } else {
     await mainWindow.loadURL(pathToFileURL(join(__dirname, '../renderer/index.html')).toString());
   }
+  logMain('createWindow:loaded');
 }
 
 function handle<Channel extends IpcChannel>(
@@ -94,11 +120,15 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.connection.connect, async ({ id }) => {
     const connection = (await connectionStore.list()).find((item) => item.id === id);
     if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-    const result = await postgres.connect({
+    const password = await loadPassword(connection.id);
+    const config = {
       ...connection,
-      password: await loadPassword(connection.id),
       maxClients: 5,
-    });
+    };
+    if (password !== undefined) {
+      Object.assign(config, { password });
+    }
+    const result = await postgres.connect(config);
     if (!result.ok) {
       await connectionStore.markStatus(id, 'error');
       return result;
@@ -228,10 +258,14 @@ function validateConnectionInput(input: ConnectionInput) {
   return undefined;
 }
 
-app.whenReady().then(() => {
+void app.whenReady().then(() => {
+  logMain('app:ready');
   registerIpcHandlers();
   void llmRouter;
-  void createWindow();
+  void createWindow().catch((error) => {
+    logMain('createWindow:error', error);
+    app.quit();
+  });
 });
 
 app.on('window-all-closed', () => {

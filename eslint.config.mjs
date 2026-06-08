@@ -5,7 +5,14 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
-    ignores: ['dist/**', 'coverage/**', 'node_modules/**'],
+    ignores: [
+      '**/dist/**',
+      '**/dist-types/**',
+      '**/coverage/**',
+      '**/node_modules/**',
+      '**/release/**',
+      '**/.turbo/**',
+    ],
   },
   {
     files: ['**/*.ts', '**/*.tsx'],

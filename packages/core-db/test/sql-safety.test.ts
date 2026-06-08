@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeSqlSafety } from './sql-safety.js';
+import { analyzeSqlSafety } from '../src/sql-safety.js';
 
 describe('analyzeSqlSafety', () => {
   it('allows read-only SELECT queries', () => {

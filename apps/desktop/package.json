@@ -2,15 +2,18 @@
   "name": "@dbagent/desktop",
   "version": "0.1.0",
   "private": true,
+  "description": "Agent-native database IDE for data engineers.",
+  "author": "DBAgent Team",
   "type": "module",
-  "main": "dist/main/main.js",
+  "main": "dist/main/main.cjs",
   "scripts": {
     "dev": "node ../../scripts/dev-desktop.mjs",
-    "build": "tsc -p tsconfig.json && vite build --mode main && vite build --mode preload && vite build && electron-builder --dir",
+    "build": "node ../../scripts/clean-path.mjs dist dist-types tsconfig.tsbuildinfo && tsc -p tsconfig.json && vite build --mode main && vite build --mode preload && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run",
-    "package": "pnpm build && electron-builder"
+    "test": "vitest run --passWithNoTests",
+    "package": "pnpm build && electron-builder",
+    "package:dir": "pnpm build && electron-builder --dir"
   },
   "dependencies": {
     "@dbagent/core-auth": "workspace:*",
@@ -24,6 +27,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "@electron/asar": "^3.4.1",
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
     "@types/react": "^19.0.2",
@@ -35,15 +39,27 @@
     "appId": "com.dbagent.desktop",
     "productName": "DBAgent",
     "asar": true,
+    "afterPack": "../../scripts/prune-asar.cjs",
+    "compression": "maximum",
+    "electronLanguages": ["en-US", "zh-CN"],
     "files": [
       "dist/**",
-      "package.json"
+      "package.json",
+      "!**/node_modules/@dbagent/*/src/**",
+      "!**/node_modules/@dbagent/*/test/**",
+      "!**/node_modules/@dbagent/*/.turbo/**",
+      "!**/node_modules/@dbagent/*/tsconfig.json",
+      "!**/node_modules/@dbagent/*/tsconfig.tsbuildinfo",
+      "!**/node_modules/@dbagent/*/dist/**/*.map",
+      "!**/node_modules/@dbagent/*/dist/**/*.test.js",
+      "!**/node_modules/@dbagent/*/dist/**/*.test.d.ts"
     ],
     "directories": {
       "output": "release"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "signAndEditExecutable": false
     },
     "mac": {
       "target": "dmg"

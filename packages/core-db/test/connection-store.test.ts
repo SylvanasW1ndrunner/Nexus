@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ConnectionStore } from './connection-store.js';
+import { ConnectionStore } from '../src/connection-store.js';
 
 const tempDirs: string[] = [];
 

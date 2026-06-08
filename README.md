@@ -24,6 +24,8 @@ pnpm typecheck
 pnpm lint
 pnpm test
 pnpm smoke
+pnpm run ci
+pnpm --filter @dbagent/desktop build
 pnpm --filter @dbagent/desktop package
 ```
 

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { QuerySafetyReport } from '@dbagent/shared';
-import { QueryHistoryStore } from './query-history.js';
+import { QueryHistoryStore } from '../src/query-history.js';
 
 const tempDirs: string[] = [];
 const safeSelect: QuerySafetyReport = {

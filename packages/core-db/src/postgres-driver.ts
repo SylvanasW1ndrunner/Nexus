@@ -2,10 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { QueryExecutionResult, QueryRequest, SavedConnection } from '@dbagent/shared';
 import { err, ok, type Result } from '@dbagent/shared';
+import type { Pool as PgPool } from 'pg';
 import { analyzeSqlSafety } from './sql-safety.js';
 import type { DatabaseConnectionConfig, IDatabaseDriver, TableSummary } from './types.js';
-
-type PgPool = import('pg').Pool;
 
 export class PostgresDriver implements IDatabaseDriver {
   readonly capabilities = {

@@ -49,8 +49,18 @@ DBAgent is a desktop product, so dependency choices must preserve a reliable Ele
 ## Packaging Command
 
 ```bash
+pnpm --filter @dbagent/desktop build
 pnpm --filter @dbagent/desktop package
 ```
 
 The current `electron-builder` configuration packages `dist/**` into ASAR and emits platform
 installers under `apps/desktop/release`.
+
+## Current Verification
+
+On Windows, `pnpm --filter @dbagent/desktop package` produced:
+
+- `apps/desktop/release/DBAgent Setup 0.1.0.exe`
+- Installer size: 71.51 MB
+
+This is below the product target of a sub-200 MB installer for the M0-M1.5 baseline.

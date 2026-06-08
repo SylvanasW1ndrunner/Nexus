@@ -1,5 +1,7 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import electron from 'electron';
 import type { IpcChannel, IpcRequestMap, IpcResponseMap } from '@dbagent/shared';
+
+const { contextBridge, ipcRenderer } = electron;
 
 const api = {
   invoke<Channel extends IpcChannel>(

@@ -21,10 +21,10 @@ export default defineConfig(({ mode }) => {
       build: {
         outDir: isMain ? 'dist/main' : 'dist/preload',
         emptyOutDir: false,
-        sourcemap: true,
+        sourcemap: false,
         lib: {
           entry: resolve(configDir, isMain ? 'src/main/main.ts' : 'src/preload/preload.ts'),
-          formats: ['es'],
+          formats: ['cjs'],
           fileName: isMain ? 'main' : 'preload',
         },
         rollupOptions: {
@@ -40,6 +40,7 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: '../../dist/renderer',
       emptyOutDir: false,
+      sourcemap: false,
     },
     server: {
       port: 5173,
