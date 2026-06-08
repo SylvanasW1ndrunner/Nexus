@@ -154,6 +154,9 @@ function registerIpcHandlers(): void {
     executeQuery({ ...request, sql: `EXPLAIN (FORMAT JSON) ${request.sql}` }),
   );
   handle(ipcChannels.db.listTables, async ({ connectionId }) => postgres.listTables(connectionId));
+  handle(ipcChannels.db.describeTable, async ({ connectionId, schema, table }) =>
+    postgres.describeTable(connectionId, schema, table),
+  );
   handle(ipcChannels.db.queryHistory, async (request) => ok(await queryHistoryStore.list(request ?? {})));
 
   handle(ipcChannels.auth.status, async () => ok(await authService.status()));

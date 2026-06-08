@@ -4,6 +4,7 @@ import type {
   DatabaseEngine,
   QueryResultRow,
   QueryRiskLevel,
+  TableDetail,
   TableSummary,
   UsageMode,
 } from './domain.js';
@@ -24,6 +25,7 @@ export const ipcChannels = {
     queryHistory: 'db:query-history',
     explainQuery: 'db:explain-query',
     listTables: 'db:list-tables',
+    describeTable: 'db:describe-table',
   },
   app: {
     loadWorkspaceState: 'app:load-workspace-state',
@@ -156,6 +158,7 @@ export type IpcRequestMap = {
   'db:query-history': { connectionId?: ConnectionId; limit?: number };
   'db:explain-query': QueryRequest;
   'db:list-tables': { connectionId: ConnectionId };
+  'db:describe-table': { connectionId: ConnectionId; schema: string; table: string };
   'auth:login': { email: string; password: string };
   'auth:logout': void;
   'auth:status': void;
@@ -177,6 +180,7 @@ export type IpcResponseMap = {
   'db:query-history': Result<QueryHistoryItem[]>;
   'db:explain-query': Result<QueryExecutionResult>;
   'db:list-tables': Result<TableSummary[]>;
+  'db:describe-table': Result<TableDetail>;
   'auth:login': Result<AuthStatus>;
   'auth:logout': Result<AuthStatus>;
   'auth:status': Result<AuthStatus>;

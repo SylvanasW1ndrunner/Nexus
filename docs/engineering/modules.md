@@ -63,6 +63,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 - `ConnectionStore` 只存连接元数据；密码由 desktop main 用 `safeStorage` 管理。
 - `PostgresDriver` 内部持有连接池，renderer 不接触连接池。
+- Schema 能力分两层：`listTables` 只拉轻量对象列表，`describeTable` 按用户选择的表再拉列、主键、外键和注释，避免连接后一次性扫描大型生产库。
 - 只读连接在执行前拦截写操作和 DDL。
 - 可写连接中需要确认的 SQL 使用显式事务执行，失败后回滚。
 - 远程连接默认启用连接超时、语句超时和 TCP keepalive。
@@ -71,13 +72,13 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 多数据库扩展方式：
 
 - 新增 `MysqlDriver`、`ClickHouseDriver`、`SqlServerDriver` 等实现 `IDatabaseDriver`。
-- 每个 driver 独立实现系统表查询、错误分类、EXPLAIN 语法和连接参数。
+- 每个 driver 独立实现系统表查询、表结构详情、错误分类、EXPLAIN 语法和连接参数。
 - 上层 main 通过 `engine` 选择 driver，不把具体数据库 SDK 透传到 UI。
 
 测试重点：
 
 - 纯单测覆盖 SQL 安全、性能提示、连接持久化、查询历史、错误分类。
-- `pnpm test:postgres` 覆盖真实 PostgreSQL 连接、Schema、复杂 join、只读拦截、断连和事务回滚。
+- `pnpm test:postgres` 覆盖真实 PostgreSQL 连接、Schema 表列表、表结构详情、复杂 join、只读拦截、断连和事务回滚。
 
 ## `apps/desktop`
 
@@ -98,6 +99,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 删除连接会经过确认，并删除连接元数据、凭证和活动连接池。
 - 远程连接错误在 renderer 通过诊断 helper 转成用户可行动提示。
 - SQL 性能提示在结果区展示，但不阻止执行。
+- Schema 面板点击表名加载表结构详情，点击 `SQL` 生成预览查询，避免把“看结构”和“查数据”混成同一个动作。
 - 工作区草稿通过 `workspace-state.json` 原子写入。
 - Connections、SQL Editor、Results 三个主区域分别包裹 ErrorBoundary，单个区域渲染错误不会拖垮整个应用壳。
 

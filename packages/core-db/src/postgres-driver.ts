@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import type { QueryExecutionResult, QueryRequest, SavedConnection } from '@dbagent/shared';
+import type { ColumnSummary, QueryExecutionResult, QueryRequest, SavedConnection, TableDetail } from '@dbagent/shared';
 import { err, ok, type Result } from '@dbagent/shared';
 import type { Pool as PgPool, QueryResult as PgQueryResult, QueryResultRow } from 'pg';
 import { classifyPostgresConnectionError } from './postgres-errors.js';
@@ -134,6 +134,121 @@ export class PostgresDriver implements IDatabaseDriver {
         return summary;
       }),
     );
+  }
+
+  async describeTable(connectionId: string, schema: string, table: string): Promise<Result<TableDetail>> {
+    const pool = this.pools.get(connectionId);
+    if (!pool) {
+      return err({ code: 'CONNECTION_FAILED', message: 'Connection is not active.', retryable: true });
+    }
+
+    const tableResult = await pool.query<{
+      schema_name: string;
+      table_name: string;
+      table_type: string;
+      comment: string | null;
+    }>(
+      `
+        select
+          n.nspname as schema_name,
+          c.relname as table_name,
+          case c.relkind when 'v' then 'view' else 'table' end as table_type,
+          obj_description(c.oid) as comment
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where c.relkind in ('r', 'p', 'v')
+          and n.nspname = $1
+          and c.relname = $2
+      `,
+      [schema, table],
+    );
+
+    const tableRow = tableResult.rows[0];
+    if (!tableRow) {
+      return err({ code: 'NOT_FOUND', message: `Table ${schema}.${table} was not found.` });
+    }
+
+    const columnResult = await pool.query<{
+      column_name: string;
+      ordinal_position: number;
+      data_type: string;
+      is_nullable: 'YES' | 'NO';
+      column_default: string | null;
+      comment: string | null;
+      is_primary_key: boolean;
+      foreign_schema: string | null;
+      foreign_table: string | null;
+      foreign_column: string | null;
+    }>(
+      `
+        select
+          a.attname as column_name,
+          a.attnum as ordinal_position,
+          format_type(a.atttypid, a.atttypmod) as data_type,
+          case when a.attnotnull then 'NO' else 'YES' end as is_nullable,
+          pg_get_expr(ad.adbin, ad.adrelid) as column_default,
+          col_description(a.attrelid, a.attnum) as comment,
+          exists (
+            select 1
+            from pg_index i
+            where i.indrelid = a.attrelid
+              and i.indisprimary
+              and a.attnum = any(i.indkey)
+          ) as is_primary_key,
+          fn.nspname as foreign_schema,
+          fc.relname as foreign_table,
+          fa.attname as foreign_column
+        from pg_attribute a
+        join pg_class c on c.oid = a.attrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        left join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum
+        left join pg_constraint fk
+          on fk.conrelid = a.attrelid
+          and fk.contype = 'f'
+          and a.attnum = any(fk.conkey)
+        left join pg_class fc on fc.oid = fk.confrelid
+        left join pg_namespace fn on fn.oid = fc.relnamespace
+        left join pg_attribute fa
+          on fa.attrelid = fk.confrelid
+          and fa.attnum = fk.confkey[array_position(fk.conkey, a.attnum)]
+        where n.nspname = $1
+          and c.relname = $2
+          and a.attnum > 0
+          and not a.attisdropped
+        order by a.attnum
+      `,
+      [schema, table],
+    );
+
+    const columns = columnResult.rows.map((row): ColumnSummary => {
+      const column: ColumnSummary = {
+        name: row.column_name,
+        ordinal: row.ordinal_position,
+        dataType: row.data_type,
+        nullable: row.is_nullable === 'YES',
+        isPrimaryKey: row.is_primary_key,
+      };
+      if (row.column_default) column.defaultValue = row.column_default;
+      if (row.comment) column.comment = row.comment;
+      if (row.foreign_schema && row.foreign_table && row.foreign_column) {
+        column.foreignKey = {
+          schema: row.foreign_schema,
+          table: row.foreign_table,
+          column: row.foreign_column,
+        };
+      }
+      return column;
+    });
+
+    const detail: TableDetail = {
+      schema: tableRow.schema_name,
+      name: tableRow.table_name,
+      type: tableRow.table_type === 'view' ? 'view' : 'table',
+      columns,
+      primaryKey: columns.filter((column) => column.isPrimaryKey).map((column) => column.name),
+    };
+    if (tableRow.comment) detail.comment = tableRow.comment;
+    return ok(detail);
   }
 }
 

@@ -117,6 +117,13 @@ small {
   text-transform: uppercase;
 }
 
+.table-node-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  gap: 4px;
+  align-items: stretch;
+}
+
 .table-node {
   width: 100%;
   border: 0;
@@ -130,7 +137,8 @@ small {
   text-align: left;
 }
 
-.table-node:hover {
+.table-node:hover,
+.table-node.active {
   background: #eef2f7;
 }
 
@@ -138,6 +146,69 @@ small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.table-preview {
+  border-radius: 6px;
+  background: #eef2f7;
+  color: #344054;
+  font-size: 11px;
+  padding: 0;
+}
+
+.table-detail {
+  border-top: 1px solid #dde2ea;
+  margin-top: 14px;
+  padding-top: 12px;
+}
+
+.table-detail-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.table-detail-title span {
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.column-list {
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.column-row {
+  border-top: 1px solid #eef2f7;
+  padding: 8px;
+}
+
+.column-row:first-child {
+  border-top: 0;
+}
+
+.column-row div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.column-row span {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.column-row small {
+  display: block;
+  margin-top: 3px;
+  line-height: 1.35;
 }
 
 .editor-pane {

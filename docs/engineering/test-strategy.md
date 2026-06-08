@@ -16,6 +16,7 @@
 - DBA 查看查询历史，包括状态、耗时、行数和安全等级。
 - BYOK 用户不登录也能进入应用，本地查询轮次仍会记录。
 - 工程师连接 PostgreSQL 后打开 Schema 树，点击表生成安全 quote 的 `select * ... limit 100` 预览查询。
+- 工程师点击 Schema 树中的表名时，能看到列、类型、nullable、主键和外键引用；点击 `SQL` 时才生成数据预览查询。
 - 数据分析师将结果导出 CSV，逗号、引号、换行、JSON 和空值等表格敏感内容能正确导入。
 - 应用重启后恢复活动连接 id 和 SQL 草稿。
 - 用户能编辑已保存连接的 host、database、SSL 和超时配置；更新后连接池必须断开，避免继续使用旧连接。
@@ -87,9 +88,12 @@ pnpm db:up
 
 - `PostgresDriver.test(config)` 能连接默认 fixture。
 - `PostgresDriver.listTables(connectionId)` 返回 `public.users` 和 `public.orders`。
+- `PostgresDriver.describeTable(connectionId, 'public', 'users')` 返回列 metadata 和主键 `id`。
+- `PostgresDriver.describeTable(connectionId, 'public', 'orders')` 返回 `user_id -> public.users.id` 外键。
 - 真实 join 查询返回 `Shanghai` 和 `Beijing`。
 - 只读连接中 `delete from users where email = 'alice@example.com'` 必须返回 `READ_ONLY_VIOLATION`。
 - `disconnect(connectionId)` 后再次 `listTables(connectionId)` 必须返回 `CONNECTION_FAILED`。
+- `disconnect(connectionId)` 后再次 `describeTable(connectionId, ...)` 必须返回 `CONNECTION_FAILED`。
 - 可写连接中批量 SQL 先插入数据、再执行错误语句时必须失败，并且前序插入后的计数仍为 `0`，证明事务已回滚。
 
 环境变量 `DBAGENT_TEST_PG_HOST`、`DBAGENT_TEST_PG_PORT`、`DBAGENT_TEST_PG_DATABASE`、`DBAGENT_TEST_PG_USER` 和 `DBAGENT_TEST_PG_PASSWORD` 可覆盖默认连接。CI 环境具备 Docker 后，应评估是否把 `pnpm test:postgres` 加入发布门禁。

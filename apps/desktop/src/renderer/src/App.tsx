@@ -6,6 +6,7 @@ import {
   type QueryExecutionResult,
   type QueryHistoryItem,
   type SavedConnection,
+  type TableDetail,
   type TableSummary,
 } from '@dbagent/shared';
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
@@ -20,6 +21,7 @@ export function App() {
   const [activeConnectionId, setActiveConnectionId] = useState('');
   const [history, setHistory] = useState<QueryHistoryItem[]>([]);
   const [tables, setTables] = useState<TableSummary[]>([]);
+  const [selectedTable, setSelectedTable] = useState<TableDetail | undefined>();
   const [sql, setSql] = useState(starterSql);
   const [result, setResult] = useState<QueryExecutionResult | undefined>();
   const [message, setMessage] = useState('Hello DBAgent');
@@ -50,6 +52,7 @@ export function App() {
   useEffect(() => {
     if (!activeConnectionId) {
       setTables([]);
+      setSelectedTable(undefined);
       return;
     }
     void refreshTables(activeConnectionId);
@@ -94,6 +97,7 @@ export function App() {
       setTables(response.data);
     } else {
       setTables([]);
+      setSelectedTable(undefined);
       setMessage(formatAppError(response.error));
     }
   }
@@ -126,6 +130,7 @@ export function App() {
       return;
     }
     setTables([]);
+    setSelectedTable(undefined);
     setConnectionDraft(connectionToDraft(response.data));
     setMessage(`Updated ${response.data.name}. Reconnect before running queries.`);
     await refreshConnections();
@@ -148,6 +153,7 @@ export function App() {
     }
     setActiveConnectionId('');
     setTables([]);
+    setSelectedTable(undefined);
     setResult(undefined);
     setConnectionDraft(defaultConnectionDraft);
     setMessage(`Deleted connection ${activeConnection.name}.`);
@@ -175,6 +181,7 @@ export function App() {
     setMessage(response.ok ? `Disconnected from ${response.data.name}.` : formatAppError(response.error));
     await refreshConnections();
     setTables([]);
+    setSelectedTable(undefined);
   }
 
   async function execute() {
@@ -218,6 +225,23 @@ export function App() {
   function previewTable(table: TableSummary) {
     setSql(buildPreviewSql(table));
     void executeSql(buildPreviewSql(table));
+  }
+
+  async function describeTable(table: TableSummary) {
+    if (!activeConnectionId) return;
+    setMessage(`Loading schema for ${table.schema}.${table.name}...`);
+    const response = await window.dbagent.invoke(ipcChannels.db.describeTable, {
+      connectionId: activeConnectionId,
+      schema: table.schema,
+      table: table.name,
+    });
+    if (response.ok) {
+      setSelectedTable(response.data);
+      setMessage(`Loaded ${response.data.schema}.${response.data.name} with ${response.data.columns.length} columns.`);
+    } else {
+      setSelectedTable(undefined);
+      setMessage(formatAppError(response.error));
+    }
   }
 
   function selectConnection(connection: SavedConnection) {
@@ -296,7 +320,12 @@ export function App() {
                 </button>
               ))
             )}
-            <SchemaPanel tables={tables} onPreview={previewTable} />
+            <SchemaPanel
+              selectedTable={selectedTable}
+              tables={tables}
+              onDescribe={(table) => void describeTable(table)}
+              onPreview={previewTable}
+            />
           </aside>
         </ErrorBoundary>
 
@@ -352,7 +381,17 @@ export function App() {
   );
 }
 
-function SchemaPanel({ tables, onPreview }: { tables: TableSummary[]; onPreview: (table: TableSummary) => void }) {
+function SchemaPanel({
+  selectedTable,
+  tables,
+  onDescribe,
+  onPreview,
+}: {
+  selectedTable: TableDetail | undefined;
+  tables: TableSummary[];
+  onDescribe: (table: TableSummary) => void;
+  onPreview: (table: TableSummary) => void;
+}) {
   const grouped = tables.reduce<Record<string, TableSummary[]>>((groups, table) => {
     groups[table.schema] = [...(groups[table.schema] ?? []), table];
     return groups;
@@ -368,14 +407,61 @@ function SchemaPanel({ tables, onPreview }: { tables: TableSummary[]; onPreview:
           <div className="schema-group" key={schema}>
             <div className="schema-title">{schema}</div>
             {schemaTables.map((table) => (
-              <button className="table-node" key={`${table.schema}.${table.name}`} onClick={() => onPreview(table)}>
-                <span>{table.name}</span>
-                <small>{table.type}</small>
-              </button>
+              <div className="table-node-row" key={`${table.schema}.${table.name}`}>
+                <button
+                  className={
+                    selectedTable?.schema === table.schema && selectedTable.name === table.name
+                      ? 'table-node active'
+                      : 'table-node'
+                  }
+                  onClick={() => onDescribe(table)}
+                >
+                  <span>{table.name}</span>
+                  <small>{table.type}</small>
+                </button>
+                <button className="table-preview" type="button" onClick={() => onPreview(table)}>
+                  SQL
+                </button>
+              </div>
             ))}
           </div>
         ))
       )}
+      {selectedTable ? <TableDetailPanel detail={selectedTable} /> : null}
+    </section>
+  );
+}
+
+function TableDetailPanel({ detail }: { detail: TableDetail }) {
+  return (
+    <section className="table-detail">
+      <div className="table-detail-title">
+        <span>
+          {detail.schema}.{detail.name}
+        </span>
+        <small>{detail.primaryKey.length > 0 ? `PK: ${detail.primaryKey.join(', ')}` : 'No primary key'}</small>
+      </div>
+      {detail.comment ? <p className="muted">{detail.comment}</p> : null}
+      <div className="column-list">
+        {detail.columns.map((column) => (
+          <div className="column-row" key={column.name}>
+            <div>
+              <span>{column.name}</span>
+              <small>
+                {column.dataType}
+                {column.nullable ? '' : ' / not null'}
+                {column.isPrimaryKey ? ' / PK' : ''}
+              </small>
+            </div>
+            {column.foreignKey ? (
+              <small>
+                FK {column.foreignKey.schema}.{column.foreignKey.table}.{column.foreignKey.column}
+              </small>
+            ) : null}
+            {column.comment ? <small>{column.comment}</small> : null}
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

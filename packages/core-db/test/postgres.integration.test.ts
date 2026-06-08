@@ -38,6 +38,29 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
       ]),
     );
 
+    const usersDetail = await driver.describeTable(config.id, 'public', 'users');
+    expect(usersDetail.ok).toBe(true);
+    if (!usersDetail.ok) return;
+    expect(usersDetail.data.primaryKey).toEqual(['id']);
+    expect(usersDetail.data.columns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'id', dataType: 'bigint', isPrimaryKey: true, nullable: false }),
+        expect.objectContaining({ name: 'email', dataType: 'text', isPrimaryKey: false, nullable: false }),
+      ]),
+    );
+
+    const ordersDetail = await driver.describeTable(config.id, 'public', 'orders');
+    expect(ordersDetail.ok).toBe(true);
+    if (!ordersDetail.ok) return;
+    expect(ordersDetail.data.columns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'user_id',
+          foreignKey: { schema: 'public', table: 'users', column: 'id' },
+        }),
+      ]),
+    );
+
     const queryResult = await driver.execute(
       {
         connectionId: config.id,
@@ -78,6 +101,11 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
     expect(afterDisconnect.ok).toBe(false);
     if (afterDisconnect.ok) return;
     expect(afterDisconnect.error.code).toBe('CONNECTION_FAILED');
+
+    const describeAfterDisconnect = await driver.describeTable(config.id, 'public', 'users');
+    expect(describeAfterDisconnect.ok).toBe(false);
+    if (describeAfterDisconnect.ok) return;
+    expect(describeAfterDisconnect.error.code).toBe('CONNECTION_FAILED');
   });
 
   it('rolls back failed write batches on writable connections', async () => {

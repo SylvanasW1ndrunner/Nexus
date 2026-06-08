@@ -17,6 +17,7 @@ Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契
 - `db:query-history`
 - `db:explain-query`
 - `db:list-tables`
+- `db:describe-table`
 - `auth:login`
 - `auth:logout`
 - `auth:status`
@@ -36,6 +37,7 @@ Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契
 - `disconnect(connectionId)`：关闭连接池资源。
 - `execute(request, connection)`：执行 SQL，并返回字段、行数据、行数、耗时和安全报告。
 - `listTables(connectionId)`：为 M1.5 Schema 树和后续 M2 RAG 提供表/视图列表。
+- `describeTable(connectionId, schema, table)`：返回表/视图列、类型、nullable、默认值、注释、主键和外键引用。
 
 `PostgresDriver` 使用 `pg`，连接参数由主进程从连接元数据和本地凭证组合生成；renderer 不直接接触驱动实例、连接池或密码。
 
@@ -96,7 +98,9 @@ Renderer 在创建连接后不会再收到已保存密码；删除连接时也�
 
 ## Schema 与 SQL builder
 
-`db:list-tables` 返回 `TableSummary[]`，包含 schema、表/视图名、类型和可选 comment。Renderer 可基于 `buildTablePreviewSql(schema, table, limit)` 生成预览 SQL；该 helper 会 quote PostgreSQL identifier，并将 limit 约束在 `1..1000`。
+`db:list-tables` 返回 `TableSummary[]`，包含 schema、表/视图名、类型和可选 comment。`db:describe-table` 返回 `TableDetail`，包含 `columns` 和 `primaryKey`，列级 metadata 包括列名、顺序、数据库原生类型、可空性、默认值、注释、是否主键和外键引用。
+
+Renderer 可基于 `buildTablePreviewSql(schema, table, limit)` 生成预览 SQL；该 helper 会 quote PostgreSQL identifier，并将 limit 约束在 `1..1000`。
 
 ## 结果导出
 

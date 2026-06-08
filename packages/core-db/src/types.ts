@@ -4,6 +4,7 @@ import type {
   QueryExecutionResult,
   QueryRequest,
   SavedConnection,
+  TableDetail,
 } from '@dbagent/shared';
 import type { Result } from '@dbagent/shared';
 
@@ -44,4 +45,5 @@ export interface IDatabaseDriver {
   disconnect(connectionId: ConnectionId): Promise<Result<void>>;
   execute(request: QueryRequest, connection: SavedConnection): Promise<Result<QueryExecutionResult>>;
   listTables(connectionId: ConnectionId): Promise<Result<TableSummary[]>>;
+  describeTable(connectionId: ConnectionId, schema: string, table: string): Promise<Result<TableDetail>>;
 }

@@ -21,3 +21,23 @@ export type TableSummary = {
   type: 'table' | 'view';
   comment?: string;
 };
+
+export type ColumnSummary = {
+  name: string;
+  ordinal: number;
+  dataType: string;
+  nullable: boolean;
+  defaultValue?: string;
+  comment?: string;
+  isPrimaryKey: boolean;
+  foreignKey?: {
+    schema: string;
+    table: string;
+    column: string;
+  };
+};
+
+export type TableDetail = TableSummary & {
+  columns: ColumnSummary[];
+  primaryKey: string[];
+};
