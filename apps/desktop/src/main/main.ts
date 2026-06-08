@@ -3,7 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ConnectionStore, PostgresDriver, QueryHistoryStore, analyzeSqlSafety } from '@dbagent/core-db';
+import { ConnectionStore, PostgresDriver, QueryHistoryStore } from '@dbagent/core-db';
 import { AuthService } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
@@ -15,11 +15,10 @@ import {
   type IpcChannel,
   type IpcRequestMap,
   type IpcResponseMap,
-  type QueryRequest,
   type WorkspaceState,
 } from '@dbagent/shared';
 import { validateConnectionInput } from './connection-validation.js';
-import { confirmationRequiredError } from './query-confirmation.js';
+import { createQueryWorkflow } from './query-workflow.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
@@ -32,6 +31,12 @@ const authService = new AuthService(join(dataDir, 'auth-session.json'));
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
 const postgres = new PostgresDriver();
+const executeQuery = createQueryWorkflow({
+  connections: connectionStore,
+  history: queryHistoryStore,
+  usage: usageTracker,
+  driver: postgres,
+});
 
 let mainWindow: InstanceType<typeof BrowserWindow> | undefined;
 
@@ -173,54 +178,6 @@ function registerIpcHandlers(): void {
     await writeJsonAtomic(workspaceStatePath, saved);
     return ok(saved);
   });
-}
-
-async function executeQuery(request: QueryRequest): Promise<IpcResponseMap['db:execute-query']> {
-  const connection = (await connectionStore.list()).find((item) => item.id === request.connectionId);
-  if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-
-  const safety = analyzeSqlSafety(request.sql, { readOnly: connection.readOnly });
-  if (safety.blocked) {
-    await queryHistoryStore.append({
-      connectionId: request.connectionId,
-      sql: request.sql,
-      status: 'blocked',
-      safety,
-      errorMessage: safety.reasons.join(' '),
-    });
-    return err({
-      code: 'READ_ONLY_VIOLATION',
-      message: 'This query is blocked by read-only mode.',
-      detail: safety.reasons.join(' '),
-    });
-  }
-
-  if (!request.confirmed) {
-    const confirmationError = confirmationRequiredError(safety);
-    if (confirmationError) return err(confirmationError);
-  }
-
-  const result = await postgres.execute(request, connection);
-  if (result.ok) {
-    await usageTracker.recordLocalQuery();
-    await queryHistoryStore.append({
-      connectionId: request.connectionId,
-      sql: request.sql,
-      status: 'success',
-      rowCount: result.data.rowCount,
-      elapsedMs: result.data.elapsedMs,
-      safety: result.data.safety,
-    });
-  } else {
-    await queryHistoryStore.append({
-      connectionId: request.connectionId,
-      sql: request.sql,
-      status: 'failed',
-      safety,
-      errorMessage: result.error.message,
-    });
-  }
-  return result;
 }
 
 function toDbConfig(input: ConnectionInput) {
