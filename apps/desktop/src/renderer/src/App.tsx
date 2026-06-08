@@ -11,7 +11,6 @@ import {
   type TableDetail,
   type TableSummary,
   type WorkspaceProject,
-  type WorkspaceRecentState,
   type WorkspaceFileEntry,
   type WorkspacePythonConfig,
   type WorkspaceTemplate,
@@ -103,11 +102,12 @@ export function App() {
   const [message, setMessage] = useState(t('assistantReady'));
   const [connectionDraft, setConnectionDraft] = useState<ConnectionInput>(defaultConnectionDraft);
   const [workspaceDraft, setWorkspaceDraft] = useState<WorkspaceDraft>(defaultWorkspaceDraft);
-  const [recentWorkspaces, setRecentWorkspaces] = useState<WorkspaceRecentState>({ workspaces: [] });
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceProject | undefined>();
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileEntry[]>([]);
   const [workspaceDialogMode, setWorkspaceDialogMode] = useState<WorkspaceDialogMode>('create');
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [saveSqlDialogOpen, setSaveSqlDialogOpen] = useState(false);
+  const [saveSqlNameDraft, setSaveSqlNameDraft] = useState('');
   const [createConnectionDuringWorkspace, setCreateConnectionDuringWorkspace] = useState(false);
   const [selectedDatabaseEngine, setSelectedDatabaseEngine] = useState<ConnectionInput['engine']>('postgres');
   const [workspaceSettingsDraft, setWorkspaceSettingsDraft] = useState({
@@ -189,11 +189,7 @@ export function App() {
   }
 
   async function refreshWorkspace() {
-    const [recentResponse, activeResponse] = await Promise.all([
-      window.dbagent.invoke(ipcChannels.workspace.listRecent, undefined),
-      window.dbagent.invoke(ipcChannels.workspace.loadActive, undefined),
-    ]);
-    if (recentResponse.ok) setRecentWorkspaces(recentResponse.data);
+    const activeResponse = await window.dbagent.invoke(ipcChannels.workspace.loadActive, undefined);
     if (activeResponse.ok) {
       setActiveWorkspace(activeResponse.data);
       if (activeResponse.data) {
@@ -500,7 +496,7 @@ export function App() {
     );
   }
 
-  async function saveCurrentSql() {
+  function requestSaveSql() {
     if (editorLanguage !== 'sql') {
       setMessage(language === 'zh-CN' ? '当前编辑器不是 SQL 文件。' : 'Current editor is not a SQL file.');
       return;
@@ -509,8 +505,18 @@ export function App() {
       setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
       return;
     }
-    const name = window.prompt(language === 'zh-CN' ? 'SQL 名称' : 'SQL name', activeWorkspace.name);
-    if (!name) return;
+    const defaultName = editorDocument.title.replace(/\.sql$/i, '').trim() || activeWorkspace.name;
+    setSaveSqlNameDraft(defaultName);
+    setSaveSqlDialogOpen(true);
+  }
+
+  async function confirmSaveSql() {
+    if (!activeWorkspace) return;
+    const name = saveSqlNameDraft.trim();
+    if (!name) {
+      setMessage(language === 'zh-CN' ? 'SQL 名称不能为空。' : 'SQL name is required.');
+      return;
+    }
     const response = await window.dbagent.invoke(ipcChannels.workspace.saveSqlFile, {
       rootPath: activeWorkspace.rootPath,
       name,
@@ -528,6 +534,7 @@ export function App() {
       language: 'sql',
       dirty: false,
     });
+    setSaveSqlDialogOpen(false);
     setMessage(
       language === 'zh-CN' ? `已保存 ${response.data.relativePath}` : `Saved ${response.data.relativePath}`,
     );
@@ -628,7 +635,7 @@ export function App() {
             setWorkspaceDialogMode('settings');
             setWorkspaceDialogOpen(true);
           }
-          if (action === 'save-sql') void saveCurrentSql();
+          if (action === 'save-sql') requestSaveSql();
           if (action === 'run-sql') void execute();
           if (action === 'explain-sql') void explain();
         }}
@@ -639,7 +646,6 @@ export function App() {
             <ProjectPanel
               activeWorkspace={activeWorkspace}
               files={workspaceFiles}
-              recent={recentWorkspaces}
               t={t}
               {...(editorDocument.relativePath ? { activeFilePath: editorDocument.relativePath } : {})}
               onCreateProject={() => {
@@ -648,29 +654,6 @@ export function App() {
               }}
               onOpenFile={(file) => void openWorkspaceFile(file)}
               onOpenProject={() => void chooseAndOpenWorkspace()}
-              onOpenSettings={() => {
-                setWorkspaceDialogMode('settings');
-                setWorkspaceDialogOpen(true);
-              }}
-              onOpen={(rootPath) => void openWorkspace(rootPath)}
-            />
-            <ConnectionPanel
-              activeConnectionId={activeConnectionId}
-              connections={connections}
-              draft={connectionDraft}
-              selectedTable={selectedTable}
-              setDraft={setConnectionDraft}
-              tables={tables}
-              t={t}
-              onConnect={() => void connectActive()}
-              onCreate={() => void createConnection()}
-              onDelete={() => void removeActiveConnection()}
-              onDescribe={(table) => void describeTable(table)}
-              onDisconnect={() => void disconnectActive()}
-              onPreview={previewTable}
-              onSelect={selectConnection}
-              onTest={() => void testConnection()}
-              onUpdate={() => void updateActiveConnection()}
             />
           </aside>
         </ErrorBoundary>
@@ -690,13 +673,31 @@ export function App() {
               onExplain={() => void explain()}
               onExportCsv={exportCsv}
               onExportJson={exportJson}
-              onSaveSql={() => void saveCurrentSql()}
+              onSaveSql={requestSaveSql}
             />
           </section>
         </ErrorBoundary>
 
         <ErrorBoundary label="Chat">
           <aside className="right-rail">
+            <ConnectionPanel
+              activeConnectionId={activeConnectionId}
+              connections={connections}
+              draft={connectionDraft}
+              selectedTable={selectedTable}
+              setDraft={setConnectionDraft}
+              tables={tables}
+              t={t}
+              onConnect={() => void connectActive()}
+              onCreate={() => void createConnection()}
+              onDelete={() => void removeActiveConnection()}
+              onDescribe={(table) => void describeTable(table)}
+              onDisconnect={() => void disconnectActive()}
+              onPreview={previewTable}
+              onSelect={selectConnection}
+              onTest={() => void testConnection()}
+              onUpdate={() => void updateActiveConnection()}
+            />
             <ChatPanel
               activeConnection={activeConnection}
               activeWorkspace={activeWorkspace}
@@ -747,6 +748,18 @@ export function App() {
           onClose={() => setWorkspaceDialogOpen(false)}
           onCreate={() => void createWorkspace()}
           onSaveSettings={() => void updateWorkspaceSettings()}
+        />
+      ) : null}
+      {saveSqlDialogOpen ? (
+        <SaveSqlDialog
+          activeConnection={activeConnection}
+          activeWorkspace={activeWorkspace}
+          document={editorDocument}
+          name={saveSqlNameDraft}
+          setName={setSaveSqlNameDraft}
+          t={t}
+          onClose={() => setSaveSqlDialogOpen(false)}
+          onSave={() => void confirmSaveSql()}
         />
       ) : null}
     </main>
@@ -814,13 +827,18 @@ function TopBar({
         <button className="quick-command primary-action" type="button" onClick={() => onAction('run-sql')}>
           {t('runSql')}
         </button>
-        <label className="language-switch">
-          <span>{t('language')}</span>
-          <select value={language} onChange={(event) => setLanguage(normalizeLanguage(event.target.value))}>
-            <option value="zh-CN">中文</option>
-            <option value="en">English</option>
-          </select>
-        </label>
+        <div className="language-switch" aria-label={t('language')} role="group">
+          <button
+            className={language === 'zh-CN' ? 'active' : ''}
+            type="button"
+            onClick={() => setLanguage('zh-CN')}
+          >
+            中
+          </button>
+          <button className={language === 'en' ? 'active' : ''} type="button" onClick={() => setLanguage('en')}>
+            EN
+          </button>
+        </div>
       </div>
     </header>
   );
@@ -889,6 +907,74 @@ function MenuButton({
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+function SaveSqlDialog({
+  activeConnection,
+  activeWorkspace,
+  document,
+  name,
+  setName,
+  t,
+  onClose,
+  onSave,
+}: {
+  activeConnection: SavedConnection | undefined;
+  activeWorkspace: WorkspaceProject | undefined;
+  document: EditorDocument;
+  name: string;
+  setName: (value: string) => void;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="save-sql-panel" role="dialog" aria-modal="true" aria-label={t('saveSql')}>
+        <div className="modal-heading">
+          <div>
+            <strong>{t('saveSql')}</strong>
+            <small>{t('saveSqlHint')}</small>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+        </div>
+        <div className="save-sql-grid">
+          <label>
+            <span>{t('sqlName')}</span>
+            <input autoFocus value={name} onChange={(event) => setName(event.target.value)} />
+          </label>
+          <div className="save-sql-summary">
+            <div className="context-row">
+              <span>{t('project')}</span>
+              <small title={activeWorkspace?.rootPath}>{activeWorkspace?.name ?? t('noProject')}</small>
+            </div>
+            <div className="context-row">
+              <span>{t('sqlLibrary')}</span>
+              <small>{activeWorkspace?.assetPaths.sqlLibrary ?? '-'}</small>
+            </div>
+            <div className="context-row">
+              <span>{t('connections')}</span>
+              <small>{activeConnection?.name ?? t('noConnection')}</small>
+            </div>
+            <div className="context-row">
+              <span>{t('currentFile')}</span>
+              <small title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</small>
+            </div>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+          <button className="primary-action" type="button" onClick={onSave}>
+            {t('saveSql')}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -1204,55 +1290,29 @@ function ProjectPanel({
   activeWorkspace,
   activeFilePath,
   files,
-  recent,
   t,
   onCreateProject,
   onOpenFile,
   onOpenProject,
-  onOpenSettings,
-  onOpen,
 }: {
   activeWorkspace: WorkspaceProject | undefined;
   activeFilePath?: string;
   files: WorkspaceFileEntry[];
-  recent: WorkspaceRecentState;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   onCreateProject: () => void;
   onOpenFile: (file: WorkspaceFileEntry) => void;
   onOpenProject: () => void;
-  onOpenSettings: () => void;
-  onOpen: (rootPath: string) => void;
 }) {
   return (
-    <section className="panel project-panel">
-      <div className="panel-heading">
-        <span>{t('project')}</span>
-        <small>{activeWorkspace?.name ?? t('noProject')}</small>
+    <section className="project-panel">
+      <div className="explorer-heading">
+        <span>{t('workspaceFiles')}</span>
+        <small title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</small>
       </div>
       {activeWorkspace ? (
-        <div className="active-project">
-          <div className="project-card">
-            <div>
-              <strong>{activeWorkspace.name}</strong>
-              <span>{activeWorkspace.rootPath}</span>
-            </div>
-            <button className="secondary compact-button" type="button" onClick={onOpenSettings}>
-              {t('projectSettings')}
-            </button>
-          </div>
-          <div className="project-summary-grid">
-            <ProjectSummaryItem label={t('sqlLibrary')} value={activeWorkspace.assetPaths.sqlLibrary} />
-            <ProjectSummaryItem label={t('scriptsPath')} value={activeWorkspace.assetPaths.scripts} />
-            <ProjectSummaryItem label={t('outputsPath')} value={activeWorkspace.assetPaths.outputs} />
-            <ProjectSummaryItem label={t('requirementsPath')} value={activeWorkspace.python.requirementsPath} />
-          </div>
-          <div className="project-runtime-row">
-            <span>
-              {t('pythonEnvironment')}: {formatPythonMode(activeWorkspace.python.mode, t)}
-            </span>
-            <span>
-              {t('workspaceConnections')}: {activeWorkspace.connections.length}
-            </span>
+        <div className="explorer-tree" aria-label={t('workspaceFiles')}>
+          <div className="explorer-root" title={activeWorkspace.rootPath}>
+            {activeWorkspace.rootPath}
           </div>
           <div className="project-files">
             {files.length > 0 ? (
@@ -1266,7 +1326,6 @@ function ProjectPanel({
               ))
             ) : (
               <div className="workspace-scaffold">
-                <span>{t('standardFolders')}</span>
                 <FileNode label=".dbagent/workspace.json" />
                 <FileNode label="sql/" />
                 <FileNode label="scripts/" />
@@ -1279,7 +1338,6 @@ function ProjectPanel({
       ) : (
         <div className="project-empty">
           <strong>{t('projectEmptyTitle')}</strong>
-          <span>{t('projectEmptyDescription')}</span>
           <div className="project-empty-actions">
             <button className="primary-action" type="button" onClick={onCreateProject}>
               {t('createProject')}
@@ -1290,39 +1348,8 @@ function ProjectPanel({
           </div>
         </div>
       )}
-      <div className="recent-list">
-        <div className="mini-section-title">{t('recentProjects')}</div>
-        {recent.workspaces.length > 0 ? (
-          recent.workspaces.map((workspace) => (
-            <button className="recent-workspace" key={workspace.id} type="button" onClick={() => onOpen(workspace.rootPath)}>
-              <span>{workspace.name}</span>
-              <small>{workspace.rootPath}</small>
-            </button>
-          ))
-        ) : (
-          <div className="empty-inline">{t('noRecentProjects')}</div>
-        )}
-      </div>
     </section>
   );
-}
-
-function ProjectSummaryItem({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="project-summary-item">
-      <span>{label}</span>
-      <small title={value}>{value}</small>
-    </div>
-  );
-}
-
-function formatPythonMode(
-  mode: WorkspacePythonConfig['mode'],
-  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string,
-): string {
-  if (mode === 'venv') return t('pythonModeVenv');
-  if (mode === 'conda') return t('pythonModeConda');
-  return t('pythonModeSystem');
 }
 
 function FileNode({
