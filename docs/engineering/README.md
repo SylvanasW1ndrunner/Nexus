@@ -7,3 +7,4 @@
 - [分模块开发文档](./modules/README.md)
 - [测试策略](./test-strategy.md)
 - [打包策略](./packaging.md)
+- [M0-M1.5 阶段验收记录](./m0-m15-acceptance.md)
