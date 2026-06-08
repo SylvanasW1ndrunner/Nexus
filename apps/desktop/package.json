@@ -21,17 +21,19 @@
     "@dbagent/core-llm": "workspace:*",
     "@dbagent/core-usage": "workspace:*",
     "@dbagent/shared": "workspace:*",
+    "@monaco-editor/react": "^4.7.0",
+    "monaco-editor": "^0.55.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.4",
     "@electron/asar": "^3.4.1",
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "vite": "^6.0.5",
     "vitest": "^2.1.8"
   },
@@ -41,7 +43,10 @@
     "asar": true,
     "afterPack": "../../scripts/prune-asar.cjs",
     "compression": "maximum",
-    "electronLanguages": ["en-US", "zh-CN"],
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
+    ],
     "files": [
       "dist/**",
       "package.json",

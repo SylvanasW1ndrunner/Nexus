@@ -18,15 +18,19 @@
 - 最近项目写入 Electron `userData/data/workspaces.json`，打开项目时自动置顶。
 - 项目文件树展示 `sql/`、`queries/`、`scripts/`、`docs/`、`outputs/`。
 - SQL 编辑器支持将当前 SQL 保存到 `sql/analytics/`，并写入 `@name`、`@connection`、`@tags`、`@updated` 元信息。
+- 点击项目文件树中的 SQL 文件，可回读到中间编辑器继续编辑或运行。
+- 顶部 `File` 下拉菜单支持新建项目弹窗和打开项目；新建项目时可选择同时建立数据库连接，也可以先跳过。
+- 顶部 `Settings` 下拉菜单支持项目配置弹窗，可修改 SQL 库、脚本、文档和输出目录。
+- 中间编辑器升级为 Monaco Editor，支持 SQL 和 Python 语法高亮。
 - Renderer 改为左侧项目/连接/Schema、中间 SQL 编辑器/结果、右侧对话/历史的三栏工作台。
-- 顶部加入文件、运行、设置和语言切换入口。
+- 顶部加入文件、运行、设置下拉菜单和语言切换入口。
 - 新增中英文 UI 字典，默认中文，支持切换英文。
 
 ## 测试
 
 新增和更新测试：
 
-- `workspace-project-store.test.ts`：创建真实项目目录、写入配置、生成 starter 文件、打开已有项目、最近项目置顶、拒绝普通目录、保存可复用 SQL。
+- `workspace-project-store.test.ts`：创建真实项目目录、写入配置、生成 starter 文件、打开已有项目、最近项目置顶、拒绝普通目录、保存/读取可复用 SQL、拒绝非受管路径读取。
 - `i18n.test.ts`：默认中文、英文切换、未知语言回退。
 - `ipc-contract.test.ts`：纳入 Workspace IPC 快照。
 

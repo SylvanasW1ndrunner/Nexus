@@ -1,4 +1,5 @@
 import { Component, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from 'react';
+import { Editor } from '@monaco-editor/react';
 import {
   ipcChannels,
   queryResultToCsv,
@@ -12,6 +13,7 @@ import {
   type WorkspaceProject,
   type WorkspaceRecentState,
   type WorkspaceFileEntry,
+  type WorkspacePythonConfig,
   type WorkspaceTemplate,
 } from '@dbagent/shared';
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
@@ -39,12 +41,37 @@ type ChatMessage = {
   content: string;
 };
 
+type TopBarAction = 'new-project' | 'open-project' | 'save-sql' | 'run-sql' | 'explain-sql' | 'project-settings';
+
+type EditorLanguage = 'sql' | 'python' | 'markdown' | 'plaintext';
+
+type WorkspaceDialogMode = 'create' | 'settings';
+
+type DatabaseEngineOption = {
+  id: ConnectionInput['engine'];
+  label: string;
+  description: string;
+};
+
 const defaultWorkspaceDraft: WorkspaceDraft = {
   name: '电商分析项目',
   rootPath: '',
   description: '',
   template: 'standard',
 };
+
+const defaultWorkspacePythonDraft: WorkspacePythonConfig = {
+  mode: 'system',
+  requirementsPath: 'scripts/requirements.txt',
+};
+
+const databaseEngineOptions: DatabaseEngineOption[] = [
+  {
+    id: 'postgres',
+    label: 'PostgreSQL',
+    description: 'M0-M1.5 默认支持',
+  },
+];
 
 export function App() {
   const [language, setLanguage] = useState<AppLanguage>(() =>
@@ -57,6 +84,7 @@ export function App() {
   const [tables, setTables] = useState<TableSummary[]>([]);
   const [selectedTable, setSelectedTable] = useState<TableDetail | undefined>();
   const [sql, setSql] = useState(starterSql);
+  const [editorLanguage, setEditorLanguage] = useState<EditorLanguage>('sql');
   const [result, setResult] = useState<QueryExecutionResult | undefined>();
   const [message, setMessage] = useState(t('assistantReady'));
   const [connectionDraft, setConnectionDraft] = useState<ConnectionInput>(defaultConnectionDraft);
@@ -64,6 +92,17 @@ export function App() {
   const [recentWorkspaces, setRecentWorkspaces] = useState<WorkspaceRecentState>({ workspaces: [] });
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceProject | undefined>();
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileEntry[]>([]);
+  const [workspaceDialogMode, setWorkspaceDialogMode] = useState<WorkspaceDialogMode>('create');
+  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [createConnectionDuringWorkspace, setCreateConnectionDuringWorkspace] = useState(false);
+  const [selectedDatabaseEngine, setSelectedDatabaseEngine] = useState<ConnectionInput['engine']>('postgres');
+  const [workspaceSettingsDraft, setWorkspaceSettingsDraft] = useState({
+    sqlLibrary: 'sql/analytics',
+    scripts: 'scripts',
+    docs: 'docs',
+    outputs: 'outputs',
+  });
+  const [workspacePythonDraft, setWorkspacePythonDraft] = useState<WorkspacePythonConfig>(defaultWorkspacePythonDraft);
   const [chatDraft, setChatDraft] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
@@ -125,7 +164,11 @@ export function App() {
     if (recentResponse.ok) setRecentWorkspaces(recentResponse.data);
     if (activeResponse.ok) {
       setActiveWorkspace(activeResponse.data);
-      if (activeResponse.data) await refreshWorkspaceFiles(activeResponse.data.rootPath);
+      if (activeResponse.data) {
+        setWorkspaceSettingsDraft(activeResponse.data.assetPaths);
+        setWorkspacePythonDraft(activeResponse.data.python);
+        await refreshWorkspaceFiles(activeResponse.data.rootPath);
+      }
     }
   }
 
@@ -151,17 +194,48 @@ export function App() {
     }
   }
 
+  async function chooseAndOpenWorkspace() {
+    const response = await window.dbagent.invoke(ipcChannels.workspace.chooseDirectory, {
+      title: t('openProject'),
+      buttonLabel: t('openProject'),
+    });
+    if (response.ok && response.data.path) {
+      await openWorkspace(response.data.path);
+    } else if (!response.ok) {
+      setMessage(formatAppError(response.error));
+    }
+  }
+
   async function createWorkspace() {
     setMessage(language === 'zh-CN' ? '正在创建项目...' : 'Creating project...');
-    const response = await window.dbagent.invoke(ipcChannels.workspace.create, workspaceDraft);
+    const response = await window.dbagent.invoke(ipcChannels.workspace.create, {
+      ...workspaceDraft,
+      python: workspacePythonDraft,
+    });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
       return;
     }
     setActiveWorkspace(response.data);
+    setWorkspaceSettingsDraft(response.data.assetPaths);
+    setWorkspacePythonDraft(response.data.python);
     await refreshWorkspaceFiles(response.data.rootPath);
     setWorkspaceDraft({ ...defaultWorkspaceDraft, rootPath: response.data.rootPath });
     setMessage(language === 'zh-CN' ? `已打开项目 ${response.data.name}` : `Opened ${response.data.name}`);
+    if (createConnectionDuringWorkspace) {
+      const connectionResponse = await window.dbagent.invoke(ipcChannels.connection.create, {
+        ...connectionDraft,
+        engine: selectedDatabaseEngine,
+      });
+      if (connectionResponse.ok) {
+        setActiveConnectionId(connectionResponse.data.id);
+        setConnectionDraft(connectionToDraft(connectionResponse.data));
+        await refreshConnections();
+      } else {
+        setMessage(formatAppError(connectionResponse.error));
+      }
+    }
+    setWorkspaceDialogOpen(false);
     await refreshWorkspace();
   }
 
@@ -173,6 +247,8 @@ export function App() {
       return;
     }
     setActiveWorkspace(response.data);
+    setWorkspaceSettingsDraft(response.data.assetPaths);
+    setWorkspacePythonDraft(response.data.python);
     await refreshWorkspaceFiles(response.data.rootPath);
     setMessage(language === 'zh-CN' ? `已打开项目 ${response.data.name}` : `Opened ${response.data.name}`);
     await refreshWorkspace();
@@ -288,6 +364,10 @@ export function App() {
   }
 
   async function execute() {
+    if (editorLanguage !== 'sql') {
+      setMessage(language === 'zh-CN' ? '当前编辑器不是 SQL 文件。' : 'Current editor is not a SQL file.');
+      return;
+    }
     if (!activeConnectionId) {
       setMessage(language === 'zh-CN' ? '请先连接数据库。' : 'Connect a database first.');
       return;
@@ -296,6 +376,10 @@ export function App() {
   }
 
   async function explain() {
+    if (editorLanguage !== 'sql') {
+      setMessage(language === 'zh-CN' ? '当前编辑器不是 SQL 文件。' : 'Current editor is not a SQL file.');
+      return;
+    }
     if (!activeConnectionId) {
       setMessage(language === 'zh-CN' ? '请先连接数据库。' : 'Connect a database first.');
       return;
@@ -381,6 +465,10 @@ export function App() {
   }
 
   async function saveCurrentSql() {
+    if (editorLanguage !== 'sql') {
+      setMessage(language === 'zh-CN' ? '当前编辑器不是 SQL 文件。' : 'Current editor is not a SQL file.');
+      return;
+    }
     if (!activeWorkspace) {
       setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
       return;
@@ -403,6 +491,58 @@ export function App() {
     );
   }
 
+  async function updateWorkspaceSettings() {
+    if (!activeWorkspace) return;
+    const response = await window.dbagent.invoke(ipcChannels.workspace.updateSettings, {
+      rootPath: activeWorkspace.rootPath,
+      assetPaths: workspaceSettingsDraft,
+      python: workspacePythonDraft,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setActiveWorkspace(response.data);
+    setWorkspaceSettingsDraft(response.data.assetPaths);
+    setWorkspacePythonDraft(response.data.python);
+    await refreshWorkspaceFiles(response.data.rootPath);
+    setWorkspaceDialogOpen(false);
+    setMessage(language === 'zh-CN' ? '项目配置已保存。' : 'Project settings saved.');
+  }
+
+  async function openWorkspaceFile(file: WorkspaceFileEntry) {
+    if (!activeWorkspace || file.type !== 'file') return;
+    const response = await window.dbagent.invoke(ipcChannels.workspace.readFile, {
+      rootPath: activeWorkspace.rootPath,
+      relativePath: file.relativePath,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    if (response.data.relativePath.endsWith('.sql')) {
+      setSql(stripSqlMetadata(response.data.content));
+      setEditorLanguage('sql');
+      setMessage(language === 'zh-CN' ? `已打开 ${response.data.relativePath}` : `Opened ${response.data.relativePath}`);
+      return;
+    }
+    if (response.data.relativePath.endsWith('.py')) {
+      setSql(response.data.content);
+      setEditorLanguage('python');
+      setMessage(language === 'zh-CN' ? `已打开 ${response.data.relativePath}` : `Opened ${response.data.relativePath}`);
+      return;
+    }
+    setChatMessages((items) => [
+      ...items,
+      {
+        id: `${Date.now()}-file`,
+        role: 'assistant',
+        content: `${response.data.relativePath}\n\n${response.data.content.slice(0, 1200)}`,
+      },
+    ]);
+    setMessage(language === 'zh-CN' ? `已读取 ${response.data.relativePath}` : `Read ${response.data.relativePath}`);
+  }
+
   function sendChatMessage() {
     const content = chatDraft.trim();
     if (!content) return;
@@ -423,19 +563,34 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <TopBar language={language} setLanguage={setLanguage} t={t} />
+      <TopBar
+        language={language}
+        setLanguage={setLanguage}
+        t={t}
+        onAction={(action) => {
+          if (action === 'new-project') {
+            setWorkspaceDialogMode('create');
+            setWorkspaceDialogOpen(true);
+          }
+          if (action === 'open-project') void chooseAndOpenWorkspace();
+          if (action === 'project-settings') {
+            setWorkspaceDialogMode('settings');
+            setWorkspaceDialogOpen(true);
+          }
+          if (action === 'save-sql') void saveCurrentSql();
+          if (action === 'run-sql') void execute();
+          if (action === 'explain-sql') void explain();
+        }}
+      />
       <section className="workbench">
         <ErrorBoundary label="Project">
           <aside className="left-rail">
             <ProjectPanel
               activeWorkspace={activeWorkspace}
-              draft={workspaceDraft}
               files={workspaceFiles}
               recent={recentWorkspaces}
-              setDraft={setWorkspaceDraft}
               t={t}
-              onChooseDirectory={() => void chooseWorkspaceDirectory()}
-              onCreate={() => void createWorkspace()}
+              onOpenFile={(file) => void openWorkspaceFile(file)}
               onOpen={(rootPath) => void openWorkspace(rootPath)}
             />
             <ConnectionPanel
@@ -463,6 +618,7 @@ export function App() {
           <section className="center-stage">
             <EditorPane
               activeConnection={activeConnection}
+              editorLanguage={editorLanguage}
               message={message}
               result={result}
               sql={sql}
@@ -491,16 +647,41 @@ export function App() {
           </aside>
         </ErrorBoundary>
       </section>
+      {workspaceDialogOpen ? (
+        <WorkspaceDialog
+          activeWorkspace={activeWorkspace}
+          connectionDraft={connectionDraft}
+          createConnection={createConnectionDuringWorkspace}
+          mode={workspaceDialogMode}
+          selectedDatabaseEngine={selectedDatabaseEngine}
+          settingsDraft={workspaceSettingsDraft}
+          setConnectionDraft={setConnectionDraft}
+          setCreateConnection={setCreateConnectionDuringWorkspace}
+          setSelectedDatabaseEngine={setSelectedDatabaseEngine}
+          setSettingsDraft={setWorkspaceSettingsDraft}
+          setWorkspaceDraft={setWorkspaceDraft}
+          setPythonDraft={setWorkspacePythonDraft}
+          t={t}
+          workspaceDraft={workspaceDraft}
+          pythonDraft={workspacePythonDraft}
+          onChooseDirectory={() => void chooseWorkspaceDirectory()}
+          onClose={() => setWorkspaceDialogOpen(false)}
+          onCreate={() => void createWorkspace()}
+          onSaveSettings={() => void updateWorkspaceSettings()}
+        />
+      ) : null}
     </main>
   );
 }
 
 function TopBar({
   language,
+  onAction,
   setLanguage,
   t,
 }: {
   language: AppLanguage;
+  onAction: (action: TopBarAction) => void;
   setLanguage: (language: AppLanguage) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
 }) {
@@ -511,15 +692,28 @@ function TopBar({
         <span>{t('appSubtitle')}</span>
       </div>
       <nav className="menu-strip" aria-label="Application menu">
-        <button className="menu-button" type="button">
-          {t('file')}
-        </button>
-        <button className="menu-button" type="button">
-          {t('run')}
-        </button>
-        <button className="menu-button" type="button">
-          {t('settings')}
-        </button>
+        <MenuButton
+          label={t('file')}
+          items={[
+            { label: t('createProject'), onClick: () => onAction('new-project') },
+            { label: t('openProject'), onClick: () => onAction('open-project') },
+            { label: t('saveSql'), onClick: () => onAction('save-sql') },
+          ]}
+        />
+        <MenuButton
+          label={t('run')}
+          items={[
+            { label: t('runCurrentSql'), onClick: () => onAction('run-sql') },
+            { label: t('explainQuery'), onClick: () => onAction('explain-sql') },
+          ]}
+        />
+        <MenuButton
+          label={t('settings')}
+          items={[
+            { label: t('projectSettings'), onClick: () => onAction('project-settings') },
+            { label: t('languageSettings'), onClick: () => undefined },
+          ]}
+        />
       </nav>
       <label className="language-switch">
         <span>{t('language')}</span>
@@ -532,25 +726,320 @@ function TopBar({
   );
 }
 
+function MenuButton({
+  items,
+  label,
+}: {
+  items: Array<{ label: string; onClick: () => void }>;
+  label: string;
+}) {
+  return (
+    <div className="menu-group">
+      <button className="menu-button" type="button">
+        {label}
+      </button>
+      <div className="menu-popover">
+        {items.map((item) => (
+          <button className="menu-item" key={item.label} type="button" onClick={item.onClick}>
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceDialog({
+  activeWorkspace,
+  connectionDraft,
+  createConnection,
+  mode,
+  selectedDatabaseEngine,
+  settingsDraft,
+  setConnectionDraft,
+  setCreateConnection,
+  setSelectedDatabaseEngine,
+  setSettingsDraft,
+  setWorkspaceDraft,
+  setPythonDraft,
+  t,
+  workspaceDraft,
+  pythonDraft,
+  onChooseDirectory,
+  onClose,
+  onCreate,
+  onSaveSettings,
+}: {
+  activeWorkspace: WorkspaceProject | undefined;
+  connectionDraft: ConnectionInput;
+  createConnection: boolean;
+  mode: WorkspaceDialogMode;
+  selectedDatabaseEngine: ConnectionInput['engine'];
+  settingsDraft: WorkspaceProject['assetPaths'];
+  setConnectionDraft: (draft: ConnectionInput) => void;
+  setCreateConnection: (enabled: boolean) => void;
+  setSelectedDatabaseEngine: (engine: ConnectionInput['engine']) => void;
+  setSettingsDraft: (draft: WorkspaceProject['assetPaths']) => void;
+  setWorkspaceDraft: (draft: WorkspaceDraft) => void;
+  setPythonDraft: (draft: WorkspacePythonConfig) => void;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  workspaceDraft: WorkspaceDraft;
+  pythonDraft: WorkspacePythonConfig;
+  onChooseDirectory: () => void;
+  onClose: () => void;
+  onCreate: () => void;
+  onSaveSettings: () => void;
+}) {
+  const isCreate = mode === 'create';
+  const isEnglish = t('project') === 'Project';
+  const databaseTypeLabel = isEnglish ? 'Database Type' : '数据库类型';
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel" role="dialog" aria-modal="true" aria-label={isCreate ? t('createProject') : t('projectSettings')}>
+        <div className="modal-heading">
+          <div>
+            <strong>{isCreate ? t('createProject') : t('projectSettings')}</strong>
+            <small>{activeWorkspace?.rootPath ?? t('noProject')}</small>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+        </div>
+        {isCreate ? (
+          <>
+            <div className="project-wizard">
+              <aside className="database-selector" aria-label={databaseTypeLabel}>
+                <span>{databaseTypeLabel}</span>
+                {databaseEngineOptions.map((engine) => (
+                  <button
+                    className={selectedDatabaseEngine === engine.id ? 'database-option active' : 'database-option'}
+                    key={engine.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedDatabaseEngine(engine.id);
+                      setConnectionDraft({ ...connectionDraft, engine: engine.id });
+                    }}
+                  >
+                    <strong>{engine.label}</strong>
+                    <small>{engine.description}</small>
+                  </button>
+                ))}
+              </aside>
+              <div className="wizard-main">
+                <div className="modal-grid">
+                  <input
+                    aria-label={t('projectName')}
+                    placeholder={t('projectName')}
+                    value={workspaceDraft.name}
+                    onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, name: event.target.value })}
+                  />
+                  <div className="path-row">
+                    <input
+                      aria-label={t('projectPath')}
+                      placeholder={t('projectPath')}
+                      value={workspaceDraft.rootPath}
+                      onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, rootPath: event.target.value })}
+                    />
+                    <button className="icon-button" type="button" title={t('chooseFolder')} onClick={onChooseDirectory}>
+                      ...
+                    </button>
+                  </div>
+                  <input
+                    aria-label={t('description')}
+                    placeholder={t('description')}
+                    value={workspaceDraft.description}
+                    onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, description: event.target.value })}
+                  />
+                  <div className="segmented-control">
+                    <button
+                      className={workspaceDraft.template === 'standard' ? 'active' : ''}
+                      type="button"
+                      onClick={() => setWorkspaceDraft({ ...workspaceDraft, template: 'standard' })}
+                    >
+                      {t('standard')}
+                    </button>
+                    <button
+                      className={workspaceDraft.template === 'minimal' ? 'active' : ''}
+                      type="button"
+                      onClick={() => setWorkspaceDraft({ ...workspaceDraft, template: 'minimal' })}
+                    >
+                      {t('minimal')}
+                    </button>
+                  </div>
+                  <label className="switch-row">
+                    <input
+                      checked={createConnection}
+                      type="checkbox"
+                      onChange={(event) => setCreateConnection(event.target.checked)}
+                    />
+                    <span>{createConnection ? t('createConnectionNow') : t('skipConnection')}</span>
+                  </label>
+                </div>
+                {createConnection ? (
+                  <div className="modal-grid two">
+                    <input value={connectionDraft.name} onChange={(event) => setConnectionDraft({ ...connectionDraft, name: event.target.value })} />
+                    <input value={connectionDraft.host} onChange={(event) => setConnectionDraft({ ...connectionDraft, host: event.target.value })} />
+                    <input value={connectionDraft.database} onChange={(event) => setConnectionDraft({ ...connectionDraft, database: event.target.value })} />
+                    <input value={connectionDraft.username} onChange={(event) => setConnectionDraft({ ...connectionDraft, username: event.target.value })} />
+                    <input
+                      type="password"
+                      value={connectionDraft.password}
+                      onChange={(event) => setConnectionDraft({ ...connectionDraft, password: event.target.value })}
+                    />
+                    <input
+                      min={1}
+                      type="number"
+                      value={connectionDraft.port}
+                      onChange={(event) => setConnectionDraft({ ...connectionDraft, port: Number(event.target.value) })}
+                    />
+                  </div>
+                ) : null}
+                <PythonConfigForm pythonDraft={pythonDraft} setPythonDraft={setPythonDraft} t={t} />
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button className="primary-action" type="button" onClick={onCreate}>
+                {t('createProject')}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="modal-grid two">
+              <label>
+                <span>{t('sqlLibrary')}</span>
+                <input
+                  value={settingsDraft.sqlLibrary}
+                  onChange={(event) => setSettingsDraft({ ...settingsDraft, sqlLibrary: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>{t('scriptsPath')}</span>
+                <input
+                  value={settingsDraft.scripts}
+                  onChange={(event) => setSettingsDraft({ ...settingsDraft, scripts: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>{t('docsPath')}</span>
+                <input value={settingsDraft.docs} onChange={(event) => setSettingsDraft({ ...settingsDraft, docs: event.target.value })} />
+              </label>
+              <label>
+                <span>{t('outputsPath')}</span>
+                <input
+                  value={settingsDraft.outputs}
+                  onChange={(event) => setSettingsDraft({ ...settingsDraft, outputs: event.target.value })}
+                />
+              </label>
+            </div>
+            <PythonConfigForm pythonDraft={pythonDraft} setPythonDraft={setPythonDraft} t={t} />
+            <div className="modal-actions">
+              <button className="primary-action" disabled={!activeWorkspace} type="button" onClick={onSaveSettings}>
+                {t('saveSettings')}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function PythonConfigForm({
+  pythonDraft,
+  setPythonDraft,
+  t,
+}: {
+  pythonDraft: WorkspacePythonConfig;
+  setPythonDraft: (draft: WorkspacePythonConfig) => void;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+}) {
+  const isEnglish = t('project') === 'Project';
+  const labels = {
+    pythonEnvironment: isEnglish ? 'Python Environment' : 'Python 环境',
+    pythonEnvironmentHint: isEnglish
+      ? 'Used for local scripts, data processing, and analysis jobs'
+      : '用于本地脚本、数据处理和分析任务',
+    pythonMode: isEnglish ? 'Environment Mode' : '环境模式',
+    pythonModeSystem: isEnglish ? 'System Python' : '系统 Python',
+    pythonModeVenv: isEnglish ? 'Virtualenv venv' : '虚拟环境 venv',
+    pythonModeConda: isEnglish ? 'Conda Environment' : 'Conda 环境',
+    pythonPath: isEnglish ? 'Python Path' : 'Python 路径',
+    pythonPathPlaceholder: isEnglish ? 'Optional, e.g. python or conda env python' : '可选，例如 python 或 conda 环境 python',
+    venvPath: isEnglish ? 'venv Path' : 'venv 目录',
+    requirementsPath: isEnglish ? 'requirements Path' : 'requirements 路径',
+  };
+  return (
+    <section className="subform-section">
+      <div className="subform-heading">
+        <strong>{labels.pythonEnvironment}</strong>
+        <small>{labels.pythonEnvironmentHint}</small>
+      </div>
+      <div className="modal-grid two">
+        <label>
+          <span>{labels.pythonMode}</span>
+          <select
+            value={pythonDraft.mode}
+            onChange={(event) =>
+              setPythonDraft({ ...pythonDraft, mode: event.target.value as WorkspacePythonConfig['mode'] })
+            }
+          >
+            <option value="system">{labels.pythonModeSystem}</option>
+            <option value="venv">{labels.pythonModeVenv}</option>
+            <option value="conda">{labels.pythonModeConda}</option>
+          </select>
+        </label>
+        <label>
+          <span>{labels.requirementsPath}</span>
+          <input
+            value={pythonDraft.requirementsPath}
+            onChange={(event) => setPythonDraft({ ...pythonDraft, requirementsPath: event.target.value })}
+          />
+        </label>
+        <label>
+          <span>{labels.pythonPath}</span>
+          <input
+            placeholder={labels.pythonPathPlaceholder}
+            value={pythonDraft.pythonPath ?? ''}
+            onChange={(event) => {
+              const next = { ...pythonDraft };
+              if (event.target.value.trim()) next.pythonPath = event.target.value;
+              else delete next.pythonPath;
+              setPythonDraft(next);
+            }}
+          />
+        </label>
+        <label>
+          <span>{labels.venvPath}</span>
+          <input
+            placeholder=".venv"
+            value={pythonDraft.venvPath ?? ''}
+            onChange={(event) => {
+              const next = { ...pythonDraft };
+              if (event.target.value.trim()) next.venvPath = event.target.value;
+              else delete next.venvPath;
+              setPythonDraft(next);
+            }}
+          />
+        </label>
+      </div>
+    </section>
+  );
+}
+
 function ProjectPanel({
   activeWorkspace,
-  draft,
   files,
   recent,
-  setDraft,
   t,
-  onChooseDirectory,
-  onCreate,
+  onOpenFile,
   onOpen,
 }: {
   activeWorkspace: WorkspaceProject | undefined;
-  draft: WorkspaceDraft;
   files: WorkspaceFileEntry[];
   recent: WorkspaceRecentState;
-  setDraft: (draft: WorkspaceDraft) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
-  onChooseDirectory: () => void;
-  onCreate: () => void;
+  onOpenFile: (file: WorkspaceFileEntry) => void;
   onOpen: (rootPath: string) => void;
 }) {
   return (
@@ -565,7 +1054,7 @@ function ProjectPanel({
           <span>{activeWorkspace.rootPath}</span>
           <div className="project-files">
             {files.length > 0 ? (
-              files.map((file) => <FileNode entry={file} key={file.relativePath} />)
+              files.map((file) => <FileNode entry={file} key={file.relativePath} onOpenFile={onOpenFile} />)
             ) : (
               <>
                 <FileNode label=".dbagent/workspace.json" />
@@ -578,50 +1067,6 @@ function ProjectPanel({
           </div>
         </div>
       ) : null}
-      <div className="workspace-form">
-        <input
-          aria-label={t('projectName')}
-          placeholder={t('projectName')}
-          value={draft.name}
-          onChange={(event) => setDraft({ ...draft, name: event.target.value })}
-        />
-        <div className="path-row">
-          <input
-            aria-label={t('projectPath')}
-            placeholder={t('projectPath')}
-            value={draft.rootPath}
-            onChange={(event) => setDraft({ ...draft, rootPath: event.target.value })}
-          />
-          <button className="icon-button" type="button" title={t('chooseFolder')} onClick={onChooseDirectory}>
-            ...
-          </button>
-        </div>
-        <input
-          aria-label={t('description')}
-          placeholder={t('description')}
-          value={draft.description}
-          onChange={(event) => setDraft({ ...draft, description: event.target.value })}
-        />
-        <div className="segmented-control">
-          <button
-            className={draft.template === 'standard' ? 'active' : ''}
-            type="button"
-            onClick={() => setDraft({ ...draft, template: 'standard' })}
-          >
-            {t('standard')}
-          </button>
-          <button
-            className={draft.template === 'minimal' ? 'active' : ''}
-            type="button"
-            onClick={() => setDraft({ ...draft, template: 'minimal' })}
-          >
-            {t('minimal')}
-          </button>
-        </div>
-        <button className="primary-action" type="button" onClick={onCreate}>
-          {t('createProject')}
-        </button>
-      </div>
       <div className="recent-list">
         {recent.workspaces.map((workspace) => (
           <button className="recent-workspace" key={workspace.id} type="button" onClick={() => onOpen(workspace.rootPath)}>
@@ -634,18 +1079,33 @@ function ProjectPanel({
   );
 }
 
-function FileNode({ entry, label }: { entry?: WorkspaceFileEntry; label?: string }) {
+function FileNode({
+  entry,
+  label,
+  onOpenFile,
+}: {
+  entry?: WorkspaceFileEntry;
+  label?: string;
+  onOpenFile?: (file: WorkspaceFileEntry) => void;
+}) {
   const display = entry?.type === 'directory' ? `${entry.name}/` : (entry?.name ?? label ?? '');
   return (
     <>
-      <div className={`file-node ${entry?.type ?? 'file'}`}>
+      <button
+        className={`file-node ${entry?.type ?? 'file'}`}
+        disabled={!entry || entry.type === 'directory'}
+        type="button"
+        onClick={() => {
+          if (entry) onOpenFile?.(entry);
+        }}
+      >
         <span />
         <small title={entry?.relativePath ?? label}>{display}</small>
-      </div>
+      </button>
       {entry?.children?.length ? (
         <div className="file-children">
           {entry.children.map((child) => (
-            <FileNode entry={child} key={child.relativePath} />
+            <FileNode entry={child} key={child.relativePath} {...(onOpenFile ? { onOpenFile } : {})} />
           ))}
         </div>
       ) : null}
@@ -907,6 +1367,7 @@ function TableDetailPanel({ detail }: { detail: TableDetail }) {
 
 function EditorPane({
   activeConnection,
+  editorLanguage,
   message,
   result,
   sql,
@@ -919,6 +1380,7 @@ function EditorPane({
   onSaveSql,
 }: {
   activeConnection: SavedConnection | undefined;
+  editorLanguage: EditorLanguage;
   message: string;
   result: QueryExecutionResult | undefined;
   sql: string;
@@ -953,7 +1415,23 @@ function EditorPane({
             </button>
           </div>
         </div>
-        <textarea value={sql} onChange={(event) => onChangeSql(event.target.value)} spellCheck={false} />
+        <div className="monaco-shell">
+          <Editor
+            height="100%"
+            language={editorLanguage}
+            options={{
+              fontFamily: 'JetBrains Mono, Consolas, SFMono-Regular, monospace',
+              fontSize: 13,
+              minimap: { enabled: false },
+              padding: { top: 14 },
+              scrollBeyondLastLine: false,
+              wordWrap: 'on',
+            }}
+            theme="vs-dark"
+            value={sql}
+            onChange={(value: string | undefined) => onChangeSql(value ?? '')}
+          />
+        </div>
       </section>
       <section className="result-pane">
         <div className="pane-toolbar">
@@ -1148,4 +1626,12 @@ function downloadResult(filename: string, content: string, type: string): void {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function stripSqlMetadata(content: string): string {
+  const lines = content.split(/\r?\n/);
+  let index = 0;
+  while (index < lines.length && lines[index]?.startsWith('-- @')) index += 1;
+  while (index < lines.length && lines[index]?.trim() === '') index += 1;
+  return lines.slice(index).join('\n').trimEnd();
 }

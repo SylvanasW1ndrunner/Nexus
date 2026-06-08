@@ -117,12 +117,49 @@ small {
   gap: 4px;
 }
 
+.menu-group {
+  position: relative;
+}
+
 .menu-button {
   border-color: transparent;
   background: transparent;
   color: #b8c0cc;
   min-height: 28px;
   padding: 4px 10px;
+}
+
+.menu-popover {
+  position: absolute;
+  top: 30px;
+  left: 0;
+  z-index: 20;
+  min-width: 172px;
+  border: 1px solid #3a414d;
+  border-radius: 8px;
+  background: #20242b;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  display: none;
+  padding: 6px;
+}
+
+.menu-group:hover .menu-popover,
+.menu-group:focus-within .menu-popover {
+  display: block;
+}
+
+.menu-item {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  color: #d8dee9;
+  display: block;
+  text-align: left;
+}
+
+.menu-item:hover {
+  background: #303743;
 }
 
 .language-switch {
@@ -217,13 +254,14 @@ small {
 
 .project-panel {
   padding-bottom: 14px;
+  min-height: 330px;
 }
 
 .active-project {
-  border: 1px solid #3a414d;
-  border-radius: 8px;
-  background: #181c23;
-  padding: 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
   margin-bottom: 10px;
 }
 
@@ -254,6 +292,14 @@ small {
   align-items: center;
   gap: 7px;
   height: 22px;
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  min-height: 22px;
+  padding: 0;
+  text-align: left;
 }
 
 .file-node span {
@@ -265,6 +311,15 @@ small {
 
 .file-node.directory span {
   background: #e0af68;
+}
+
+.file-node.file:hover {
+  background: #222b36;
+}
+
+.file-node:disabled {
+  cursor: default;
+  opacity: 1;
 }
 
 .file-node small {
@@ -519,6 +574,156 @@ textarea {
   outline: none;
 }
 
+.monaco-shell {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid #303743;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #101318;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(8, 10, 14, 0.62);
+}
+
+.modal-panel {
+  width: min(920px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  border: 1px solid #3a414d;
+  border-radius: 10px;
+  background: #20242b;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.46);
+  padding: 16px;
+}
+
+.modal-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.modal-heading strong {
+  display: block;
+  color: #ffffff;
+  font-size: 15px;
+}
+
+.modal-heading small {
+  display: block;
+  margin-top: 4px;
+  max-width: 560px;
+  overflow-wrap: anywhere;
+}
+
+.modal-grid {
+  display: grid;
+  gap: 9px;
+}
+
+.modal-grid.two {
+  grid-template-columns: 1fr 1fr;
+  margin-top: 12px;
+}
+
+.modal-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #aeb7c5;
+  font-size: 12px;
+}
+
+.project-wizard {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.database-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-right: 1px solid #303743;
+  padding-right: 12px;
+}
+
+.database-selector > span,
+.subform-heading small {
+  color: #8f9aaa;
+  font-size: 12px;
+}
+
+.database-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-height: 54px;
+  text-align: left;
+}
+
+.database-option.active {
+  border-color: #66a8d9;
+  background: #253648;
+  box-shadow: inset 3px 0 0 #66a8d9;
+}
+
+.database-option strong {
+  color: #f3f6fb;
+}
+
+.database-option small {
+  color: #9aa6b5;
+}
+
+.wizard-main,
+.subform-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.subform-section {
+  border-top: 1px solid #303743;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.subform-heading strong {
+  display: block;
+  color: #f3f6fb;
+  font-size: 13px;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #c6ceda;
+  font-size: 13px;
+}
+
+.switch-row input {
+  width: auto;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 textarea:focus,
 input:focus,
 select:focus {
@@ -676,5 +881,23 @@ td {
 
   .topbar {
     grid-template-columns: 240px minmax(0, 1fr) 170px;
+  }
+}
+
+@media (max-width: 760px) {
+  .modal-panel {
+    width: calc(100vw - 24px);
+  }
+
+  .project-wizard,
+  .modal-grid.two {
+    grid-template-columns: 1fr;
+  }
+
+  .database-selector {
+    border-right: 0;
+    border-bottom: 1px solid #303743;
+    padding-right: 0;
+    padding-bottom: 12px;
   }
 }

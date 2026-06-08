@@ -10,7 +10,7 @@
 - `apps/desktop/src/main/workspace-project-store.ts`：项目级 Workspace 创建、打开、最近项目管理和目录骨架生成。
 - `apps/desktop/src/main/workspace-state-store.ts`：SQL 草稿和活动连接恢复状态持久化。
 - `apps/desktop/src/preload/preload.ts`：受控 IPC 暴露。
-- `apps/desktop/src/renderer/src/App.tsx`：BetaV0.1.1 三栏工作台主界面。
+- `apps/desktop/src/renderer/src/App.tsx`：BetaV0.1.1 三栏工作台主界面，包含 Monaco 编辑器、项目弹窗、文件树和右侧对话区。
 - `apps/desktop/src/renderer/src/connection-draft.ts`：连接编辑草稿转换。
 - `apps/desktop/src/renderer/src/diagnostics.ts`：远程连接错误和性能提示展示文案。
 - `apps/desktop/src/renderer/src/i18n.ts`：中英文 UI 文案字典和语言归一化。
@@ -37,13 +37,15 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 
 最近项目列表写入 Electron `userData/data/workspaces.json`。打开项目时必须读取并校验 `.dbagent/workspace.json`，普通目录或损坏配置不会进入最近项目列表。
 
-Workspace 文件树当前列出 `sql/`、`queries/`、`scripts/`、`docs/` 和 `outputs/`，用于左侧项目侧栏展示。SQL 编辑器可以把当前 SQL 保存到 `sql/analytics/<slug>.sql`，并在文件头写入 `@name`、`@connection`、`@tags`、`@updated` 元信息。路径由主进程解析并限制在 Workspace 根目录内，renderer 不直接写文件。
+Workspace 文件树当前列出 `sql/`、`queries/`、`scripts/`、`docs/` 和 `outputs/`，用于左侧项目侧栏展示。SQL 编辑器可以把当前 SQL 保存到项目配置中的 SQL 库目录，并在文件头写入 `@name`、`@connection`、`@tags`、`@updated` 元信息。用户点击 SQL 文件时，主进程读取文件并返回内容，renderer 剥离元信息后放回编辑器继续编辑或执行。路径由主进程解析并限制在 Workspace 根目录内，renderer 不直接写文件。
 
-当前版本实现项目创建、打开、最近项目置顶、活动项目恢复、文件树展示和 SQL 文件保存；Python 脚本运行、Agent 工具注册、SQL 参数化执行和文件 diff 预览属于后续增量。
+新建 Workspace 入口移动到顶部 `File` 下拉菜单，使用弹窗填写项目名、目录、描述和模板；弹窗内可选择是否同时创建数据库连接，也可以先跳过连接，后续在连接面板中再建。项目设置入口位于顶部 `Settings` 下拉菜单，可修改 SQL 库、脚本、文档和输出目录配置。
+
+当前版本实现项目创建、打开、最近项目置顶、活动项目恢复、文件树展示、SQL 文件保存和 SQL 文件打开；Python 脚本运行、Agent 工具注册、SQL 参数化执行和文件 diff 预览属于后续增量。
 
 工作区状态保存活动连接 id 和 SQL 草稿，写入 Electron `userData/data/workspace-state.json`，采用临时文件加 rename 的原子写入方式，避免异常退出留下半截 JSON。启动恢复时如果状态文件缺失、JSON 损坏或结构不合法，应用会忽略该恢复状态并继续启动，避免一个损坏草稿拖垮整个桌面应用。
 
-Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目、最近项目、连接和 Schema；中间是 SQL 编辑器和结果区；右侧是对话窗口与查询历史。顶部提供文件、运行、设置和语言切换入口。语言选择写入 `localStorage`，当前支持中文与英文，默认中文。
+Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目文件树、最近项目、连接和 Schema；中间是 Monaco 编辑器和结果区；右侧是对话窗口与查询历史。顶部提供文件、运行、设置下拉菜单和语言切换入口。Monaco 当前至少支持 SQL 与 Python 高亮，语言由打开的文件类型决定。语言选择写入 `localStorage`，当前支持中文与英文，默认中文。
 
 ## 测试覆盖
 
@@ -53,7 +55,7 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 - `query-confirmation.test.ts`：危险 SQL 未确认时必须返回确认要求。
 - `query-workflow.test.ts`：主进程查询业务链路，包括成功执行、用量记录、历史写入、只读拦截、确认要求和失败历史。
 - `schema-workflow.test.ts`：Schema 主进程业务链路，包括连接缺失时的 `NOT_FOUND`、按 `engine` 路由 driver、表列表和表详情参数透传。
-- `workspace-project-store.test.ts`：真实项目目录创建、标准模板目录与 starter 文件、打开已有项目、最近项目置顶、普通目录拒绝打开、保存可复用 SQL 并在文件树中出现。
+- `workspace-project-store.test.ts`：真实项目目录创建、标准模板目录与 starter 文件、打开已有项目、最近项目置顶、普通目录拒绝打开、保存可复用 SQL、读取 SQL 文件、拦截非受管路径读取、修改 SQL 库配置后保存到新路径。
 - `workspace-state-store.test.ts`：SQL 草稿恢复、活动连接恢复、缺失状态、损坏 JSON 和结构不合法状态。
 - `connection-draft.test.ts`：编辑连接不回填密码，并保留远程连接配置。
 - `diagnostics.test.ts`：远程连接错误提示和 SQL 性能告警汇总。

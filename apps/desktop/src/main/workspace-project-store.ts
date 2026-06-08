@@ -1,17 +1,30 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type {
   WorkspaceCreateRequest,
+  WorkspaceFileContent,
   WorkspaceFileEntry,
   WorkspaceProject,
+  WorkspaceReadFileRequest,
   WorkspaceRecentState,
   WorkspaceSavedFile,
   WorkspaceSaveSqlFileRequest,
   WorkspaceSummary,
+  WorkspaceUpdateSettingsRequest,
 } from '@dbagent/shared';
 
 const workspaceConfigRelativePath = join('.dbagent', 'workspace.json');
+const defaultAssetPaths = {
+  sqlLibrary: 'sql/analytics',
+  scripts: 'scripts',
+  docs: 'docs',
+  outputs: 'outputs',
+} as const;
+const defaultPythonConfig = {
+  mode: 'system',
+  requirementsPath: 'scripts/requirements.txt',
+} as const;
 
 export class WorkspaceProjectStore {
   constructor(private readonly recentStatePath: string) {}
@@ -49,6 +62,8 @@ export class WorkspaceProjectStore {
       defaults: {
         agentMode: 'ask',
       },
+      assetPaths: normalizeAssetPaths(request.assetPaths),
+      python: normalizePythonConfig(request.python),
       enabledSkills: [],
       enabledMcpServers: [],
       tags: [],
@@ -68,7 +83,7 @@ export class WorkspaceProjectStore {
 
   async listFiles(rootPath: string): Promise<WorkspaceFileEntry[]> {
     const project = await this.loadProject(rootPath);
-    const roots = ['sql', 'queries', 'scripts', 'docs', 'outputs'];
+    const roots = uniqueTopLevelRoots(['sql', 'queries', project.assetPaths.scripts, project.assetPaths.docs, project.assetPaths.outputs]);
     const entries = await Promise.all(
       roots.map(async (directory) => {
         const absolutePath = join(project.rootPath, directory);
@@ -85,12 +100,28 @@ export class WorkspaceProjectStore {
     return entries.filter((entry): entry is WorkspaceFileEntry => Boolean(entry));
   }
 
+  async readFile(request: WorkspaceReadFileRequest): Promise<WorkspaceFileContent> {
+    const project = await this.loadProject(request.rootPath);
+    const relativePath = normalizeWorkspaceRelativePath(request.relativePath);
+    const absolutePath = resolveInside(project.rootPath, relativePath);
+    const info = await stat(absolutePath);
+    if (!info.isFile()) throw new Error('Workspace path is not a file.');
+    if (info.size > 1024 * 1024) throw new Error('Workspace file is too large to open in the editor.');
+    return {
+      name: basename(relativePath),
+      relativePath: toPortablePath(relativePath),
+      content: await readFile(absolutePath, 'utf8'),
+      bytes: info.size,
+      updatedAt: info.mtime.toISOString(),
+    };
+  }
+
   async saveSqlFile(request: WorkspaceSaveSqlFileRequest): Promise<WorkspaceSavedFile> {
     const project = await this.loadProject(request.rootPath);
     const sql = request.sql.trim();
     if (!sql) throw new Error('SQL content is required.');
     const displayName = normalizeName(request.name);
-    const relativePath = join('sql', 'analytics', `${slugify(displayName)}.sql`);
+    const relativePath = join(project.assetPaths.sqlLibrary, `${slugify(displayName)}.sql`);
     const absolutePath = resolveInside(project.rootPath, relativePath);
     const content = buildSqlFileContent({
       name: displayName,
@@ -109,6 +140,25 @@ export class WorkspaceProjectStore {
       bytes: info.size,
       updatedAt: info.mtime.toISOString(),
     };
+  }
+
+  async updateSettings(request: WorkspaceUpdateSettingsRequest): Promise<WorkspaceProject> {
+    const project = await this.loadProject(request.rootPath);
+    const updated: WorkspaceProject = {
+      ...project,
+      assetPaths: {
+        sqlLibrary: normalizeWorkspaceRelativeDirectory(request.assetPaths?.sqlLibrary ?? project.assetPaths.sqlLibrary),
+        scripts: normalizeWorkspaceRelativeDirectory(request.assetPaths?.scripts ?? project.assetPaths.scripts),
+        docs: normalizeWorkspaceRelativeDirectory(request.assetPaths?.docs ?? project.assetPaths.docs),
+        outputs: normalizeWorkspaceRelativeDirectory(request.assetPaths?.outputs ?? project.assetPaths.outputs),
+      },
+      python: request.python ? normalizePythonConfig(request.python) : project.python,
+      updatedAt: new Date().toISOString(),
+    };
+    await createConfiguredAssetDirectories(updated);
+    await this.saveProject(updated);
+    await this.remember(updated);
+    return updated;
   }
 
   private async loadProject(rootPath: string): Promise<WorkspaceProject> {
@@ -181,6 +231,8 @@ function normalizeWorkspaceProject(input: unknown, rootPath: string): WorkspaceP
         ? { connectionId: input.defaults.connectionId }
         : {}),
     },
+    assetPaths: normalizeAssetPaths(input.assetPaths),
+    python: normalizePythonConfig(input.python),
     enabledSkills: Array.isArray(input.enabledSkills)
       ? input.enabledSkills.filter((item): item is string => typeof item === 'string')
       : [],
@@ -234,7 +286,17 @@ async function createWorkspaceStructure(project: WorkspaceProject): Promise<void
         ];
 
   await Promise.all(directories.map((directory) => mkdir(join(project.rootPath, directory), { recursive: true })));
+  await createConfiguredAssetDirectories(project);
   await writeStarterFiles(project);
+}
+
+async function createConfiguredAssetDirectories(project: WorkspaceProject): Promise<void> {
+  const directories = [
+    ...Object.values(project.assetPaths),
+    dirname(project.python.requirementsPath),
+    ...(project.python.mode === 'venv' && project.python.venvPath ? [project.python.venvPath] : []),
+  ];
+  await Promise.all(directories.map((directory) => mkdir(join(project.rootPath, directory), { recursive: true })));
 }
 
 async function writeStarterFiles(project: WorkspaceProject): Promise<void> {
@@ -244,7 +306,7 @@ async function writeStarterFiles(project: WorkspaceProject): Promise<void> {
       `# ${project.name} SQL 库\n\n这里保存可复用 SQL。建议在 SQL 文件头部写入 @name、@description、@connection 和 @tags。\n`,
     ],
     [
-      'scripts/requirements.txt',
+      project.python.requirementsPath,
       '# DBAgent workspace script dependencies\npandas\nnumpy\n',
     ],
     ['docs/README.md', `# ${project.name} 文档\n\n这里保存 Schema 文档、ER 图、分析报告和人工整理资料。\n`],
@@ -348,6 +410,60 @@ function resolveInside(rootPath: string, relativePath: string): string {
     throw new Error('Workspace path escapes are not allowed.');
   }
   return resolved;
+}
+
+function normalizeWorkspaceRelativePath(path: string): string {
+  const normalized = path.trim().replace(/\\/g, '/');
+  if (!normalized) throw new Error('Workspace file path is required.');
+  if (isAbsolute(normalized) || normalized.includes('\0')) throw new Error('Invalid workspace file path.');
+  const firstSegment = normalized.split('/')[0];
+  if (!firstSegment || firstSegment.startsWith('.') || firstSegment === 'node_modules') {
+    throw new Error('Workspace file must be inside a managed project directory.');
+  }
+  if (normalized.split('/').some((segment) => segment === '..')) throw new Error('Workspace path escapes are not allowed.');
+  return normalized;
+}
+
+function normalizeWorkspaceRelativeDirectory(path: string): string {
+  const normalized = path.trim().replace(/\\/g, '/').replace(/\/+$/g, '');
+  if (!normalized) throw new Error('Workspace directory path is required.');
+  if (isAbsolute(normalized) || normalized.includes('\0')) throw new Error('Invalid workspace directory path.');
+  if (normalized.split('/').some((segment) => segment === '..')) throw new Error('Workspace path escapes are not allowed.');
+  return normalized;
+}
+
+function normalizeAssetPaths(value: unknown): WorkspaceProject['assetPaths'] {
+  if (!isRecord(value)) return { ...defaultAssetPaths };
+  return {
+    sqlLibrary:
+      typeof value.sqlLibrary === 'string' ? normalizeWorkspaceRelativeDirectory(value.sqlLibrary) : defaultAssetPaths.sqlLibrary,
+    scripts: typeof value.scripts === 'string' ? normalizeWorkspaceRelativeDirectory(value.scripts) : defaultAssetPaths.scripts,
+    docs: typeof value.docs === 'string' ? normalizeWorkspaceRelativeDirectory(value.docs) : defaultAssetPaths.docs,
+    outputs: typeof value.outputs === 'string' ? normalizeWorkspaceRelativeDirectory(value.outputs) : defaultAssetPaths.outputs,
+  };
+}
+
+function normalizePythonConfig(value: unknown): WorkspaceProject['python'] {
+  if (!isRecord(value)) return { ...defaultPythonConfig };
+  const mode = value.mode === 'venv' || value.mode === 'conda' ? value.mode : defaultPythonConfig.mode;
+  const pythonPath = typeof value.pythonPath === 'string' && value.pythonPath.trim() ? value.pythonPath.trim() : undefined;
+  const venvPath = typeof value.venvPath === 'string' && value.venvPath.trim()
+    ? normalizeWorkspaceRelativeDirectory(value.venvPath)
+    : undefined;
+  const requirementsPath =
+    typeof value.requirementsPath === 'string'
+      ? normalizeWorkspaceRelativePath(value.requirementsPath)
+      : defaultPythonConfig.requirementsPath;
+  return {
+    mode,
+    ...(pythonPath ? { pythonPath } : {}),
+    ...(venvPath ? { venvPath } : {}),
+    requirementsPath,
+  };
+}
+
+function uniqueTopLevelRoots(paths: string[]): string[] {
+  return [...new Set(paths.map((path) => path.split(/[\\/]/)[0]).filter((path): path is string => Boolean(path)))];
 }
 
 function slugify(value: string): string {

@@ -186,6 +186,17 @@ function registerIpcHandlers(): void {
       });
     }
   });
+  handle(ipcChannels.workspace.readFile, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.readFile(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to read workspace file.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
   handle(ipcChannels.workspace.saveSqlFile, async (request) => {
     try {
       return ok(await workspaceProjectStore.saveSqlFile(request));
@@ -193,6 +204,17 @@ function registerIpcHandlers(): void {
       return err({
         code: 'VALIDATION_ERROR',
         message: 'Unable to save SQL file.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
+  handle(ipcChannels.workspace.updateSettings, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.updateSettings(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to update workspace settings.',
         ...(error instanceof Error ? { detail: error.message } : {}),
       });
     }

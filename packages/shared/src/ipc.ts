@@ -38,7 +38,9 @@ export const ipcChannels = {
     listRecent: 'workspace:list-recent',
     loadActive: 'workspace:load-active',
     listFiles: 'workspace:list-files',
+    readFile: 'workspace:read-file',
     saveSqlFile: 'workspace:save-sql-file',
+    updateSettings: 'workspace:update-settings',
   },
   auth: {
     login: 'auth:login',
@@ -179,9 +181,25 @@ export type WorkspaceProject = {
     connectionId?: ConnectionId;
     agentMode: 'ask' | 'auto' | 'full-auto' | 'readonly';
   };
+  assetPaths: WorkspaceAssetPaths;
+  python: WorkspacePythonConfig;
   enabledSkills: string[];
   enabledMcpServers: string[];
   tags: string[];
+};
+
+export type WorkspaceAssetPaths = {
+  sqlLibrary: string;
+  scripts: string;
+  docs: string;
+  outputs: string;
+};
+
+export type WorkspacePythonConfig = {
+  mode: 'system' | 'venv' | 'conda';
+  pythonPath?: string;
+  venvPath?: string;
+  requirementsPath: string;
 };
 
 export type WorkspaceSummary = Pick<
@@ -199,6 +217,8 @@ export type WorkspaceCreateRequest = {
   rootPath: string;
   description?: string;
   template?: WorkspaceTemplate;
+  assetPaths?: Partial<WorkspaceAssetPaths>;
+  python?: Partial<WorkspacePythonConfig>;
 };
 
 export type WorkspaceOpenRequest = {
@@ -229,6 +249,25 @@ export type WorkspaceSavedFile = {
   updatedAt: string;
 };
 
+export type WorkspaceUpdateSettingsRequest = {
+  rootPath: string;
+  assetPaths?: Partial<WorkspaceAssetPaths>;
+  python?: Partial<WorkspacePythonConfig>;
+};
+
+export type WorkspaceReadFileRequest = {
+  rootPath: string;
+  relativePath: string;
+};
+
+export type WorkspaceFileContent = {
+  name: string;
+  relativePath: string;
+  content: string;
+  bytes: number;
+  updatedAt: string;
+};
+
 export type IpcRequestMap = {
   'connection:list': void;
   'connection:test': ConnectionInput;
@@ -255,7 +294,9 @@ export type IpcRequestMap = {
   'workspace:list-recent': void;
   'workspace:load-active': void;
   'workspace:list-files': { rootPath: string };
+  'workspace:read-file': WorkspaceReadFileRequest;
   'workspace:save-sql-file': WorkspaceSaveSqlFileRequest;
+  'workspace:update-settings': WorkspaceUpdateSettingsRequest;
 };
 
 export type IpcResponseMap = {
@@ -284,7 +325,9 @@ export type IpcResponseMap = {
   'workspace:list-recent': Result<WorkspaceRecentState>;
   'workspace:load-active': Result<WorkspaceProject | undefined>;
   'workspace:list-files': Result<WorkspaceFileEntry[]>;
+  'workspace:read-file': Result<WorkspaceFileContent>;
   'workspace:save-sql-file': Result<WorkspaceSavedFile>;
+  'workspace:update-settings': Result<WorkspaceProject>;
 };
 
 export type IpcChannel = keyof IpcRequestMap;
