@@ -47,6 +47,13 @@ type EditorLanguage = 'sql' | 'python' | 'markdown' | 'plaintext';
 
 type WorkspaceDialogMode = 'create' | 'settings';
 
+type EditorDocument = {
+  title: string;
+  relativePath?: string;
+  language: EditorLanguage;
+  dirty: boolean;
+};
+
 type DatabaseEngineOption = {
   id: ConnectionInput['engine'];
   label: string;
@@ -63,6 +70,12 @@ const defaultWorkspaceDraft: WorkspaceDraft = {
 const defaultWorkspacePythonDraft: WorkspacePythonConfig = {
   mode: 'system',
   requirementsPath: 'scripts/requirements.txt',
+};
+
+const defaultEditorDocument: EditorDocument = {
+  title: 'Scratch.sql',
+  language: 'sql',
+  dirty: false,
 };
 
 const databaseEngineOptions: DatabaseEngineOption[] = [
@@ -85,6 +98,7 @@ export function App() {
   const [selectedTable, setSelectedTable] = useState<TableDetail | undefined>();
   const [sql, setSql] = useState(starterSql);
   const [editorLanguage, setEditorLanguage] = useState<EditorLanguage>('sql');
+  const [editorDocument, setEditorDocument] = useState<EditorDocument>(defaultEditorDocument);
   const [result, setResult] = useState<QueryExecutionResult | undefined>();
   const [message, setMessage] = useState(t('assistantReady'));
   const [connectionDraft, setConnectionDraft] = useState<ConnectionInput>(defaultConnectionDraft);
@@ -153,7 +167,25 @@ export function App() {
     const response = await window.dbagent.invoke(ipcChannels.app.loadWorkspaceState, undefined);
     if (!response.ok || !response.data) return;
     setSql(response.data.sqlDraft);
+    setEditorLanguage('sql');
+    setEditorDocument({ ...defaultEditorDocument, dirty: false });
     if (response.data.activeConnectionId) setActiveConnectionId(response.data.activeConnectionId);
+  }
+
+  function updateEditorContent(content: string, document: Omit<EditorDocument, 'dirty'> & { dirty?: boolean }) {
+    setSql(content);
+    setEditorLanguage(document.language);
+    setEditorDocument({
+      title: document.title,
+      language: document.language,
+      ...(document.relativePath ? { relativePath: document.relativePath } : {}),
+      dirty: document.dirty ?? false,
+    });
+  }
+
+  function handleEditorChange(content: string) {
+    setSql(content);
+    setEditorDocument((document) => ({ ...document, dirty: true }));
   }
 
   async function refreshWorkspace() {
@@ -399,7 +431,11 @@ export function App() {
 
   function previewTable(table: TableSummary) {
     const nextSql = buildPreviewSql(table);
-    setSql(nextSql);
+    updateEditorContent(nextSql, {
+      title: `${table.name}.preview.sql`,
+      language: 'sql',
+      dirty: true,
+    });
     void executeSql(nextSql);
   }
 
@@ -486,6 +522,12 @@ export function App() {
       return;
     }
     await refreshWorkspaceFiles(activeWorkspace.rootPath);
+    setEditorDocument({
+      title: response.data.name,
+      relativePath: response.data.relativePath,
+      language: 'sql',
+      dirty: false,
+    });
     setMessage(
       language === 'zh-CN' ? `已保存 ${response.data.relativePath}` : `Saved ${response.data.relativePath}`,
     );
@@ -521,14 +563,20 @@ export function App() {
       return;
     }
     if (response.data.relativePath.endsWith('.sql')) {
-      setSql(stripSqlMetadata(response.data.content));
-      setEditorLanguage('sql');
+      updateEditorContent(stripSqlMetadata(response.data.content), {
+        title: response.data.name,
+        relativePath: response.data.relativePath,
+        language: 'sql',
+      });
       setMessage(language === 'zh-CN' ? `已打开 ${response.data.relativePath}` : `Opened ${response.data.relativePath}`);
       return;
     }
     if (response.data.relativePath.endsWith('.py')) {
-      setSql(response.data.content);
-      setEditorLanguage('python');
+      updateEditorContent(response.data.content, {
+        title: response.data.name,
+        relativePath: response.data.relativePath,
+        language: 'python',
+      });
       setMessage(language === 'zh-CN' ? `已打开 ${response.data.relativePath}` : `Opened ${response.data.relativePath}`);
       return;
     }
@@ -590,6 +638,7 @@ export function App() {
               files={workspaceFiles}
               recent={recentWorkspaces}
               t={t}
+              {...(editorDocument.relativePath ? { activeFilePath: editorDocument.relativePath } : {})}
               onOpenFile={(file) => void openWorkspaceFile(file)}
               onOpen={(rootPath) => void openWorkspace(rootPath)}
             />
@@ -618,12 +667,13 @@ export function App() {
           <section className="center-stage">
             <EditorPane
               activeConnection={activeConnection}
+              document={editorDocument}
               editorLanguage={editorLanguage}
               message={message}
               result={result}
               sql={sql}
               t={t}
-              onChangeSql={setSql}
+              onChangeSql={handleEditorChange}
               onExecute={() => void execute()}
               onExplain={() => void explain()}
               onExportCsv={exportCsv}
@@ -641,7 +691,13 @@ export function App() {
               messages={chatMessages}
               setDraft={setChatDraft}
               t={t}
-              onPickHistory={(item) => setSql(item.sql)}
+              onPickHistory={(item) =>
+                updateEditorContent(item.sql, {
+                  title: `history-${item.id}.sql`,
+                  language: 'sql',
+                  dirty: true,
+                })
+              }
               onSend={sendChatMessage}
             />
           </aside>
@@ -1012,6 +1068,7 @@ function PythonConfigForm({
 
 function ProjectPanel({
   activeWorkspace,
+  activeFilePath,
   files,
   recent,
   t,
@@ -1019,6 +1076,7 @@ function ProjectPanel({
   onOpen,
 }: {
   activeWorkspace: WorkspaceProject | undefined;
+  activeFilePath?: string;
   files: WorkspaceFileEntry[];
   recent: WorkspaceRecentState;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
@@ -1037,7 +1095,14 @@ function ProjectPanel({
           <span>{activeWorkspace.rootPath}</span>
           <div className="project-files">
             {files.length > 0 ? (
-              files.map((file) => <FileNode entry={file} key={file.relativePath} onOpenFile={onOpenFile} />)
+              files.map((file) => (
+                <FileNode
+                  entry={file}
+                  key={file.relativePath}
+                  {...(activeFilePath ? { activeFilePath } : {})}
+                  onOpenFile={onOpenFile}
+                />
+              ))
             ) : (
               <>
                 <FileNode label=".dbagent/workspace.json" />
@@ -1063,19 +1128,22 @@ function ProjectPanel({
 }
 
 function FileNode({
+  activeFilePath,
   entry,
   label,
   onOpenFile,
 }: {
+  activeFilePath?: string;
   entry?: WorkspaceFileEntry;
   label?: string;
   onOpenFile?: (file: WorkspaceFileEntry) => void;
 }) {
   const display = entry?.type === 'directory' ? `${entry.name}/` : (entry?.name ?? label ?? '');
+  const isActive = Boolean(entry?.relativePath && activeFilePath === entry.relativePath);
   return (
     <>
       <button
-        className={`file-node ${entry?.type ?? 'file'}`}
+        className={`file-node ${entry?.type ?? 'file'}${isActive ? ' active' : ''}`}
         disabled={!entry || entry.type === 'directory'}
         type="button"
         onClick={() => {
@@ -1088,7 +1156,12 @@ function FileNode({
       {entry?.children?.length ? (
         <div className="file-children">
           {entry.children.map((child) => (
-            <FileNode entry={child} key={child.relativePath} {...(onOpenFile ? { onOpenFile } : {})} />
+            <FileNode
+              entry={child}
+              key={child.relativePath}
+              {...(activeFilePath ? { activeFilePath } : {})}
+              {...(onOpenFile ? { onOpenFile } : {})}
+            />
           ))}
         </div>
       ) : null}
@@ -1350,6 +1423,7 @@ function TableDetailPanel({ detail }: { detail: TableDetail }) {
 
 function EditorPane({
   activeConnection,
+  document,
   editorLanguage,
   message,
   result,
@@ -1363,6 +1437,7 @@ function EditorPane({
   onSaveSql,
 }: {
   activeConnection: SavedConnection | undefined;
+  document: EditorDocument;
   editorLanguage: EditorLanguage;
   message: string;
   result: QueryExecutionResult | undefined;
@@ -1378,6 +1453,14 @@ function EditorPane({
   return (
     <>
       <section className="editor-pane">
+        <div className="editor-tabs" aria-label="Open editor tabs">
+          <button className="editor-tab active" type="button" title={document.relativePath ?? document.title}>
+            <span>{document.title}</span>
+            <small>{document.language.toUpperCase()}</small>
+            {document.dirty ? <i aria-label="Unsaved changes" /> : null}
+          </button>
+          {document.relativePath ? <div className="editor-path">{document.relativePath}</div> : null}
+        </div>
         <div className="pane-toolbar">
           <div>
             <span>{t('editor')}</span>
