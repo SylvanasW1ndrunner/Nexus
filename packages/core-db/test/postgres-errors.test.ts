@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyPostgresConnectionError } from '../src/index.js';
+import { classifyPostgresConnectionError, classifyPostgresRuntimeError } from '../src/index.js';
 
 function pgError(code: string, message = code) {
   return Object.assign(new Error(message), { code });
@@ -36,6 +36,27 @@ describe('classifyPostgresConnectionError', () => {
     expect(classifyPostgresConnectionError(new Error('server requires SSL'))).toMatchObject({
       code: 'CONNECTION_FAILED',
       detail: 'server requires SSL',
+    });
+  });
+});
+
+describe('classifyPostgresRuntimeError', () => {
+  it('keeps interrupted remote queries retryable and diagnosable', () => {
+    expect(classifyPostgresRuntimeError(pgError('ECONNRESET'))).toMatchObject({
+      code: 'DB_CONNECTION_INTERRUPTED',
+      retryable: true,
+    });
+    expect(classifyPostgresRuntimeError(pgError('ETIMEDOUT'))).toMatchObject({
+      code: 'DB_CONNECTION_TIMEOUT',
+      retryable: true,
+    });
+  });
+
+  it('keeps SQL and catalog errors as query failures', () => {
+    expect(classifyPostgresRuntimeError(pgError('42601', 'syntax error at or near "fromm"'))).toMatchObject({
+      code: 'QUERY_FAILED',
+      detail: 'syntax error at or near "fromm"',
+      retryable: false,
     });
   });
 });

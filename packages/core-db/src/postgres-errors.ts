@@ -1,5 +1,7 @@
 import type { AppError } from '@dbagent/shared';
 
+const retryableNetworkCodes = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNREFUSED']);
+
 export function classifyPostgresConnectionError(error: unknown): AppError {
   const code = getErrorCode(error);
   const message = error instanceof Error ? error.message : String(error);
@@ -63,6 +65,26 @@ export function classifyPostgresConnectionError(error: unknown): AppError {
     message: 'Unable to connect to PostgreSQL.',
     detail: message,
     retryable: true,
+  };
+}
+
+export function classifyPostgresRuntimeError(error: unknown): AppError {
+  const code = getErrorCode(error);
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (code && retryableNetworkCodes.has(code)) {
+    return classifyPostgresConnectionError(error);
+  }
+
+  if (/timeout/i.test(message)) {
+    return classifyPostgresConnectionError(error);
+  }
+
+  return {
+    code: 'QUERY_FAILED',
+    message: 'PostgreSQL query failed.',
+    detail: message,
+    retryable: false,
   };
 }
 

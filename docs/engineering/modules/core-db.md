@@ -31,6 +31,7 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 - 对需要确认的 SQL，主进程必须完成确认握手后才调用 driver。driver 在可写连接中使用显式事务执行需要确认的 SQL，任意语句失败都 `ROLLBACK`，避免批量 SQL 留下半完成状态。
 
 远程连接按真实桌面使用场景处理：默认连接超时、语句超时、TCP keepalive，并把认证失败、DNS 失败、端口关闭、超时和连接中断分类成产品错误码。这样 Windows 或 Linux 桌面连接服务器数据库时，用户能得到可操作提示，而不是只有“连接失败”。
+连接建立后的运行期错误也必须保持 `Result<T>` 契约。`PostgresDriver.execute`、`listTables` 和 `describeTable` 会把网络中断、端口拒绝和超时继续分类为可重试的远程连接错误；普通 SQL 语法错误、catalog 查询错误等则返回 `QUERY_FAILED`。这保证 Schema 树刷新或查询执行遇到远程数据库抖动时，不会把异常漏到 IPC 外层。
 
 性能提示是轻量静态分析，不阻塞执行。当前覆盖 `SELECT *`、缺少 `LIMIT`、前置通配 `LIKE`、大 `OFFSET`、逗号连接和过滤列套函数。它不是优化器替代品，而是 M1.5 阶段给用户和后续 Agent 的结构化风险输入。
 
@@ -42,7 +43,8 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 - `sql-performance.test.ts`：复杂 SQL 性能提示。
 - `sql-builder.test.ts`：PostgreSQL identifier quote 和预览 limit 上限。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
-- `postgres-errors.test.ts`：远程连接常见失败分类。
+- `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
+- `postgres-driver-runtime-errors.test.ts`：验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
 - `query-history.test.ts`：查询历史写入、读取、审计上下文和损坏 JSON 降级。
 - `postgres.integration.test.ts`：真实 PostgreSQL 连接、Schema 列表、表详情、join 查询、只读拦截、断连后失败、批量 SQL 事务回滚。

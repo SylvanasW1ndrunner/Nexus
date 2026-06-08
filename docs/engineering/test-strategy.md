@@ -4,7 +4,7 @@
 
 - 单元测试覆盖纯业务规则，例如 SQL 安全判断、PostgreSQL identifier quote、预览 SQL limit、连接校验、查询历史、CSV/JSON 导出、用量窗口、认证与会话持久化。
 - 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts`。
-- 远程连接风险以可复现单测覆盖错误分类，以真实 PostgreSQL 集成测试覆盖成功连接、查询、断连和事务回滚。弱网、VPN、云安全组和跨系统防火墙场景后续进入发布前手工 QA 矩阵。
+- 远程连接风险以可复现单测覆盖连接建立失败和连接后运行期中断分类，以真实 PostgreSQL 集成测试覆盖成功连接、查询、断连和事务回滚。弱网、VPN、云安全组和跨系统防火墙场景后续进入发布前手工 QA 矩阵。
 - E2E 测试覆盖桌面端用户路径：打开应用、创建连接、执行 SQL、查看结果表、查看查询历史、验证只读拦截、导出 CSV、重启后恢复 SQL 草稿。
 - Smoke 测试是零外部依赖的仓库健康检查，入口为 `pnpm smoke`，实现文件为 `scripts/smoke.mjs`。它检查关键文件存在、SQL 安全关键字和 IPC 契约片段。
 
@@ -64,7 +64,8 @@ pnpm db:down
 
 - `packages/core-db/test/sql-safety.test.ts` 覆盖只读拦截、写操作风险和多语句风险。
 - `packages/core-db/test/sql-performance.test.ts` 覆盖复杂 SQL 性能提示。
-- `packages/core-db/test/postgres-errors.test.ts` 覆盖远程连接常见失败分类。
+- `packages/core-db/test/postgres-errors.test.ts` 覆盖远程连接常见失败和连接后运行期失败分类。
+- `packages/core-db/test/postgres-driver-runtime-errors.test.ts` 覆盖查询执行、Schema 列表和表详情在远程中断/查询错误时不抛出 IPC 外异常。
 - `packages/core-db/test/sql-builder.test.ts` 覆盖 PostgreSQL 标识符 quote 和预览 limit 上限。
 - `packages/core-db/test/connection-store.test.ts` 覆盖连接持久化、状态更新和损坏 JSON 降级。
 - `packages/core-db/test/query-history.test.ts` 覆盖查询历史记录、审计上下文和损坏 JSON 降级。
