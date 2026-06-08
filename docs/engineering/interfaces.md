@@ -39,7 +39,7 @@ Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契
 
 `PostgresDriver` 使用 `pg`，连接参数由主进程从连接元数据和本地凭证组合生成；renderer 不直接接触驱动实例、连接池或密码。
 
-远程数据库连接默认按桌面端真实使用场景处理：连接超时默认为 10 秒，语句超时默认为 60 秒，TCP keepalive 开启。`DatabaseConnectionConfig` 可通过 `connectionTimeoutMs` 和 `statementTimeoutMs` 覆盖默认值，用于跨机房、VPN、堡垒机或弱网环境。
+远程数据库连接默认按桌面端真实使用场景处理：连接超时默认为 10 秒，语句超时默认为 60 秒，TCP keepalive 开启。`ConnectionInput`、`SavedConnection` 和 `DatabaseConnectionConfig` 支持 `ssl`、`connectionTimeoutMs` 和 `statementTimeoutMs`，用于跨机房、VPN、堡垒机、云安全组或弱网环境。主进程会校验超时值必须在 `1,000..120,000` 毫秒之间。
 
 PostgreSQL 连接错误会被分类为可展示、可测试的业务错误码：
 
@@ -51,6 +51,8 @@ PostgreSQL 连接错误会被分类为可展示、可测试的业务错误码：
 - `DB_CONNECTION_INTERRUPTED`：连接被远端、代理或网络中间层中断。
 
 这些错误码用于 UI 给出更具体的排查提示，避免把远程连接问题都折叠成笼统的连接失败。
+
+Renderer 通过诊断 helper 将错误码转成用户可行动提示，例如检查 VPN、DNS、防火墙、云安全组、SSL 要求、监听地址和 `pg_hba.conf`。
 
 ## 工作区状态
 

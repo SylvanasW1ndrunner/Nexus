@@ -26,7 +26,10 @@ export class ConnectionStore {
       port: input.port,
       database: input.database.trim(),
       username: input.username.trim(),
+      ssl: input.ssl ?? false,
       readOnly: input.readOnly ?? true,
+      ...(input.connectionTimeoutMs !== undefined ? { connectionTimeoutMs: input.connectionTimeoutMs } : {}),
+      ...(input.statementTimeoutMs !== undefined ? { statementTimeoutMs: input.statementTimeoutMs } : {}),
       status: 'disconnected',
       createdAt: now,
       updatedAt: now,
@@ -48,7 +51,14 @@ export class ConnectionStore {
       port: patch.port ?? current.port,
       database: patch.database?.trim() ?? current.database,
       username: patch.username?.trim() ?? current.username,
+      ssl: patch.ssl ?? current.ssl ?? false,
       readOnly: patch.readOnly ?? current.readOnly,
+      ...(patch.connectionTimeoutMs ?? current.connectionTimeoutMs
+        ? { connectionTimeoutMs: patch.connectionTimeoutMs ?? current.connectionTimeoutMs }
+        : {}),
+      ...(patch.statementTimeoutMs ?? current.statementTimeoutMs
+        ? { statementTimeoutMs: patch.statementTimeoutMs ?? current.statementTimeoutMs }
+        : {}),
       updatedAt: new Date().toISOString(),
     };
     connections[index] = updated;

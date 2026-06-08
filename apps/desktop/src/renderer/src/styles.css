@@ -234,6 +234,7 @@ textarea {
 .status {
   min-height: 22px;
   color: #344054;
+  line-height: 1.4;
 }
 
 .result-actions {
@@ -251,6 +252,50 @@ textarea {
   border-radius: 8px;
   padding: 24px;
   color: #667085;
+}
+
+.performance-panel {
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+  margin-bottom: 10px;
+  padding: 10px;
+}
+
+.performance-title {
+  color: #9a3412;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.performance-item {
+  display: grid;
+  grid-template-columns: 152px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-top: 1px solid #ffedd5;
+}
+
+.performance-item:first-of-type {
+  border-top: 0;
+}
+
+.performance-item span {
+  color: #7c2d12;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.performance-item.info span {
+  color: #365314;
+}
+
+.performance-item small {
+  min-width: 0;
+  color: #57534e;
+  line-height: 1.35;
 }
 
 .table-scroll {

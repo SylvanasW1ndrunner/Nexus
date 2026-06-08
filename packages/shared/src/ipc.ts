@@ -48,7 +48,10 @@ export type SavedConnection = {
   port: number;
   database: string;
   username: string;
+  ssl?: boolean;
   readOnly: boolean;
+  connectionTimeoutMs?: number;
+  statementTimeoutMs?: number;
   status: ConnectionStatus;
   createdAt: string;
   updatedAt: string;
@@ -64,6 +67,8 @@ export type ConnectionInput = {
   password?: string;
   ssl?: boolean;
   readOnly?: boolean;
+  connectionTimeoutMs?: number;
+  statementTimeoutMs?: number;
 };
 
 export type QueryRequest = {

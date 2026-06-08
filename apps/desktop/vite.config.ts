@@ -37,6 +37,10 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     root: 'src/renderer',
+    test: {
+      root: configDir,
+      include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    },
     build: {
       outDir: '../../dist/renderer',
       emptyOutDir: false,

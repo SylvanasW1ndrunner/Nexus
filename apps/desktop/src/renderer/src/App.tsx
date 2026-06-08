@@ -8,6 +8,7 @@ import {
   type SavedConnection,
   type TableSummary,
 } from '@dbagent/shared';
+import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 
 const starterSql = `select
   now() as checked_at,
@@ -30,6 +31,9 @@ export function App() {
     username: 'postgres',
     password: '',
     readOnly: true,
+    ssl: false,
+    connectionTimeoutMs: 10000,
+    statementTimeoutMs: 60000,
   });
   const activeConnection = useMemo(
     () => connections.find((connection) => connection.id === activeConnectionId),
@@ -75,7 +79,7 @@ export function App() {
       setConnections(response.data);
       setActiveConnectionId((current) => current || response.data[0]?.id || '');
     } else {
-      setMessage(response.error.message);
+      setMessage(formatAppError(response.error));
     }
   }
 
@@ -95,7 +99,7 @@ export function App() {
       setTables(response.data);
     } else {
       setTables([]);
-      setMessage(response.error.detail ?? response.error.message);
+      setMessage(formatAppError(response.error));
     }
   }
 
@@ -103,7 +107,7 @@ export function App() {
     setMessage('Saving connection...');
     const response = await window.dbagent.invoke(ipcChannels.connection.create, connectionDraft);
     if (!response.ok) {
-      setMessage(response.error.message);
+      setMessage(formatAppError(response.error));
       return;
     }
     setMessage(`Saved ${response.data.name}.`);
@@ -113,14 +117,14 @@ export function App() {
   async function testConnection() {
     setMessage('Testing PostgreSQL connection...');
     const response = await window.dbagent.invoke(ipcChannels.connection.test, connectionDraft);
-    setMessage(response.ok ? `Connection OK in ${response.data.latencyMs} ms.` : response.error.detail ?? response.error.message);
+    setMessage(response.ok ? `Connection OK in ${response.data.latencyMs} ms.` : formatAppError(response.error));
   }
 
   async function connectActive() {
     if (!activeConnectionId) return;
     setMessage('Connecting...');
     const response = await window.dbagent.invoke(ipcChannels.connection.connect, { id: activeConnectionId });
-    setMessage(response.ok ? `Connected to ${response.data.name}.` : response.error.detail ?? response.error.message);
+    setMessage(response.ok ? `Connected to ${response.data.name}.` : formatAppError(response.error));
     await refreshConnections();
     if (response.ok) await refreshTables(activeConnectionId);
   }
@@ -128,7 +132,7 @@ export function App() {
   async function disconnectActive() {
     if (!activeConnectionId) return;
     const response = await window.dbagent.invoke(ipcChannels.connection.disconnect, { id: activeConnectionId });
-    setMessage(response.ok ? `Disconnected from ${response.data.name}.` : response.error.message);
+    setMessage(response.ok ? `Disconnected from ${response.data.name}.` : formatAppError(response.error));
     await refreshConnections();
     setTables([]);
   }
@@ -147,7 +151,7 @@ export function App() {
       setResult(response.data);
       setMessage(`Returned ${response.data.rowCount} rows in ${response.data.elapsedMs} ms.`);
     } else {
-      setMessage(response.error.detail ?? response.error.message);
+      setMessage(formatAppError(response.error));
     }
     await refreshHistory();
   }
@@ -166,7 +170,7 @@ export function App() {
       setResult(response.data);
       setMessage(`EXPLAIN returned in ${response.data.elapsedMs} ms.`);
     } else {
-      setMessage(response.error.detail ?? response.error.message);
+      setMessage(formatAppError(response.error));
     }
     await refreshHistory();
   }
@@ -190,7 +194,7 @@ export function App() {
       setResult(response.data);
       setMessage(`Returned ${response.data.rowCount} rows in ${response.data.elapsedMs} ms.`);
     } else {
-      setMessage(response.error.detail ?? response.error.message);
+      setMessage(formatAppError(response.error));
     }
     await refreshHistory();
   }
@@ -238,6 +242,7 @@ export function App() {
                 <span>{connection.name}</span>
                 <small>
                   {connection.engine} / {connection.status}
+                  {connection.ssl ? ' / SSL' : ''}
                 </small>
               </button>
             ))
@@ -280,6 +285,7 @@ export function App() {
                   Export CSV
                 </button>
               </div>
+              <PerformanceWarnings result={result} />
               <ResultTable result={result} />
             </>
           ) : (
@@ -375,6 +381,32 @@ function ConnectionForm({
         />
         Read-only by default
       </label>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={draft.ssl ?? false}
+          onChange={(event) => setDraft({ ...draft, ssl: event.target.checked })}
+        />
+        Require SSL
+      </label>
+      <div className="split">
+        <input
+          aria-label="Connection timeout in milliseconds"
+          min={1000}
+          step={1000}
+          type="number"
+          value={draft.connectionTimeoutMs ?? 10000}
+          onChange={(event) => setDraft({ ...draft, connectionTimeoutMs: Number(event.target.value) })}
+        />
+        <input
+          aria-label="Statement timeout in milliseconds"
+          min={1000}
+          step={1000}
+          type="number"
+          value={draft.statementTimeoutMs ?? 60000}
+          onChange={(event) => setDraft({ ...draft, statementTimeoutMs: Number(event.target.value) })}
+        />
+      </div>
       <div className="form-actions">
         <button className="secondary" type="button" onClick={onTest}>
           Test
@@ -384,6 +416,23 @@ function ConnectionForm({
         </button>
       </div>
     </form>
+  );
+}
+
+function PerformanceWarnings({ result }: { result: QueryExecutionResult }) {
+  const summary = summarizePerformanceWarnings(result.safety.performanceWarnings);
+  if (!summary) return null;
+
+  return (
+    <section className="performance-panel" aria-label="SQL performance diagnostics">
+      <div className="performance-title">{summary.title}</div>
+      {summary.items.map((warning) => (
+        <div className={`performance-item ${warning.severity}`} key={warning.code}>
+          <span>{warning.code.replace(/_/g, ' ')}</span>
+          <small>{warning.message}</small>
+        </div>
+      ))}
+    </section>
   );
 }
 

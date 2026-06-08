@@ -58,6 +58,8 @@ pnpm db:down
 - `packages/core-db/test/sql-builder.test.ts` 覆盖 PostgreSQL 标识符 quote 和预览 limit 上限。
 - `packages/core-db/test/connection-store.test.ts` 覆盖连接持久化和删除。
 - `packages/core-db/test/query-history.test.ts` 覆盖查询历史记录。
+- `apps/desktop/src/main/connection-validation.test.ts` 覆盖远程连接表单配置校验，例如 SSL、连接超时和语句超时。
+- `apps/desktop/src/renderer/src/diagnostics.test.ts` 覆盖远程连接错误提示和 SQL 性能告警汇总。
 - `packages/shared/test/csv.test.ts` 覆盖真实表格导出边界。
 - `packages/core-auth/test/auth-service.test.ts` 覆盖认证状态和会话持久化。
 - `packages/core-usage/test/usage-tracker.test.ts` 覆盖本地用量记录。
@@ -96,6 +98,7 @@ pnpm db:up
 - 远程数据库连接不是单一问题：DNS、端口、防火墙、VPN、SSL、认证、数据库名和连接中断都可能失败。M1.5 已有错误分类和超时/keepalive 默认值，发布 QA 仍需覆盖 Windows 客户端连接 Linux PostgreSQL、Windows 客户端连接 Windows PostgreSQL、Linux 客户端连接 Linux PostgreSQL 等组合。
 - Docker Compose、PostgreSQL 测试容器、fixture loader 和 CI helper 不能进入最终应用包。
 - `pnpm --filter @dbagent/desktop package` 后必须验证打包产物启动；renderer dev server 或 Vitest 不能替代安装包验证。
+- `@dbagent/desktop` 的 Vitest 配置必须同时覆盖 `src/main` 和 `src/renderer`；否则主进程纯逻辑测试会被漏跑。
 - 认证和用量持久化要保持快速单测覆盖，因为它们同时影响 BYOK 模式和后续订阅 UX。
 
 候选发布推荐顺序：

@@ -18,6 +18,7 @@ import {
   type QueryRequest,
   type WorkspaceState,
 } from '@dbagent/shared';
+import { validateConnectionInput } from './connection-validation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
@@ -278,17 +279,6 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   const tempPath = `${path}.${process.pid}.tmp`;
   await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
   await rename(tempPath, path);
-}
-
-function validateConnectionInput(input: ConnectionInput) {
-  if (!input.name.trim()) return { code: 'VALIDATION_ERROR' as const, message: 'Connection name is required.' };
-  if (!input.host.trim()) return { code: 'VALIDATION_ERROR' as const, message: 'Host is required.' };
-  if (!input.database.trim()) return { code: 'VALIDATION_ERROR' as const, message: 'Database is required.' };
-  if (!input.username.trim()) return { code: 'VALIDATION_ERROR' as const, message: 'Username is required.' };
-  if (input.port < 1 || input.port > 65535) {
-    return { code: 'VALIDATION_ERROR' as const, message: 'Port must be between 1 and 65535.' };
-  }
-  return undefined;
 }
 
 void app.whenReady().then(() => {

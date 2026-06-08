@@ -29,6 +29,9 @@ describe('ConnectionStore', () => {
       username: 'analyst',
       password: 'secret',
       readOnly: true,
+      ssl: true,
+      connectionTimeoutMs: 8000,
+      statementTimeoutMs: 45000,
     });
 
     expect(connection).toMatchObject({
@@ -36,6 +39,9 @@ describe('ConnectionStore', () => {
       engine: 'postgres',
       database: 'analytics',
       readOnly: true,
+      ssl: true,
+      connectionTimeoutMs: 8000,
+      statementTimeoutMs: 45000,
       status: 'disconnected',
     });
     expect(JSON.stringify(await store.list())).not.toContain('secret');
@@ -52,12 +58,21 @@ describe('ConnectionStore', () => {
       username: 'postgres',
     });
 
-    const updated = await store.update(created.id, { name: 'Local readonly', readOnly: true });
+    const updated = await store.update(created.id, {
+      name: 'Local readonly',
+      readOnly: true,
+      ssl: true,
+      connectionTimeoutMs: 12000,
+      statementTimeoutMs: 90000,
+    });
 
     expect(updated).toMatchObject({
       id: created.id,
       name: 'Local readonly',
       readOnly: true,
+      ssl: true,
+      connectionTimeoutMs: 12000,
+      statementTimeoutMs: 90000,
     });
   });
 
