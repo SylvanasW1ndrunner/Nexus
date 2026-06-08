@@ -11,7 +11,7 @@ describe('ipc contract', () => {
     expect(requestAndResponseMapsUseSameKeys).toBe(true);
   });
 
-  it('exposes the expected M0-M1.5 channel set without duplicates', () => {
+  it('exposes the expected BetaV0.1.1 channel set without duplicates', () => {
     const channels = flattenChannels(ipcChannels);
 
     expect(channels).toEqual([
@@ -29,6 +29,11 @@ describe('ipc contract', () => {
       'db:describe-table',
       'app:load-workspace-state',
       'app:save-workspace-state',
+      'workspace:choose-directory',
+      'workspace:create',
+      'workspace:open',
+      'workspace:list-recent',
+      'workspace:load-active',
       'auth:login',
       'auth:logout',
       'auth:status',

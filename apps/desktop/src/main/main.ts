@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
 import { appendFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -9,6 +9,7 @@ import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import {
   ipcChannels,
+  err,
   ok,
   type IpcChannel,
   type IpcRequestMap,
@@ -20,16 +21,19 @@ import { createExplainWorkflow } from './explain-workflow.js';
 import { createQueryWorkflow } from './query-workflow.js';
 import { createSchemaWorkflow } from './schema-workflow.js';
 import { WorkspaceStateStore } from './workspace-state-store.js';
+import { WorkspaceProjectStore } from './workspace-project-store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
 const dataDir = join(userDataDir, 'data');
 const credentialPath = join(dataDir, 'credentials.json');
 const workspaceStatePath = join(dataDir, 'workspace-state.json');
+const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
 const workspaceStateStore = new WorkspaceStateStore(workspaceStatePath);
+const workspaceProjectStore = new WorkspaceProjectStore(workspaceProjectStatePath);
 const authService = new AuthService(join(dataDir, 'auth-session.json'));
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
@@ -137,6 +141,40 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.app.saveWorkspaceState, async (state) => {
     return ok(await workspaceStateStore.save(state));
   });
+
+  handle(ipcChannels.workspace.chooseDirectory, async (request) => {
+    const selection = await dialog.showOpenDialog(mainWindow!, {
+      title: request?.title ?? 'Choose DBAgent workspace folder',
+      buttonLabel: request?.buttonLabel ?? 'Choose folder',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    const path = selection.canceled ? undefined : selection.filePaths[0];
+    return ok(path ? { path } : {});
+  });
+  handle(ipcChannels.workspace.create, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.create(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: error instanceof Error ? error.message : 'Unable to create workspace.',
+      });
+    }
+  });
+  handle(ipcChannels.workspace.open, async ({ rootPath }) => {
+    try {
+      return ok(await workspaceProjectStore.open(rootPath));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : undefined;
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to open this workspace.',
+        ...(detail ? { detail } : {}),
+      });
+    }
+  });
+  handle(ipcChannels.workspace.listRecent, async () => ok(await workspaceProjectStore.listRecent()));
+  handle(ipcChannels.workspace.loadActive, async () => ok(await workspaceProjectStore.loadActive()));
 }
 
 void app.whenReady().then(() => {

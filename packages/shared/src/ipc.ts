@@ -31,6 +31,13 @@ export const ipcChannels = {
     loadWorkspaceState: 'app:load-workspace-state',
     saveWorkspaceState: 'app:save-workspace-state',
   },
+  workspace: {
+    chooseDirectory: 'workspace:choose-directory',
+    create: 'workspace:create',
+    open: 'workspace:open',
+    listRecent: 'workspace:list-recent',
+    loadActive: 'workspace:load-active',
+  },
   auth: {
     login: 'auth:login',
     logout: 'auth:logout',
@@ -147,6 +154,55 @@ export type WorkspaceState = {
   updatedAt: string;
 };
 
+export type WorkspaceTemplate = 'minimal' | 'standard';
+
+export type WorkspaceConnectionLink = {
+  connectionId: ConnectionId;
+  alias?: string;
+  isDefault?: boolean;
+  autoActivate?: boolean;
+};
+
+export type WorkspaceProject = {
+  version: 1;
+  id: string;
+  name: string;
+  rootPath: string;
+  description?: string;
+  template: WorkspaceTemplate;
+  createdAt: string;
+  updatedAt: string;
+  connections: WorkspaceConnectionLink[];
+  defaults: {
+    connectionId?: ConnectionId;
+    agentMode: 'ask' | 'auto' | 'full-auto' | 'readonly';
+  };
+  enabledSkills: string[];
+  enabledMcpServers: string[];
+  tags: string[];
+};
+
+export type WorkspaceSummary = Pick<
+  WorkspaceProject,
+  'id' | 'name' | 'rootPath' | 'description' | 'template' | 'updatedAt' | 'tags'
+>;
+
+export type WorkspaceRecentState = {
+  activeWorkspaceId?: string;
+  workspaces: WorkspaceSummary[];
+};
+
+export type WorkspaceCreateRequest = {
+  name: string;
+  rootPath: string;
+  description?: string;
+  template?: WorkspaceTemplate;
+};
+
+export type WorkspaceOpenRequest = {
+  rootPath: string;
+};
+
 export type IpcRequestMap = {
   'connection:list': void;
   'connection:test': ConnectionInput;
@@ -167,6 +223,11 @@ export type IpcRequestMap = {
   'usage:history': { limit?: number };
   'app:load-workspace-state': void;
   'app:save-workspace-state': WorkspaceState;
+  'workspace:choose-directory': { title?: string; buttonLabel?: string };
+  'workspace:create': WorkspaceCreateRequest;
+  'workspace:open': WorkspaceOpenRequest;
+  'workspace:list-recent': void;
+  'workspace:load-active': void;
 };
 
 export type IpcResponseMap = {
@@ -189,6 +250,11 @@ export type IpcResponseMap = {
   'usage:history': Result<UsageSnapshot[]>;
   'app:load-workspace-state': Result<WorkspaceState | undefined>;
   'app:save-workspace-state': Result<WorkspaceState>;
+  'workspace:choose-directory': Result<{ path?: string }>;
+  'workspace:create': Result<WorkspaceProject>;
+  'workspace:open': Result<WorkspaceProject>;
+  'workspace:list-recent': Result<WorkspaceRecentState>;
+  'workspace:load-active': Result<WorkspaceProject | undefined>;
 };
 
 export type IpcChannel = keyof IpcRequestMap;

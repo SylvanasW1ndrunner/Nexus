@@ -4,7 +4,7 @@
 
 Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契约调用主进程能力。Preload 通过 `window.dbagent.invoke(channel, request)` 暴露统一入口，主进程使用 `ipcMain.handle` 注册同一组 channel。
 
-当前 M0-M1.5 channel：
+当前 BetaV0.1.1 channel：
 
 - `connection:list`
 - `connection:test`
@@ -25,6 +25,11 @@ Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契
 - `usage:history`
 - `app:load-workspace-state`
 - `app:save-workspace-state`
+- `workspace:choose-directory`
+- `workspace:create`
+- `workspace:open`
+- `workspace:list-recent`
+- `workspace:load-active`
 
 所有响应统一使用 `packages/shared/src/result.ts` 中的 `Result<T>`，让 UI 显式处理业务失败，而不是捕获无类型异常。
 
@@ -105,7 +110,21 @@ Renderer 在创建连接后不会再收到已保存密码；删除连接时也�
 
 ## IPC 契约校验
 
-`packages/shared/test/ipc-contract.test.ts` 固化当前 M0-M1.5 IPC channel 集合，并用 TypeScript 编译期断言保证 `IpcRequestMap` 与 `IpcResponseMap` 的键集合一致。新增、删除或重命名 channel 时，必须同时更新 `ipcChannels`、request map、response map、主进程 handler、renderer 调用点和该契约测试。
+`packages/shared/test/ipc-contract.test.ts` 固化当前 BetaV0.1.1 IPC channel 集合，并用 TypeScript 编译期断言保证 `IpcRequestMap` 与 `IpcResponseMap` 的键集合一致。新增、删除或重命名 channel 时，必须同时更新 `ipcChannels`、request map、response map、主进程 handler、renderer 调用点和该契约测试。
+
+## 工作空间/项目管理
+
+BetaV0.1.1 新增项目级 Workspace IPC，目标是把 SQL、脚本、文档和导出物沉淀到用户选择的真实目录中。
+
+- `workspace:choose-directory`：打开系统目录选择器，返回用户选择的目录路径；取消选择时返回空对象。
+- `workspace:create`：按 `WorkspaceCreateRequest` 创建项目目录、`.dbagent/workspace.json` 和标准目录骨架。
+- `workspace:open`：读取已有项目目录中的 `.dbagent/workspace.json`，校验后设为最近项目和当前项目。
+- `workspace:list-recent`：返回 `userData/data/workspaces.json` 中维护的最近项目列表。
+- `workspace:load-active`：加载最近项目中的当前活动项目。
+
+Workspace 配置采用 `WorkspaceProject` 类型，当前包含 `id`、`name`、`rootPath`、`template`、时间戳、关联连接列表、默认 Agent 模式、启用 Skill/MCP 列表和标签。连接定义仍然是全局资源，Workspace 只保存连接关联关系；凭证不进入项目目录。
+
+主进程实现位于 `apps/desktop/src/main/workspace-project-store.ts`。创建项目时会生成 `.dbagent/`、`sql/`、`scripts/`、`docs/`、`outputs/` 等目录；`standard` 模板还会包含 `queries/`、`skills/`、`notebooks/` 和报告/脚本运行输出子目录。最近项目列表写入 Electron `userData/data/workspaces.json`，不写入用户项目目录。
 
 ## Schema 与 SQL builder
 

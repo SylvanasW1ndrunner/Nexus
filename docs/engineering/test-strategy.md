@@ -25,6 +25,10 @@
 - 工程师在可写连接上执行批量写入，其中后续语句失败时，前序写入必须回滚。
 - 数据分析师执行复杂 SQL 时，系统返回性能提示，例如缺少 `LIMIT`、大 `OFFSET`、前置通配符 `LIKE`、逗号连接和过滤列套函数。
 - 用户在本地 Windows 或 Linux 桌面连接服务器上的 PostgreSQL 时，认证失败、DNS 失败、端口关闭、超时和连接中断应被分类成具体错误码。
+- 用户创建“电商分析项目”Workspace 后，磁盘上必须出现 `.dbagent/workspace.json`、SQL 库、脚本目录、文档目录和输出目录。
+- 用户打开已有 Workspace 后，该项目必须成为最近项目列表的第一项，并在下次启动时恢复为活动项目。
+- 用户尝试打开普通目录或损坏 Workspace 时，应用必须返回可处理错误，不能污染最近项目列表。
+- 用户能在中文与英文界面之间切换，未知语言配置必须回退到中文。
 
 ## 必须通过的质量门禁
 
@@ -76,8 +80,10 @@ pnpm db:down
 - `apps/desktop/src/main/query-workflow.test.ts` 覆盖主进程查询业务链路：安全查询成功入历史和用量、空 SQL 在 driver 前返回校验错误、只读写操作在 driver 前拦截、可写危险 SQL 未确认时要求确认、driver 失败时写失败历史。
 - `apps/desktop/src/main/schema-workflow.test.ts` 覆盖 Schema 主进程业务链路：连接不存在时不触碰 driver，连接存在时按保存连接的 `engine` 路由 `listTables` 和 `describeTable`。
 - `apps/desktop/src/main/workspace-state-store.test.ts` 覆盖 SQL 草稿恢复、活动连接恢复、缺失文件、损坏 JSON 和结构不合法状态。
+- `apps/desktop/src/main/workspace-project-store.test.ts` 覆盖真实项目目录创建、标准模板 starter 文件、打开已有项目、最近项目置顶和普通目录拒绝打开。
 - `apps/desktop/src/renderer/src/connection-draft.test.ts` 覆盖已保存连接回填到编辑表单时不回填密码，并保留远程连接配置。
 - `apps/desktop/src/renderer/src/diagnostics.test.ts` 覆盖远程连接错误提示和 SQL 性能告警汇总。
+- `apps/desktop/src/renderer/src/i18n.test.ts` 覆盖默认中文、英文切换和未知语言回退。
 - `packages/shared/test/ipc-contract.test.ts` 覆盖 IPC channel 快照，并用编译期断言保证 request/response map 对齐。
 - `packages/shared/test/csv.test.ts` 覆盖真实表格导出边界。
 - `packages/shared/test/export.test.ts` 覆盖 JSON 结果导出边界。

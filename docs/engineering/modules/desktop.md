@@ -7,11 +7,13 @@
 - `apps/desktop/src/main/connection-workflow.ts`：连接列表、测试、创建、更新、删除、连接和断开的主进程业务链路。
 - `apps/desktop/src/main/credential-vault.ts`：数据库密码本地凭证存储，封装 `safeStorage` 和 fallback。
 - `apps/desktop/src/main/query-confirmation.ts`：危险 SQL 确认握手判断。
+- `apps/desktop/src/main/workspace-project-store.ts`：项目级 Workspace 创建、打开、最近项目管理和目录骨架生成。
 - `apps/desktop/src/main/workspace-state-store.ts`：SQL 草稿和活动连接恢复状态持久化。
 - `apps/desktop/src/preload/preload.ts`：受控 IPC 暴露。
-- `apps/desktop/src/renderer/src/App.tsx`：M1.5 主界面。
+- `apps/desktop/src/renderer/src/App.tsx`：BetaV0.1.1 三栏工作台主界面。
 - `apps/desktop/src/renderer/src/connection-draft.ts`：连接编辑草稿转换。
 - `apps/desktop/src/renderer/src/diagnostics.ts`：远程连接错误和性能提示展示文案。
+- `apps/desktop/src/renderer/src/i18n.ts`：中英文 UI 文案字典和语言归一化。
 - `apps/desktop/src/renderer/src/styles.css`：界面样式。
 - `apps/desktop/package.json`：Electron builder 配置和打包脚本。
 
@@ -31,7 +33,13 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 
 结果区支持 CSV 和 JSON 导出。导出逻辑在 renderer 使用浏览器 `Blob` 下载，不引入桌面端额外运行时依赖。格式化逻辑来自 `@dbagent/shared`，保证 main、renderer 和测试使用同一结果结构。
 
+项目级 Workspace 是 BetaV0.1.1 的新增边界。用户选择一个真实目录后，主进程创建 `.dbagent/workspace.json`，并生成 `sql/`、`scripts/`、`docs/`、`outputs/` 等目录。Workspace 只保存项目元信息和连接关联，数据库连接定义与凭证仍保留在全局 `userData/data` 中，避免项目目录泄露密码。
+
+最近项目列表写入 Electron `userData/data/workspaces.json`。打开项目时必须读取并校验 `.dbagent/workspace.json`，普通目录或损坏配置不会进入最近项目列表。当前版本实现项目创建、打开、最近项目置顶和活动项目恢复；Workspace 内文件读写、SQL 文件保存、Python 脚本运行和 Agent 工具注册属于后续增量。
+
 工作区状态保存活动连接 id 和 SQL 草稿，写入 Electron `userData/data/workspace-state.json`，采用临时文件加 rename 的原子写入方式，避免异常退出留下半截 JSON。启动恢复时如果状态文件缺失、JSON 损坏或结构不合法，应用会忽略该恢复状态并继续启动，避免一个损坏草稿拖垮整个桌面应用。
+
+Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目、最近项目、连接和 Schema；中间是 SQL 编辑器和结果区；右侧是对话窗口与查询历史。顶部提供文件、运行、设置和语言切换入口。语言选择写入 `localStorage`，当前支持中文与英文，默认中文。
 
 ## 测试覆盖
 
@@ -41,9 +49,11 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 - `query-confirmation.test.ts`：危险 SQL 未确认时必须返回确认要求。
 - `query-workflow.test.ts`：主进程查询业务链路，包括成功执行、用量记录、历史写入、只读拦截、确认要求和失败历史。
 - `schema-workflow.test.ts`：Schema 主进程业务链路，包括连接缺失时的 `NOT_FOUND`、按 `engine` 路由 driver、表列表和表详情参数透传。
+- `workspace-project-store.test.ts`：真实项目目录创建、标准模板目录与 starter 文件、打开已有项目、最近项目置顶、普通目录拒绝打开。
 - `workspace-state-store.test.ts`：SQL 草稿恢复、活动连接恢复、缺失状态、损坏 JSON 和结构不合法状态。
 - `connection-draft.test.ts`：编辑连接不回填密码，并保留远程连接配置。
 - `diagnostics.test.ts`：远程连接错误提示和 SQL 性能告警汇总。
+- `i18n.test.ts`：默认中文、英文切换和未知语言归一化。
 - 打包验证：`pnpm package`。
 - 启动验证：直接启动 `apps/desktop/release/win-unpacked/DBAgent.exe`，确认打包产物能进入主进程并写入日志。
 
@@ -55,7 +65,7 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 
 ## 后续扩展
 
-- Agent、RAG、workspace 文件和多 tab 不应直接堆进 `App.tsx`；进入 M2 后应拆出稳定的 renderer 状态模块和页面级组件。
+- Agent、RAG、Workspace 文件读写和多 tab 不应长期堆进 `App.tsx`；BetaV0.1.1 先完成工作台骨架，后续应拆出稳定的 renderer 状态模块和页面级组件。
 - 如果后续加入真实 E2E，应优先从打包产物启动，而不是只测 Vite dev server。
 ## 2026-06-08 增量：EXPLAIN workflow
 
