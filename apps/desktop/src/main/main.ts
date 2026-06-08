@@ -3,7 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ConnectionStore, PostgresDriver, QueryHistoryStore } from '@dbagent/core-db';
+import { ConnectionStore, QueryHistoryStore, createDefaultDatabaseDriverRegistry } from '@dbagent/core-db';
 import { AuthService } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
@@ -33,7 +33,8 @@ const workspaceStateStore = new WorkspaceStateStore(workspaceStatePath);
 const authService = new AuthService(join(dataDir, 'auth-session.json'));
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
-const postgres = new PostgresDriver();
+const databaseDrivers = createDefaultDatabaseDriverRegistry();
+const postgres = databaseDrivers.create('postgres');
 const executeQuery = createQueryWorkflow({
   connections: connectionStore,
   history: queryHistoryStore,

@@ -74,12 +74,14 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 多数据库扩展方式：
 
 - 新增 `MysqlDriver`、`ClickHouseDriver`、`SqlServerDriver` 等实现 `IDatabaseDriver`。
+- 在 `DatabaseDriverRegistry` 注册新 driver 的工厂和 `DatabaseCapabilities`，让 main 通过 `engine` 创建 driver，而不是在 UI 或 workflow 中硬编码具体 SDK。
 - 每个 driver 独立实现系统表查询、表结构详情、错误分类、EXPLAIN 语法和连接参数。
 - 上层 main 通过 `engine` 选择 driver，不把具体数据库 SDK 透传到 UI。
 
 测试重点：
 
 - 纯单测覆盖 SQL 安全、性能提示、连接持久化、查询历史、错误分类。
+- `database-driver-registry.test.ts` 覆盖 driver 注册、能力声明、创建实例和错误边界。
 - `pnpm test:postgres` 覆盖真实 PostgreSQL 连接、Schema 表列表、表结构详情、复杂 join、只读拦截、断连和事务回滚。
 
 ## `apps/desktop`
