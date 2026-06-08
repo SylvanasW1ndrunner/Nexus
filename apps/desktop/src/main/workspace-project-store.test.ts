@@ -113,7 +113,7 @@ describe('WorkspaceProjectStore', () => {
     const rootPath = join(await tempDir(), 'ecommerce-analytics');
     const store = new WorkspaceProjectStore(join(await tempDir(), 'workspaces.json'));
     const project = await store.create({
-      name: 'Python 绛栫暐鍒嗘瀽',
+      name: 'Python 策略分析',
       rootPath,
       python: {
         mode: 'venv',

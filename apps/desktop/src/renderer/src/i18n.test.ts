@@ -9,5 +9,6 @@ describe('renderer i18n', () => {
 
     expect(createTranslator('zh-CN')('project')).toBe('项目');
     expect(createTranslator('en')('project')).toBe('Project');
+    expect(createTranslator('zh-CN')('pythonEnvironment')).toBe('Python 环境');
   });
 });

@@ -791,8 +791,6 @@ function WorkspaceDialog({
   onSaveSettings: () => void;
 }) {
   const isCreate = mode === 'create';
-  const isEnglish = t('project') === 'Project';
-  const databaseTypeLabel = isEnglish ? 'Database Type' : '数据库类型';
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal-panel" role="dialog" aria-modal="true" aria-label={isCreate ? t('createProject') : t('projectSettings')}>
@@ -808,8 +806,8 @@ function WorkspaceDialog({
         {isCreate ? (
           <>
             <div className="project-wizard">
-              <aside className="database-selector" aria-label={databaseTypeLabel}>
-                <span>{databaseTypeLabel}</span>
+              <aside className="database-selector" aria-label={t('databaseType')}>
+                <span>{t('databaseType')}</span>
                 {databaseEngineOptions.map((engine) => (
                   <button
                     className={selectedDatabaseEngine === engine.id ? 'database-option active' : 'database-option'}
@@ -954,52 +952,37 @@ function PythonConfigForm({
   setPythonDraft: (draft: WorkspacePythonConfig) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
 }) {
-  const isEnglish = t('project') === 'Project';
-  const labels = {
-    pythonEnvironment: isEnglish ? 'Python Environment' : 'Python 环境',
-    pythonEnvironmentHint: isEnglish
-      ? 'Used for local scripts, data processing, and analysis jobs'
-      : '用于本地脚本、数据处理和分析任务',
-    pythonMode: isEnglish ? 'Environment Mode' : '环境模式',
-    pythonModeSystem: isEnglish ? 'System Python' : '系统 Python',
-    pythonModeVenv: isEnglish ? 'Virtualenv venv' : '虚拟环境 venv',
-    pythonModeConda: isEnglish ? 'Conda Environment' : 'Conda 环境',
-    pythonPath: isEnglish ? 'Python Path' : 'Python 路径',
-    pythonPathPlaceholder: isEnglish ? 'Optional, e.g. python or conda env python' : '可选，例如 python 或 conda 环境 python',
-    venvPath: isEnglish ? 'venv Path' : 'venv 目录',
-    requirementsPath: isEnglish ? 'requirements Path' : 'requirements 路径',
-  };
   return (
     <section className="subform-section">
       <div className="subform-heading">
-        <strong>{labels.pythonEnvironment}</strong>
-        <small>{labels.pythonEnvironmentHint}</small>
+        <strong>{t('pythonEnvironment')}</strong>
+        <small>{t('pythonEnvironmentHint')}</small>
       </div>
       <div className="modal-grid two">
         <label>
-          <span>{labels.pythonMode}</span>
+          <span>{t('pythonMode')}</span>
           <select
             value={pythonDraft.mode}
             onChange={(event) =>
               setPythonDraft({ ...pythonDraft, mode: event.target.value as WorkspacePythonConfig['mode'] })
             }
           >
-            <option value="system">{labels.pythonModeSystem}</option>
-            <option value="venv">{labels.pythonModeVenv}</option>
-            <option value="conda">{labels.pythonModeConda}</option>
+            <option value="system">{t('pythonModeSystem')}</option>
+            <option value="venv">{t('pythonModeVenv')}</option>
+            <option value="conda">{t('pythonModeConda')}</option>
           </select>
         </label>
         <label>
-          <span>{labels.requirementsPath}</span>
+          <span>{t('requirementsPath')}</span>
           <input
             value={pythonDraft.requirementsPath}
             onChange={(event) => setPythonDraft({ ...pythonDraft, requirementsPath: event.target.value })}
           />
         </label>
         <label>
-          <span>{labels.pythonPath}</span>
+          <span>{t('pythonPath')}</span>
           <input
-            placeholder={labels.pythonPathPlaceholder}
+            placeholder={t('pythonPathPlaceholder')}
             value={pythonDraft.pythonPath ?? ''}
             onChange={(event) => {
               const next = { ...pythonDraft };
@@ -1010,7 +993,7 @@ function PythonConfigForm({
           />
         </label>
         <label>
-          <span>{labels.venvPath}</span>
+          <span>{t('venvPath')}</span>
           <input
             placeholder=".venv"
             value={pythonDraft.venvPath ?? ''}
