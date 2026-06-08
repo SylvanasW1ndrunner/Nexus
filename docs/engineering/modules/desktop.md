@@ -4,6 +4,7 @@
 
 - `apps/desktop/src/main/main.ts`：Electron 主进程、IPC handler、服务组合和持久化路径。
 - `apps/desktop/src/main/connection-validation.ts`：连接表单输入校验。
+- `apps/desktop/src/main/credential-vault.ts`：数据库密码本地凭证存储，封装 `safeStorage` 和 fallback。
 - `apps/desktop/src/main/query-confirmation.ts`：危险 SQL 确认握手判断。
 - `apps/desktop/src/preload/preload.ts`：受控 IPC 暴露。
 - `apps/desktop/src/renderer/src/App.tsx`：M1.5 主界面。
@@ -18,6 +19,8 @@
 
 连接管理支持创建、编辑、删除、测试、连接和断开。保存连接后 renderer 不回填密码；编辑已有连接时只加载元数据，密码留空。更新连接会让 main 主动断开旧连接池并标记为 disconnected，避免用户修改 host、database、SSL 或超时配置后，查询仍落到旧连接。
 
+密码由 `CredentialVault` 在主进程内管理。它优先使用 Electron `safeStorage` 加密，系统不可用时退化为 base64 fallback，并通过临时文件加 rename 写入，避免凭证文件半写。该 fallback 只是 M1.5 的可运行兜底，不等同于安全加密；公开发布前仍要迁移到 OS keychain adapter，并分别验证 Windows、macOS、Linux 的可用性。
+
 远程连接配置在 UI 暴露 SSL、连接超时和语句超时。输入校验在主进程做最终裁决，超时值必须落在合理区间。连接失败时 renderer 使用 `diagnostics.ts` 把产品错误码转成可行动提示，例如 DNS、VPN、防火墙、云安全组、SSL、监听地址或 `pg_hba.conf`。
 
 SQL 执行路径由主进程强制执行确认握手。如果 SQL 需要确认且 request 没有 `confirmed: true`，main 返回 `CONFIRMATION_REQUIRED`，不调用 driver，也不写历史。用户确认后 renderer 用同一 SQL 重试。
@@ -31,6 +34,7 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 ## 测试覆盖
 
 - `connection-validation.test.ts`：连接输入校验、SSL、连接超时、语句超时。
+- `credential-vault.test.ts`：凭证保存、读取、删除、`safeStorage` 可用和不可用 fallback。
 - `query-confirmation.test.ts`：危险 SQL 未确认时必须返回确认要求。
 - `query-workflow.test.ts`：主进程查询业务链路，包括成功执行、用量记录、历史写入、只读拦截、确认要求和失败历史。
 - `connection-draft.test.ts`：编辑连接不回填密码，并保留远程连接配置。

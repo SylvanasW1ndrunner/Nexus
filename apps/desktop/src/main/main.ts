@@ -18,6 +18,7 @@ import {
   type WorkspaceState,
 } from '@dbagent/shared';
 import { validateConnectionInput } from './connection-validation.js';
+import { CredentialVault } from './credential-vault.js';
 import { createQueryWorkflow } from './query-workflow.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,7 @@ const credentialPath = join(dataDir, 'credentials.json');
 const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
+const credentialVault = new CredentialVault(credentialPath, safeStorage);
 const authService = new AuthService(join(dataDir, 'auth-session.json'));
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
@@ -109,13 +111,13 @@ function registerIpcHandlers(): void {
     const validation = validateConnectionInput(input);
     if (validation) return err(validation);
     const connection = await connectionStore.create(input);
-    if (input.password) await savePassword(connection.id, input.password);
+    if (input.password) await credentialVault.save(connection.id, input.password);
     return ok(connection);
   });
 
   handle(ipcChannels.connection.update, async ({ id, patch }) => {
     const updated = await connectionStore.update(id, patch);
-    if (patch.password) await savePassword(id, patch.password);
+    if (patch.password) await credentialVault.save(id, patch.password);
     if (!updated) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
     await postgres.disconnect(id);
     const disconnected = await connectionStore.markStatus(id, 'disconnected');
@@ -125,14 +127,14 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.connection.remove, async ({ id }) => {
     await postgres.disconnect(id);
     const removed = await connectionStore.remove(id);
-    if (removed) await removePassword(id);
+    if (removed) await credentialVault.remove(id);
     return removed ? ok({ id }) : err({ code: 'NOT_FOUND', message: 'Connection not found.' });
   });
 
   handle(ipcChannels.connection.connect, async ({ id }) => {
     const connection = (await connectionStore.list()).find((item) => item.id === id);
     if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-    const password = await loadPassword(connection.id);
+    const password = await credentialVault.load(connection.id);
     const config = {
       ...connection,
       maxClients: 5,
@@ -186,45 +188,6 @@ function toDbConfig(input: ConnectionInput) {
     readOnly: input.readOnly ?? true,
     maxClients: 5,
   };
-}
-
-async function savePassword(connectionId: string, password: string): Promise<void> {
-  const credentials = await loadCredentials();
-  const encrypted = safeStorage.isEncryptionAvailable()
-    ? safeStorage.encryptString(password).toString('base64')
-    : Buffer.from(password, 'utf8').toString('base64');
-  credentials[connectionId] = {
-    encrypted,
-    safeStorage: safeStorage.isEncryptionAvailable(),
-  };
-  await writeFile(credentialPath, `${JSON.stringify(credentials, null, 2)}\n`, 'utf8');
-}
-
-async function loadPassword(connectionId: string): Promise<string | undefined> {
-  const credentials = await loadCredentials();
-  const credential = credentials[connectionId];
-  if (!credential) return undefined;
-  const buffer = Buffer.from(credential.encrypted, 'base64');
-  return credential.safeStorage ? safeStorage.decryptString(buffer) : buffer.toString('utf8');
-}
-
-async function removePassword(connectionId: string): Promise<void> {
-  const credentials = await loadCredentials();
-  if (!(connectionId in credentials)) return;
-  delete credentials[connectionId];
-  await writeFile(credentialPath, `${JSON.stringify(credentials, null, 2)}\n`, 'utf8');
-}
-
-async function loadCredentials(): Promise<Record<string, { encrypted: string; safeStorage: boolean }>> {
-  try {
-    return JSON.parse(await readFile(credentialPath, 'utf8')) as Record<
-      string,
-      { encrypted: string; safeStorage: boolean }
-    >;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
-    throw error;
-  }
 }
 
 async function loadWorkspaceState(): Promise<WorkspaceState | undefined> {
