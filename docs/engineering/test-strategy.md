@@ -2,12 +2,13 @@
 
 ## 测试分层
 
-- 单元测试覆盖纯业务规则，例如 SQL 安全判断、连接校验、用量窗口、认证与会话持久化。
-- 集成测试覆盖真实 PostgreSQL 行为；本地或 CI 具备 Docker 后，通过 Docker Compose 启动测试库。
-- E2E 测试覆盖桌面端用户路径：打开应用、创建连接、执行 SQL、查看结果表、查看查询历史、验证只读拦截。
-- Smoke 测试是零外部依赖的仓库健康检查，即使 Node 包尚未完整安装，也应尽量能运行。
+- 单元测试覆盖纯业务规则，例如 SQL 安全判断、PostgreSQL identifier quote、预览 SQL limit、连接校验、查询历史、CSV 导出、用量窗口、认证与会话持久化。
+- 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts`。
+- 远程连接风险以可复现单测覆盖错误分类，以真实 PostgreSQL 集成测试覆盖成功连接、查询、断连和事务回滚。弱网、VPN、云安全组和跨系统防火墙场景后续进入发布前手工 QA 矩阵。
+- E2E 测试覆盖桌面端用户路径：打开应用、创建连接、执行 SQL、查看结果表、查看查询历史、验证只读拦截、导出 CSV、重启后恢复 SQL 草稿。
+- Smoke 测试是零外部依赖的仓库健康检查，入口为 `pnpm smoke`，实现文件为 `scripts/smoke.mjs`。它检查关键文件存在、SQL 安全关键字和 IPC 契约片段。
 
-## M1/M1.5 业务场景
+## M0-M1.5 业务场景
 
 - 数据分析师连接 PostgreSQL 并执行安全的 `SELECT`。
 - 数据分析师误在只读连接上执行 `DELETE`，应用明确阻止操作。
@@ -17,52 +18,56 @@
 - 工程师连接 PostgreSQL 后打开 Schema 树，点击表生成安全 quote 的 `select * ... limit 100` 预览查询。
 - 数据分析师将结果导出 CSV，逗号、引号、换行、JSON 和空值等表格敏感内容能正确导入。
 - 应用重启后恢复活动连接 id 和 SQL 草稿。
+- 工程师在可写连接上执行批量写入，其中后续语句失败时，前序写入必须回滚。
+- 数据分析师执行复杂 SQL 时，系统返回性能提示，例如缺少 `LIMIT`、大 `OFFSET`、前置通配符 `LIKE`、逗号连接和过滤列套函数。
+- 用户在本地 Windows 或 Linux 桌面连接服务器上的 PostgreSQL 时，认证失败、DNS 失败、端口关闭、超时和连接中断应被分类成具体错误码。
 
 ## 必须通过的质量门禁
+
+当前仓库已有的基础门禁：
 
 ```bash
 pnpm typecheck
 pnpm lint
 pnpm test
 pnpm smoke
+pnpm run ci
 ```
+
+`pnpm run ci` 当前等价于：
+
+```bash
+pnpm typecheck && pnpm lint && pnpm test && pnpm smoke
+```
+
+真实 PostgreSQL 集成测试当前没有包含在 `pnpm run ci` 中。优先使用 Docker：
+
+```bash
+pnpm db:up
+pnpm test:postgres
+pnpm db:down
+```
+
+如果本机没有 Docker，也可以使用 PostgreSQL 官方 Windows binary fixture。本次阶段验证在本机下载并解压 PostgreSQL 16.14，初始化本地 `dbagent_demo` 后运行 `pnpm test:postgres`，测试确实连接了 `127.0.0.1:5432` 上的真实 PostgreSQL 进程，而不是 mock。
 
 当前快速测试覆盖：
 
+- `packages/core-db/test/sql-safety.test.ts` 覆盖只读拦截、写操作风险和多语句风险。
+- `packages/core-db/test/sql-performance.test.ts` 覆盖复杂 SQL 性能提示。
+- `packages/core-db/test/postgres-errors.test.ts` 覆盖远程连接常见失败分类。
 - `packages/core-db/test/sql-builder.test.ts` 覆盖 PostgreSQL 标识符 quote 和预览 limit 上限。
+- `packages/core-db/test/connection-store.test.ts` 覆盖连接持久化和删除。
+- `packages/core-db/test/query-history.test.ts` 覆盖查询历史记录。
 - `packages/shared/test/csv.test.ts` 覆盖真实表格导出边界。
-- 既有 core 测试覆盖 SQL 安全、连接持久化、查询历史、认证和用量记录。
+- `packages/core-auth/test/auth-service.test.ts` 覆盖认证状态和会话持久化。
+- `packages/core-usage/test/usage-tracker.test.ts` 覆盖本地用量记录。
 
-## M0-M1.5 发布风险
+## PostgreSQL 集成验证
 
-- Electron 包级测试通过，不等于最终桌面包可启动。主进程、preload、ASAR 路径和运行时依赖必须通过打包产物验证。
-- PostgreSQL 集成测试必须在候选发布前跑真实数据库。单元测试足够覆盖 SQL 安全和本地持久化 helper，但不能证明驱动行为、SSL 选项、连接池生命周期、结果类型映射或服务器错误文本正确。
-- Docker PostgreSQL 测试在本地开发中可先作为 opt-in；等 CI 环境具备 Docker 后，应作为发布 CI 必跑项。
-- `pnpm --filter @dbagent/desktop package` 后必须验证打包产物启动；renderer dev server 或 Vitest 不能替代安装包验证。
-- 认证和用量持久化要保持快速单测覆盖，因为它们同时影响 BYOK 模式和后续订阅 UX。
-
-候选发布命令：
+本地 PostgreSQL fixture：
 
 ```bash
-pnpm --filter @dbagent/desktop package
-```
-
-推荐候选发布顺序：
-
-```bash
-pnpm run ci
-pnpm --filter @dbagent/core-db test:postgres
-pnpm --filter @dbagent/desktop package
-```
-
-`test:postgres` 是后续 Docker PostgreSQL 集成测试的目标脚本名。如果脚本尚未实现，候选发布记录中必须明确 PostgreSQL 集成测试未完成。
-
-## PostgreSQL 集成测试数据
-
-M1 手工和自动化集成测试使用 `scripts/dev-db` 中的本地 fixture：
-
-```bash
-docker compose -f scripts/dev-db/docker-compose.yml up -d
+pnpm db:up
 ```
 
 默认连接：
@@ -75,6 +80,32 @@ docker compose -f scripts/dev-db/docker-compose.yml up -d
 
 业务检查：
 
-- `select * from users` 返回种子用户数据。
-- `select u.city, sum(o.total_amount) from users u join orders o on o.user_id = u.id group by u.city` 验证真实 join 场景。
-- 只读连接下 `delete from users` 必须被阻止。
+- `PostgresDriver.test(config)` 能连接默认 fixture。
+- `PostgresDriver.listTables(connectionId)` 返回 `public.users` 和 `public.orders`。
+- 真实 join 查询返回 `Shanghai` 和 `Beijing`。
+- 只读连接中 `delete from users where email = 'alice@example.com'` 必须返回 `READ_ONLY_VIOLATION`。
+- `disconnect(connectionId)` 后再次 `listTables(connectionId)` 必须返回 `CONNECTION_FAILED`。
+- 可写连接中批量 SQL 先插入数据、再执行错误语句时必须失败，并且前序插入后的计数仍为 `0`，证明事务已回滚。
+
+环境变量 `DBAGENT_TEST_PG_HOST`、`DBAGENT_TEST_PG_PORT`、`DBAGENT_TEST_PG_DATABASE`、`DBAGENT_TEST_PG_USER` 和 `DBAGENT_TEST_PG_PASSWORD` 可覆盖默认连接。CI 环境具备 Docker 后，应评估是否把 `pnpm test:postgres` 加入发布门禁。
+
+## M0-M1.5 发布风险
+
+- Electron 包级测试通过，不等于最终桌面包可启动。主进程、preload、ASAR 路径和运行时依赖必须通过打包产物验证。
+- PostgreSQL 自动化集成测试已作为 `pnpm test:postgres` 落地，但尚未包含在 `pnpm run ci`；候选发布前必须显式运行或在发布记录中说明未运行原因。
+- 远程数据库连接不是单一问题：DNS、端口、防火墙、VPN、SSL、认证、数据库名和连接中断都可能失败。M1.5 已有错误分类和超时/keepalive 默认值，发布 QA 仍需覆盖 Windows 客户端连接 Linux PostgreSQL、Windows 客户端连接 Windows PostgreSQL、Linux 客户端连接 Linux PostgreSQL 等组合。
+- Docker Compose、PostgreSQL 测试容器、fixture loader 和 CI helper 不能进入最终应用包。
+- `pnpm --filter @dbagent/desktop package` 后必须验证打包产物启动；renderer dev server 或 Vitest 不能替代安装包验证。
+- 认证和用量持久化要保持快速单测覆盖，因为它们同时影响 BYOK 模式和后续订阅 UX。
+
+候选发布推荐顺序：
+
+```bash
+pnpm run ci
+pnpm db:up
+pnpm test:postgres
+pnpm --filter @dbagent/desktop package
+pnpm db:down
+```
+
+如果跳过 `pnpm test:postgres`，候选发布记录中必须明确原因和替代验证方式。

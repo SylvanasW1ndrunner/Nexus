@@ -14,8 +14,11 @@
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
     "test": "turbo test",
+    "test:postgres": "pnpm --filter @dbagent/core-db test:postgres",
     "smoke": "node scripts/smoke.mjs",
-    "ci": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke"
+    "ci": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke",
+    "db:up": "docker compose -f scripts/dev-db/docker-compose.yml up -d",
+    "db:down": "docker compose -f scripts/dev-db/docker-compose.yml down -v"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

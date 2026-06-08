@@ -1,4 +1,5 @@
 import type { QuerySafetyReport } from '@dbagent/shared';
+import { analyzeSqlPerformance } from './sql-performance.js';
 
 const dangerousKinds = new Set(['DROP', 'TRUNCATE', 'ALTER', 'CREATE']);
 const writeKinds = new Set(['INSERT', 'UPDATE', 'DELETE', 'MERGE', 'CALL']);
@@ -58,6 +59,7 @@ export function analyzeSqlSafety(sql: string, options: AnalyzeSqlOptions): Query
     requiresConfirmation,
     blocked,
     reasons,
+    performanceWarnings: analyzeSqlPerformance(normalized),
   };
 }
 

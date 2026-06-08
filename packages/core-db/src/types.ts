@@ -19,6 +19,8 @@ export type DatabaseConnectionConfig = {
   ssl?: boolean;
   readOnly: boolean;
   maxClients?: number;
+  connectionTimeoutMs?: number;
+  statementTimeoutMs?: number;
 };
 
 export type DatabaseCapabilities = {

@@ -79,6 +79,19 @@ export type QuerySafetyReport = {
   requiresConfirmation: boolean;
   blocked: boolean;
   reasons: string[];
+  performanceWarnings?: SqlPerformanceWarning[];
+};
+
+export type SqlPerformanceWarning = {
+  code:
+    | 'SELECT_STAR'
+    | 'MISSING_LIMIT'
+    | 'LEADING_WILDCARD_LIKE'
+    | 'LARGE_OFFSET'
+    | 'CARTESIAN_JOIN'
+    | 'FUNCTION_ON_FILTER_COLUMN';
+  message: string;
+  severity: 'info' | 'warning';
 };
 
 export type QueryExecutionResult = {

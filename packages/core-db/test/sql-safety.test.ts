@@ -45,4 +45,36 @@ describe('analyzeSqlSafety', () => {
     expect(report.requiresConfirmation).toBe(true);
     expect(report.reasons.join(' ')).toContain('Multiple statements');
   });
+
+  it('ignores comments before classifying complex CTE reads', () => {
+    const report = analyzeSqlSafety(
+      `
+        -- analyst note: this query explores city revenue
+        with city_revenue as (
+          select u.city, sum(o.total_amount) as revenue
+          from users u
+          join orders o on o.user_id = u.id
+          group by u.city
+        )
+        select * from city_revenue order by revenue desc limit 10
+      `,
+      { readOnly: true },
+    );
+
+    expect(report).toMatchObject({
+      statementKind: 'WITH',
+      riskLevel: 'safe',
+      blocked: false,
+    });
+  });
+
+  it('adds performance warnings to exploratory broad reads', () => {
+    const report = analyzeSqlSafety("select * from users where lower(email) like '%@example.com' offset 20000", {
+      readOnly: true,
+    });
+
+    expect(report.performanceWarnings?.map((warning) => warning.code)).toEqual(
+      expect.arrayContaining(['SELECT_STAR', 'MISSING_LIMIT', 'LEADING_WILDCARD_LIKE', 'LARGE_OFFSET']),
+    );
+  });
 });

@@ -2,9 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { QueryExecutionResult, QueryRequest, SavedConnection } from '@dbagent/shared';
 import { err, ok, type Result } from '@dbagent/shared';
-import type { Pool as PgPool } from 'pg';
+import type { Pool as PgPool, QueryResult as PgQueryResult, QueryResultRow } from 'pg';
+import { classifyPostgresConnectionError } from './postgres-errors.js';
 import { analyzeSqlSafety } from './sql-safety.js';
 import type { DatabaseConnectionConfig, IDatabaseDriver, TableSummary } from './types.js';
+
+type SafePgQueryResult = PgQueryResult<QueryResultRow>;
 
 export class PostgresDriver implements IDatabaseDriver {
   readonly capabilities = {
@@ -30,12 +33,7 @@ export class PostgresDriver implements IDatabaseDriver {
       }
       return ok({ latencyMs: Math.round(performance.now() - started) });
     } catch (error) {
-      return err({
-        code: 'CONNECTION_FAILED',
-        message: 'Unable to connect to PostgreSQL.',
-        detail: error instanceof Error ? error.message : String(error),
-        retryable: true,
-      });
+      return err(classifyPostgresConnectionError(error));
     }
   }
 
@@ -90,15 +88,10 @@ export class PostgresDriver implements IDatabaseDriver {
 
     const started = performance.now();
     try {
-      const result = await pool.query(request.sql);
-      return ok({
-        queryId: randomUUID(),
-        columns: result.fields.map((field) => ({ name: field.name, dataType: String(field.dataTypeID) })),
-        rows: result.rows,
-        rowCount: result.rowCount ?? result.rows.length,
-        elapsedMs: Math.round(performance.now() - started),
-        safety,
-      });
+      const result = safety.requiresConfirmation
+        ? await executeInTransaction(pool, request.sql)
+        : normalizePgResult(await pool.query<QueryResultRow>(request.sql));
+      return ok(toQueryExecutionResult(result, safety, started));
     } catch (error) {
       return err({
         code: 'QUERY_FAILED',
@@ -144,6 +137,52 @@ export class PostgresDriver implements IDatabaseDriver {
   }
 }
 
+async function executeInTransaction(pool: PgPool, sql: string): Promise<SafePgQueryResult> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = normalizePgResult(await client.query<QueryResultRow>(sql));
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Preserve the original database error; rollback failure is secondary.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function normalizePgResult(result: SafePgQueryResult | SafePgQueryResult[]): SafePgQueryResult {
+  if (!Array.isArray(result)) return result;
+  const emptyRows: QueryResultRow[] = [];
+  return result.at(-1) ?? {
+    command: '',
+    rowCount: 0,
+    oid: 0,
+    fields: [],
+    rows: emptyRows,
+  };
+}
+
+function toQueryExecutionResult(
+  result: SafePgQueryResult,
+  safety: QueryExecutionResult['safety'],
+  started: number,
+): QueryExecutionResult {
+  return {
+    queryId: randomUUID(),
+    columns: result.fields.map((field) => ({ name: field.name, dataType: String(field.dataTypeID) })),
+    rows: result.rows,
+    rowCount: result.rowCount ?? result.rows.length,
+    elapsedMs: Math.round(performance.now() - started),
+    safety,
+  };
+}
+
 function toPgConfig(config: DatabaseConnectionConfig) {
   return {
     host: config.host,
@@ -153,6 +192,12 @@ function toPgConfig(config: DatabaseConnectionConfig) {
     password: config.password,
     ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
     max: config.maxClients ?? 5,
+    connectionTimeoutMillis: config.connectionTimeoutMs ?? 10_000,
+    idleTimeoutMillis: 30_000,
+    query_timeout: config.statementTimeoutMs ?? 60_000,
+    statement_timeout: config.statementTimeoutMs ?? 60_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
     application_name: 'DBAgent',
   };
 }
