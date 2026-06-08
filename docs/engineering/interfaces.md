@@ -70,6 +70,8 @@ M1.5 通过 `app:load-workspace-state` 和 `app:save-workspace-state` IPC channe
 
 Renderer 在创建连接后不会再收到已保存密码；删除连接时也会删除对应凭证。这是 M1 的过渡实现。公开发布前，应将该边界迁移到 OS keychain adapter 后面，并分别验证 Windows Credential Manager、macOS Keychain 和 Linux secret storage。
 
+更新连接元数据时，主进程会主动断开对应连接池并把状态置为 `disconnected`。这是为了避免用户修改 host、database、SSL 或超时后，界面显示新配置但查询仍落到旧连接池。删除连接会同时断开连接池、删除连接元数据并删除对应凭证。
+
 ## SQL 安全
 
 `analyzeSqlSafety(sql, { readOnly })` 会在执行前分类 SQL：

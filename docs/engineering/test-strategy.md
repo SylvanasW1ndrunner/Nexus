@@ -18,6 +18,8 @@
 - 工程师连接 PostgreSQL 后打开 Schema 树，点击表生成安全 quote 的 `select * ... limit 100` 预览查询。
 - 数据分析师将结果导出 CSV，逗号、引号、换行、JSON 和空值等表格敏感内容能正确导入。
 - 应用重启后恢复活动连接 id 和 SQL 草稿。
+- 用户能编辑已保存连接的 host、database、SSL 和超时配置；更新后连接池必须断开，避免继续使用旧连接。
+- 用户能删除已保存连接，同时删除对应凭证和活动连接池。
 - 工程师在可写连接上执行批量写入，其中后续语句失败时，前序写入必须回滚。
 - 数据分析师执行复杂 SQL 时，系统返回性能提示，例如缺少 `LIMIT`、大 `OFFSET`、前置通配符 `LIKE`、逗号连接和过滤列套函数。
 - 用户在本地 Windows 或 Linux 桌面连接服务器上的 PostgreSQL 时，认证失败、DNS 失败、端口关闭、超时和连接中断应被分类成具体错误码。
@@ -59,6 +61,7 @@ pnpm db:down
 - `packages/core-db/test/connection-store.test.ts` 覆盖连接持久化和删除。
 - `packages/core-db/test/query-history.test.ts` 覆盖查询历史记录。
 - `apps/desktop/src/main/connection-validation.test.ts` 覆盖远程连接表单配置校验，例如 SSL、连接超时和语句超时。
+- `apps/desktop/src/renderer/src/connection-draft.test.ts` 覆盖已保存连接回填到编辑表单时不回填密码，并保留远程连接配置。
 - `apps/desktop/src/renderer/src/diagnostics.test.ts` 覆盖远程连接错误提示和 SQL 性能告警汇总。
 - `packages/shared/test/csv.test.ts` 覆盖真实表格导出边界。
 - `packages/core-auth/test/auth-service.test.ts` 覆盖认证状态和会话持久化。

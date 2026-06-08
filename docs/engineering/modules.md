@@ -93,14 +93,18 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - Main 是安全边界：持有文件路径、密码、连接池和数据库驱动实例。
 - Renderer 只发送类型化请求，收到 `Result<T>` 后渲染成功或失败状态。
 - 连接表单现在暴露 SSL、连接超时和语句超时，服务于本地桌面连接远程数据库。
+- 保存连接后，renderer 不会回填密码；编辑已保存连接时，表单只加载元数据并保持密码为空。
+- 更新连接会让 main 断开旧连接池并标记为 disconnected，用户需要重新连接，避免“配置已改但查询仍打旧库”的隐患。
+- 删除连接会经过确认，并删除连接元数据、凭证和活动连接池。
 - 远程连接错误在 renderer 通过诊断 helper 转成用户可行动提示。
 - SQL 性能提示在结果区展示，但不阻止执行。
 - 工作区草稿通过 `workspace-state.json` 原子写入。
+- Connections、SQL Editor、Results 三个主区域分别包裹 ErrorBoundary，单个区域渲染错误不会拖垮整个应用壳。
 
 测试重点：
 
 - 主进程可测试逻辑要尽量抽成纯模块，例如连接输入校验。
-- Renderer 展示逻辑要抽成 helper，例如远程错误文案和性能提示汇总。
+- Renderer 展示逻辑要抽成 helper，例如远程错误文案、性能提示汇总和连接草稿转换。
 - 打包后必须启动 `win-unpacked/DBAgent.exe`，不能只相信 Vite dev server。
 
 ## `packages/core-auth`

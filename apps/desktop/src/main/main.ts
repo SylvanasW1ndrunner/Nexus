@@ -110,7 +110,10 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.connection.update, async ({ id, patch }) => {
     const updated = await connectionStore.update(id, patch);
     if (patch.password) await savePassword(id, patch.password);
-    return updated ? ok(updated) : err({ code: 'NOT_FOUND', message: 'Connection not found.' });
+    if (!updated) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
+    await postgres.disconnect(id);
+    const disconnected = await connectionStore.markStatus(id, 'disconnected');
+    return ok(disconnected ?? updated);
   });
 
   handle(ipcChannels.connection.remove, async ({ id }) => {

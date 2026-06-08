@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Component, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from 'react';
 import {
   ipcChannels,
   queryResultToCsv,
@@ -8,6 +8,7 @@ import {
   type SavedConnection,
   type TableSummary,
 } from '@dbagent/shared';
+import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 
 const starterSql = `select
@@ -22,19 +23,7 @@ export function App() {
   const [sql, setSql] = useState(starterSql);
   const [result, setResult] = useState<QueryExecutionResult | undefined>();
   const [message, setMessage] = useState('Hello DBAgent');
-  const [connectionDraft, setConnectionDraft] = useState<ConnectionInput>({
-    name: 'Local PostgreSQL',
-    engine: 'postgres',
-    host: '127.0.0.1',
-    port: 5432,
-    database: 'postgres',
-    username: 'postgres',
-    password: '',
-    readOnly: true,
-    ssl: false,
-    connectionTimeoutMs: 10000,
-    statementTimeoutMs: 60000,
-  });
+  const [connectionDraft, setConnectionDraft] = useState<ConnectionInput>(defaultConnectionDraft);
   const activeConnection = useMemo(
     () => connections.find((connection) => connection.id === activeConnectionId),
     [activeConnectionId, connections],
@@ -77,7 +66,13 @@ export function App() {
     const response = await window.dbagent.invoke(ipcChannels.connection.list, undefined);
     if (response.ok) {
       setConnections(response.data);
-      setActiveConnectionId((current) => current || response.data[0]?.id || '');
+      setActiveConnectionId((current) => {
+        const currentConnection = response.data.find((connection) => connection.id === current);
+        if (currentConnection) return currentConnection.id;
+        const fallback = response.data[0];
+        setConnectionDraft(fallback ? connectionToDraft(fallback) : defaultConnectionDraft);
+        return fallback?.id ?? '';
+      });
     } else {
       setMessage(formatAppError(response.error));
     }
@@ -110,7 +105,52 @@ export function App() {
       setMessage(formatAppError(response.error));
       return;
     }
+    setActiveConnectionId(response.data.id);
+    setConnectionDraft(connectionToDraft(response.data));
     setMessage(`Saved ${response.data.name}.`);
+    await refreshConnections();
+  }
+
+  async function updateActiveConnection() {
+    if (!activeConnectionId) {
+      setMessage('Select a saved connection before applying changes.');
+      return;
+    }
+    setMessage('Updating connection...');
+    const response = await window.dbagent.invoke(ipcChannels.connection.update, {
+      id: activeConnectionId,
+      patch: connectionDraft,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setTables([]);
+    setConnectionDraft(connectionToDraft(response.data));
+    setMessage(`Updated ${response.data.name}. Reconnect before running queries.`);
+    await refreshConnections();
+  }
+
+  async function removeActiveConnection() {
+    if (!activeConnectionId || !activeConnection) {
+      setMessage('Select a saved connection before deleting it.');
+      return;
+    }
+    if (!window.confirm(`Delete connection "${activeConnection.name}"? Saved password and active pool will be removed.`)) {
+      return;
+    }
+    const removedId = activeConnectionId;
+    setMessage('Deleting connection...');
+    const response = await window.dbagent.invoke(ipcChannels.connection.remove, { id: removedId });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setActiveConnectionId('');
+    setTables([]);
+    setResult(undefined);
+    setConnectionDraft(defaultConnectionDraft);
+    setMessage(`Deleted connection ${activeConnection.name}.`);
     await refreshConnections();
   }
 
@@ -180,6 +220,11 @@ export function App() {
     void executeSql(buildPreviewSql(table));
   }
 
+  function selectConnection(connection: SavedConnection) {
+    setActiveConnectionId(connection.id);
+    setConnectionDraft(connectionToDraft(connection));
+  }
+
   async function executeSql(nextSql: string) {
     if (!activeConnectionId) {
       setMessage('Create and connect a PostgreSQL connection before running SQL.');
@@ -222,77 +267,86 @@ export function App() {
       </header>
 
       <section className="workspace">
-        <aside className="sidebar">
-          <h2>Connections</h2>
-          <ConnectionForm
-            draft={connectionDraft}
-            setDraft={setConnectionDraft}
-            onCreate={() => void createConnection()}
-            onTest={() => void testConnection()}
-          />
-          {connections.length === 0 ? (
-            <p className="muted">No saved connections yet. Add one from Settings in the next slice.</p>
-          ) : (
-            connections.map((connection) => (
-              <button
-                className={connection.id === activeConnectionId ? 'connection active' : 'connection'}
-                key={connection.id}
-                onClick={() => setActiveConnectionId(connection.id)}
-              >
-                <span>{connection.name}</span>
-                <small>
-                  {connection.engine} / {connection.status}
-                  {connection.ssl ? ' / SSL' : ''}
-                </small>
-              </button>
-            ))
-          )}
-          <SchemaPanel tables={tables} onPreview={previewTable} />
-        </aside>
-
-        <section className="editor-pane">
-          <div className="pane-toolbar">
-            <span>
-              {activeConnection?.name ?? 'No connection selected'}
-              {activeConnection?.readOnly ? ' / read-only' : ''}
-            </span>
-            <div className="toolbar-actions">
-              <button className="secondary" onClick={() => void connectActive()}>
-                Connect
-              </button>
-              <button className="secondary" onClick={() => void disconnectActive()}>
-                Disconnect
-              </button>
-              <button className="secondary" onClick={() => void explain()}>
-                Explain
-              </button>
-              <button onClick={() => void execute()}>Run SQL</button>
-            </div>
-          </div>
-          <textarea value={sql} onChange={(event) => setSql(event.target.value)} spellCheck={false} />
-        </section>
-
-        <section className="result-pane">
-          <h2>Results</h2>
-          <p className="status">{message}</p>
-          {result ? (
-            <>
-              <div className="result-actions">
-                <span>
-                  {result.rowCount} rows / {result.elapsedMs} ms / {result.safety.riskLevel}
-                </span>
-                <button className="secondary" onClick={exportCsv}>
-                  Export CSV
+        <ErrorBoundary label="Connections">
+          <aside className="sidebar">
+            <h2>Connections</h2>
+            <ConnectionForm
+              hasActiveConnection={Boolean(activeConnectionId)}
+              draft={connectionDraft}
+              setDraft={setConnectionDraft}
+              onCreate={() => void createConnection()}
+              onDelete={() => void removeActiveConnection()}
+              onTest={() => void testConnection()}
+              onUpdate={() => void updateActiveConnection()}
+            />
+            {connections.length === 0 ? (
+              <p className="muted">No saved connections yet. Add one from Settings in the next slice.</p>
+            ) : (
+              connections.map((connection) => (
+                <button
+                  className={connection.id === activeConnectionId ? 'connection active' : 'connection'}
+                  key={connection.id}
+                  onClick={() => selectConnection(connection)}
+                >
+                  <span>{connection.name}</span>
+                  <small>
+                    {connection.engine} / {connection.status}
+                    {connection.ssl ? ' / SSL' : ''}
+                  </small>
                 </button>
+              ))
+            )}
+            <SchemaPanel tables={tables} onPreview={previewTable} />
+          </aside>
+        </ErrorBoundary>
+
+        <ErrorBoundary label="SQL Editor">
+          <section className="editor-pane">
+            <div className="pane-toolbar">
+              <span>
+                {activeConnection?.name ?? 'No connection selected'}
+                {activeConnection?.readOnly ? ' / read-only' : ''}
+              </span>
+              <div className="toolbar-actions">
+                <button className="secondary" onClick={() => void connectActive()}>
+                  Connect
+                </button>
+                <button className="secondary" onClick={() => void disconnectActive()}>
+                  Disconnect
+                </button>
+                <button className="secondary" onClick={() => void explain()}>
+                  Explain
+                </button>
+                <button onClick={() => void execute()}>Run SQL</button>
               </div>
-              <PerformanceWarnings result={result} />
-              <ResultTable result={result} />
-            </>
-          ) : (
-            <div className="empty-state">Query results appear here.</div>
-          )}
-          <QueryHistory history={history} onPick={(item) => setSql(item.sql)} />
-        </section>
+            </div>
+            <textarea value={sql} onChange={(event) => setSql(event.target.value)} spellCheck={false} />
+          </section>
+        </ErrorBoundary>
+
+        <ErrorBoundary label="Results">
+          <section className="result-pane">
+            <h2>Results</h2>
+            <p className="status">{message}</p>
+            {result ? (
+              <>
+                <div className="result-actions">
+                  <span>
+                    {result.rowCount} rows / {result.elapsedMs} ms / {result.safety.riskLevel}
+                  </span>
+                  <button className="secondary" onClick={exportCsv}>
+                    Export CSV
+                  </button>
+                </div>
+                <PerformanceWarnings result={result} />
+                <ResultTable result={result} />
+              </>
+            ) : (
+              <div className="empty-state">Query results appear here.</div>
+            )}
+            <QueryHistory history={history} onPick={(item) => setSql(item.sql)} />
+          </section>
+        </ErrorBoundary>
       </section>
     </main>
   );
@@ -326,16 +380,56 @@ function SchemaPanel({ tables, onPreview }: { tables: TableSummary[]; onPreview:
   );
 }
 
+type ErrorBoundaryProps = {
+  children: ReactNode;
+  label: string;
+};
+
+type ErrorBoundaryState = {
+  error?: Error;
+};
+
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  override state: ErrorBoundaryState = {};
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error };
+  }
+
+  override componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error(`${this.props.label} failed to render`, error, info.componentStack);
+  }
+
+  override render(): ReactNode {
+    if (!this.state.error) return this.props.children;
+    return (
+      <section className="pane-error">
+        <strong>{this.props.label} failed to render.</strong>
+        <span>{this.state.error.message}</span>
+        <button className="secondary" type="button" onClick={() => this.setState({})}>
+          Retry
+        </button>
+      </section>
+    );
+  }
+}
+
 function ConnectionForm({
   draft,
+  hasActiveConnection,
   setDraft,
   onCreate,
+  onDelete,
   onTest,
+  onUpdate,
 }: {
   draft: ConnectionInput;
+  hasActiveConnection: boolean;
   setDraft: (draft: ConnectionInput) => void;
   onCreate: () => void;
+  onDelete: () => void;
   onTest: () => void;
+  onUpdate: () => void;
 }) {
   return (
     <form className="connection-form" onSubmit={(event) => event.preventDefault()}>
@@ -411,8 +505,14 @@ function ConnectionForm({
         <button className="secondary" type="button" onClick={onTest}>
           Test
         </button>
+        <button className="secondary" disabled={!hasActiveConnection} type="button" onClick={onUpdate}>
+          Apply
+        </button>
         <button type="button" onClick={onCreate}>
-          Save
+          Save New
+        </button>
+        <button className="danger" disabled={!hasActiveConnection} type="button" onClick={onDelete}>
+          Delete
         </button>
       </div>
     </form>
