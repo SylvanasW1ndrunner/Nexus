@@ -65,7 +65,7 @@ pnpm db:down
 - `packages/core-db/test/sql-safety.test.ts` 覆盖只读拦截、写操作风险和多语句风险。
 - `packages/core-db/test/sql-performance.test.ts` 覆盖复杂 SQL 性能提示。
 - `packages/core-db/test/postgres-errors.test.ts` 覆盖远程连接常见失败和连接后运行期失败分类。
-- `packages/core-db/test/postgres-driver-runtime-errors.test.ts` 覆盖查询执行、Schema 列表和表详情在远程中断/查询错误时不抛出 IPC 外异常。
+- `packages/core-db/test/postgres-driver-runtime-errors.test.ts` 覆盖空 SQL 校验，以及查询执行、Schema 列表和表详情在远程中断/查询错误时不抛出 IPC 外异常。
 - `packages/core-db/test/sql-builder.test.ts` 覆盖 PostgreSQL 标识符 quote 和预览 limit 上限。
 - `packages/core-db/test/connection-store.test.ts` 覆盖连接持久化、状态更新和损坏 JSON 降级。
 - `packages/core-db/test/query-history.test.ts` 覆盖查询历史记录、审计上下文和损坏 JSON 降级。
@@ -73,7 +73,7 @@ pnpm db:down
 - `apps/desktop/src/main/connection-workflow.test.ts` 覆盖连接生命周期：创建连接保存凭证、更新不存在连接不写孤立凭证、更新后断开旧连接池、连接失败标记 error、删除连接时清理凭证。
 - `apps/desktop/src/main/credential-vault.test.ts` 覆盖密码凭证保存、读取、删除、`safeStorage` 可用路径和不可用 fallback。
 - `apps/desktop/src/main/query-confirmation.test.ts` 覆盖写操作确认握手，确保未确认 SQL 不会直接执行。
-- `apps/desktop/src/main/query-workflow.test.ts` 覆盖主进程查询业务链路：安全查询成功入历史和用量、只读写操作在 driver 前拦截、可写危险 SQL 未确认时要求确认、driver 失败时写失败历史。
+- `apps/desktop/src/main/query-workflow.test.ts` 覆盖主进程查询业务链路：安全查询成功入历史和用量、空 SQL 在 driver 前返回校验错误、只读写操作在 driver 前拦截、可写危险 SQL 未确认时要求确认、driver 失败时写失败历史。
 - `apps/desktop/src/main/schema-workflow.test.ts` 覆盖 Schema 主进程业务链路：连接不存在时不触碰 driver，连接存在时按保存连接的 `engine` 路由 `listTables` 和 `describeTable`。
 - `apps/desktop/src/main/workspace-state-store.test.ts` 覆盖 SQL 草稿恢复、活动连接恢复、缺失文件、损坏 JSON 和结构不合法状态。
 - `apps/desktop/src/renderer/src/connection-draft.test.ts` 覆盖已保存连接回填到编辑表单时不回填密码，并保留远程连接配置。

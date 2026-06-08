@@ -73,6 +73,14 @@ export class PostgresDriver implements IDatabaseDriver {
 
   async execute(request: QueryRequest, connection: SavedConnection): Promise<Result<QueryExecutionResult>> {
     const safety = analyzeSqlSafety(request.sql, { readOnly: connection.readOnly });
+    if (safety.statementKind === 'EMPTY') {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'SQL is empty.',
+        detail: safety.reasons.join(' '),
+      });
+    }
+
     if (safety.blocked) {
       return err({
         code: 'READ_ONLY_VIOLATION',

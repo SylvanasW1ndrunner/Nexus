@@ -44,7 +44,7 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 - `sql-builder.test.ts`：PostgreSQL identifier quote 和预览 limit 上限。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
-- `postgres-driver-runtime-errors.test.ts`：验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
+- `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
 - `query-history.test.ts`：查询历史写入、读取、审计上下文和损坏 JSON 降级。
 - `postgres.integration.test.ts`：真实 PostgreSQL 连接、Schema 列表、表详情、join 查询、只读拦截、断连后失败、批量 SQL 事务回滚。

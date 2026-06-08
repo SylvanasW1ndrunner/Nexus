@@ -17,6 +17,25 @@ const connection = {
 };
 
 describe('PostgresDriver runtime errors', () => {
+  it('rejects empty SQL as validation without hitting the pool', async () => {
+    const driver = driverWithQueryError(pgError('ECONNRESET'));
+
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: '/* comment only */',
+      },
+      connection,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'SQL is empty.',
+    });
+  });
+
   it('classifies interrupted execute calls without throwing outside Result', async () => {
     const driver = driverWithQueryError(pgError('ECONNRESET'));
 

@@ -82,6 +82,7 @@ Renderer 在创建连接后不会再收到已保存密码；删除连接时也�
 
 `analyzeSqlSafety(sql, { readOnly })` 会在执行前分类 SQL：
 
+- 空 SQL 或只有注释的 SQL 返回 `VALIDATION_ERROR`，不调用 driver、不写查询历史、不记录用量。
 - 只读连接允许 `SELECT`、`WITH`、`SHOW`、`EXPLAIN` 和 `VALUES`。
 - 只读连接阻止 `INSERT`、`UPDATE`、`DELETE`、`MERGE`、`CALL` 和 DDL。
 - 非只读连接上的写操作和 DDL 需要用户确认。

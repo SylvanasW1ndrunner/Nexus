@@ -48,6 +48,14 @@ export function createQueryWorkflow({
     if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
 
     const safety = analyzeSqlSafety(request.sql, { readOnly: connection.readOnly });
+    if (safety.statementKind === 'EMPTY') {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'SQL is empty.',
+        detail: safety.reasons.join(' '),
+      });
+    }
+
     if (safety.blocked) {
       await history.append({
         connectionId: request.connectionId,

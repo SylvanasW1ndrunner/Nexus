@@ -69,6 +69,22 @@ describe('createQueryWorkflow', () => {
     expect(harness.history[0]?.errorMessage).toContain('read-only');
   });
 
+  it('rejects empty SQL as validation without touching the driver or history', async () => {
+    const harness = createHarness({ connection: baseConnection });
+
+    const result = await harness.execute({
+      connectionId: baseConnection.id,
+      sql: ' -- analyst note only',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(harness.driverCalls).toHaveLength(0);
+    expect(harness.usageCount).toBe(0);
+    expect(harness.history).toEqual([]);
+  });
+
   it('requires confirmation for writable risky SQL before execution', async () => {
     const connection = { ...baseConnection, readOnly: false };
     const harness = createHarness({ connection });
