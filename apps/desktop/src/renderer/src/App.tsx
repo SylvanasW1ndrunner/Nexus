@@ -703,6 +703,14 @@ export function App() {
           </aside>
         </ErrorBoundary>
       </section>
+      <StatusBar
+        activeConnection={activeConnection}
+        activeWorkspace={activeWorkspace}
+        document={editorDocument}
+        language={language}
+        result={result}
+        t={t}
+      />
       {workspaceDialogOpen ? (
         <WorkspaceDialog
           activeWorkspace={activeWorkspace}
@@ -779,6 +787,50 @@ function TopBar({
         </select>
       </label>
     </header>
+  );
+}
+
+function StatusBar({
+  activeConnection,
+  activeWorkspace,
+  document,
+  language,
+  result,
+  t,
+}: {
+  activeConnection: SavedConnection | undefined;
+  activeWorkspace: WorkspaceProject | undefined;
+  document: EditorDocument;
+  language: AppLanguage;
+  result: QueryExecutionResult | undefined;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+}) {
+  return (
+    <footer className="statusbar">
+      <div className="statusbar-group">
+        <span>
+          {t('statusProject')}: {activeWorkspace?.name ?? t('noProject')}
+        </span>
+        <span>
+          {t('statusConnection')}: {activeConnection?.name ?? t('noConnection')}
+        </span>
+      </div>
+      <div className="statusbar-group center">
+        <span title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</span>
+        <span>{document.language.toUpperCase()}</span>
+        <span>{document.dirty ? t('statusUnsaved') : t('statusSaved')}</span>
+      </div>
+      <div className="statusbar-group right">
+        {result ? (
+          <span>
+            {result.rowCount} rows / {result.elapsedMs} ms
+          </span>
+        ) : null}
+        <span>
+          {t('statusLanguage')}: {language === 'zh-CN' ? '中文' : 'English'}
+        </span>
+      </div>
+    </footer>
   );
 }
 

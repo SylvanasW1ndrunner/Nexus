@@ -183,6 +183,42 @@ small {
   grid-template-columns: 318px minmax(430px, 1fr) 356px;
 }
 
+.statusbar {
+  flex: 0 0 24px;
+  min-height: 24px;
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(220px, 1fr) minmax(240px, 1fr);
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid #303743;
+  background: #171b22;
+  color: #9aa6b5;
+  font-size: 11px;
+  padding: 0 10px;
+}
+
+.statusbar-group {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.statusbar-group.center {
+  justify-content: center;
+}
+
+.statusbar-group.right {
+  justify-content: flex-end;
+}
+
+.statusbar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .left-rail,
 .right-rail,
 .center-stage {

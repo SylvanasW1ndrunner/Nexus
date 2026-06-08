@@ -73,6 +73,11 @@ const dictionary = {
     language: '语言',
     readOnly: '只读',
     ssl: 'SSL',
+    statusProject: '项目',
+    statusConnection: '连接',
+    statusLanguage: '语言',
+    statusSaved: '已保存',
+    statusUnsaved: '未保存',
   },
   en: {
     appSubtitle: 'Data engineering workspace',
@@ -144,6 +149,11 @@ const dictionary = {
     language: 'Language',
     readOnly: 'Read-only',
     ssl: 'SSL',
+    statusProject: 'Project',
+    statusConnection: 'Connection',
+    statusLanguage: 'Language',
+    statusSaved: 'Saved',
+    statusUnsaved: 'Unsaved',
   },
 } satisfies Record<AppLanguage, Record<string, string>>;
 
