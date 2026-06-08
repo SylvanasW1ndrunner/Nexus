@@ -10,6 +10,7 @@
 - `packages/core-db/src/sql-builder.ts`：Schema 预览 SQL 和 identifier quote。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
+- `packages/core-db/src/json-file.ts`：JSON 文件原子读写 helper。
 
 ## 开发逻辑
 
@@ -30,14 +31,16 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 
 性能提示是轻量静态分析，不阻塞执行。当前覆盖 `SELECT *`、缺少 `LIMIT`、前置通配 `LIKE`、大 `OFFSET`、逗号连接和过滤列套函数。它不是优化器替代品，而是 M1.5 阶段给用户和后续 Agent 的结构化风险输入。
 
+连接元数据和查询历史使用 `json-file.ts` 做临时文件加 rename 的原子写入。读取时如果文件缺失或 JSON 损坏，会返回空列表，让应用继续启动和执行查询；这避免单个损坏的本地 JSON 文件把桌面应用整体拖垮。后续如果进入多用户或大历史量阶段，应迁移到 SQLite 并保留迁移备份。
+
 ## 测试覆盖
 
 - `sql-safety.test.ts`：只读拦截、写操作风险、多语句风险。
 - `sql-performance.test.ts`：复杂 SQL 性能提示。
 - `sql-builder.test.ts`：PostgreSQL identifier quote 和预览 limit 上限。
 - `postgres-errors.test.ts`：远程连接常见失败分类。
-- `connection-store.test.ts`：连接元数据持久化和删除。
-- `query-history.test.ts`：查询历史写入与读取。
+- `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
+- `query-history.test.ts`：查询历史写入、读取、审计上下文和损坏 JSON 降级。
 - `postgres.integration.test.ts`：真实 PostgreSQL 连接、Schema 列表、表详情、join 查询、只读拦截、断连后失败、批量 SQL 事务回滚。
 
 本地真实数据库验证入口是：

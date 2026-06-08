@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { QuerySafetyReport } from '@dbagent/shared';
 import { QueryHistoryStore } from '../src/query-history.js';
@@ -72,5 +72,14 @@ describe('QueryHistoryStore', () => {
       errorMessage: 'Connection is read-only.',
       safety: blocked,
     });
+  });
+
+  it('treats corrupt query history as empty so query execution can continue', async () => {
+    const filePath = await historyPath();
+    const store = new QueryHistoryStore(filePath);
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, '{ broken json', 'utf8');
+
+    await expect(store.list({})).resolves.toEqual([]);
   });
 });

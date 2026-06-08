@@ -1,19 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import type { ConnectionInput, SavedConnection } from '@dbagent/shared';
+import { readJsonFile, writeJsonFileAtomic } from './json-file.js';
 
 export class ConnectionStore {
   constructor(private readonly filePath: string) {}
 
   async list(): Promise<SavedConnection[]> {
-    try {
-      const raw = await readFile(this.filePath, 'utf8');
-      return JSON.parse(raw) as SavedConnection[];
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw error;
-    }
+    return readJsonFile<SavedConnection[]>(this.filePath, []);
   }
 
   async create(input: ConnectionInput): Promise<SavedConnection> {
@@ -84,7 +77,6 @@ export class ConnectionStore {
   }
 
   private async save(connections: SavedConnection[]): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, `${JSON.stringify(connections, null, 2)}\n`, 'utf8');
+    await writeJsonFileAtomic(this.filePath, connections);
   }
 }

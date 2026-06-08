@@ -63,6 +63,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 开发逻辑：
 
 - `ConnectionStore` 只存连接元数据；密码由 desktop main 用 `safeStorage` 管理。
+- 连接元数据和查询历史使用原子 JSON 写入；本地 JSON 损坏时返回空列表，保证应用可启动。
 - `PostgresDriver` 内部持有连接池，renderer 不接触连接池。
 - Schema 能力分两层：`listTables` 只拉轻量对象列表，`describeTable` 按用户选择的表再拉列、主键、外键和注释，避免连接后一次性扫描大型生产库。
 - 只读连接在执行前拦截写操作和 DDL。

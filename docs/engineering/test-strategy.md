@@ -66,8 +66,8 @@ pnpm db:down
 - `packages/core-db/test/sql-performance.test.ts` 覆盖复杂 SQL 性能提示。
 - `packages/core-db/test/postgres-errors.test.ts` 覆盖远程连接常见失败分类。
 - `packages/core-db/test/sql-builder.test.ts` 覆盖 PostgreSQL 标识符 quote 和预览 limit 上限。
-- `packages/core-db/test/connection-store.test.ts` 覆盖连接持久化和删除。
-- `packages/core-db/test/query-history.test.ts` 覆盖查询历史记录。
+- `packages/core-db/test/connection-store.test.ts` 覆盖连接持久化、状态更新和损坏 JSON 降级。
+- `packages/core-db/test/query-history.test.ts` 覆盖查询历史记录、审计上下文和损坏 JSON 降级。
 - `apps/desktop/src/main/connection-validation.test.ts` 覆盖远程连接表单配置校验，例如 SSL、连接超时和语句超时。
 - `apps/desktop/src/main/credential-vault.test.ts` 覆盖密码凭证保存、读取、删除、`safeStorage` 可用路径和不可用 fallback。
 - `apps/desktop/src/main/query-confirmation.test.ts` 覆盖写操作确认握手，确保未确认 SQL 不会直接执行。

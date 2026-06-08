@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ConnectionStore } from '../src/connection-store.js';
 
@@ -91,5 +91,14 @@ describe('ConnectionStore', () => {
       id: created.id,
       status: 'connected',
     });
+  });
+
+  it('treats corrupt connection metadata as empty so the app can start', async () => {
+    const filePath = await storePath();
+    const store = new ConnectionStore(filePath);
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, '{ broken json', 'utf8');
+
+    await expect(store.list()).resolves.toEqual([]);
   });
 });

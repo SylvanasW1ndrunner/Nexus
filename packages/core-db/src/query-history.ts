@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import type { QueryHistoryItem, QuerySafetyReport } from '@dbagent/shared';
+import { readJsonFile, writeJsonFileAtomic } from './json-file.js';
 
 export type AppendQueryHistoryInput = {
   connectionId: string;
@@ -34,21 +33,12 @@ export class QueryHistoryStore {
   }
 
   async list(options: { connectionId?: string; limit?: number }): Promise<QueryHistoryItem[]> {
-    try {
-      const raw = await readFile(this.filePath, 'utf8');
-      const all = JSON.parse(raw) as QueryHistoryItem[];
-      const filtered = options.connectionId
-        ? all.filter((item) => item.connectionId === options.connectionId)
-        : all;
-      return filtered.slice(0, options.limit ?? 100);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw error;
-    }
+    const all = await readJsonFile<QueryHistoryItem[]>(this.filePath, []);
+    const filtered = options.connectionId ? all.filter((item) => item.connectionId === options.connectionId) : all;
+    return filtered.slice(0, options.limit ?? 100);
   }
 
   private async save(items: QueryHistoryItem[]): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, `${JSON.stringify(items, null, 2)}\n`, 'utf8');
+    await writeJsonFileAtomic(this.filePath, items);
   }
 }
