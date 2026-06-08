@@ -1286,6 +1286,13 @@ function ConnectionPanel({
   onTest: () => void;
   onUpdate: () => void;
 }) {
+  const activeConnection = connections.find((connection) => connection.id === activeConnectionId);
+  const schemaState = !activeConnection
+    ? 'none'
+    : activeConnection.status === 'connected'
+      ? 'connected'
+      : 'disconnected';
+
   return (
     <section className="panel">
       <div className="panel-heading">
@@ -1293,19 +1300,26 @@ function ConnectionPanel({
         <small>{connections.length}</small>
       </div>
       <div className="connection-list">
-        {connections.map((connection) => (
-          <button
-            className={connection.id === activeConnectionId ? 'connection active' : 'connection'}
-            key={connection.id}
-            type="button"
-            onClick={() => onSelect(connection)}
-          >
-            <span>{connection.name}</span>
-            <small>
-              {connection.database} / {connection.status}
-            </small>
-          </button>
-        ))}
+        {connections.length ? (
+          connections.map((connection) => (
+            <button
+              className={connection.id === activeConnectionId ? 'connection active' : 'connection'}
+              key={connection.id}
+              type="button"
+              onClick={() => onSelect(connection)}
+            >
+              <span>{connection.name}</span>
+              <small>
+                {connection.database} / {connection.status === 'connected' ? t('connected') : t('disconnected')}
+              </small>
+            </button>
+          ))
+        ) : (
+          <div className="connection-empty">
+            <strong>{t('connectionEmptyTitle')}</strong>
+            <span>{t('connectionEmptyDescription')}</span>
+          </div>
+        )}
       </div>
       <ConnectionForm
         draft={draft}
@@ -1320,6 +1334,7 @@ function ConnectionPanel({
         onUpdate={onUpdate}
       />
       <SchemaPanel
+        connectionState={schemaState}
         selectedTable={selectedTable}
         tables={tables}
         t={t}
@@ -1429,18 +1444,26 @@ function ConnectionForm({
 }
 
 function SchemaPanel({
+  connectionState,
   selectedTable,
   tables,
   t,
   onDescribe,
   onPreview,
 }: {
+  connectionState: 'none' | 'disconnected' | 'connected';
   selectedTable: TableDetail | undefined;
   tables: TableSummary[];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   onDescribe: (table: TableSummary) => void;
   onPreview: (table: TableSummary) => void;
 }) {
+  const emptyCopy =
+    connectionState === 'none'
+      ? { description: t('schemaEmptyNoConnectionDescription'), title: t('schemaEmptyNoConnectionTitle') }
+      : connectionState === 'disconnected'
+        ? { description: t('schemaEmptyDisconnectedDescription'), title: t('schemaEmptyDisconnectedTitle') }
+        : { description: t('schemaEmptyConnectedDescription'), title: t('schemaEmptyConnectedTitle') };
   const grouped = tables.reduce<Record<string, TableSummary[]>>((groups, table) => {
     groups[table.schema] = [...(groups[table.schema] ?? []), table];
     return groups;
@@ -1452,30 +1475,37 @@ function SchemaPanel({
         <span>{t('schema')}</span>
         <small>{tables.length}</small>
       </div>
-      {Object.entries(grouped).map(([schema, schemaTables]) => (
-        <div className="schema-group" key={schema}>
-          <div className="schema-title">{schema}</div>
-          {schemaTables.map((table) => (
-            <div className="table-node-row" key={`${table.schema}.${table.name}`}>
-              <button
-                className={
-                  selectedTable?.schema === table.schema && selectedTable.name === table.name
-                    ? 'table-node active'
-                    : 'table-node'
-                }
-                type="button"
-                onClick={() => onDescribe(table)}
-              >
-                <span>{table.name}</span>
-                <small>{table.type}</small>
-              </button>
-              <button className="table-preview" type="button" onClick={() => onPreview(table)}>
-                SQL
-              </button>
-            </div>
-          ))}
+      {tables.length ? (
+        Object.entries(grouped).map(([schema, schemaTables]) => (
+          <div className="schema-group" key={schema}>
+            <div className="schema-title">{schema}</div>
+            {schemaTables.map((table) => (
+              <div className="table-node-row" key={`${table.schema}.${table.name}`}>
+                <button
+                  className={
+                    selectedTable?.schema === table.schema && selectedTable.name === table.name
+                      ? 'table-node active'
+                      : 'table-node'
+                  }
+                  type="button"
+                  onClick={() => onDescribe(table)}
+                >
+                  <span>{table.name}</span>
+                  <small>{table.type}</small>
+                </button>
+                <button className="table-preview" type="button" onClick={() => onPreview(table)}>
+                  SQL
+                </button>
+              </div>
+            ))}
+          </div>
+        ))
+      ) : (
+        <div className="schema-empty">
+          <strong>{emptyCopy.title}</strong>
+          <span>{emptyCopy.description}</span>
         </div>
-      ))}
+      )}
       {selectedTable ? <TableDetailPanel detail={selectedTable} /> : null}
     </section>
   );

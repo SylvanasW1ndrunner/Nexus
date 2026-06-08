@@ -512,6 +512,30 @@ small {
   margin-bottom: 10px;
 }
 
+.connection-empty,
+.schema-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border: 1px dashed #303743;
+  border-radius: 6px;
+  background: #171b22;
+  color: #8c97a8;
+  line-height: 1.45;
+  padding: 10px;
+}
+
+.connection-empty strong,
+.schema-empty strong {
+  color: #d8dee8;
+  font-size: 12px;
+}
+
+.connection-empty span,
+.schema-empty span {
+  font-size: 12px;
+}
+
 .connection.active {
   border-color: #66a8d9;
   background: #243545;
@@ -552,6 +576,10 @@ small {
 
 .schema-panel {
   margin-top: 12px;
+}
+
+.schema-empty {
+  margin-top: 8px;
 }
 
 .schema-group {
