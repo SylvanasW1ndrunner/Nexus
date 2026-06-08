@@ -6,7 +6,6 @@ import {
   queryResultToJson,
   type ConnectionInput,
   type QueryExecutionResult,
-  type QueryHistoryItem,
   type SavedConnection,
   type TableDetail,
   type TableSummary,
@@ -92,7 +91,6 @@ export function App() {
   const t = useMemo(() => createTranslator(language), [language]);
   const [connections, setConnections] = useState<SavedConnection[]>([]);
   const [activeConnectionId, setActiveConnectionId] = useState('');
-  const [history, setHistory] = useState<QueryHistoryItem[]>([]);
   const [tables, setTables] = useState<TableSummary[]>([]);
   const [selectedTable, setSelectedTable] = useState<TableDetail | undefined>();
   const [sql, setSql] = useState(starterSql);
@@ -137,7 +135,6 @@ export function App() {
 
   useEffect(() => {
     void refreshConnections();
-    void refreshHistory();
     void restoreWorkspaceState();
     void refreshWorkspace();
   }, []);
@@ -298,11 +295,6 @@ export function App() {
     }
   }
 
-  async function refreshHistory() {
-    const response = await window.dbagent.invoke(ipcChannels.db.queryHistory, { limit: 30 });
-    if (response.ok) setHistory(response.data);
-  }
-
   async function refreshTables(connectionId: string) {
     const connection = connections.find((item) => item.id === connectionId);
     if (!connection || connection.status !== 'connected') {
@@ -422,7 +414,6 @@ export function App() {
     } else {
       setMessage(formatAppError(response.error));
     }
-    await refreshHistory();
   }
 
   function previewTable(table: TableSummary) {
@@ -479,7 +470,6 @@ export function App() {
       }
       setMessage(formatAppError(response.error));
     }
-    await refreshHistory();
   }
 
   function exportCsv() {
@@ -680,40 +670,14 @@ export function App() {
 
         <ErrorBoundary label="Chat">
           <aside className="right-rail">
-            <ConnectionPanel
-              activeConnectionId={activeConnectionId}
-              connections={connections}
-              draft={connectionDraft}
-              selectedTable={selectedTable}
-              setDraft={setConnectionDraft}
-              tables={tables}
-              t={t}
-              onConnect={() => void connectActive()}
-              onCreate={() => void createConnection()}
-              onDelete={() => void removeActiveConnection()}
-              onDescribe={(table) => void describeTable(table)}
-              onDisconnect={() => void disconnectActive()}
-              onPreview={previewTable}
-              onSelect={selectConnection}
-              onTest={() => void testConnection()}
-              onUpdate={() => void updateActiveConnection()}
-            />
             <ChatPanel
               activeConnection={activeConnection}
               activeWorkspace={activeWorkspace}
               document={editorDocument}
               draft={chatDraft}
-              history={history}
               messages={chatMessages}
               setDraft={setChatDraft}
               t={t}
-              onPickHistory={(item) =>
-                updateEditorContent(item.sql, {
-                  title: `history-${item.id}.sql`,
-                  language: 'sql',
-                  dirty: true,
-                })
-              }
               onSend={sendChatMessage}
             />
           </aside>
@@ -729,11 +693,14 @@ export function App() {
       />
       {workspaceDialogOpen ? (
         <WorkspaceDialog
+          activeConnectionId={activeConnectionId}
           activeWorkspace={activeWorkspace}
           connectionDraft={connectionDraft}
+          connections={connections}
           createConnection={createConnectionDuringWorkspace}
           mode={workspaceDialogMode}
           selectedDatabaseEngine={selectedDatabaseEngine}
+          selectedTable={selectedTable}
           settingsDraft={workspaceSettingsDraft}
           setConnectionDraft={setConnectionDraft}
           setCreateConnection={setCreateConnectionDuringWorkspace}
@@ -742,12 +709,22 @@ export function App() {
           setWorkspaceDraft={setWorkspaceDraft}
           setPythonDraft={setWorkspacePythonDraft}
           t={t}
+          tables={tables}
           workspaceDraft={workspaceDraft}
           pythonDraft={workspacePythonDraft}
           onChooseDirectory={() => void chooseWorkspaceDirectory()}
+          onConnect={() => void connectActive()}
           onClose={() => setWorkspaceDialogOpen(false)}
           onCreate={() => void createWorkspace()}
+          onCreateConnection={() => void createConnection()}
+          onDeleteConnection={() => void removeActiveConnection()}
+          onDescribeTable={(table) => void describeTable(table)}
+          onDisconnect={() => void disconnectActive()}
+          onPreviewTable={previewTable}
           onSaveSettings={() => void updateWorkspaceSettings()}
+          onSelectConnection={selectConnection}
+          onTestConnection={() => void testConnection()}
+          onUpdateConnection={() => void updateActiveConnection()}
         />
       ) : null}
       {saveSqlDialogOpen ? (
@@ -785,12 +762,7 @@ function TopBar({
 }) {
   return (
     <header className="topbar">
-      <div className="brand-lockup">
-        <span className="brand-mark">DB</span>
-        <strong>DBAgent</strong>
-        <span>{t('appSubtitle')}</span>
-      </div>
-      <div className="topbar-main">
+      <div className="topbar-left">
         <nav className="menu-strip" aria-label="Application menu">
           <MenuButton
             label={t('file')}
@@ -814,6 +786,12 @@ function TopBar({
             ]}
           />
         </nav>
+        <div className="brand-lockup compact">
+          <span className="brand-mark">DB</span>
+          <strong>DBAgent</strong>
+        </div>
+      </div>
+      <div className="topbar-main">
         <div className="command-context" aria-label="Workspace command context">
           <span title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</span>
           <span title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</span>
@@ -980,11 +958,14 @@ function SaveSqlDialog({
 }
 
 function WorkspaceDialog({
+  activeConnectionId,
   activeWorkspace,
   connectionDraft,
+  connections,
   createConnection,
   mode,
   selectedDatabaseEngine,
+  selectedTable,
   settingsDraft,
   setConnectionDraft,
   setCreateConnection,
@@ -993,18 +974,31 @@ function WorkspaceDialog({
   setWorkspaceDraft,
   setPythonDraft,
   t,
+  tables,
   workspaceDraft,
   pythonDraft,
   onChooseDirectory,
+  onConnect,
   onClose,
   onCreate,
+  onCreateConnection,
+  onDeleteConnection,
+  onDescribeTable,
+  onDisconnect,
+  onPreviewTable,
   onSaveSettings,
+  onSelectConnection,
+  onTestConnection,
+  onUpdateConnection,
 }: {
+  activeConnectionId: string;
   activeWorkspace: WorkspaceProject | undefined;
   connectionDraft: ConnectionInput;
+  connections: SavedConnection[];
   createConnection: boolean;
   mode: WorkspaceDialogMode;
   selectedDatabaseEngine: ConnectionInput['engine'];
+  selectedTable: TableDetail | undefined;
   settingsDraft: WorkspaceProject['assetPaths'];
   setConnectionDraft: (draft: ConnectionInput) => void;
   setCreateConnection: (enabled: boolean) => void;
@@ -1013,14 +1007,25 @@ function WorkspaceDialog({
   setWorkspaceDraft: (draft: WorkspaceDraft) => void;
   setPythonDraft: (draft: WorkspacePythonConfig) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  tables: TableSummary[];
   workspaceDraft: WorkspaceDraft;
   pythonDraft: WorkspacePythonConfig;
   onChooseDirectory: () => void;
+  onConnect: () => void;
   onClose: () => void;
   onCreate: () => void;
+  onCreateConnection: () => void;
+  onDeleteConnection: () => void;
+  onDescribeTable: (table: TableSummary) => void;
+  onDisconnect: () => void;
+  onPreviewTable: (table: TableSummary) => void;
   onSaveSettings: () => void;
+  onSelectConnection: (connection: SavedConnection) => void;
+  onTestConnection: () => void;
+  onUpdateConnection: () => void;
 }) {
   const isCreate = mode === 'create';
+  const [settingsSection, setSettingsSection] = useState<'assets' | 'python' | 'connections'>('assets');
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal-panel" role="dialog" aria-modal="true" aria-label={isCreate ? t('createProject') : t('projectSettings')}>
@@ -1175,38 +1180,94 @@ function WorkspaceDialog({
           </>
         ) : (
           <>
-            <div className="subform-heading settings-heading">
-              <strong>{t('workspaceAssets')}</strong>
-              <small>{t('workspaceAssetsHint')}</small>
+            <div className="settings-layout">
+              <aside className="settings-nav" aria-label={t('projectSettings')}>
+                <button
+                  className={settingsSection === 'assets' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setSettingsSection('assets')}
+                >
+                  {t('workspaceAssets')}
+                </button>
+                <button
+                  className={settingsSection === 'python' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setSettingsSection('python')}
+                >
+                  {t('pythonEnvironment')}
+                </button>
+                <button
+                  className={settingsSection === 'connections' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setSettingsSection('connections')}
+                >
+                  {t('databaseConnection')}
+                </button>
+              </aside>
+              <div className="settings-content">
+                {settingsSection === 'assets' ? (
+                  <>
+                    <div className="subform-heading">
+                      <strong>{t('workspaceAssets')}</strong>
+                      <small>{t('workspaceAssetsHint')}</small>
+                    </div>
+                    <div className="modal-grid two">
+                      <label>
+                        <span>{t('sqlLibrary')}</span>
+                        <input
+                          value={settingsDraft.sqlLibrary}
+                          onChange={(event) => setSettingsDraft({ ...settingsDraft, sqlLibrary: event.target.value })}
+                        />
+                      </label>
+                      <label>
+                        <span>{t('scriptsPath')}</span>
+                        <input
+                          value={settingsDraft.scripts}
+                          onChange={(event) => setSettingsDraft({ ...settingsDraft, scripts: event.target.value })}
+                        />
+                      </label>
+                      <label>
+                        <span>{t('docsPath')}</span>
+                        <input
+                          value={settingsDraft.docs}
+                          onChange={(event) => setSettingsDraft({ ...settingsDraft, docs: event.target.value })}
+                        />
+                      </label>
+                      <label>
+                        <span>{t('outputsPath')}</span>
+                        <input
+                          value={settingsDraft.outputs}
+                          onChange={(event) => setSettingsDraft({ ...settingsDraft, outputs: event.target.value })}
+                        />
+                      </label>
+                    </div>
+                  </>
+                ) : null}
+                {settingsSection === 'python' ? (
+                  <PythonConfigForm pythonDraft={pythonDraft} setPythonDraft={setPythonDraft} t={t} />
+                ) : null}
+                {settingsSection === 'connections' ? (
+                  <ConnectionPanel
+                    activeConnectionId={activeConnectionId}
+                    connections={connections}
+                    draft={connectionDraft}
+                    selectedTable={selectedTable}
+                    setDraft={setConnectionDraft}
+                    tables={tables}
+                    t={t}
+                    onConnect={onConnect}
+                    onCreate={onCreateConnection}
+                    onDelete={onDeleteConnection}
+                    onDescribe={onDescribeTable}
+                    onDisconnect={onDisconnect}
+                    onPreview={onPreviewTable}
+                    onSelect={onSelectConnection}
+                    onTest={onTestConnection}
+                    onUpdate={onUpdateConnection}
+                  />
+                ) : null}
+              </div>
             </div>
-            <div className="modal-grid two">
-              <label>
-                <span>{t('sqlLibrary')}</span>
-                <input
-                  value={settingsDraft.sqlLibrary}
-                  onChange={(event) => setSettingsDraft({ ...settingsDraft, sqlLibrary: event.target.value })}
-                />
-              </label>
-              <label>
-                <span>{t('scriptsPath')}</span>
-                <input
-                  value={settingsDraft.scripts}
-                  onChange={(event) => setSettingsDraft({ ...settingsDraft, scripts: event.target.value })}
-                />
-              </label>
-              <label>
-                <span>{t('docsPath')}</span>
-                <input value={settingsDraft.docs} onChange={(event) => setSettingsDraft({ ...settingsDraft, docs: event.target.value })} />
-              </label>
-              <label>
-                <span>{t('outputsPath')}</span>
-                <input
-                  value={settingsDraft.outputs}
-                  onChange={(event) => setSettingsDraft({ ...settingsDraft, outputs: event.target.value })}
-                />
-              </label>
-            </div>
-            <PythonConfigForm pythonDraft={pythonDraft} setPythonDraft={setPythonDraft} t={t} />
             <div className="modal-actions">
               <button className="primary-action" disabled={!activeWorkspace} type="button" onClick={onSaveSettings}>
                 {t('saveSettings')}
@@ -1869,118 +1930,81 @@ function ChatPanel({
   activeWorkspace,
   document,
   draft,
-  history,
   messages,
   setDraft,
   t,
-  onPickHistory,
   onSend,
 }: {
   activeConnection: SavedConnection | undefined;
   activeWorkspace: WorkspaceProject | undefined;
   document: EditorDocument;
   draft: string;
-  history: QueryHistoryItem[];
   messages: ChatMessage[];
   setDraft: (value: string) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
-  onPickHistory: (item: QueryHistoryItem) => void;
   onSend: () => void;
 }) {
   return (
-    <>
-      <section className="panel chat-panel">
-        <div className="panel-heading">
-          <span>{t('chat')}</span>
-          <small>Assistant</small>
-        </div>
-        <div className="assistant-context">
-          <div className="mini-section-title">{t('assistantContext')}</div>
-          <div className="context-row">
-            <span>{t('project')}</span>
-            <small>{activeWorkspace?.name ?? t('noProject')}</small>
-          </div>
-          <div className="context-row">
-            <span>{t('connections')}</span>
-            <small>{activeConnection?.name ?? t('noConnection')}</small>
-          </div>
-          <div className="context-row">
-            <span>{t('currentFile')}</span>
-            <small title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</small>
-          </div>
-          <div className="context-row">
-            <span>{t('documentLanguage')}</span>
-            <small>{document.language.toUpperCase()}</small>
-          </div>
-        </div>
-        <div className="assistant-prompts">
-          <div className="mini-section-title">{t('assistantShortcuts')}</div>
-          <button type="button" onClick={() => setDraft(t('assistantPromptExplainSql'))}>
-            {t('assistantPromptExplainSqlTitle')}
-          </button>
-          <button type="button" onClick={() => setDraft(t('assistantPromptOptimizeSql'))}>
-            {t('assistantPromptOptimizeSqlTitle')}
-          </button>
-          <button type="button" onClick={() => setDraft(t('assistantPromptPythonScript'))}>
-            {t('assistantPromptPythonScriptTitle')}
+    <section className="panel chat-panel simple-chat-panel">
+      <div className="chat-titlebar">
+        <div className="agent-tabs" aria-label={t('chat')}>
+          <button type="button">CHAT</button>
+          <button className="active" type="button">
+            CODEX
           </button>
         </div>
-        <div className="message-list">
-          {messages.map((message) => (
-            <div className={`chat-message ${message.role}`} key={message.id}>
-              <span>{message.content}</span>
-            </div>
-          ))}
-        </div>
-        <div className="chat-input">
-          <input
-            aria-label={t('chatPlaceholder')}
-            placeholder={t('chatPlaceholder')}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') onSend();
-            }}
-          />
-          <button type="button" onClick={onSend}>
-            {t('send')}
+        <div className="agent-toolbar" aria-label="Agent toolbar">
+          <button type="button" title="More">
+            ...
+          </button>
+          <button type="button" title="Refresh">
+            ○
+          </button>
+          <button type="button" title={t('settings')}>
+            ⚙
+          </button>
+          <button type="button" title="New chat">
+            ✎
           </button>
         </div>
-      </section>
-      <section className="panel history-panel">
-        <div className="panel-heading">
-          <span>{t('queryHistory')}</span>
-          <small>{history.length}</small>
-        </div>
-        {history.length > 0 ? (
-          history.map((item) => (
-            <button className="history-item" key={item.id} type="button" onClick={() => onPickHistory(item)}>
-              <span>{item.sql.replace(/\s+/g, ' ').slice(0, 90)}</span>
-              <div className="history-badges">
-                <small className={`history-status ${item.status}`}>{item.status}</small>
-                <small>{item.safety.riskLevel}</small>
-                <small>{item.elapsedMs ?? '-'} ms</small>
-                <small>{formatHistoryTime(item.createdAt)}</small>
-              </div>
+      </div>
+      <div className="message-list simple-message-list">
+        {messages.map((message) => (
+          <div className={`chat-message ${message.role}`} key={message.id}>
+            <span>{message.content}</span>
+          </div>
+        ))}
+      </div>
+      <div className="agent-composer">
+        <textarea
+          className="agent-composer-input"
+          aria-label={t('chatPlaceholder')}
+          placeholder={t('chatPlaceholder')}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              onSend();
+            }
+          }}
+        />
+        <div className="agent-composer-footer">
+          <div className="agent-composer-actions">
+            <button type="button" title="Attach">
+              +
             </button>
-          ))
-        ) : (
-          <div className="empty-inline">{t('queryHistoryEmpty')}</div>
-        )}
-      </section>
-    </>
+            <span title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</span>
+            <span title={activeConnection?.name ?? t('noConnection')}>{activeConnection?.name ?? t('noConnection')}</span>
+            <span title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</span>
+          </div>
+          <button className="agent-send" type="button" onClick={onSend}>
+            ↑
+          </button>
+        </div>
+      </div>
+    </section>
   );
-}
-
-function formatHistoryTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, {
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    month: '2-digit',
-  });
 }
 
 type ErrorBoundaryProps = {
