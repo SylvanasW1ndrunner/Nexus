@@ -965,12 +965,7 @@ textarea {
   gap: 9px;
 }
 
-.modal-grid.two {
-  grid-template-columns: 1fr 1fr;
-  margin-top: 12px;
-}
-
-.modal-grid label {
+.modal-grid > label {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -978,9 +973,18 @@ textarea {
   font-size: 12px;
 }
 
+.modal-grid > label.switch-row {
+  flex-direction: row;
+}
+
+.modal-grid.two {
+  grid-template-columns: 1fr 1fr;
+  margin-top: 12px;
+}
+
 .project-wizard {
   display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
+  grid-template-columns: 200px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -1030,16 +1034,40 @@ textarea {
   min-width: 0;
 }
 
+.wizard-card {
+  border: 1px solid #303743;
+  border-radius: 8px;
+  background: #1a1f27;
+  padding: 12px;
+}
+
 .subform-section {
-  border-top: 1px solid #303743;
-  margin-top: 12px;
-  padding-top: 12px;
+  border: 1px solid #303743;
+  border-radius: 8px;
+  background: #1a1f27;
+  padding: 12px;
 }
 
 .subform-heading strong {
   display: block;
   color: #f3f6fb;
   font-size: 13px;
+}
+
+.subform-heading.settings-heading {
+  border: 1px solid #303743;
+  border-radius: 8px 8px 0 0;
+  background: #1a1f27;
+  padding: 12px 12px 0;
+}
+
+.settings-heading + .modal-grid.two {
+  border: 1px solid #303743;
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: #1a1f27;
+  margin-top: 0;
+  padding: 12px;
 }
 
 .switch-row {

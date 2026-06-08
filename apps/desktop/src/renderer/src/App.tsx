@@ -968,73 +968,115 @@ function WorkspaceDialog({
                 ))}
               </aside>
               <div className="wizard-main">
-                <div className="modal-grid">
-                  <input
-                    aria-label={t('projectName')}
-                    placeholder={t('projectName')}
-                    value={workspaceDraft.name}
-                    onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, name: event.target.value })}
-                  />
-                  <div className="path-row">
-                    <input
-                      aria-label={t('projectPath')}
-                      placeholder={t('projectPath')}
-                      value={workspaceDraft.rootPath}
-                      onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, rootPath: event.target.value })}
-                    />
-                    <button className="icon-button" type="button" title={t('chooseFolder')} onClick={onChooseDirectory}>
-                      ...
-                    </button>
+                <section className="wizard-card">
+                  <div className="subform-heading">
+                    <strong>{t('projectBasics')}</strong>
+                    <small>{t('projectBasicsHint')}</small>
                   </div>
-                  <input
-                    aria-label={t('description')}
-                    placeholder={t('description')}
-                    value={workspaceDraft.description}
-                    onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, description: event.target.value })}
-                  />
-                  <div className="segmented-control">
-                    <button
-                      className={workspaceDraft.template === 'standard' ? 'active' : ''}
-                      type="button"
-                      onClick={() => setWorkspaceDraft({ ...workspaceDraft, template: 'standard' })}
-                    >
-                      {t('standard')}
-                    </button>
-                    <button
-                      className={workspaceDraft.template === 'minimal' ? 'active' : ''}
-                      type="button"
-                      onClick={() => setWorkspaceDraft({ ...workspaceDraft, template: 'minimal' })}
-                    >
-                      {t('minimal')}
-                    </button>
+                  <div className="modal-grid">
+                    <label>
+                      <span>{t('projectName')}</span>
+                      <input
+                        aria-label={t('projectName')}
+                        placeholder={t('projectName')}
+                        value={workspaceDraft.name}
+                        onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, name: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>{t('projectPath')}</span>
+                      <div className="path-row">
+                        <input
+                          aria-label={t('projectPath')}
+                          placeholder={t('projectPath')}
+                          value={workspaceDraft.rootPath}
+                          onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, rootPath: event.target.value })}
+                        />
+                        <button className="icon-button" type="button" title={t('chooseFolder')} onClick={onChooseDirectory}>
+                          ...
+                        </button>
+                      </div>
+                    </label>
+                    <label>
+                      <span>{t('description')}</span>
+                      <input
+                        aria-label={t('description')}
+                        placeholder={t('description')}
+                        value={workspaceDraft.description}
+                        onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, description: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>{t('template')}</span>
+                      <div className="segmented-control">
+                        <button
+                          className={workspaceDraft.template === 'standard' ? 'active' : ''}
+                          type="button"
+                          onClick={() => setWorkspaceDraft({ ...workspaceDraft, template: 'standard' })}
+                        >
+                          {t('standard')}
+                        </button>
+                        <button
+                          className={workspaceDraft.template === 'minimal' ? 'active' : ''}
+                          type="button"
+                          onClick={() => setWorkspaceDraft({ ...workspaceDraft, template: 'minimal' })}
+                        >
+                          {t('minimal')}
+                        </button>
+                      </div>
+                    </label>
+                    <label className="switch-row">
+                      <input
+                        checked={createConnection}
+                        type="checkbox"
+                        onChange={(event) => setCreateConnection(event.target.checked)}
+                      />
+                      <span>{createConnection ? t('createConnectionNow') : t('skipConnection')}</span>
+                    </label>
                   </div>
-                  <label className="switch-row">
-                    <input
-                      checked={createConnection}
-                      type="checkbox"
-                      onChange={(event) => setCreateConnection(event.target.checked)}
-                    />
-                    <span>{createConnection ? t('createConnectionNow') : t('skipConnection')}</span>
-                  </label>
-                </div>
+                </section>
                 {createConnection ? (
-                  <div className="modal-grid two">
-                    <input value={connectionDraft.name} onChange={(event) => setConnectionDraft({ ...connectionDraft, name: event.target.value })} />
-                    <input value={connectionDraft.host} onChange={(event) => setConnectionDraft({ ...connectionDraft, host: event.target.value })} />
-                    <input value={connectionDraft.database} onChange={(event) => setConnectionDraft({ ...connectionDraft, database: event.target.value })} />
-                    <input value={connectionDraft.username} onChange={(event) => setConnectionDraft({ ...connectionDraft, username: event.target.value })} />
-                    <input
-                      type="password"
-                      value={connectionDraft.password}
-                      onChange={(event) => setConnectionDraft({ ...connectionDraft, password: event.target.value })}
-                    />
-                    <input
-                      min={1}
-                      type="number"
-                      value={connectionDraft.port}
-                      onChange={(event) => setConnectionDraft({ ...connectionDraft, port: Number(event.target.value) })}
-                    />
-                  </div>
+                  <section className="wizard-card">
+                    <div className="subform-heading">
+                      <strong>{t('databaseConnection')}</strong>
+                      <small>{t('databaseConnectionHint')}</small>
+                    </div>
+                    <div className="modal-grid two">
+                      <label>
+                        <span>{t('connectionName')}</span>
+                        <input value={connectionDraft.name} onChange={(event) => setConnectionDraft({ ...connectionDraft, name: event.target.value })} />
+                      </label>
+                      <label>
+                        <span>{t('host')}</span>
+                        <input value={connectionDraft.host} onChange={(event) => setConnectionDraft({ ...connectionDraft, host: event.target.value })} />
+                      </label>
+                      <label>
+                        <span>{t('database')}</span>
+                        <input value={connectionDraft.database} onChange={(event) => setConnectionDraft({ ...connectionDraft, database: event.target.value })} />
+                      </label>
+                      <label>
+                        <span>{t('username')}</span>
+                        <input value={connectionDraft.username} onChange={(event) => setConnectionDraft({ ...connectionDraft, username: event.target.value })} />
+                      </label>
+                      <label>
+                        <span>{t('password')}</span>
+                        <input
+                          type="password"
+                          value={connectionDraft.password}
+                          onChange={(event) => setConnectionDraft({ ...connectionDraft, password: event.target.value })}
+                        />
+                      </label>
+                      <label>
+                        <span>{t('port')}</span>
+                        <input
+                          min={1}
+                          type="number"
+                          value={connectionDraft.port}
+                          onChange={(event) => setConnectionDraft({ ...connectionDraft, port: Number(event.target.value) })}
+                        />
+                      </label>
+                    </div>
+                  </section>
                 ) : null}
                 <PythonConfigForm pythonDraft={pythonDraft} setPythonDraft={setPythonDraft} t={t} />
               </div>
@@ -1047,6 +1089,10 @@ function WorkspaceDialog({
           </>
         ) : (
           <>
+            <div className="subform-heading settings-heading">
+              <strong>{t('workspaceAssets')}</strong>
+              <small>{t('workspaceAssetsHint')}</small>
+            </div>
             <div className="modal-grid two">
               <label>
                 <span>{t('sqlLibrary')}</span>
