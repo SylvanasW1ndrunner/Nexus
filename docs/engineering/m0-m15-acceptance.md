@@ -76,7 +76,7 @@ pnpm package:verify
 
 测试覆盖摘要：
 
-- 单元测试：SQL 安全、SQL 性能提示、PostgreSQL 错误分类、SQL builder、连接 store、查询历史、CSV/JSON 导出、认证、用量、主进程查询链路、Schema 主进程链路、凭证 vault、工作区状态恢复、renderer diagnostics、连接草稿。
+- 单元测试：SQL 安全、SQL 性能提示、PostgreSQL 错误分类、SQL builder、连接 store、连接 workflow、查询历史、CSV/JSON 导出、认证、用量、主进程查询链路、Schema 主进程链路、凭证 vault、工作区状态恢复、renderer diagnostics、连接草稿。
 - 集成测试：`pnpm test:postgres` 连接真实 PostgreSQL，覆盖连接、Schema、表结构、join 查询、只读拦截、断连、事务回滚。
 - CI：`.github/workflows/ci.yml` 包含 `verify` 和 `postgres-integration` 两个 job。
 

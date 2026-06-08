@@ -4,6 +4,7 @@
 
 - `apps/desktop/src/main/main.ts`：Electron 主进程、IPC handler、服务组合和持久化路径。
 - `apps/desktop/src/main/connection-validation.ts`：连接表单输入校验。
+- `apps/desktop/src/main/connection-workflow.ts`：连接列表、测试、创建、更新、删除、连接和断开的主进程业务链路。
 - `apps/desktop/src/main/credential-vault.ts`：数据库密码本地凭证存储，封装 `safeStorage` 和 fallback。
 - `apps/desktop/src/main/query-confirmation.ts`：危险 SQL 确认握手判断。
 - `apps/desktop/src/main/workspace-state-store.ts`：SQL 草稿和活动连接恢复状态持久化。
@@ -35,6 +36,7 @@ Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `de
 ## 测试覆盖
 
 - `connection-validation.test.ts`：连接输入校验、SSL、连接超时、语句超时。
+- `connection-workflow.test.ts`：连接生命周期，包括创建保存凭证、缺失连接不写孤立凭证、更新后断开旧连接池、连接失败标记 error、删除时清理凭证。
 - `credential-vault.test.ts`：凭证保存、读取、删除、`safeStorage` 可用和不可用 fallback。
 - `query-confirmation.test.ts`：危险 SQL 未确认时必须返回确认要求。
 - `query-workflow.test.ts`：主进程查询业务链路，包括成功执行、用量记录、历史写入、只读拦截、确认要求和失败历史。

@@ -8,15 +8,13 @@ import { AuthService } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import {
-  err,
   ipcChannels,
   ok,
-  type ConnectionInput,
   type IpcChannel,
   type IpcRequestMap,
   type IpcResponseMap,
 } from '@dbagent/shared';
-import { validateConnectionInput } from './connection-validation.js';
+import { createConnectionWorkflow } from './connection-workflow.js';
 import { CredentialVault } from './credential-vault.js';
 import { createQueryWorkflow } from './query-workflow.js';
 import { createSchemaWorkflow } from './schema-workflow.js';
@@ -35,6 +33,11 @@ const authService = new AuthService(join(dataDir, 'auth-session.json'));
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
 const databaseDrivers = createDefaultDatabaseDriverRegistry();
+const connectionWorkflow = createConnectionWorkflow({
+  connections: connectionStore,
+  credentials: credentialVault,
+  driverForEngine: (engine) => databaseDrivers.get(engine),
+});
 const executeQuery = createQueryWorkflow({
   connections: connectionStore,
   history: queryHistoryStore,
@@ -105,67 +108,13 @@ function handle<Channel extends IpcChannel>(
 }
 
 function registerIpcHandlers(): void {
-  handle(ipcChannels.connection.list, async () => ok(await connectionStore.list()));
-
-  handle(ipcChannels.connection.test, async (input) => {
-    const validation = validateConnectionInput(input);
-    if (validation) return err(validation);
-    const config = toDbConfig(input);
-    const result = await databaseDrivers.get(input.engine).test(config);
-    return result.ok ? ok({ success: true, latencyMs: result.data.latencyMs }) : result;
-  });
-
-  handle(ipcChannels.connection.create, async (input) => {
-    const validation = validateConnectionInput(input);
-    if (validation) return err(validation);
-    const connection = await connectionStore.create(input);
-    if (input.password) await credentialVault.save(connection.id, input.password);
-    return ok(connection);
-  });
-
-  handle(ipcChannels.connection.update, async ({ id, patch }) => {
-    const updated = await connectionStore.update(id, patch);
-    if (patch.password) await credentialVault.save(id, patch.password);
-    if (!updated) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-    await databaseDrivers.get(updated.engine).disconnect(id);
-    const disconnected = await connectionStore.markStatus(id, 'disconnected');
-    return ok(disconnected ?? updated);
-  });
-
-  handle(ipcChannels.connection.remove, async ({ id }) => {
-    const existing = (await connectionStore.list()).find((item) => item.id === id);
-    if (existing) await databaseDrivers.get(existing.engine).disconnect(id);
-    const removed = await connectionStore.remove(id);
-    if (removed) await credentialVault.remove(id);
-    return removed ? ok({ id }) : err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-  });
-
-  handle(ipcChannels.connection.connect, async ({ id }) => {
-    const connection = (await connectionStore.list()).find((item) => item.id === id);
-    if (!connection) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-    const password = await credentialVault.load(connection.id);
-    const config = {
-      ...connection,
-      maxClients: 5,
-    };
-    if (password !== undefined) {
-      Object.assign(config, { password });
-    }
-    const result = await databaseDrivers.get(connection.engine).connect(config);
-    if (!result.ok) {
-      await connectionStore.markStatus(id, 'error');
-      return result;
-    }
-    const updated = await connectionStore.markStatus(id, 'connected');
-    return ok(updated ?? result.data);
-  });
-
-  handle(ipcChannels.connection.disconnect, async ({ id }) => {
-    const connection = (await connectionStore.list()).find((item) => item.id === id);
-    if (connection) await databaseDrivers.get(connection.engine).disconnect(id);
-    const updated = await connectionStore.markStatus(id, 'disconnected');
-    return updated ? ok(updated) : err({ code: 'NOT_FOUND', message: 'Connection not found.' });
-  });
+  handle(ipcChannels.connection.list, async () => connectionWorkflow.list());
+  handle(ipcChannels.connection.test, async (input) => connectionWorkflow.test(input));
+  handle(ipcChannels.connection.create, async (input) => connectionWorkflow.create(input));
+  handle(ipcChannels.connection.update, async ({ id, patch }) => connectionWorkflow.update(id, patch));
+  handle(ipcChannels.connection.remove, async ({ id }) => connectionWorkflow.remove(id));
+  handle(ipcChannels.connection.connect, async ({ id }) => connectionWorkflow.connect(id));
+  handle(ipcChannels.connection.disconnect, async ({ id }) => connectionWorkflow.disconnect(id));
 
   handle(ipcChannels.db.executeQuery, async (request) => executeQuery(request));
   handle(ipcChannels.db.explainQuery, async (request) =>
@@ -188,14 +137,6 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.app.saveWorkspaceState, async (state) => {
     return ok(await workspaceStateStore.save(state));
   });
-}
-
-function toDbConfig(input: ConnectionInput) {
-  return {
-    ...input,
-    readOnly: input.readOnly ?? true,
-    maxClients: 5,
-  };
 }
 
 void app.whenReady().then(() => {
