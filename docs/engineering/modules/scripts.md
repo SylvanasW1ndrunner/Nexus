@@ -5,6 +5,7 @@
 - `scripts/smoke.mjs`：零外部依赖的仓库健康检查。
 - `scripts/run-postgres-tests.mjs`：真实 PostgreSQL 集成测试入口。
 - `scripts/prune-asar.cjs`：Electron 打包后 ASAR 裁剪。
+- `scripts/verify-package.mjs`：打包产物启动和 ASAR 内容验证。
 - `scripts/dev-db/*`：本地 PostgreSQL fixture 和 Docker Compose 开发环境。
 - `scripts/clean-path.mjs`：构建前清理输出路径。
 
@@ -17,6 +18,8 @@
 `run-postgres-tests.mjs` 显式设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `postgres.integration.test.ts`。这样普通 `pnpm test` 不会因为本机没有 PostgreSQL 而失败，但发布候选可以明确运行真实数据库测试。
 
 `prune-asar.cjs` 是打包质量的一部分。workspace 包在 Electron 打包时容易把源码、测试、`.turbo`、`tsconfig.tsbuildinfo` 和 source map 带进 ASAR；裁剪脚本负责把这些开发产物剔除，降低安装包体积和源码暴露风险。
+
+`verify-package.mjs` 把手工发布检查固化为脚本。它会检查当前平台的 unpacked 目录、`app.asar`、主进程/preload/renderer 入口、workspace 包源码/测试残留，并在默认模式下短时启动打包后的应用，确认最终产物不是只能构建、不能运行。
 
 `dev-db` 提供标准开发 fixture，默认数据库是 `dbagent_demo`，用户、密码均为 `postgres`。这套 fixture 只服务开发和测试，不意味着用户需要本地安装 PostgreSQL；真实产品场景是桌面客户端连接本机或远程服务器数据库。
 
@@ -44,6 +47,7 @@ GitHub Actions 中的 `postgres-integration` job 会启动 PostgreSQL 16 service
 
 ```bash
 pnpm package
+pnpm package:verify
 ```
 
 打包后还必须启动 `win-unpacked/DBAgent.exe` 并检查 ASAR 内容，不能只相信 build 成功。

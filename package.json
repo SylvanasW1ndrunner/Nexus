@@ -23,6 +23,8 @@
     "package:mac": "pnpm --filter @dbagent/desktop package -- --mac",
     "package:linux": "pnpm --filter @dbagent/desktop package -- --linux",
     "package:all": "pnpm --filter @dbagent/desktop package -- --win --mac --linux",
+    "package:verify": "node scripts/verify-package.mjs",
+    "package:verify:asar": "node scripts/verify-package.mjs --skip-launch",
     "db:up": "docker compose -f scripts/dev-db/docker-compose.yml up -d",
     "db:down": "docker compose -f scripts/dev-db/docker-compose.yml down -v"
   },

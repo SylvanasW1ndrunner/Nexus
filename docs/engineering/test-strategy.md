@@ -114,6 +114,7 @@ pnpm db:up
 - 远程数据库连接不是单一问题：DNS、端口、防火墙、VPN、SSL、认证、数据库名和连接中断都可能失败。M1.5 已有错误分类和超时/keepalive 默认值，发布 QA 仍需覆盖 Windows 客户端连接 Linux PostgreSQL、Windows 客户端连接 Windows PostgreSQL、Linux 客户端连接 Linux PostgreSQL 等组合。
 - Docker Compose、PostgreSQL 测试容器、fixture loader 和 CI helper 不能进入最终应用包。
 - `pnpm package` 后必须验证打包产物启动；renderer dev server 或 Vitest 不能替代安装包验证。
+- `pnpm package:verify` 是当前平台的标准打包产物验证入口；无图形环境只能运行 `pnpm package:verify:asar` 时，发布记录必须说明没有做启动探活。
 - `@dbagent/desktop` 的 Vitest 配置必须同时覆盖 `src/main` 和 `src/renderer`；否则主进程纯逻辑测试会被漏跑。
 - 认证和用量持久化要保持快速单测覆盖，因为它们同时影响 BYOK 模式和后续订阅 UX。
 
@@ -124,6 +125,7 @@ pnpm run ci
 pnpm db:up
 pnpm test:postgres
 pnpm package
+pnpm package:verify
 pnpm db:down
 ```
 
