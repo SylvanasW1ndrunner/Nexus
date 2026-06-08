@@ -7,6 +7,7 @@
 - [分模块开发文档](./modules/README.md)
 - [测试策略](./test-strategy.md)
 - [打包策略](./packaging.md)
+- [发布流程](./release-process.md)
 - [M0-M1.5 阶段验收记录](./m0-m15-acceptance.md)
 - [M0-M1.5 候选验收审计](./m0-m15-final-audit.md)
 - [betaV0.1 测试版记录](./releases/betaV0.1.md)

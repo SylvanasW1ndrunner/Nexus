@@ -77,3 +77,13 @@ pnpm db:down
 ```
 
 Windows 上曾通过 `pnpm package` 生成 `apps/desktop/release/DBAgent Setup 0.1.0.exe`，安装包约 71.51 MB，低于 M0-M1.5 基线阶段小于 200 MB 的产品目标。该数值是历史验证结果，不应替代每次候选发布的重新打包和启动验证。
+
+## 发布资产
+
+每个正式测试版本都必须生成可交付给用户的 Release 包，不能只保留源码 tag。当前 Windows 发布至少包含：
+
+- 安装包：由 `pnpm package` 生成的 NSIS 安装程序。
+- 解压包：由 `apps/desktop/release/win-unpacked` 压缩得到，用户可解压后直接运行 `DBAgent.exe`。
+- 校验文件：`SHA256SUMS.txt`，记录安装包和解压包的 SHA256。
+
+发布资产放在 `release/<version>/` 下，并上传到同名 GitHub Release。完整流程见 [发布流程](./release-process.md)。

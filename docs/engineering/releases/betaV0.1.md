@@ -1,6 +1,6 @@
 # betaV0.1 测试版记录
 
-> 发布日期：2026-06-08。Git tag：`betaV0.1`。产品版本：`0.1.0`。分支：`codex/m0-m1-foundation`。
+> 发布日期：2026-06-08。Git tag：`betaV0.1`。产品版本：`0.1.0`。正式分支：`main`。版本分支：`betaV0.1`。
 
 ## 定位
 
@@ -52,6 +52,16 @@ Password: postgres
 SSL: false
 ```
 
+## Release 包
+
+`betaV0.1` 作为第一个主要测试版本，必须提供可直接体验的发布资产：
+
+- `DBAgent-betaV0.1-win-x64-setup.exe`：Windows 安装包。
+- `DBAgent-betaV0.1-win-x64-unpacked.zip`：Windows 解压即用包。
+- `SHA256SUMS.txt`：发布资产 SHA256 校验文件。
+
+当前版本仅在 Windows 平台产出 Release 包；macOS 和 Linux 包将在后续跨平台打包阶段补齐。
+
 ## 已知限制
 
 - 这是测试版，不是公开发布安装包。
@@ -66,9 +76,12 @@ SSL: false
 
 从 `betaV0.1` 开始，后续每个测试版都应保留：
 
-- tag。
+- `main` 提交。
+- 同名版本分支。
+- 同名 tag。
 - 中文版本记录。
 - `pnpm run ci` 结果。
 - 真实 PostgreSQL 验证结果。
 - 打包产物验证结果。
+- GitHub Release 安装包、解压包和 SHA256 校验文件。
 - 已知限制和下一版本重点。
