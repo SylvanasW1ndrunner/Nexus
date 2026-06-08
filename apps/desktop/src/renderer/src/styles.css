@@ -802,6 +802,29 @@ small {
   padding: 0 12px;
 }
 
+.editor-context-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: -2px 0 10px;
+}
+
+.editor-context-strip span {
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  border: 1px solid #303743;
+  border-radius: 999px;
+  background: #171b22;
+  color: #aeb8c6;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 4px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .result-pane {
   display: flex;
   flex-direction: column;
@@ -986,6 +1009,67 @@ select:focus {
   border-radius: 8px;
   padding: 18px;
   color: #8993a3;
+}
+
+.result-empty {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed #3a414d;
+  border-radius: 8px;
+  background: #171b22;
+  color: #8993a3;
+  padding: 18px;
+  text-align: center;
+}
+
+.result-empty strong {
+  color: #e5e9f0;
+  font-size: 13px;
+}
+
+.result-empty span {
+  max-width: 420px;
+  color: #96a0af;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.result-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.result-metric {
+  min-width: 0;
+  border: 1px solid #303743;
+  border-radius: 7px;
+  background: #171b22;
+  padding: 8px;
+}
+
+.result-metric span {
+  display: block;
+  margin-bottom: 4px;
+  color: #7f8b9c;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.result-metric strong {
+  display: block;
+  overflow: hidden;
+  color: #f2f7ff;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .performance-panel {

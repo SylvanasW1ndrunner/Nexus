@@ -1638,6 +1638,16 @@ function EditorPane({
             </button>
           </div>
         </div>
+        <div className="editor-context-strip" aria-label="Editor context">
+          <span title={document.relativePath ?? document.title}>
+            {t('currentFile')}: {document.relativePath ?? document.title}
+          </span>
+          <span>
+            {t('statusConnection')}: {activeConnection?.name ?? t('noConnection')}
+          </span>
+          <span>{document.dirty ? t('statusUnsaved') : t('statusSaved')}</span>
+          {activeConnection?.readOnly ? <span>{t('readOnly')}</span> : null}
+        </div>
         <div className="monaco-shell">
           <Editor
             height="100%"
@@ -1673,14 +1683,44 @@ function EditorPane({
         </div>
         {result ? (
           <>
+            <ResultSummary result={result} t={t} />
             <PerformanceWarnings result={result} />
             <ResultTable result={result} />
           </>
         ) : (
-          <div className="empty-state">{t('noResults')}</div>
+          <div className="result-empty">
+            <strong>{t('resultEmptyTitle')}</strong>
+            <span>{t('resultEmptyDescription')}</span>
+          </div>
         )}
       </section>
     </>
+  );
+}
+
+function ResultSummary({
+  result,
+  t,
+}: {
+  result: QueryExecutionResult;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+}) {
+  return (
+    <div className="result-summary" aria-label="Query result summary">
+      <ResultMetric label={t('resultRows')} value={String(result.rowCount)} />
+      <ResultMetric label={t('resultElapsed')} value={`${result.elapsedMs} ms`} />
+      <ResultMetric label={t('resultRisk')} value={result.safety.riskLevel} />
+      <ResultMetric label={t('resultStatement')} value={result.safety.statementKind} />
+    </div>
+  );
+}
+
+function ResultMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="result-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
