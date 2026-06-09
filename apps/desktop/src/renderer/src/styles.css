@@ -425,6 +425,16 @@ small {
   background: #111315;
 }
 
+.center-stage.terminal-panel-maximized {
+  grid-template-rows: 0 minmax(0, 1fr);
+}
+
+.center-stage.terminal-panel-maximized .editor-pane {
+  overflow: hidden;
+  border-bottom: 0;
+  padding: 0;
+}
+
 .panel,
 .editor-pane,
 .result-pane {
@@ -1053,6 +1063,10 @@ small {
   background: #181a1f;
 }
 
+.result-pane.terminal-maximized {
+  border-top: 1px solid var(--border-subtle);
+}
+
 .bottom-panel-tabs {
   position: relative;
   flex: 0 0 34px;
@@ -1416,6 +1430,11 @@ small {
   opacity: 1;
 }
 
+.terminal-tool.active {
+  background: #2a2d2e;
+  color: #ffffff;
+}
+
 .terminal-session-list button span:not(.icon-glyph) {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1433,8 +1452,21 @@ small {
   padding: 0;
 }
 
-.terminal-viewport {
+.terminal-split-grid {
   flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+}
+
+.terminal-split-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.terminal-viewport {
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
   color: #cccccc;
   background: #181818;
@@ -1442,6 +1474,10 @@ small {
   font-family: "JetBrains Mono", Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
+}
+
+.terminal-split-grid .terminal-viewport + .terminal-viewport {
+  border-left: 1px solid #2b2b2b;
 }
 
 .terminal-output {

@@ -38,6 +38,7 @@ import {
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
+import { selectVisibleTerminals } from './terminal-layout.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
 
 const starterSql = '';
@@ -187,6 +188,8 @@ export function App() {
   const [terminals, setTerminals] = useState<TerminalView[]>([]);
   const terminalsRef = useRef<TerminalView[]>([]);
   const [activeTerminalId, setActiveTerminalId] = useState('');
+  const [splitTerminalId, setSplitTerminalId] = useState('');
+  const [terminalMaximized, setTerminalMaximized] = useState(false);
   const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [chatDraft, setChatDraft] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [createAgentWelcomeMessage(language)]);
@@ -402,17 +405,27 @@ export function App() {
     setActiveTerminalId(terminal.id);
   }
 
-  async function createTerminal() {
+  async function createTerminal(): Promise<TerminalView | undefined> {
     const response = await window.dbagent.invoke(ipcChannels.terminal.create, {
       ...(activeWorkspace ? { cwd: activeWorkspace.rootPath } : {}),
     });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
-      return;
+      return undefined;
     }
     const terminal = toTerminalView(response.data);
     setTerminals((current) => [...current, terminal]);
     setActiveTerminalId(terminal.id);
+    return terminal;
+  }
+
+  async function splitTerminal() {
+    const primaryTerminalId = activeTerminalId;
+    const terminal = await createTerminal();
+    if (!terminal) return;
+    setActiveTerminalId(primaryTerminalId || terminal.id);
+    setSplitTerminalId(terminal.id);
+    setBottomPanel('console');
   }
 
   async function closeTerminal(id: string) {
@@ -424,6 +437,7 @@ export function App() {
     setTerminals((current) => {
       const next = current.filter((terminal) => terminal.id !== id);
       if (activeTerminalId === id) setActiveTerminalId(next[0]?.id ?? '');
+      if (splitTerminalId === id) setSplitTerminalId('');
       return next;
     });
   }
@@ -1194,7 +1208,7 @@ export function App() {
         </ErrorBoundary>
 
         <ErrorBoundary label="Editor">
-          <section className="center-stage">
+          <section className={terminalMaximized ? 'center-stage terminal-panel-maximized' : 'center-stage'}>
             <EditorPane
               activeConnection={activeConnection}
               bottomPanel={bottomPanel}
@@ -1206,6 +1220,8 @@ export function App() {
               t={t}
               activeTerminalId={activeTerminalId}
               ideSettings={ideSettings}
+              splitTerminalId={splitTerminalId}
+              terminalMaximized={terminalMaximized}
               terminals={terminals}
               onChangeSql={handleEditorChange}
               onClearTerminal={(id) => void clearTerminal(id)}
@@ -1219,6 +1235,8 @@ export function App() {
               onSaveSql={() => void saveCurrentDocument()}
               onRunTerminal={(id) => void runTerminalCommand(id)}
               onSelectTerminal={setActiveTerminalId}
+              onSplitTerminal={() => void splitTerminal()}
+              onToggleTerminalMaximized={() => setTerminalMaximized((maximized) => !maximized)}
               onUpdateTerminalInput={updateTerminalInput}
               setBottomPanel={setBottomPanel}
             />
@@ -2955,7 +2973,9 @@ function EditorPane({
   message,
   result,
   sql,
+  splitTerminalId,
   t,
+  terminalMaximized,
   terminals,
   onChangeSql,
   onClearTerminal,
@@ -2969,6 +2989,8 @@ function EditorPane({
   onSaveSql,
   onRunTerminal,
   onSelectTerminal,
+  onSplitTerminal,
+  onToggleTerminalMaximized,
   onUpdateTerminalInput,
   setBottomPanel,
 }: {
@@ -2981,7 +3003,9 @@ function EditorPane({
   message: string;
   result: QueryExecutionResult | undefined;
   sql: string;
+  splitTerminalId: string;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  terminalMaximized: boolean;
   terminals: TerminalView[];
   onChangeSql: (sql: string) => void;
   onClearTerminal: (id: string) => void;
@@ -2995,6 +3019,8 @@ function EditorPane({
   onSaveSql: () => void;
   onRunTerminal: (id: string) => void;
   onSelectTerminal: (id: string) => void;
+  onSplitTerminal: () => void;
+  onToggleTerminalMaximized: () => void;
   onUpdateTerminalInput: (id: string, input: string) => void;
   setBottomPanel: (panel: 'results' | 'console') => void;
 }) {
@@ -3116,30 +3142,27 @@ function EditorPane({
           ) : null}
         </div>
       </section>
-      <section className="result-pane">
+      <section className={terminalMaximized ? 'result-pane terminal-maximized' : 'result-pane'}>
         <div className="bottom-panel-tabs">
           <button disabled type="button">
-            PROBLEMS
+            {t('problems')}
           </button>
           <button
             className={bottomPanel === 'results' ? 'active' : ''}
             type="button"
             onClick={() => setBottomPanel('results')}
           >
-            OUTPUT
-          </button>
-          <button disabled type="button">
-            DEBUG CONSOLE
+            {t('output')}
           </button>
           <button
             className={bottomPanel === 'console' ? 'active' : ''}
             type="button"
             onClick={() => setBottomPanel('console')}
           >
-            TERMINAL
+            {t('terminal')}
           </button>
           <button disabled type="button">
-            PORTS
+            {t('ports')}
           </button>
           <small>{message}</small>
           {bottomPanel === 'results' ? (
@@ -3206,7 +3229,13 @@ function EditorPane({
               <button className="terminal-tool" type="button" title="New Terminal" onClick={onCreateTerminal}>
                 <span className="icon-glyph new-chat" aria-hidden="true" />
               </button>
-              <button className="terminal-tool" disabled type="button" title="Split Terminal">
+              <button
+                className="terminal-tool"
+                disabled={!activeTerminal}
+                type="button"
+                title="Split Terminal"
+                onClick={onSplitTerminal}
+              >
                 <span className="icon-glyph split-terminal" aria-hidden="true" />
               </button>
               <button
@@ -3223,7 +3252,12 @@ function EditorPane({
               <button className="terminal-tool" disabled type="button" title="More Actions">
                 <span className="icon-glyph more" aria-hidden="true" />
               </button>
-              <button className="terminal-tool" disabled type="button" title="Maximize Panel">
+              <button
+                className={terminalMaximized ? 'terminal-tool active' : 'terminal-tool'}
+                type="button"
+                title={terminalMaximized ? 'Restore Panel' : 'Maximize Panel'}
+                onClick={onToggleTerminalMaximized}
+              >
                 <span className="icon-glyph maximize" aria-hidden="true" />
               </button>
               <button
@@ -3258,6 +3292,7 @@ function EditorPane({
         ) : (
           <TerminalPanel
             activeTerminalId={activeTerminalId}
+            splitTerminalId={splitTerminalId}
             terminals={terminals}
             terminalSettings={ideSettings.terminal}
             t={t}
@@ -3273,6 +3308,7 @@ function EditorPane({
 
 function TerminalPanel({
   activeTerminalId,
+  splitTerminalId,
   terminals,
   terminalSettings,
   t,
@@ -3281,6 +3317,7 @@ function TerminalPanel({
   onUpdateTerminalInput,
 }: {
   activeTerminalId: string;
+  splitTerminalId: string;
   terminals: TerminalView[];
   terminalSettings: IdeSettings['terminal'];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
@@ -3288,31 +3325,21 @@ function TerminalPanel({
   onRunTerminal: (id: string) => void;
   onUpdateTerminalInput: (id: string, input: string) => void;
 }) {
-  const activeTerminal = terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
+  const visibleTerminals = selectVisibleTerminals(terminals, activeTerminalId, splitTerminalId);
   return (
     <div className="console-panel">
-      {activeTerminal ? (
-        <div className="terminal-viewport" style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}>
-          <pre className={terminalSettings.cursorBlink ? 'terminal-output cursor-blink' : 'terminal-output'}>
-            {activeTerminal.output}
-          </pre>
-          <div className="terminal-command-row">
-            <span className="terminal-prompt">
-              {activeTerminal.shell?.toLowerCase().includes('powershell') ? 'PS' : '$'} {activeTerminal.cwd ? `${activeTerminal.cwd}>` : '>'}
-            </span>
-            <input
-              aria-label="Terminal command"
-              placeholder={activeTerminal.output ? '' : t('consoleHint')}
-              value={activeTerminal.input}
-              onChange={(event) => onUpdateTerminalInput(activeTerminal.id, event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') onRunTerminal(activeTerminal.id);
-              }}
+      {visibleTerminals.length ? (
+        <div className={visibleTerminals.length > 1 ? 'terminal-split-grid' : 'terminal-split-grid single'}>
+          {visibleTerminals.map((terminal) => (
+            <TerminalViewport
+              key={terminal.id}
+              terminal={terminal}
+              terminalSettings={terminalSettings}
+              t={t}
+              onRunTerminal={onRunTerminal}
+              onUpdateTerminalInput={onUpdateTerminalInput}
             />
-            <button className="terminal-run" disabled={activeTerminal.running} type="button" onClick={() => onRunTerminal(activeTerminal.id)}>
-              {activeTerminal.running ? '...' : '>'}
-            </button>
-          </div>
+          ))}
         </div>
       ) : (
         <div className="terminal-empty">
@@ -3322,6 +3349,45 @@ function TerminalPanel({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function TerminalViewport({
+  terminal,
+  terminalSettings,
+  t,
+  onRunTerminal,
+  onUpdateTerminalInput,
+}: {
+  terminal: TerminalView;
+  terminalSettings: IdeSettings['terminal'];
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onRunTerminal: (id: string) => void;
+  onUpdateTerminalInput: (id: string, input: string) => void;
+}) {
+  return (
+    <div className="terminal-viewport" style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}>
+      <pre className={terminalSettings.cursorBlink ? 'terminal-output cursor-blink' : 'terminal-output'}>
+        {terminal.output}
+      </pre>
+      <div className="terminal-command-row">
+        <span className="terminal-prompt">
+          {terminal.shell?.toLowerCase().includes('powershell') ? 'PS' : '$'} {terminal.cwd ? `${terminal.cwd}>` : '>'}
+        </span>
+        <input
+          aria-label="Terminal command"
+          placeholder={terminal.output ? '' : t('consoleHint')}
+          value={terminal.input}
+          onChange={(event) => onUpdateTerminalInput(terminal.id, event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') onRunTerminal(terminal.id);
+          }}
+        />
+        <button className="terminal-run" disabled={terminal.running} type="button" onClick={() => onRunTerminal(terminal.id)}>
+          {terminal.running ? '...' : '>'}
+        </button>
+      </div>
     </div>
   );
 }
