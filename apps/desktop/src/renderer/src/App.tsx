@@ -1335,6 +1335,7 @@ export function App() {
           commands={commandPaletteItems}
           query={commandPaletteQuery}
           setQuery={setCommandPaletteQuery}
+          t={t}
           onClose={() => setCommandPaletteOpen(false)}
           onRun={(id) => void runCommandPaletteItem(id)}
         />
@@ -1519,12 +1520,14 @@ function CommandPalette({
   commands,
   query,
   setQuery,
+  t,
   onClose,
   onRun,
 }: {
   commands: CommandPaletteItem[];
   query: string;
   setQuery: (query: string) => void;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   onClose: () => void;
   onRun: (id: string) => void;
 }) {
@@ -1547,10 +1550,10 @@ function CommandPalette({
 
   return (
     <div className="modal-backdrop command-backdrop" role="presentation">
-      <section className="command-palette" role="dialog" aria-modal="true" aria-label="Command Palette">
+      <section className="command-palette" role="dialog" aria-modal="true" aria-label={t('commandPalette')}>
         <input
           autoFocus
-          placeholder="Search commands"
+          placeholder={t('searchCommands')}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
@@ -1574,7 +1577,7 @@ function CommandPalette({
               </button>
             ))
           ) : (
-            <div className="command-empty">No commands</div>
+            <div className="command-empty">{t('noCommands')}</div>
           )}
         </div>
       </section>
@@ -3270,14 +3273,14 @@ function EditorPane({
                   </button>
                 ))}
               </div>
-              <button className="terminal-tool" type="button" title="New Terminal" onClick={onCreateTerminal}>
+              <button className="terminal-tool" type="button" title={t('newTerminal')} onClick={onCreateTerminal}>
                 <span className="icon-glyph new-chat" aria-hidden="true" />
               </button>
               <button
                 className="terminal-tool"
                 disabled={!activeTerminal}
                 type="button"
-                title="Split Terminal"
+                title={t('splitTerminal')}
                 onClick={onSplitTerminal}
               >
                 <span className="icon-glyph split-terminal" aria-hidden="true" />
@@ -3293,13 +3296,13 @@ function EditorPane({
               >
                 <span className="icon-glyph clear-terminal" aria-hidden="true" />
               </button>
-              <button className="terminal-tool" disabled type="button" title="More Actions">
+              <button className="terminal-tool" disabled type="button" title={t('moreActions')}>
                 <span className="icon-glyph more" aria-hidden="true" />
               </button>
               <button
                 className={terminalMaximized ? 'terminal-tool active' : 'terminal-tool'}
                 type="button"
-                title={terminalMaximized ? 'Restore Panel' : 'Maximize Panel'}
+                title={terminalMaximized ? t('restorePanel') : t('maximizePanel')}
                 onClick={onToggleTerminalMaximized}
               >
                 <span className="icon-glyph maximize" aria-hidden="true" />
@@ -3430,7 +3433,7 @@ function TerminalViewport({
           {terminal.shell?.toLowerCase().includes('powershell') ? 'PS' : '$'} {terminal.cwd ? `${terminal.cwd}>` : '>'}
         </span>
         <input
-          aria-label="Terminal command"
+          aria-label={t('terminalCommand')}
           placeholder={terminal.output ? '' : t('consoleHint')}
           value={terminal.input}
           onChange={(event) => onUpdateTerminalInput(terminal.id, event.target.value)}

@@ -23,6 +23,11 @@ describe('renderer i18n', () => {
       t('pluginMarketplace'),
       t('passwordLogin'),
       t('sendCode'),
+      t('commandPalette'),
+      t('searchCommands'),
+      t('newTerminal'),
+      t('splitTerminal'),
+      t('maximizePanel'),
     ];
 
     expect(criticalLabels).toEqual([
@@ -34,6 +39,11 @@ describe('renderer i18n', () => {
       '插件市场',
       '账密登录',
       '发送验证码',
+      '命令面板',
+      '搜索命令',
+      '新建终端',
+      '拆分终端',
+      '最大化面板',
     ]);
     expect(criticalLabels.join('')).not.toMatch(/[\u951F\uFFFD\u93B5\u7481\u940E\u7F01]/);
   });
