@@ -39,6 +39,7 @@ import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 import { filterPlugins, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
+import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
 import { selectVisibleTerminals } from './terminal-layout.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
 
@@ -2446,15 +2447,7 @@ function PythonConfigForm({
   }, [pythonDraft.mode]);
 
   function switchMode(mode: WorkspacePythonConfig['mode']) {
-    setPythonDraft({
-      mode,
-      requirementsPath: pythonDraft.requirementsPath,
-      ...(mode === 'system' && pythonDraft.pythonPath ? { pythonPath: pythonDraft.pythonPath } : {}),
-      ...(mode === 'venv' && pythonDraft.venvPath ? { venvPath: pythonDraft.venvPath } : {}),
-      ...(mode === 'conda' && pythonDraft.condaEnvName ? { condaEnvName: pythonDraft.condaEnvName } : {}),
-      ...(mode === 'conda' && pythonDraft.condaPrefix ? { condaPrefix: pythonDraft.condaPrefix } : {}),
-      ...(mode === 'conda' && pythonDraft.pythonPath ? { pythonPath: pythonDraft.pythonPath } : {}),
-    });
+    setPythonDraft(switchPythonMode(pythonDraft, mode));
   }
 
   async function choosePath(mode: 'file' | 'directory') {
@@ -2468,21 +2461,14 @@ function PythonConfigForm({
       }
       setPythonDraft({ ...pythonDraft, venvPath: relativePath });
     } else if (pythonDraft.mode === 'conda') {
-      setPythonDraft({ mode: 'conda', requirementsPath: pythonDraft.requirementsPath, condaPrefix: path });
+      setPythonDraft(setCondaEnvironmentInput(pythonDraft, path));
     } else setPythonDraft({ ...pythonDraft, pythonPath: path });
   }
 
   function selectEnvironment(id: string) {
     const environment = environments.find((item) => item.id === id);
     if (!environment) return;
-    setPythonDraft({
-      mode: environment.mode,
-      requirementsPath: pythonDraft.requirementsPath,
-      ...(environment.pythonPath ? { pythonPath: environment.pythonPath } : {}),
-      ...(environment.venvPath ? { venvPath: environment.venvPath } : {}),
-      ...(environment.condaEnvName ? { condaEnvName: environment.condaEnvName } : {}),
-      ...(environment.condaPrefix ? { condaPrefix: environment.condaPrefix } : {}),
-    });
+    setPythonDraft(selectPythonEnvironment(pythonDraft, environment));
   }
 
   return (
@@ -2557,9 +2543,7 @@ function PythonConfigForm({
               <input
                 placeholder="base / analytics / C:\\Miniconda3\\envs\\analytics"
                 value={pythonDraft.condaEnvName ?? pythonDraft.condaPrefix ?? ''}
-                onChange={(event) =>
-                  setPythonDraft({ mode: 'conda', requirementsPath: pythonDraft.requirementsPath, condaEnvName: event.target.value })
-                }
+                onChange={(event) => setPythonDraft(setCondaEnvironmentInput(pythonDraft, event.target.value))}
               />
               <button className="icon-button" type="button" onClick={() => void choosePath('directory')}>
                 ...
