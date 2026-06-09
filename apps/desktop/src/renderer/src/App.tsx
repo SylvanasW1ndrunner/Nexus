@@ -3095,63 +3095,74 @@ function EditorPane({
       </section>
       <section className="result-pane">
         <div className="bottom-panel-tabs">
+          <button disabled type="button">
+            PROBLEMS
+          </button>
           <button
             className={bottomPanel === 'results' ? 'active' : ''}
             type="button"
             onClick={() => setBottomPanel('results')}
           >
-            {t('results')}
+            OUTPUT
+          </button>
+          <button disabled type="button">
+            DEBUG CONSOLE
           </button>
           <button
             className={bottomPanel === 'console' ? 'active' : ''}
             type="button"
             onClick={() => setBottomPanel('console')}
           >
-            {t('console')}
+            TERMINAL
+          </button>
+          <button disabled type="button">
+            PORTS
           </button>
           <small>{message}</small>
-          <div className="bottom-panel-tools">
-            <button
-              className="icon-tool"
-              disabled={!result}
-              title={t('exportResult')}
-              type="button"
-              onClick={() => setExportMenuOpen((open) => !open)}
-            >
-              <span className="icon-glyph export" aria-hidden="true" />
-            </button>
-            {exportMenuOpen && result ? (
-              <div className="tool-menu">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExportMenuOpen(false);
-                    onExportCsv();
-                  }}
-                >
-                  {t('exportCsv')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExportMenuOpen(false);
-                    onExportExcel();
-                  }}
-                >
-                  {t('exportExcel')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExportMenuOpen(false);
-                    onExportJson();
-                  }}
-                >
-                  {t('exportJson')}
-                </button>
-              </div>
-            ) : null}
-          </div>
+          {bottomPanel === 'results' ? (
+            <div className="bottom-panel-tools">
+              <button
+                className="icon-tool"
+                disabled={!result}
+                title={t('exportResult')}
+                type="button"
+                onClick={() => setExportMenuOpen((open) => !open)}
+              >
+                <span className="icon-glyph export" aria-hidden="true" />
+              </button>
+              {exportMenuOpen && result ? (
+                <div className="tool-menu">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportMenuOpen(false);
+                      onExportCsv();
+                    }}
+                  >
+                    {t('exportCsv')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportMenuOpen(false);
+                      onExportExcel();
+                    }}
+                  >
+                    {t('exportExcel')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportMenuOpen(false);
+                      onExportJson();
+                    }}
+                  >
+                    {t('exportJson')}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         {bottomPanel === 'results' ? (
           <div className="bottom-panel-body">
@@ -3214,33 +3225,53 @@ function TerminalPanel({
   return (
     <div className="console-panel">
       <div className="terminal-tabs">
-        {terminals.map((terminal) => (
-          <button
-            className={terminal.id === activeTerminal?.id ? 'active' : ''}
-            key={terminal.id}
-            type="button"
-            onClick={() => onSelectTerminal(terminal.id)}
-          >
-            <span>{terminal.name}</span>
-            <small>{terminal.lastExitCode === undefined ? '' : terminal.lastExitCode}</small>
-            <i
-              role="button"
-              tabIndex={0}
-              title={t('close')}
-              onClick={(event) => {
-                event.stopPropagation();
-                onCloseTerminal(terminal.id);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') onCloseTerminal(terminal.id);
-              }}
+        <div className="terminal-session-list">
+          {terminals.map((terminal) => (
+            <button
+              className={terminal.id === activeTerminal?.id ? 'active' : ''}
+              key={terminal.id}
+              type="button"
+              title={terminal.cwd ?? terminal.name}
+              onClick={() => onSelectTerminal(terminal.id)}
             >
-              x
-            </i>
-          </button>
-        ))}
-        <button type="button" onClick={onCreateTerminal}>
+              <span>{terminal.shell ?? terminal.name}</span>
+              <small>{terminal.lastExitCode === undefined ? '' : terminal.lastExitCode}</small>
+            </button>
+          ))}
+        </div>
+        <button className="terminal-tool" type="button" title="New Terminal" onClick={onCreateTerminal}>
           +
+        </button>
+        <button className="terminal-tool" disabled type="button" title="Split Terminal">
+          ||
+        </button>
+        <button
+          className="terminal-tool"
+          disabled={!activeTerminal}
+          type="button"
+          title={t('clear')}
+          onClick={() => {
+            if (activeTerminal) onClearTerminal(activeTerminal.id);
+          }}
+        >
+          ⌫
+        </button>
+        <button className="terminal-tool" disabled type="button" title="More Actions">
+          ⋯
+        </button>
+        <button className="terminal-tool" disabled type="button" title="Maximize Panel">
+          □
+        </button>
+        <button
+          className="terminal-tool"
+          disabled={!activeTerminal}
+          type="button"
+          title={t('close')}
+          onClick={() => {
+            if (activeTerminal) onCloseTerminal(activeTerminal.id);
+          }}
+        >
+          ×
         </button>
       </div>
       {activeTerminal ? (
@@ -3252,7 +3283,7 @@ function TerminalPanel({
             {activeTerminal.output || t('consoleHint')}
           </pre>
           <div className="terminal-command-row">
-            <span>&gt;</span>
+            <span>{activeTerminal.shell?.toLowerCase().includes('powershell') ? 'PS' : '$'}</span>
             <input
               value={activeTerminal.input}
               onChange={(event) => onUpdateTerminalInput(activeTerminal.id, event.target.value)}
@@ -3260,11 +3291,8 @@ function TerminalPanel({
                 if (event.key === 'Enter') onRunTerminal(activeTerminal.id);
               }}
             />
-            <button disabled={activeTerminal.running} type="button" onClick={() => onRunTerminal(activeTerminal.id)}>
-              {activeTerminal.running ? t('running') : t('runCommand')}
-            </button>
-            <button className="secondary" type="button" onClick={() => onClearTerminal(activeTerminal.id)}>
-              {t('clear')}
+            <button className="terminal-run" disabled={activeTerminal.running} type="button" onClick={() => onRunTerminal(activeTerminal.id)}>
+              {activeTerminal.running ? '...' : '>'}
             </button>
           </div>
         </>
