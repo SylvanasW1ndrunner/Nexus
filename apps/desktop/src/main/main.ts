@@ -104,6 +104,7 @@ function installApplicationMenu(): void {
       submenu: [
         { label: '\u8fd0\u884c\u5f53\u524d SQL', accelerator: 'F5', click: () => sendMenuCommand('run-sql') },
         { label: '\u5206\u6790\u5f53\u524d SQL', accelerator: 'CmdOrCtrl+Enter', click: () => sendMenuCommand('explain-sql') },
+        { label: '\u8fd0\u884c\u5f53\u524d Python', accelerator: 'F6', click: () => sendMenuCommand('run-python') },
       ],
     },
     {

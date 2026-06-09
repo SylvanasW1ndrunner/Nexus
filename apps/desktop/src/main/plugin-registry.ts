@@ -46,6 +46,7 @@ const officialPlugins: PluginManifest[] = [
     contributes: {
       commands: [
         { id: 'dbagent.python.detect', title: 'Detect Python Environments', category: 'Python' },
+        { id: 'dbagent.python.runCurrentFile', title: 'Run Current Python File', category: 'Python' },
         { id: 'dbagent.python.createVenv', title: 'Create Virtual Environment', category: 'Python' },
       ],
       views: [{ id: 'dbagent.python.environments', title: 'Python Environments', location: 'settings' }],

@@ -258,6 +258,10 @@ export function App() {
         void explain();
         return;
       }
+      if (command === 'run-python') {
+        void runPythonScript();
+        return;
+      }
       if (command === 'toggle-left-sidebar') {
         setLeftSidebarCollapsed((collapsed) => !collapsed);
         return;
@@ -297,6 +301,10 @@ export function App() {
         return;
       case 'core.runSql':
         await execute();
+        return;
+      case 'core.runPython':
+      case 'dbagent.python.runCurrentFile':
+        await runPythonScript();
         return;
       case 'core.explainSql':
       case 'dbagent.postgres.explain':
@@ -818,6 +826,62 @@ export function App() {
     } else {
       setMessage(formatAppError(response.error));
     }
+  }
+
+  async function runPythonScript() {
+    if (editorLanguage !== 'python') {
+      setMessage(language === 'zh-CN' ? '当前编辑器不是 Python 文件。' : 'Current editor is not a Python file.');
+      return;
+    }
+    if (!activeWorkspace) {
+      setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
+      return;
+    }
+    setBottomPanel('console');
+    appendTerminalText(`\n> python ${editorDocument.relativePath ?? editorDocument.title}\n`);
+    const response = await window.dbagent.invoke(ipcChannels.python.runScript, {
+      rootPath: activeWorkspace.rootPath,
+      config: workspacePythonDraft,
+      code: sql,
+      timeoutMs: 120_000,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      appendTerminalText(`${formatAppError(response.error)}\n`);
+      return;
+    }
+    const output = [response.data.stdout, response.data.stderr].filter(Boolean).join('\n');
+    appendTerminalText(`${output}${output ? '\n' : ''}[python exit ${response.data.exitCode ?? 'unknown'} / ${response.data.elapsedMs} ms]\n`);
+    setMessage(
+      response.data.exitCode === 0
+        ? language === 'zh-CN'
+          ? `Python 运行完成，耗时 ${response.data.elapsedMs} ms。`
+          : `Python finished in ${response.data.elapsedMs} ms.`
+        : language === 'zh-CN'
+          ? `Python 运行失败，退出码 ${response.data.exitCode ?? 'unknown'}。`
+          : `Python failed with exit ${response.data.exitCode ?? 'unknown'}.`,
+    );
+  }
+
+  function appendTerminalText(text: string) {
+    setTerminals((current) => {
+      if (!current.length) {
+        return [
+          {
+            id: 'python-output',
+            name: 'Python',
+            createdAt: new Date().toISOString(),
+            input: '',
+            output: text,
+            running: false,
+            cursor: 0,
+          },
+        ];
+      }
+      const targetId = activeTerminalId || current[0]?.id;
+      return current.map((terminal) => (terminal.id === targetId ? { ...terminal, output: `${terminal.output}${text}` } : terminal));
+    });
+    if (!activeTerminalId) setActiveTerminalId((current) => current || 'python-output');
   }
 
   function previewTable(table: TableSummary) {
@@ -3450,6 +3514,13 @@ function buildCommandPaletteItems({
     { id: 'core.newProject', title: 'New Project', category: 'File', source: 'Core', enabled: true },
     { id: 'core.openProject', title: 'Open Project', category: 'File', source: 'Core', enabled: true },
     { id: 'core.saveFile', title: 'Save File', category: 'File', source: 'Core', enabled: true },
+    {
+      id: 'core.runPython',
+      title: 'Run Current Python File',
+      category: 'Python',
+      source: 'Core',
+      enabled: editorLanguage === 'python' && Boolean(activeWorkspace),
+    },
     { id: 'core.runSql', title: 'Run Current SQL', category: 'SQL', source: 'Core', enabled: isSql && Boolean(activeConnection) },
     {
       id: 'core.explainSql',
@@ -3498,6 +3569,7 @@ function isPluginCommandEnabled(
   if (commandId === 'dbagent.postgres.connect') return true;
   if (commandId === 'dbagent.postgres.explain') return context.editorLanguage === 'sql' && Boolean(context.activeConnection);
   if (commandId === 'dbagent.python.detect') return true;
+  if (commandId === 'dbagent.python.runCurrentFile') return context.editorLanguage === 'python' && Boolean(context.activeWorkspace);
   if (commandId === 'dbagent.python.createVenv') return Boolean(context.activeWorkspace);
   if (commandId === 'dbagent.result.exportCsv' || commandId === 'dbagent.result.exportJson') return Boolean(context.result);
   if (commandId === 'dbagent.chart.preview') return Boolean(context.result);
