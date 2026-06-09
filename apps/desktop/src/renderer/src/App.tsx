@@ -29,6 +29,12 @@ import {
   type WorkspacePythonConfig,
   type WorkspaceTemplate,
 } from '@dbagent/shared';
+import {
+  archiveConversation,
+  createWelcomeMessage,
+  type AgentConversation,
+  type AgentMessage,
+} from './agent-chat.js';
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
@@ -47,11 +53,7 @@ type WorkspaceDraft = {
   template: WorkspaceTemplate;
 };
 
-type ChatMessage = {
-  id: string;
-  role: 'assistant' | 'user';
-  content: string;
-};
+type ChatMessage = AgentMessage;
 
 type CommandPaletteItem = {
   id: string;
@@ -126,6 +128,14 @@ const defaultEditorDocument: EditorDocument = {
   dirty: false,
 };
 
+function createAgentWelcomeMessage(language: AppLanguage): AgentMessage {
+  return createWelcomeMessage(
+    language === 'zh-CN'
+      ? '工作台已就绪。你可以在项目中沉淀 SQL、脚本和文档。'
+      : 'Workspace ready. You can organize SQL, scripts, and docs in this project.',
+  );
+}
+
 const databaseEngineOptions: DatabaseEngineOption[] = [
   {
     id: 'postgres',
@@ -179,13 +189,8 @@ export function App() {
   const [activeTerminalId, setActiveTerminalId] = useState('');
   const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [chatDraft, setChatDraft] = useState('');
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      content: '工作台已就绪。你可以在项目中沉淀 SQL、脚本和文档。',
-    },
-  ]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [createAgentWelcomeMessage(language)]);
+  const [chatHistory, setChatHistory] = useState<AgentConversation[]>([]);
   const activeConnection = useMemo(
     () => connections.find((connection) => connection.id === activeConnectionId),
     [activeConnectionId, connections],
@@ -1124,6 +1129,20 @@ export function App() {
     setChatDraft('');
   }
 
+  function startNewChatConversation() {
+    const now = Date.now();
+    setChatHistory((history) => archiveConversation(history, chatMessages, t('newConversation'), now));
+    setChatMessages([createAgentWelcomeMessage(language)]);
+    setChatDraft('');
+  }
+
+  function restoreChatConversation(conversationId: string) {
+    const conversation = chatHistory.find((item) => item.id === conversationId);
+    if (!conversation) return;
+    setChatMessages(conversation.messages);
+    setChatDraft('');
+  }
+
   return (
     <main className={`app-shell theme-${ideSettings.appearance.theme} density-${ideSettings.appearance.density}`}>
       <TopBar
@@ -1221,9 +1240,12 @@ export function App() {
               activeWorkspace={activeWorkspace}
               document={editorDocument}
               draft={chatDraft}
+              history={chatHistory}
               messages={chatMessages}
               setDraft={setChatDraft}
               t={t}
+              onNewConversation={startNewChatConversation}
+              onRestoreConversation={restoreChatConversation}
               onSend={sendChatMessage}
             />
             {!rightSidebarCollapsed ? (
@@ -3440,20 +3462,37 @@ function ChatPanel({
   activeWorkspace,
   document,
   draft,
+  history,
   messages,
   setDraft,
   t,
+  onNewConversation,
+  onRestoreConversation,
   onSend,
 }: {
   activeConnection: SavedConnection | undefined;
   activeWorkspace: WorkspaceProject | undefined;
   document: EditorDocument;
   draft: string;
+  history: AgentConversation[];
   messages: ChatMessage[];
   setDraft: (value: string) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onNewConversation: () => void;
+  onRestoreConversation: (conversationId: string) => void;
   onSend: () => void;
 }) {
+  const [openMenu, setOpenMenu] = useState<'history' | 'settings' | undefined>();
+  const [contextSettings, setContextSettings] = useState({
+    workspace: true,
+    connection: true,
+    file: true,
+  });
+
+  function toggleMenu(menu: 'history' | 'settings') {
+    setOpenMenu((current) => (current === menu ? undefined : menu));
+  }
+
   return (
     <section className="panel chat-panel simple-chat-panel">
       <div className="chat-titlebar">
@@ -3462,16 +3501,94 @@ function ChatPanel({
           <small>{t('assistantReady')}</small>
         </div>
         <div className="agent-toolbar" aria-label="Agent toolbar">
-          <button type="button" title={t('conversationHistory')}>
+          <button
+            className={openMenu === 'history' ? 'active' : ''}
+            type="button"
+            title={t('conversationHistory')}
+            onClick={() => toggleMenu('history')}
+          >
             <span className="icon-glyph history" aria-hidden="true" />
           </button>
-          <button type="button" title={t('settings')}>
+          <button
+            className={openMenu === 'settings' ? 'active' : ''}
+            type="button"
+            title={t('settings')}
+            onClick={() => toggleMenu('settings')}
+          >
             <span className="icon-glyph settings" aria-hidden="true" />
           </button>
-          <button type="button" title={t('newConversation')}>
+          <button
+            type="button"
+            title={t('newConversation')}
+            onClick={() => {
+              setOpenMenu(undefined);
+              onNewConversation();
+            }}
+          >
             <span className="icon-glyph new-chat" aria-hidden="true" />
           </button>
         </div>
+        {openMenu === 'history' ? (
+          <div className="agent-popover history-popover">
+            <strong>{t('conversationHistory')}</strong>
+            <button
+              type="button"
+              onClick={() => {
+                setOpenMenu(undefined);
+                onNewConversation();
+              }}
+            >
+              {t('newConversation')}
+            </button>
+            {history.length ? (
+              history.map((conversation) => (
+                <button
+                  key={conversation.id}
+                  type="button"
+                  title={conversation.title}
+                  onClick={() => {
+                    setOpenMenu(undefined);
+                    onRestoreConversation(conversation.id);
+                  }}
+                >
+                  <span>{conversation.title}</span>
+                  <small>{new Date(conversation.updatedAt).toLocaleString()}</small>
+                </button>
+              ))
+            ) : (
+              <small>{t('noConversationHistory')}</small>
+            )}
+          </div>
+        ) : null}
+        {openMenu === 'settings' ? (
+          <div className="agent-popover settings-popover">
+            <strong>{t('agentPanelSettings')}</strong>
+            <label>
+              <input
+                checked={contextSettings.workspace}
+                type="checkbox"
+                onChange={(event) => setContextSettings({ ...contextSettings, workspace: event.target.checked })}
+              />
+              <span>{t('agentUseWorkspaceContext')}</span>
+            </label>
+            <label>
+              <input
+                checked={contextSettings.connection}
+                type="checkbox"
+                onChange={(event) => setContextSettings({ ...contextSettings, connection: event.target.checked })}
+              />
+              <span>{t('agentUseConnectionContext')}</span>
+            </label>
+            <label>
+              <input
+                checked={contextSettings.file}
+                type="checkbox"
+                onChange={(event) => setContextSettings({ ...contextSettings, file: event.target.checked })}
+              />
+              <span>{t('agentUseFileContext')}</span>
+            </label>
+          </div>
+        ) : null}
       </div>
       <div className="message-list simple-message-list">
         {messages.map((message) => (
@@ -3499,9 +3616,15 @@ function ChatPanel({
             <button type="button" title="Attach">
               +
             </button>
-            <span title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</span>
-            <span title={activeConnection?.name ?? t('noConnection')}>{activeConnection?.name ?? t('noConnection')}</span>
-            <span title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</span>
+            {contextSettings.workspace ? (
+              <span title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</span>
+            ) : null}
+            {contextSettings.connection ? (
+              <span title={activeConnection?.name ?? t('noConnection')}>{activeConnection?.name ?? t('noConnection')}</span>
+            ) : null}
+            {contextSettings.file ? (
+              <span title={document.relativePath ?? document.title}>{document.relativePath ?? document.title}</span>
+            ) : null}
           </div>
           <button className="agent-send" type="button" onClick={onSend}>
             ^

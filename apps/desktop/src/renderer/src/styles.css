@@ -2593,6 +2593,7 @@ td {
 }
 
 .chat-titlebar {
+  position: relative;
   flex: 0 0 44px;
   min-height: 44px;
   display: flex;
@@ -2645,6 +2646,82 @@ td {
 .agent-toolbar button:hover {
   background: #2a2a2a;
   color: #ffffff;
+}
+
+.agent-toolbar button.active {
+  background: #2a2a2a;
+  color: #ffffff;
+}
+
+.agent-popover {
+  position: absolute;
+  top: 38px;
+  right: 10px;
+  z-index: 30;
+  width: min(300px, calc(100% - 20px));
+  max-height: min(360px, 70vh);
+  overflow: auto;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  background: #1f1f1f;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+  padding: 8px;
+}
+
+.agent-popover strong {
+  display: block;
+  color: #f0f0f0;
+  font-size: 12px;
+  margin: 2px 4px 8px;
+}
+
+.agent-popover button {
+  width: 100%;
+  min-height: 34px;
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #d4d4d4;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.agent-popover button:hover {
+  background: #2a2d2e;
+}
+
+.agent-popover button span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-popover button small,
+.agent-popover > small {
+  display: block;
+  color: #8f8f8f;
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.settings-popover {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-popover label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #d4d4d4;
+  font-size: 12px;
+  padding: 6px 4px;
+}
+
+.settings-popover input {
+  width: auto;
 }
 
 .chat-context-line {
