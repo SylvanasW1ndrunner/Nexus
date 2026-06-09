@@ -32,6 +32,7 @@ import {
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
+import { toWorkspaceRelativeDirectory } from './workspace-path.js';
 
 const starterSql = '';
 
@@ -1789,6 +1790,7 @@ function WorkspaceDialog({
                   pythonDraft={pythonDraft}
                   setPythonDraft={setPythonDraft}
                   t={t}
+                  workspaceRoot={workspaceDraft.rootPath}
                   onChoosePythonPath={onChoosePythonPath}
                   onCreateEnvironment={onCreatePythonEnvironment}
                   onDetectPython={onDetectPython}
@@ -1872,6 +1874,7 @@ function WorkspaceDialog({
                     pythonDraft={pythonDraft}
                     setPythonDraft={setPythonDraft}
                     t={t}
+                    {...(activeWorkspace?.rootPath ? { workspaceRoot: activeWorkspace.rootPath } : {})}
                     onChoosePythonPath={onChoosePythonPath}
                     onCreateEnvironment={onCreatePythonEnvironment}
                     onDetectPython={onDetectPython}
@@ -2353,6 +2356,7 @@ function PythonConfigForm({
   pythonDraft,
   setPythonDraft,
   t,
+  workspaceRoot,
   onChoosePythonPath,
   onCreateEnvironment,
   onDetectPython,
@@ -2361,6 +2365,7 @@ function PythonConfigForm({
   pythonDraft: WorkspacePythonConfig;
   setPythonDraft: (draft: WorkspacePythonConfig) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  workspaceRoot?: string;
   onChoosePythonPath: (mode: 'file' | 'directory') => Promise<string | undefined>;
   onCreateEnvironment: (mode: 'venv' | 'conda', name: string) => void;
   onDetectPython: () => void;
@@ -2390,8 +2395,14 @@ function PythonConfigForm({
   async function choosePath(mode: 'file' | 'directory') {
     const path = await onChoosePythonPath(mode);
     if (!path) return;
-    if (pythonDraft.mode === 'venv') setPythonDraft({ ...pythonDraft, venvPath: path });
-    else if (pythonDraft.mode === 'conda') {
+    if (pythonDraft.mode === 'venv') {
+      const relativePath = toWorkspaceRelativeDirectory(path, workspaceRoot);
+      if (!relativePath) {
+        window.alert(t('venvMustBeInsideWorkspace'));
+        return;
+      }
+      setPythonDraft({ ...pythonDraft, venvPath: relativePath });
+    } else if (pythonDraft.mode === 'conda') {
       setPythonDraft({ mode: 'conda', requirementsPath: pythonDraft.requirementsPath, condaPrefix: path });
     } else setPythonDraft({ ...pythonDraft, pythonPath: path });
   }
