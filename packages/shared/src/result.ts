@@ -11,6 +11,7 @@ export type Err = {
 export type Result<T> = Ok<T> | Err;
 
 export type AppErrorCode =
+  | 'AUTH_DATABASE_UNAVAILABLE'
   | 'VALIDATION_ERROR'
   | 'CONNECTION_FAILED'
   | 'DB_AUTH_FAILED'

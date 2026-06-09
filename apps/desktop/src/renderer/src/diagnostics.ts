@@ -5,6 +5,8 @@ export function formatAppError(error: AppError): string {
   const retry = error.retryable ? ' You can retry after checking the network path.' : '';
 
   switch (error.code) {
+    case 'AUTH_DATABASE_UNAVAILABLE':
+      return `账号功能需要 PostgreSQL 认证数据库。请设置 DBAGENT_AUTH_DATABASE_URL 后重启应用。${detail}`;
     case 'DB_AUTH_FAILED':
       return `Authentication failed. Check username, password, and PostgreSQL pg_hba.conf rules.${detail}`;
     case 'DB_DATABASE_NOT_FOUND':

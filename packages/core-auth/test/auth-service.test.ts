@@ -10,6 +10,7 @@ import {
   type AuthCodeRecord,
   type AuthRepository,
 } from '../src/auth-service.js';
+import { AuthDatabaseUnavailableError, UnavailableAuthRepository } from '../src/unavailable-auth-repository.js';
 
 const tempDirs: string[] = [];
 
@@ -164,6 +165,14 @@ describe('AuthService', () => {
     await writeFile(path, '{bad json', 'utf8');
 
     await expect(new AuthService(path, new MemoryAuthRepository()).status()).rejects.toThrow(SyntaxError);
+  });
+
+  it('reports unavailable PostgreSQL auth storage with a typed error', async () => {
+    const service = new AuthService(await sessionPath(), new UnavailableAuthRepository('missing DBAGENT_AUTH_DATABASE_URL'));
+
+    await expect(service.requestCode({ target: 'analyst@example.com', channel: 'email', purpose: 'register' })).rejects.toThrow(
+      AuthDatabaseUnavailableError,
+    );
   });
 });
 

@@ -16,6 +16,16 @@ describe('renderer diagnostics', () => {
     expect(formatAppError(error)).toContain('retry');
   });
 
+  it('explains when the local auth PostgreSQL database is not configured', () => {
+    expect(
+      formatAppError({
+        code: 'AUTH_DATABASE_UNAVAILABLE',
+        message: 'Authentication requires a PostgreSQL account database.',
+        detail: 'Authentication requires DBAGENT_AUTH_DATABASE_URL pointing to a PostgreSQL database.',
+      }),
+    ).toContain('DBAGENT_AUTH_DATABASE_URL');
+  });
+
   it('explains read-only blocks without losing database detail', () => {
     expect(
       formatAppError({

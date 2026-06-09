@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ConnectionStore, QueryHistoryStore, createDefaultDatabaseDriverRegistry } from '@dbagent/core-db';
-import { AuthService, PostgresAuthRepository, UnavailableAuthRepository } from '@dbagent/core-auth';
+import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, UnavailableAuthRepository } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import {
@@ -190,6 +190,13 @@ async function safeResult<T>(operation: () => Promise<T>): Promise<ReturnType<ty
   try {
     return ok(await operation());
   } catch (error) {
+    if (error instanceof AuthDatabaseUnavailableError) {
+      return err({
+        code: 'AUTH_DATABASE_UNAVAILABLE',
+        message: 'Authentication requires a PostgreSQL account database.',
+        detail: error.message,
+      });
+    }
     return err({
       code: 'VALIDATION_ERROR',
       message: error instanceof Error ? error.message : 'Operation failed.',
