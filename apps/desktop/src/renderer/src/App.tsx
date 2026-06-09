@@ -39,7 +39,7 @@ import { authCodePurpose, canRequestAuthCode, canSubmitAuthForm, inferAuthChanne
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
-import { filterPlugins, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
+import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
@@ -513,8 +513,8 @@ export function App() {
     if (response.ok) setPlugins(response.data);
   }
 
-  async function updatePlugin(id: string, installed: boolean) {
-    const response = await window.dbagent.invoke(installed ? ipcChannels.plugin.uninstall : ipcChannels.plugin.install, { id });
+  async function updatePlugin(id: string, installTarget: boolean) {
+    const response = await window.dbagent.invoke(installTarget ? ipcChannels.plugin.install : ipcChannels.plugin.uninstall, { id });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
       return;
@@ -522,8 +522,8 @@ export function App() {
     setPlugins((current) => current.map((plugin) => (plugin.id === id ? response.data : plugin)));
   }
 
-  async function setPluginEnabled(id: string, enabled: boolean) {
-    const response = await window.dbagent.invoke(enabled ? ipcChannels.plugin.disable : ipcChannels.plugin.enable, { id });
+  async function setPluginEnabled(id: string, enableTarget: boolean) {
+    const response = await window.dbagent.invoke(enableTarget ? ipcChannels.plugin.enable : ipcChannels.plugin.disable, { id });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
       return;
@@ -1661,8 +1661,8 @@ function WorkspaceDialog({
   onSaveSettings: () => void;
   onSaveIdeSettings: (settings: IdeSettings) => void;
   onDetectPython: () => void;
-  onSetPluginEnabled: (id: string, enabled: boolean) => void;
-  onUpdatePlugin: (id: string, installed: boolean) => void;
+  onSetPluginEnabled: (id: string, enableTarget: boolean) => void;
+  onUpdatePlugin: (id: string, installTarget: boolean) => void;
   onSelectConnection: (connection: SavedConnection) => void;
   onTestConnection: () => void;
   onUpdateConnection: () => void;
@@ -2374,8 +2374,8 @@ function PluginMarketplacePanel({
 }: {
   plugins: PluginManifest[];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
-  onSetPluginEnabled: (id: string, enabled: boolean) => void;
-  onUpdatePlugin: (id: string, installed: boolean) => void;
+  onSetPluginEnabled: (id: string, enableTarget: boolean) => void;
+  onUpdatePlugin: (id: string, installTarget: boolean) => void;
 }) {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('');
@@ -2407,42 +2407,45 @@ function PluginMarketplacePanel({
         </select>
       </div>
       <div className="plugin-grid">
-        {visiblePlugins.map((plugin) => (
-          <div className="plugin-item" key={plugin.id}>
-            <div>
-              <strong>{plugin.name}</strong>
-              <small>
-                {plugin.publisher} / {plugin.version} {plugin.official ? `/ ${t('officialPlugin')}` : ''}{' '}
-                {plugin.builtin ? `/ ${t('builtinPlugin')}` : ''}
-              </small>
+        {visiblePlugins.map((plugin) => {
+          const action = getPluginPrimaryAction(plugin);
+          return (
+            <div className="plugin-item" key={plugin.id}>
+              <div>
+                <strong>{plugin.name}</strong>
+                <small>
+                  {plugin.publisher} / {plugin.version} {plugin.official ? `/ ${t('officialPlugin')}` : ''}{' '}
+                  {plugin.builtin ? `/ ${t('builtinPlugin')}` : ''}
+                </small>
+              </div>
+              <p>{plugin.description}</p>
+              <div className="plugin-meta">
+                <span>{plugin.categories.join(', ')}</span>
+                <span>{plugin.activationEvents.join(', ')}</span>
+              </div>
+              <div className="plugin-contributes">
+                {(plugin.contributes.commands ?? []).slice(0, 3).map((command) => (
+                  <span key={command.id}>{command.title}</span>
+                ))}
+                {(plugin.contributes.views ?? []).slice(0, 2).map((view) => (
+                  <span key={view.id}>{view.title}</span>
+                ))}
+              </div>
+              <div className="plugin-actions">
+                {plugin.installed ? (
+                  <button className="secondary" type="button" onClick={() => onSetPluginEnabled(plugin.id, action.enableTarget ?? false)}>
+                    {plugin.enabled ? t('disable') : t('enable')}
+                  </button>
+                ) : null}
+                {!plugin.builtin ? (
+                  <button className="secondary" type="button" onClick={() => onUpdatePlugin(plugin.id, action.installTarget)}>
+                    {plugin.installed ? t('uninstall') : t('install')}
+                  </button>
+                ) : null}
+              </div>
             </div>
-            <p>{plugin.description}</p>
-            <div className="plugin-meta">
-              <span>{plugin.categories.join(', ')}</span>
-              <span>{plugin.activationEvents.join(', ')}</span>
-            </div>
-            <div className="plugin-contributes">
-              {(plugin.contributes.commands ?? []).slice(0, 3).map((command) => (
-                <span key={command.id}>{command.title}</span>
-              ))}
-              {(plugin.contributes.views ?? []).slice(0, 2).map((view) => (
-                <span key={view.id}>{view.title}</span>
-              ))}
-            </div>
-            <div className="plugin-actions">
-              {plugin.installed ? (
-                <button className="secondary" type="button" onClick={() => onSetPluginEnabled(plugin.id, plugin.enabled)}>
-                  {plugin.enabled ? t('disable') : t('enable')}
-                </button>
-              ) : null}
-              {!plugin.builtin ? (
-                <button className="secondary" type="button" onClick={() => onUpdatePlugin(plugin.id, plugin.installed)}>
-                  {plugin.installed ? t('uninstall') : t('install')}
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ))}
+          );
+        })}
         {visiblePlugins.length === 0 ? <div className="empty-state">{t('noMatchingPlugins')}</div> : null}
       </div>
     </section>

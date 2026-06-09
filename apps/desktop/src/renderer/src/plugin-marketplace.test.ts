@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PluginManifest } from '@dbagent/shared';
-import { filterPlugins, listPluginCategories } from './plugin-marketplace.js';
+import { filterPlugins, getPluginPrimaryAction, listPluginCategories } from './plugin-marketplace.js';
 
 const plugins: PluginManifest[] = [
   {
@@ -63,5 +63,19 @@ describe('plugin marketplace filtering', () => {
     expect(filterPlugins(plugins, { query: '', category: 'visualization', filter: 'official' }).map((plugin) => plugin.id)).toEqual([
       'dbagent.chart-preview',
     ]);
+  });
+
+  it('models plugin actions as target states for the UI', () => {
+    const installedPlugin = plugins.find((plugin) => plugin.id === 'dbagent.python-runner');
+    const uninstalledPlugin = plugins.find((plugin) => plugin.id === 'dbagent.chart-preview');
+
+    expect(installedPlugin).toBeDefined();
+    expect(uninstalledPlugin).toBeDefined();
+    expect(getPluginPrimaryAction(installedPlugin as PluginManifest)).toEqual({ installTarget: false, enableTarget: false });
+    expect(getPluginPrimaryAction({ ...(installedPlugin as PluginManifest), enabled: false })).toEqual({
+      installTarget: false,
+      enableTarget: true,
+    });
+    expect(getPluginPrimaryAction(uninstalledPlugin as PluginManifest)).toEqual({ installTarget: true });
   });
 });

@@ -38,3 +38,14 @@ export function filterPlugins(
     })
     .sort((left, right) => Number(right.installed) - Number(left.installed) || left.name.localeCompare(right.name));
 }
+
+export function getPluginPrimaryAction(plugin: PluginManifest): {
+  installTarget: boolean;
+  enableTarget?: boolean;
+} {
+  if (!plugin.installed) return { installTarget: true };
+  return {
+    installTarget: false,
+    enableTarget: !plugin.enabled,
+  };
+}
