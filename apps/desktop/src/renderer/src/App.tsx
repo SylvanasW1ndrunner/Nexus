@@ -41,7 +41,7 @@ import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 import { filterPlugins, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
-import { selectVisibleTerminals } from './terminal-layout.js';
+import { resolveTerminalCloseState, selectVisibleTerminals } from './terminal-layout.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
 
 const starterSql = '';
@@ -438,10 +438,10 @@ export function App() {
       return;
     }
     setTerminals((current) => {
-      const next = current.filter((terminal) => terminal.id !== id);
-      if (activeTerminalId === id) setActiveTerminalId(next[0]?.id ?? '');
-      if (splitTerminalId === id) setSplitTerminalId('');
-      return next;
+      const next = resolveTerminalCloseState(current, id, activeTerminalId, splitTerminalId);
+      setActiveTerminalId(next.activeTerminalId);
+      setSplitTerminalId(next.splitTerminalId);
+      return next.terminals;
     });
   }
 
@@ -3342,6 +3342,7 @@ function EditorPane({
             t={t}
             onCreateTerminal={onCreateTerminal}
             onRunTerminal={onRunTerminal}
+            onSelectTerminal={onSelectTerminal}
             onUpdateTerminalInput={onUpdateTerminalInput}
           />
         )}
@@ -3358,6 +3359,7 @@ function TerminalPanel({
   t,
   onCreateTerminal,
   onRunTerminal,
+  onSelectTerminal,
   onUpdateTerminalInput,
 }: {
   activeTerminalId: string;
@@ -3367,6 +3369,7 @@ function TerminalPanel({
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   onCreateTerminal: () => void;
   onRunTerminal: (id: string) => void;
+  onSelectTerminal: (id: string) => void;
   onUpdateTerminalInput: (id: string, input: string) => void;
 }) {
   const visibleTerminals = selectVisibleTerminals(terminals, activeTerminalId, splitTerminalId);
@@ -3381,6 +3384,7 @@ function TerminalPanel({
               terminalSettings={terminalSettings}
               t={t}
               onRunTerminal={onRunTerminal}
+              onSelectTerminal={onSelectTerminal}
               onUpdateTerminalInput={onUpdateTerminalInput}
             />
           ))}
@@ -3402,16 +3406,22 @@ function TerminalViewport({
   terminalSettings,
   t,
   onRunTerminal,
+  onSelectTerminal,
   onUpdateTerminalInput,
 }: {
   terminal: TerminalView;
   terminalSettings: IdeSettings['terminal'];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   onRunTerminal: (id: string) => void;
+  onSelectTerminal: (id: string) => void;
   onUpdateTerminalInput: (id: string, input: string) => void;
 }) {
   return (
-    <div className="terminal-viewport" style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}>
+    <div
+      className="terminal-viewport"
+      style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}
+      onClick={() => onSelectTerminal(terminal.id)}
+    >
       <pre className={terminalSettings.cursorBlink ? 'terminal-output cursor-blink' : 'terminal-output'}>
         {terminal.output}
       </pre>

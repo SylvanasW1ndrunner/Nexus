@@ -11,3 +11,24 @@ export function selectVisibleTerminals<T extends TerminalLayoutSession>(
   const splitTerminal = terminals.find((terminal) => terminal.id === splitTerminalId && terminal.id !== activeTerminal?.id);
   return [activeTerminal, splitTerminal].filter((terminal): terminal is T => Boolean(terminal));
 }
+
+export function resolveTerminalCloseState<T extends TerminalLayoutSession>(
+  terminals: T[],
+  closedTerminalId: string,
+  activeTerminalId: string,
+  splitTerminalId: string,
+): { activeTerminalId: string; splitTerminalId: string; terminals: T[] } {
+  const nextTerminals = terminals.filter((terminal) => terminal.id !== closedTerminalId);
+  const splitStillOpen = nextTerminals.some((terminal) => terminal.id === splitTerminalId);
+  const activeStillOpen = nextTerminals.some((terminal) => terminal.id === activeTerminalId);
+  const promotedSplit = splitStillOpen ? splitTerminalId : '';
+  const nextActiveTerminalId = activeStillOpen ? activeTerminalId : promotedSplit || nextTerminals[0]?.id || '';
+  const nextSplitTerminalId =
+    splitStillOpen && splitTerminalId !== nextActiveTerminalId ? splitTerminalId : '';
+
+  return {
+    activeTerminalId: nextActiveTerminalId,
+    splitTerminalId: nextSplitTerminalId,
+    terminals: nextTerminals,
+  };
+}
