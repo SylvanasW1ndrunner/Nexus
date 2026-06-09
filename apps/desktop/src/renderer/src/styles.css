@@ -1938,6 +1938,19 @@ select:focus {
   margin-top: 12px;
 }
 
+.plugin-marketplace-toolbar {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, 160px) minmax(120px, 160px);
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.plugin-marketplace-toolbar input,
+.plugin-marketplace-toolbar select {
+  min-height: 30px;
+  font-size: 12px;
+}
+
 .plugin-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

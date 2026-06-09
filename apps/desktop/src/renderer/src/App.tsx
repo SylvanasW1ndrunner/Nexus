@@ -38,6 +38,7 @@ import {
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
+import { filterPlugins, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { selectVisibleTerminals } from './terminal-layout.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
 
@@ -2343,20 +2344,43 @@ function PluginMarketplacePanel({
   onSetPluginEnabled: (id: string, enabled: boolean) => void;
   onUpdatePlugin: (id: string, installed: boolean) => void;
 }) {
+  const [query, setQuery] = useState('');
+  const [category, setCategory] = useState('');
+  const [filter, setFilter] = useState<PluginMarketplaceFilter>('all');
+  const categories = useMemo(() => listPluginCategories(plugins), [plugins]);
+  const visiblePlugins = useMemo(() => filterPlugins(plugins, { query, category, filter }), [plugins, query, category, filter]);
+
   return (
     <section className="settings-card">
       <div className="subform-heading">
         <strong>{t('pluginMarketplace')}</strong>
         <small>{t('pluginMarketplaceHint')}</small>
       </div>
+      <div className="plugin-marketplace-toolbar">
+        <input value={query} placeholder={t('searchPlugins')} onChange={(event) => setQuery(event.target.value)} />
+        <select value={category} onChange={(event) => setCategory(event.target.value)}>
+          <option value="">{t('allCategories')}</option>
+          {categories.map((item) => (
+            <option key={item} value={item}>
+              {item}
+            </option>
+          ))}
+        </select>
+        <select value={filter} onChange={(event) => setFilter(event.target.value as PluginMarketplaceFilter)}>
+          <option value="all">{t('allPlugins')}</option>
+          <option value="installed">{t('installedPlugins')}</option>
+          <option value="enabled">{t('enabledPlugins')}</option>
+          <option value="official">{t('officialPlugins')}</option>
+        </select>
+      </div>
       <div className="plugin-grid">
-        {plugins.map((plugin) => (
+        {visiblePlugins.map((plugin) => (
           <div className="plugin-item" key={plugin.id}>
             <div>
               <strong>{plugin.name}</strong>
               <small>
-                {plugin.publisher} / {plugin.version} {plugin.official ? '/ Official' : ''}{' '}
-                {plugin.builtin ? '/ Built-in' : ''}
+                {plugin.publisher} / {plugin.version} {plugin.official ? `/ ${t('officialPlugin')}` : ''}{' '}
+                {plugin.builtin ? `/ ${t('builtinPlugin')}` : ''}
               </small>
             </div>
             <p>{plugin.description}</p>
@@ -2375,7 +2399,7 @@ function PluginMarketplacePanel({
             <div className="plugin-actions">
               {plugin.installed ? (
                 <button className="secondary" type="button" onClick={() => onSetPluginEnabled(plugin.id, plugin.enabled)}>
-                  {plugin.enabled ? 'Disable' : 'Enable'}
+                  {plugin.enabled ? t('disable') : t('enable')}
                 </button>
               ) : null}
               {!plugin.builtin ? (
@@ -2386,6 +2410,7 @@ function PluginMarketplacePanel({
             </div>
           </div>
         ))}
+        {visiblePlugins.length === 0 ? <div className="empty-state">{t('noMatchingPlugins')}</div> : null}
       </div>
     </section>
   );
