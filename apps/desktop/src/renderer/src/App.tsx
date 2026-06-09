@@ -2980,6 +2980,7 @@ function EditorPane({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedSql: string } | undefined>();
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const isSqlDocument = editorLanguage === 'sql';
+  const activeTerminal = terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -3163,6 +3164,59 @@ function EditorPane({
               ) : null}
             </div>
           ) : null}
+          {bottomPanel === 'console' ? (
+            <div className="bottom-panel-tools terminal-title-tools">
+              <div className="terminal-session-list">
+                {terminals.map((terminal) => (
+                  <button
+                    className={terminal.id === activeTerminal?.id ? 'active' : ''}
+                    key={terminal.id}
+                    type="button"
+                    title={terminal.cwd ?? terminal.name}
+                    onClick={() => onSelectTerminal(terminal.id)}
+                  >
+                    <span className="icon-glyph terminal-shell" aria-hidden="true" />
+                    <span>{terminal.shell ?? terminal.name}</span>
+                    <small>{terminal.lastExitCode === undefined ? '' : terminal.lastExitCode}</small>
+                  </button>
+                ))}
+              </div>
+              <button className="terminal-tool" type="button" title="New Terminal" onClick={onCreateTerminal}>
+                <span className="icon-glyph new-chat" aria-hidden="true" />
+              </button>
+              <button className="terminal-tool" disabled type="button" title="Split Terminal">
+                <span className="icon-glyph split-terminal" aria-hidden="true" />
+              </button>
+              <button
+                className="terminal-tool"
+                disabled={!activeTerminal}
+                type="button"
+                title={t('clear')}
+                onClick={() => {
+                  if (activeTerminal) onClearTerminal(activeTerminal.id);
+                }}
+              >
+                <span className="icon-glyph clear-terminal" aria-hidden="true" />
+              </button>
+              <button className="terminal-tool" disabled type="button" title="More Actions">
+                <span className="icon-glyph more" aria-hidden="true" />
+              </button>
+              <button className="terminal-tool" disabled type="button" title="Maximize Panel">
+                <span className="icon-glyph maximize" aria-hidden="true" />
+              </button>
+              <button
+                className="terminal-tool"
+                disabled={!activeTerminal}
+                type="button"
+                title={t('close')}
+                onClick={() => {
+                  if (activeTerminal) onCloseTerminal(activeTerminal.id);
+                }}
+              >
+                <span className="icon-glyph close" aria-hidden="true" />
+              </button>
+            </div>
+          ) : null}
         </div>
         {bottomPanel === 'results' ? (
           <div className="bottom-panel-body">
@@ -3185,11 +3239,8 @@ function EditorPane({
             terminals={terminals}
             terminalSettings={ideSettings.terminal}
             t={t}
-            onClearTerminal={onClearTerminal}
-            onCloseTerminal={onCloseTerminal}
             onCreateTerminal={onCreateTerminal}
             onRunTerminal={onRunTerminal}
-            onSelectTerminal={onSelectTerminal}
             onUpdateTerminalInput={onUpdateTerminalInput}
           />
         )}
@@ -3203,88 +3254,33 @@ function TerminalPanel({
   terminals,
   terminalSettings,
   t,
-  onClearTerminal,
-  onCloseTerminal,
   onCreateTerminal,
   onRunTerminal,
-  onSelectTerminal,
   onUpdateTerminalInput,
 }: {
   activeTerminalId: string;
   terminals: TerminalView[];
   terminalSettings: IdeSettings['terminal'];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
-  onClearTerminal: (id: string) => void;
-  onCloseTerminal: (id: string) => void;
   onCreateTerminal: () => void;
   onRunTerminal: (id: string) => void;
-  onSelectTerminal: (id: string) => void;
   onUpdateTerminalInput: (id: string, input: string) => void;
 }) {
   const activeTerminal = terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
   return (
     <div className="console-panel">
-      <div className="terminal-tabs">
-        <div className="terminal-session-list">
-          {terminals.map((terminal) => (
-            <button
-              className={terminal.id === activeTerminal?.id ? 'active' : ''}
-              key={terminal.id}
-              type="button"
-              title={terminal.cwd ?? terminal.name}
-              onClick={() => onSelectTerminal(terminal.id)}
-            >
-              <span>{terminal.shell ?? terminal.name}</span>
-              <small>{terminal.lastExitCode === undefined ? '' : terminal.lastExitCode}</small>
-            </button>
-          ))}
-        </div>
-        <button className="terminal-tool" type="button" title="New Terminal" onClick={onCreateTerminal}>
-          +
-        </button>
-        <button className="terminal-tool" disabled type="button" title="Split Terminal">
-          ||
-        </button>
-        <button
-          className="terminal-tool"
-          disabled={!activeTerminal}
-          type="button"
-          title={t('clear')}
-          onClick={() => {
-            if (activeTerminal) onClearTerminal(activeTerminal.id);
-          }}
-        >
-          ⌫
-        </button>
-        <button className="terminal-tool" disabled type="button" title="More Actions">
-          ⋯
-        </button>
-        <button className="terminal-tool" disabled type="button" title="Maximize Panel">
-          □
-        </button>
-        <button
-          className="terminal-tool"
-          disabled={!activeTerminal}
-          type="button"
-          title={t('close')}
-          onClick={() => {
-            if (activeTerminal) onCloseTerminal(activeTerminal.id);
-          }}
-        >
-          ×
-        </button>
-      </div>
       {activeTerminal ? (
-        <>
-          <pre
-            className={terminalSettings.cursorBlink ? 'terminal-output cursor-blink' : 'terminal-output'}
-            style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}
-          >
-            {activeTerminal.output || t('consoleHint')}
+        <div className="terminal-viewport" style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}>
+          <pre className={terminalSettings.cursorBlink ? 'terminal-output cursor-blink' : 'terminal-output'}>
+            {activeTerminal.output}
           </pre>
           <div className="terminal-command-row">
-            <span>{activeTerminal.shell?.toLowerCase().includes('powershell') ? 'PS' : '$'}</span>
+            <span className="terminal-prompt">
+              {activeTerminal.shell?.toLowerCase().includes('powershell') ? 'PS' : '$'} {activeTerminal.cwd ? `${activeTerminal.cwd}>` : '>'}
+            </span>
             <input
+              aria-label="Terminal command"
+              placeholder={activeTerminal.output ? '' : t('consoleHint')}
               value={activeTerminal.input}
               onChange={(event) => onUpdateTerminalInput(activeTerminal.id, event.target.value)}
               onKeyDown={(event) => {
@@ -3295,7 +3291,7 @@ function TerminalPanel({
               {activeTerminal.running ? '...' : '>'}
             </button>
           </div>
-        </>
+        </div>
       ) : (
         <div className="terminal-empty">
           <span>{t('consoleHint')}</span>
@@ -3307,7 +3303,6 @@ function TerminalPanel({
     </div>
   );
 }
-
 function ResultSummary({
   result,
   t,
