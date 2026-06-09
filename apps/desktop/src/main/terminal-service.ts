@@ -82,6 +82,13 @@ export class TerminalService {
     return { id };
   }
 
+  clear(id: string): { id: string } {
+    const runtime = this.runtimes.get(id);
+    if (!runtime) throw new Error('Terminal session does not exist.');
+    runtime.output = '';
+    return { id };
+  }
+
   write(request: TerminalWriteRequest): { id: string } {
     const runtime = this.runtimes.get(request.terminalId);
     if (!runtime || runtime.status !== 'running') throw new Error('Terminal session is not running.');

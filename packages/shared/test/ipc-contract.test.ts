@@ -54,6 +54,7 @@ describe('ipc contract', () => {
       'python:run-script',
       'terminal:create',
       'terminal:close',
+      'terminal:clear',
       'terminal:write',
       'terminal:read',
       'terminal:run',

@@ -422,6 +422,17 @@ export function App() {
     });
   }
 
+  async function clearTerminal(id: string) {
+    const response = await window.dbagent.invoke(ipcChannels.terminal.clear, { id });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setTerminals((current) =>
+      current.map((terminal) => (terminal.id === id ? { ...terminal, output: '', cursor: 0 } : terminal)),
+    );
+  }
+
   function updateTerminalInput(id: string, input: string) {
     setTerminals((current) => current.map((terminal) => (terminal.id === id ? { ...terminal, input } : terminal)));
   }
@@ -1177,6 +1188,7 @@ export function App() {
               ideSettings={ideSettings}
               terminals={terminals}
               onChangeSql={handleEditorChange}
+              onClearTerminal={(id) => void clearTerminal(id)}
               onCloseTerminal={(id) => void closeTerminal(id)}
               onCreateTerminal={() => void createTerminal()}
               onExecuteSql={(nextSql) => void executeSql(nextSql)}
@@ -2913,6 +2925,7 @@ function EditorPane({
   t,
   terminals,
   onChangeSql,
+  onClearTerminal,
   onCloseTerminal,
   onCreateTerminal,
   onExecuteSql,
@@ -2938,6 +2951,7 @@ function EditorPane({
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   terminals: TerminalView[];
   onChangeSql: (sql: string) => void;
+  onClearTerminal: (id: string) => void;
   onCloseTerminal: (id: string) => void;
   onCreateTerminal: () => void;
   onExecuteSql: (sql: string) => void;
@@ -3149,6 +3163,7 @@ function EditorPane({
             terminals={terminals}
             terminalSettings={ideSettings.terminal}
             t={t}
+            onClearTerminal={onClearTerminal}
             onCloseTerminal={onCloseTerminal}
             onCreateTerminal={onCreateTerminal}
             onRunTerminal={onRunTerminal}
@@ -3166,6 +3181,7 @@ function TerminalPanel({
   terminals,
   terminalSettings,
   t,
+  onClearTerminal,
   onCloseTerminal,
   onCreateTerminal,
   onRunTerminal,
@@ -3176,6 +3192,7 @@ function TerminalPanel({
   terminals: TerminalView[];
   terminalSettings: IdeSettings['terminal'];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onClearTerminal: (id: string) => void;
   onCloseTerminal: (id: string) => void;
   onCreateTerminal: () => void;
   onRunTerminal: (id: string) => void;
@@ -3195,21 +3212,20 @@ function TerminalPanel({
           >
             <span>{terminal.name}</span>
             <small>{terminal.lastExitCode === undefined ? '' : terminal.lastExitCode}</small>
-            {terminals.length > 1 ? (
-              <i
-                role="button"
-                tabIndex={0}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onCloseTerminal(terminal.id);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') onCloseTerminal(terminal.id);
-                }}
-              >
-                x
-              </i>
-            ) : null}
+            <i
+              role="button"
+              tabIndex={0}
+              title={t('close')}
+              onClick={(event) => {
+                event.stopPropagation();
+                onCloseTerminal(terminal.id);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') onCloseTerminal(terminal.id);
+              }}
+            >
+              x
+            </i>
           </button>
         ))}
         <button type="button" onClick={onCreateTerminal}>
@@ -3236,9 +3252,19 @@ function TerminalPanel({
             <button disabled={activeTerminal.running} type="button" onClick={() => onRunTerminal(activeTerminal.id)}>
               {activeTerminal.running ? t('running') : t('runCommand')}
             </button>
+            <button className="secondary" type="button" onClick={() => onClearTerminal(activeTerminal.id)}>
+              {t('clear')}
+            </button>
           </div>
         </>
-      ) : null}
+      ) : (
+        <div className="terminal-empty">
+          <span>{t('consoleHint')}</span>
+          <button type="button" onClick={onCreateTerminal}>
+            +
+          </button>
+        </div>
+      )}
     </div>
   );
 }

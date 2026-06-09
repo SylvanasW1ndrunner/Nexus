@@ -63,6 +63,7 @@ export const ipcChannels = {
   terminal: {
     create: 'terminal:create',
     close: 'terminal:close',
+    clear: 'terminal:clear',
     write: 'terminal:write',
     read: 'terminal:read',
     run: 'terminal:run',
@@ -503,6 +504,7 @@ export type IpcRequestMap = {
   'python:run-script': PythonRunScriptRequest;
   'terminal:create': { cwd?: string; name?: string };
   'terminal:close': { id: string };
+  'terminal:clear': { id: string };
   'terminal:write': TerminalWriteRequest;
   'terminal:read': TerminalReadRequest;
   'terminal:run': TerminalRunRequest;
@@ -556,6 +558,7 @@ export type IpcResponseMap = {
   'python:run-script': Result<PythonRunResult>;
   'terminal:create': Result<TerminalSession>;
   'terminal:close': Result<{ id: string }>;
+  'terminal:clear': Result<{ id: string }>;
   'terminal:write': Result<{ id: string }>;
   'terminal:read': Result<TerminalReadResult>;
   'terminal:run': Result<PythonRunResult>;

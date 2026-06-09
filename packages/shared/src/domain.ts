@@ -11,7 +11,7 @@ export type QueryRiskLevel = 'safe' | 'caution' | 'dangerous' | 'blocked';
 
 export type UsageMode = 'byok' | 'subscription';
 
-export type DbColumnValue = string | number | boolean | null | Date | Buffer | Record<string, unknown>;
+export type DbColumnValue = string | number | bigint | boolean | null | Date | Buffer | Record<string, unknown>;
 
 export type QueryResultRow = Record<string, DbColumnValue>;
 

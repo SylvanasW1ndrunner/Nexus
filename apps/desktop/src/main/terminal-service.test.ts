@@ -38,6 +38,30 @@ describe('TerminalService', () => {
       service.close(terminal.id);
     }
   });
+
+  it('clears buffered output without closing the terminal', async () => {
+    const service = new TerminalService();
+    const terminal = service.create({ name: 'Shell' });
+
+    try {
+      service.write({
+        terminalId: terminal.id,
+        data: 'echo dbagent-clear-output\n',
+      });
+      await waitForOutput(service, terminal.id, 'dbagent-clear-output');
+
+      expect(service.clear(terminal.id)).toEqual({ id: terminal.id });
+      expect(service.read({ terminalId: terminal.id, cursor: 0 })).toMatchObject({
+        terminalId: terminal.id,
+        chunk: '',
+        cursor: 0,
+        status: 'running',
+      });
+      expect(service.list()[0]?.status).toBe('running');
+    } finally {
+      service.close(terminal.id);
+    }
+  });
 });
 
 async function waitForOutput(service: TerminalService, terminalId: string, expected: string): Promise<string> {
