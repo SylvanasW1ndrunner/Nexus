@@ -109,6 +109,8 @@ function installApplicationMenu(): void {
     {
       label: '\u89c6\u56fe',
       submenu: [
+        { label: '\u547d\u4ee4\u9762\u677f...', accelerator: 'CmdOrCtrl+Shift+P', click: () => sendMenuCommand('command-palette') },
+        { type: 'separator' },
         { label: '\u5207\u6362\u5de6\u4fa7\u680f', accelerator: 'CmdOrCtrl+B', click: () => sendMenuCommand('toggle-left-sidebar') },
         { label: '\u5207\u6362 Agent', accelerator: 'CmdOrCtrl+Shift+A', click: () => sendMenuCommand('toggle-right-sidebar') },
         { type: 'separator' },

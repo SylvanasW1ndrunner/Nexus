@@ -52,6 +52,14 @@ type ChatMessage = {
   content: string;
 };
 
+type CommandPaletteItem = {
+  id: string;
+  title: string;
+  category: string;
+  source: string;
+  enabled: boolean;
+};
+
 type TerminalView = TerminalSession & {
   input: string;
   output: string;
@@ -145,6 +153,8 @@ export function App() {
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileEntry[]>([]);
   const [workspaceDialogMode, setWorkspaceDialogMode] = useState<WorkspaceDialogMode>('create');
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandPaletteQuery, setCommandPaletteQuery] = useState('');
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(false);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(268);
@@ -179,6 +189,10 @@ export function App() {
     () => connections.find((connection) => connection.id === activeConnectionId),
     [activeConnectionId, connections],
   );
+  const commandPaletteItems = useMemo(
+    () => buildCommandPaletteItems({ activeConnection, activeWorkspace, editorLanguage, plugins, result }),
+    [activeConnection, activeWorkspace, editorLanguage, plugins, result],
+  );
 
   useEffect(() => {
     window.localStorage.setItem(storageKeys.language, language);
@@ -204,6 +218,17 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        openCommandPalette();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
     return window.dbagent.onMenuCommand((command) => {
       if (command === 'new-project') {
         openCreateProjectDialog();
@@ -215,6 +240,10 @@ export function App() {
       }
       if (command === 'project-settings') {
         openSettingsDialog();
+        return;
+      }
+      if (command === 'command-palette') {
+        openCommandPalette();
         return;
       }
       if (command === 'save-file') {
@@ -247,6 +276,63 @@ export function App() {
   function openSettingsDialog() {
     setWorkspaceDialogMode(activeWorkspace ? 'project-settings' : 'ide-settings');
     setWorkspaceDialogOpen(true);
+  }
+
+  function openCommandPalette() {
+    setCommandPaletteQuery('');
+    setCommandPaletteOpen(true);
+  }
+
+  async function runCommandPaletteItem(id: string) {
+    setCommandPaletteOpen(false);
+    switch (id) {
+      case 'core.newProject':
+        openCreateProjectDialog();
+        return;
+      case 'core.openProject':
+        await chooseAndOpenWorkspace();
+        return;
+      case 'core.saveFile':
+        await saveCurrentDocument();
+        return;
+      case 'core.runSql':
+        await execute();
+        return;
+      case 'core.explainSql':
+      case 'dbagent.postgres.explain':
+        await explain();
+        return;
+      case 'core.toggleLeftSidebar':
+        setLeftSidebarCollapsed((collapsed) => !collapsed);
+        return;
+      case 'core.toggleRightSidebar':
+        setRightSidebarCollapsed((collapsed) => !collapsed);
+        return;
+      case 'core.openIdeSettings':
+        setWorkspaceDialogMode('ide-settings');
+        setWorkspaceDialogOpen(true);
+        return;
+      case 'core.openProjectSettings':
+      case 'dbagent.postgres.connect':
+      case 'dbagent.python.createVenv':
+        openSettingsDialog();
+        return;
+      case 'dbagent.python.detect':
+        await detectPythonEnvironments();
+        return;
+      case 'dbagent.result.exportCsv':
+        exportCsv();
+        return;
+      case 'dbagent.result.exportJson':
+        exportJson();
+        return;
+      case 'dbagent.chart.preview':
+        setBottomPanel('results');
+        setMessage(language === 'zh-CN' ? '图表预览插件接口已注册，运行时视图将在后续接入。' : 'Chart preview contribution is registered; runtime view mounting will follow.');
+        return;
+      default:
+        setMessage(language === 'zh-CN' ? `命令 ${id} 尚未绑定处理器。` : `Command ${id} is not bound to a handler yet.`);
+    }
   }
 
   function startSidebarResize(side: 'left' | 'right', startEvent: ReactMouseEvent<HTMLDivElement>) {
@@ -1123,6 +1209,15 @@ export function App() {
           onUpdateConnection={() => void updateActiveConnection()}
         />
       ) : null}
+      {commandPaletteOpen ? (
+        <CommandPalette
+          commands={commandPaletteItems}
+          query={commandPaletteQuery}
+          setQuery={setCommandPaletteQuery}
+          onClose={() => setCommandPaletteOpen(false)}
+          onRun={(id) => void runCommandPaletteItem(id)}
+        />
+      ) : null}
       {saveSqlDialogOpen ? (
         <SaveSqlDialog
           activeConnection={activeConnection}
@@ -1293,6 +1388,73 @@ function SaveSqlDialog({
           <button className="primary-action" type="button" onClick={onSave}>
             {t('saveSql')}
           </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CommandPalette({
+  commands,
+  query,
+  setQuery,
+  onClose,
+  onRun,
+}: {
+  commands: CommandPaletteItem[];
+  query: string;
+  setQuery: (query: string) => void;
+  onClose: () => void;
+  onRun: (id: string) => void;
+}) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = commands
+    .filter((command) =>
+      [command.title, command.category, command.source, command.id].some((value) =>
+        value.toLowerCase().includes(normalizedQuery),
+      ),
+    )
+    .slice(0, 40);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop command-backdrop" role="presentation">
+      <section className="command-palette" role="dialog" aria-modal="true" aria-label="Command Palette">
+        <input
+          autoFocus
+          placeholder="Search commands"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && filtered[0]?.enabled) onRun(filtered[0].id);
+          }}
+        />
+        <div className="command-list">
+          {filtered.length ? (
+            filtered.map((command) => (
+              <button
+                className="command-item"
+                disabled={!command.enabled}
+                key={command.id}
+                type="button"
+                onClick={() => onRun(command.id)}
+              >
+                <span>{command.title}</span>
+                <small>
+                  {command.category} / {command.source}
+                </small>
+              </button>
+            ))
+          ) : (
+            <div className="command-empty">No commands</div>
+          )}
         </div>
       </section>
     </div>
@@ -3268,6 +3430,78 @@ function toTerminalView(session: TerminalSession): TerminalView {
     running: false,
     cursor: 0,
   };
+}
+
+function buildCommandPaletteItems({
+  activeConnection,
+  activeWorkspace,
+  editorLanguage,
+  plugins,
+  result,
+}: {
+  activeConnection: SavedConnection | undefined;
+  activeWorkspace: WorkspaceProject | undefined;
+  editorLanguage: EditorLanguage;
+  plugins: PluginManifest[];
+  result: QueryExecutionResult | undefined;
+}): CommandPaletteItem[] {
+  const isSql = editorLanguage === 'sql';
+  const coreCommands: CommandPaletteItem[] = [
+    { id: 'core.newProject', title: 'New Project', category: 'File', source: 'Core', enabled: true },
+    { id: 'core.openProject', title: 'Open Project', category: 'File', source: 'Core', enabled: true },
+    { id: 'core.saveFile', title: 'Save File', category: 'File', source: 'Core', enabled: true },
+    { id: 'core.runSql', title: 'Run Current SQL', category: 'SQL', source: 'Core', enabled: isSql && Boolean(activeConnection) },
+    {
+      id: 'core.explainSql',
+      title: 'Explain Current SQL',
+      category: 'SQL',
+      source: 'Core',
+      enabled: isSql && Boolean(activeConnection),
+    },
+    { id: 'core.openIdeSettings', title: 'Open IDE Settings', category: 'Settings', source: 'Core', enabled: true },
+    {
+      id: 'core.openProjectSettings',
+      title: 'Open Project Settings',
+      category: 'Settings',
+      source: 'Core',
+      enabled: Boolean(activeWorkspace),
+    },
+    { id: 'core.toggleLeftSidebar', title: 'Toggle Explorer', category: 'View', source: 'Core', enabled: true },
+    { id: 'core.toggleRightSidebar', title: 'Toggle Assistant Panel', category: 'View', source: 'Core', enabled: true },
+  ];
+
+  const pluginCommands = plugins.flatMap((plugin) => {
+    if (!plugin.installed || !plugin.enabled) return [];
+    return (plugin.contributes.commands ?? []).map((command) => ({
+      id: command.id,
+      title: command.title,
+      category: command.category,
+      source: plugin.name,
+      enabled: isPluginCommandEnabled(command.id, { activeConnection, activeWorkspace, editorLanguage, result }),
+    }));
+  });
+
+  return [...coreCommands, ...pluginCommands].sort((left, right) =>
+    `${left.category}:${left.title}`.localeCompare(`${right.category}:${right.title}`),
+  );
+}
+
+function isPluginCommandEnabled(
+  commandId: string,
+  context: {
+    activeConnection: SavedConnection | undefined;
+    activeWorkspace: WorkspaceProject | undefined;
+    editorLanguage: EditorLanguage;
+    result: QueryExecutionResult | undefined;
+  },
+): boolean {
+  if (commandId === 'dbagent.postgres.connect') return true;
+  if (commandId === 'dbagent.postgres.explain') return context.editorLanguage === 'sql' && Boolean(context.activeConnection);
+  if (commandId === 'dbagent.python.detect') return true;
+  if (commandId === 'dbagent.python.createVenv') return Boolean(context.activeWorkspace);
+  if (commandId === 'dbagent.result.exportCsv' || commandId === 'dbagent.result.exportJson') return Boolean(context.result);
+  if (commandId === 'dbagent.chart.preview') return Boolean(context.result);
+  return false;
 }
 
 function escapeHtml(value: string): string {
