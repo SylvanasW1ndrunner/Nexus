@@ -371,6 +371,9 @@ export function App() {
       case 'dbagent.result.exportCsv':
         exportCsv();
         return;
+      case 'dbagent.result.exportExcel':
+        exportExcel();
+        return;
       case 'dbagent.result.exportJson':
         exportJson();
         return;
@@ -4378,7 +4381,13 @@ function isPluginCommandEnabled(
   if (commandId === 'dbagent.python.detect') return true;
   if (commandId === 'dbagent.python.runCurrentFile') return context.editorLanguage === 'python' && Boolean(context.activeWorkspace);
   if (commandId === 'dbagent.python.createVenv') return Boolean(context.activeWorkspace);
-  if (commandId === 'dbagent.result.exportCsv' || commandId === 'dbagent.result.exportJson') return Boolean(context.result);
+  if (
+    commandId === 'dbagent.result.exportCsv' ||
+    commandId === 'dbagent.result.exportExcel' ||
+    commandId === 'dbagent.result.exportJson'
+  ) {
+    return Boolean(context.result);
+  }
   if (commandId === 'dbagent.chart.preview') return Boolean(context.result);
   return false;
 }

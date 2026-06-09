@@ -18,9 +18,11 @@ describe('PluginRegistry', () => {
 
     const plugins = await registry.list();
     const pythonPlugin = plugins.find((plugin) => plugin.id === 'dbagent.python-runner');
+    const exportPlugin = plugins.find((plugin) => plugin.id === 'dbagent.result-export');
     expect(pythonPlugin?.official).toBe(true);
     expect(pythonPlugin?.builtin).toBe(true);
     expect(pythonPlugin?.contributes.commands?.some((command) => command.id === 'dbagent.python.detect')).toBe(true);
+    expect(exportPlugin?.contributes.commands?.some((command) => command.id === 'dbagent.result.exportExcel')).toBe(true);
 
     const installed = await registry.install('dbagent.chart-preview');
     expect(installed.installed).toBe(true);

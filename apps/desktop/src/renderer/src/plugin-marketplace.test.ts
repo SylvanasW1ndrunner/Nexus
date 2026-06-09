@@ -37,25 +37,47 @@ const plugins: PluginManifest[] = [
       views: [{ id: 'dbagent.chart.preview', title: 'Chart Preview', location: 'bottom-panel' }],
     },
   },
+  {
+    id: 'dbagent.result-export',
+    name: 'Result Export',
+    publisher: 'DBAgent',
+    version: '0.1.0',
+    description: 'Export SQL result sets',
+    official: true,
+    builtin: true,
+    installed: true,
+    enabled: true,
+    categories: ['export'],
+    activationEvents: ['onResultSet'],
+    contributes: {
+      commands: [{ id: 'dbagent.result.exportExcel', title: 'Export Excel', category: 'Results' }],
+      views: [{ id: 'dbagent.result.export', title: 'Result Export', location: 'bottom-panel' }],
+    },
+  },
 ];
 
 describe('plugin marketplace filtering', () => {
   it('lists distinct plugin categories', () => {
-    expect(listPluginCategories(plugins)).toEqual(['python', 'visualization']);
+    expect(listPluginCategories(plugins)).toEqual(['export', 'python', 'visualization']);
   });
 
   it('searches plugin command contributions', () => {
     expect(filterPlugins(plugins, { query: 'current python file', category: '', filter: 'all' }).map((plugin) => plugin.id)).toEqual([
       'dbagent.python-runner',
     ]);
+    expect(filterPlugins(plugins, { query: 'export excel', category: '', filter: 'all' }).map((plugin) => plugin.id)).toEqual([
+      'dbagent.result-export',
+    ]);
   });
 
   it('filters by install and enable state', () => {
     expect(filterPlugins(plugins, { query: '', category: '', filter: 'installed' }).map((plugin) => plugin.id)).toEqual([
       'dbagent.python-runner',
+      'dbagent.result-export',
     ]);
     expect(filterPlugins(plugins, { query: '', category: '', filter: 'enabled' }).map((plugin) => plugin.id)).toEqual([
       'dbagent.python-runner',
+      'dbagent.result-export',
     ]);
   });
 

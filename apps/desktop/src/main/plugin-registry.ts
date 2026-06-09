@@ -76,6 +76,7 @@ const officialPlugins: PluginManifest[] = [
     contributes: {
       commands: [
         { id: 'dbagent.result.exportCsv', title: 'Export CSV', category: 'Results' },
+        { id: 'dbagent.result.exportExcel', title: 'Export Excel', category: 'Results' },
         { id: 'dbagent.result.exportJson', title: 'Export JSON', category: 'Results' },
       ],
       views: [{ id: 'dbagent.result.export', title: 'Result Export', location: 'bottom-panel' }],
