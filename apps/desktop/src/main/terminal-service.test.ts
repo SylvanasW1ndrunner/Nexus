@@ -10,14 +10,45 @@ describe('TerminalService', () => {
 
     const result = await service.run({
       terminalId: terminal.id,
-      command: 'node -e "console.log(21 * 2)"',
+      command: `"${process.execPath}" -e "console.log(21 * 2)"`,
     });
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('42');
-    expect(service.list()[0]?.lastCommand).toContain('node -e');
+    expect(service.list()[0]?.lastCommand).toContain(process.execPath);
 
     service.close(terminal.id);
     expect(service.list()).toHaveLength(0);
   });
+
+  it('keeps a shell session alive for write/read terminal output', async () => {
+    const service = new TerminalService();
+    const terminal = service.create({ name: 'Shell' });
+
+    try {
+      service.write({
+        terminalId: terminal.id,
+        data: 'echo dbagent-terminal-ready\n',
+      });
+
+      const output = await waitForOutput(service, terminal.id, 'dbagent-terminal-ready');
+      expect(output).toContain('dbagent-terminal-ready');
+      expect(service.list()[0]?.status).toBe('running');
+    } finally {
+      service.close(terminal.id);
+    }
+  });
 });
+
+async function waitForOutput(service: TerminalService, terminalId: string, expected: string): Promise<string> {
+  let cursor = 0;
+  let output = '';
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const result = service.read({ terminalId, cursor });
+    cursor = result.cursor;
+    output += result.chunk;
+    if (output.includes(expected)) return output;
+  }
+  return output;
+}

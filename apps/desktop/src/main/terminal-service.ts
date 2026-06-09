@@ -1,12 +1,28 @@
 import { exec } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import type { PythonRunResult, TerminalRunRequest, TerminalSession } from '@dbagent/shared';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type {
+  PythonRunResult,
+  TerminalReadRequest,
+  TerminalReadResult,
+  TerminalRunRequest,
+  TerminalSession,
+  TerminalWriteRequest,
+} from '@dbagent/shared';
 
 const execAsync = promisify(exec);
 
+type TerminalRuntime = {
+  process: ChildProcessWithoutNullStreams;
+  output: string;
+  status: 'running' | 'exited';
+  exitCode?: number | null;
+};
+
 export class TerminalService {
   private readonly sessions = new Map<string, TerminalSession>();
+  private readonly runtimes = new Map<string, TerminalRuntime>();
 
   list(): TerminalSession[] {
     return [...this.sessions.values()];
@@ -14,19 +30,76 @@ export class TerminalService {
 
   create(input: { cwd?: string; name?: string } = {}): TerminalSession {
     const id = randomUUID();
+    const shell = getDefaultShell();
+    const cwd = input.cwd ?? process.cwd();
+    const child = spawn(shell.command, shell.args, {
+      cwd,
+      env: process.env,
+      windowsHide: true,
+    });
     const session: TerminalSession = {
       id,
       name: input.name?.trim() || `Terminal ${this.sessions.size + 1}`,
-      ...(input.cwd ? { cwd: input.cwd } : {}),
+      cwd,
       createdAt: new Date().toISOString(),
+      shell: shell.label,
+      status: 'running',
+      ...(child.pid ? { pid: child.pid } : {}),
     };
+    const runtime: TerminalRuntime = {
+      process: child,
+      output: '',
+      status: 'running',
+    };
+    child.stdout.on('data', (chunk: Buffer) => {
+      runtime.output += chunk.toString('utf8');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      runtime.output += chunk.toString('utf8');
+    });
+    child.on('exit', (code) => {
+      runtime.status = 'exited';
+      runtime.exitCode = code;
+      const current = this.sessions.get(id);
+      if (current) this.sessions.set(id, { ...current, status: 'exited', lastExitCode: code });
+    });
     this.sessions.set(id, session);
+    this.runtimes.set(id, runtime);
     return session;
   }
 
   close(id: string): { id: string } {
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status === 'running') runtime.process.kill();
+    this.runtimes.delete(id);
     this.sessions.delete(id);
     return { id };
+  }
+
+  write(request: TerminalWriteRequest): { id: string } {
+    const runtime = this.runtimes.get(request.terminalId);
+    if (!runtime || runtime.status !== 'running') throw new Error('Terminal session is not running.');
+    runtime.process.stdin.write(request.data);
+    const current = this.sessions.get(request.terminalId);
+    if (current) {
+      const command = request.data.replace(/\r?\n$/, '').trim();
+      this.sessions.set(request.terminalId, command ? { ...current, lastCommand: command } : current);
+    }
+    return { id: request.terminalId };
+  }
+
+  read(request: TerminalReadRequest): TerminalReadResult {
+    const runtime = this.runtimes.get(request.terminalId);
+    if (!runtime) throw new Error('Terminal session does not exist.');
+    const cursor = Math.max(0, request.cursor);
+    const nextCursor = runtime.output.length;
+    return {
+      terminalId: request.terminalId,
+      chunk: runtime.output.slice(cursor),
+      cursor: nextCursor,
+      status: runtime.status,
+      ...(runtime.exitCode !== undefined ? { exitCode: runtime.exitCode } : {}),
+    };
   }
 
   async run(request: TerminalRunRequest): Promise<PythonRunResult> {
@@ -66,4 +139,20 @@ export class TerminalService {
       };
     }
   }
+}
+
+function getDefaultShell(): { command: string; args: string[]; label: string } {
+  if (process.platform === 'win32') {
+    return {
+      command: process.env.ComSpec ?? 'cmd.exe',
+      args: [],
+      label: process.env.ComSpec?.split(/[\\/]/).at(-1) ?? 'cmd.exe',
+    };
+  }
+  const shell = process.env.SHELL ?? '/bin/sh';
+  return {
+    command: shell,
+    args: [],
+    label: shell.split('/').at(-1) ?? shell,
+  };
 }

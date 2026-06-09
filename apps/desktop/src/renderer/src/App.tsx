@@ -18,7 +18,6 @@ import {
   type AuthStatus,
   type PluginManifest,
   type PythonEnvironmentInfo,
-  type PythonRunResult,
   type QueryExecutionResult,
   type SavedConnection,
   type TableDetail,
@@ -56,6 +55,7 @@ type TerminalView = TerminalSession & {
   input: string;
   output: string;
   running: boolean;
+  cursor: number;
 };
 
 type EditorLanguage = 'sql' | 'python' | 'markdown' | 'plaintext';
@@ -139,6 +139,7 @@ export function App() {
   const [workspacePythonDraft, setWorkspacePythonDraft] = useState<WorkspacePythonConfig>(defaultWorkspacePythonDraft);
   const [pythonEnvironments, setPythonEnvironments] = useState<PythonEnvironmentInfo[]>([]);
   const [terminals, setTerminals] = useState<TerminalView[]>([]);
+  const terminalsRef = useRef<TerminalView[]>([]);
   const [activeTerminalId, setActiveTerminalId] = useState('');
   const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [chatDraft, setChatDraft] = useState('');
@@ -164,6 +165,17 @@ export function App() {
     void refreshWorkspace();
     void initializeTerminal();
     void refreshPlugins();
+  }, []);
+
+  useEffect(() => {
+    terminalsRef.current = terminals;
+  }, [terminals]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void pollTerminalOutputs();
+    }, 500);
+    return () => window.clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -269,44 +281,52 @@ export function App() {
     setTerminals((current) => current.map((terminal) => (terminal.id === id ? { ...terminal, input } : terminal)));
   }
 
+  async function pollTerminalOutputs() {
+    const snapshot = terminalsRef.current;
+    if (!snapshot.length) return;
+    const responses = await Promise.all(
+      snapshot.map((terminal) =>
+        window.dbagent.invoke(ipcChannels.terminal.read, {
+          terminalId: terminal.id,
+          cursor: terminal.cursor,
+        }),
+      ),
+    );
+    setTerminals((current) =>
+      current.map((terminal) => {
+        const response = responses.find((item) => item.ok && item.data.terminalId === terminal.id);
+        if (!response?.ok) return terminal;
+        return {
+          ...terminal,
+          output: response.data.chunk ? `${terminal.output}${response.data.chunk}` : terminal.output,
+          cursor: response.data.cursor,
+          status: response.data.status,
+          running: false,
+          ...(response.data.exitCode !== undefined ? { lastExitCode: response.data.exitCode } : {}),
+        };
+      }),
+    );
+  }
+
   async function runTerminalCommand(id: string) {
     const terminal = terminals.find((item) => item.id === id);
     if (!terminal || !terminal.input.trim()) return;
     const command = terminal.input.trim();
     setTerminals((current) =>
       current.map((item) =>
-        item.id === id ? { ...item, running: true, output: `${item.output}\n> ${command}\n` } : item,
+        item.id === id ? { ...item, running: true, input: '', output: `${item.output}\n> ${command}\n` } : item,
       ),
     );
-    const response = await window.dbagent.invoke(ipcChannels.terminal.run, {
+    const response = await window.dbagent.invoke(ipcChannels.terminal.write, {
       terminalId: id,
-      command,
-      ...(activeWorkspace ? { cwd: activeWorkspace.rootPath } : {}),
+      data: `${command}\n`,
     });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
       setTerminals((current) => current.map((item) => (item.id === id ? { ...item, running: false } : item)));
       return;
     }
-    appendTerminalResult(id, response.data);
-  }
-
-  function appendTerminalResult(id: string, result: PythonRunResult) {
-    const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
-    setTerminals((current) =>
-      current.map((terminal) =>
-        terminal.id === id
-          ? {
-              ...terminal,
-              running: false,
-              input: '',
-              output: `${terminal.output}${output}${output ? '\n' : ''}[exit ${result.exitCode ?? 'unknown'} / ${result.elapsedMs} ms]\n`,
-              lastExitCode: result.exitCode,
-              lastCommand: result.command,
-            }
-          : terminal,
-      ),
-    );
+    await pollTerminalOutputs();
   }
 
   async function refreshPlugins() {
@@ -2992,6 +3012,7 @@ function toTerminalView(session: TerminalSession): TerminalView {
     input: '',
     output: '',
     running: false,
+    cursor: 0,
   };
 }
 
