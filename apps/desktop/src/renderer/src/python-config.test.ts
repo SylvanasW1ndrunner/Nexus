@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PythonEnvironmentInfo, WorkspacePythonConfig } from '@dbagent/shared';
-import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
+import { canCreatePythonEnvironment, selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
 
 describe('Python configuration user flows', () => {
   const baseDraft: WorkspacePythonConfig = {
@@ -56,5 +56,14 @@ describe('Python configuration user flows', () => {
       requirementsPath: 'scripts/requirements.txt',
       condaPrefix: 'C:\\Miniconda3\\envs\\analytics',
     });
+  });
+
+  it('guards Python environment creation names before shelling out', () => {
+    expect(canCreatePythonEnvironment('.venv')).toBe(true);
+    expect(canCreatePythonEnvironment('dbagent-analytics')).toBe(true);
+    expect(canCreatePythonEnvironment('')).toBe(false);
+    expect(canCreatePythonEnvironment('../outside')).toBe(false);
+    expect(canCreatePythonEnvironment('envs/analytics')).toBe(false);
+    expect(canCreatePythonEnvironment('envs\\analytics')).toBe(false);
   });
 });

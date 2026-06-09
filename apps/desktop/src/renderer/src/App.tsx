@@ -41,7 +41,7 @@ import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
-import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
+import { canCreatePythonEnvironment, selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
 import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
 import { terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
@@ -2881,6 +2881,7 @@ function PythonConfigForm({
     () => environments.filter((environment) => environment.mode === pythonDraft.mode),
     [environments, pythonDraft.mode],
   );
+  const canCreateEnvironment = canCreatePythonEnvironment(newEnvironmentName);
 
   useEffect(() => {
     setNewEnvironmentName(pythonDraft.mode === 'conda' ? 'dbagent-analytics' : '.venv');
@@ -2994,12 +2995,17 @@ function PythonConfigForm({
       </div>
       {pythonDraft.mode === 'venv' || pythonDraft.mode === 'conda' ? (
         <div className="python-create-row">
-          <input value={newEnvironmentName} onChange={(event) => setNewEnvironmentName(event.target.value)} />
+          <input
+            placeholder={pythonDraft.mode === 'conda' ? t('condaEnvironmentNamePlaceholder') : t('venvNamePlaceholder')}
+            value={newEnvironmentName}
+            onChange={(event) => setNewEnvironmentName(event.target.value)}
+          />
           <button
             className="secondary"
+            disabled={!canCreateEnvironment}
             type="button"
             onClick={() => {
-              if (pythonDraft.mode === 'venv' || pythonDraft.mode === 'conda') {
+              if ((pythonDraft.mode === 'venv' || pythonDraft.mode === 'conda') && canCreateEnvironment) {
                 onCreateEnvironment(pythonDraft.mode, newEnvironmentName);
               }
             }}

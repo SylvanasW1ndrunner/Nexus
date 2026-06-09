@@ -38,6 +38,11 @@ export function setCondaEnvironmentInput(draft: WorkspacePythonConfig, value: st
   };
 }
 
+export function canCreatePythonEnvironment(name: string): boolean {
+  const trimmed = name.trim();
+  return Boolean(trimmed) && !trimmed.includes('..') && !/[\\/]/.test(trimmed);
+}
+
 function isPathLike(value: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('/') || value.includes('\\') || value.includes('/');
 }
