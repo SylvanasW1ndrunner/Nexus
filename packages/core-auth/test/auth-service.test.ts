@@ -55,14 +55,17 @@ describe('AuthService', () => {
   it('logs in with password and with a phone verification code', async () => {
     const repository = new MemoryAuthRepository();
     const service = new AuthService(await sessionPath(), repository);
-    const registerCode = await service.requestCode({ target: '+8613800000000', channel: 'phone', purpose: 'register' });
-    await service.register({ phone: '+8613800000000', password: 'password-123', verificationCode: registerCode.devCode! });
+    const registerCode = await service.requestCode({ target: '+86 138-0000-0000', channel: 'phone', purpose: 'register' });
+    await service.register({ phone: '+86 138-0000-0000', password: 'password-123', verificationCode: registerCode.devCode! });
 
-    await expect(service.login('+8613800000000', 'password-123')).resolves.toMatchObject({ authenticated: true });
+    await expect(service.login('+86 138-0000-0000', 'password-123')).resolves.toMatchObject({ authenticated: true });
 
-    const loginCode = await service.requestCode({ target: '+8613800000000', channel: 'phone', purpose: 'login' });
+    const account = await repository.findAccountByIdentifier('+8613800000000');
+    expect(account?.phone).toBe('+8613800000000');
+
+    const loginCode = await service.requestCode({ target: '+86 138 0000 0000', channel: 'phone', purpose: 'login' });
     await expect(
-      service.verifyCodeLogin({ target: '+8613800000000', channel: 'phone', verificationCode: loginCode.devCode! }),
+      service.verifyCodeLogin({ target: '+86-138-0000-0000', channel: 'phone', verificationCode: loginCode.devCode! }),
     ).resolves.toMatchObject({ authenticated: true });
   });
 
@@ -107,6 +110,25 @@ describe('AuthService', () => {
         verificationCode: code.devCode!,
       }),
     ).rejects.toThrow(/either email or phone/i);
+  });
+
+  it('checks account existence before issuing purpose-specific verification codes', async () => {
+    const repository = new MemoryAuthRepository();
+    const service = new AuthService(await sessionPath(), repository);
+
+    await expect(
+      service.requestCode({ target: 'missing@example.com', channel: 'email', purpose: 'login' }),
+    ).rejects.toThrow(/does not exist/i);
+    await expect(
+      service.requestCode({ target: 'missing@example.com', channel: 'email', purpose: 'reset-password' }),
+    ).rejects.toThrow(/does not exist/i);
+
+    const registerCode = await service.requestCode({ target: 'exists@example.com', channel: 'email', purpose: 'register' });
+    await service.register({ email: 'exists@example.com', password: 'password-123', verificationCode: registerCode.devCode! });
+
+    await expect(
+      service.requestCode({ target: 'exists@example.com', channel: 'email', purpose: 'register' }),
+    ).rejects.toThrow(/already exists/i);
   });
 
   it('accepts legacy sha256 password hashes and upgrades them after login', async () => {

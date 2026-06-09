@@ -56,7 +56,7 @@ export class AuthService {
   }
 
   async login(identifier: string, password: string): Promise<AuthStatus> {
-    const normalized = normalizeIdentifier(identifier);
+    const normalized = normalizeLoginIdentifier(identifier);
     const account = await this.repository.findAccountByIdentifier(normalized);
     if (!account || !verifyPassword(password, account.passwordHash)) throw new Error('Invalid account or password.');
     if (shouldUpgradePasswordHash(account.passwordHash)) {
@@ -69,8 +69,8 @@ export class AuthService {
 
   async register(request: AuthRegisterRequest): Promise<AuthStatus> {
     if (request.email && request.phone) throw new Error('Register with either email or phone, not both.');
-    const target = normalizeIdentifier(request.email ?? request.phone);
     const channel = request.email ? 'email' : 'phone';
+    const target = normalizeVerificationTarget(request.email ?? request.phone, channel);
     if (!target) throw new Error('Email or phone is required.');
     validateVerificationTarget(target, channel);
     if (request.password.length < 8) throw new Error('Password must be at least 8 characters.');
@@ -92,9 +92,14 @@ export class AuthService {
   }
 
   async requestCode(request: AuthCodeRequest): Promise<AuthCodeResponse> {
-    const target = normalizeIdentifier(request.target);
+    const target = normalizeVerificationTarget(request.target, request.channel);
     if (!target) throw new Error('Verification target is required.');
     validateVerificationTarget(target, request.channel);
+    const account = await this.repository.findAccountByIdentifier(target);
+    if (request.purpose === 'register' && account) throw new Error('Account already exists.');
+    if ((request.purpose === 'login' || request.purpose === 'reset-password') && !account) {
+      throw new Error('Account does not exist.');
+    }
     const code = String(randomInt(100000, 999999));
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     await this.repository.upsertCode({
@@ -112,7 +117,7 @@ export class AuthService {
   }
 
   async verifyCodeLogin(request: AuthVerifyCodeLoginRequest): Promise<AuthStatus> {
-    const target = normalizeIdentifier(request.target);
+    const target = normalizeVerificationTarget(request.target, request.channel);
     validateVerificationTarget(target, request.channel);
     await this.verifyCode({ ...request, target, purpose: 'login' });
     const account = await this.repository.findAccountByIdentifier(target);
@@ -123,7 +128,7 @@ export class AuthService {
   }
 
   async resetPassword(request: AuthResetPasswordRequest): Promise<AuthStatus> {
-    const target = normalizeIdentifier(request.target);
+    const target = normalizeVerificationTarget(request.target, request.channel);
     validateVerificationTarget(target, request.channel);
     if (request.newPassword.length < 8) throw new Error('Password must be at least 8 characters.');
     await this.verifyCode({ target, channel: request.channel, purpose: 'reset-password', verificationCode: request.verificationCode });
@@ -203,6 +208,20 @@ function isLegacySha256Hash(storedHash: string): boolean {
 
 function normalizeIdentifier(value: string | undefined): string {
   return value?.trim().toLowerCase() ?? '';
+}
+
+function normalizeLoginIdentifier(value: string | undefined): string {
+  const normalized = normalizeIdentifier(value);
+  return normalized.includes('@') ? normalized : normalizePhone(normalized);
+}
+
+function normalizeVerificationTarget(value: string | undefined, channel: AuthCodeRequest['channel']): string {
+  const normalized = normalizeIdentifier(value);
+  return channel === 'phone' ? normalizePhone(normalized) : normalized;
+}
+
+function normalizePhone(value: string): string {
+  return value.replace(/[\s-]/g, '');
 }
 
 function validateVerificationTarget(target: string, channel: AuthCodeRequest['channel']): void {

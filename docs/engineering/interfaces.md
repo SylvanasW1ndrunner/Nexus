@@ -19,6 +19,10 @@ Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契
 - `db:list-tables`
 - `db:describe-table`
 - `auth:login`
+- `auth:register`
+- `auth:request-code`
+- `auth:verify-code-login`
+- `auth:reset-password`
 - `auth:logout`
 - `auth:status`
 - `usage:current-quota`
