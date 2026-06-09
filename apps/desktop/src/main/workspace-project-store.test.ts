@@ -164,6 +164,36 @@ describe('WorkspaceProjectStore', () => {
     );
   });
 
+  it('creates and deletes managed subdirectories while protecting workspace roots', async () => {
+    const rootPath = join(await tempDir(), 'ecommerce-analytics');
+    const store = new WorkspaceProjectStore(join(await tempDir(), 'workspaces.json'));
+    const project = await store.create({ name: 'Directory Operations Project', rootPath });
+
+    const directory = await store.createDirectory({
+      rootPath: project.rootPath,
+      relativePath: 'docs/runbooks/monthly',
+    });
+    await store.writeFile({
+      rootPath: project.rootPath,
+      relativePath: 'docs/runbooks/monthly/README.md',
+      content: '# Monthly runbook\n',
+    });
+    const deleted = await store.deleteDirectory({
+      rootPath: project.rootPath,
+      relativePath: 'docs/runbooks',
+    });
+
+    expect(directory.relativePath).toBe('docs/runbooks/monthly');
+    expect(deleted.relativePath).toBe('docs/runbooks');
+    await expect(store.readFile({ rootPath: project.rootPath, relativePath: 'docs/runbooks/monthly/README.md' })).rejects.toThrow();
+    await expect(store.deleteDirectory({ rootPath: project.rootPath, relativePath: 'docs' })).rejects.toThrow(
+      'Top-level workspace directories cannot be deleted',
+    );
+    await expect(store.createDirectory({ rootPath: project.rootPath, relativePath: '../escape' })).rejects.toThrow(
+      'managed project directory',
+    );
+  });
+
   it('updates workspace SQL library settings and saves future SQL there', async () => {
     const rootPath = join(await tempDir(), 'ecommerce-analytics');
     const store = new WorkspaceProjectStore(join(await tempDir(), 'workspaces.json'));

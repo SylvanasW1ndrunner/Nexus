@@ -341,6 +341,17 @@ function registerIpcHandlers(): void {
       });
     }
   });
+  handle(ipcChannels.workspace.createDirectory, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.createDirectory(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to create workspace directory.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
   handle(ipcChannels.workspace.renameFile, async (request) => {
     try {
       return ok(await workspaceProjectStore.renameFile(request));
@@ -359,6 +370,17 @@ function registerIpcHandlers(): void {
       return err({
         code: 'VALIDATION_ERROR',
         message: 'Unable to delete workspace file.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
+  handle(ipcChannels.workspace.deleteDirectory, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.deleteDirectory(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to delete workspace directory.',
         ...(error instanceof Error ? { detail: error.message } : {}),
       });
     }

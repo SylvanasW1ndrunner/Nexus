@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createWorkspaceFileTemplate,
   inferWorkspaceFileLanguage,
+  normalizeNewWorkspaceDirectoryPath,
   normalizeNewWorkspaceFilePath,
 } from './workspace-file.js';
 
@@ -18,6 +19,16 @@ describe('workspace file helpers', () => {
     expect(() => normalizeNewWorkspaceFilePath('.dbagent/workspace.json')).toThrow();
     expect(() => normalizeNewWorkspaceFilePath('node_modules/pkg/index.js')).toThrow();
     expect(() => normalizeNewWorkspaceFilePath('C:\\temp\\x.py')).toThrow();
+  });
+
+  it('normalizes project directory paths without accepting file-like names', () => {
+    expect(normalizeNewWorkspaceDirectoryPath(' docs\\runbooks\\ ')).toBe('docs/runbooks');
+    expect(normalizeNewWorkspaceDirectoryPath('/sql/analytics/monthly')).toBe('sql/analytics/monthly');
+
+    expect(() => normalizeNewWorkspaceDirectoryPath('')).toThrow();
+    expect(() => normalizeNewWorkspaceDirectoryPath('../escape')).toThrow();
+    expect(() => normalizeNewWorkspaceDirectoryPath('.dbagent/cache')).toThrow();
+    expect(() => normalizeNewWorkspaceDirectoryPath('scripts/job.py')).toThrow();
   });
 
   it('infers editor language from supported project file types', () => {

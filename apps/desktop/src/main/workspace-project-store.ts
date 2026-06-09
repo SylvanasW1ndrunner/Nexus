@@ -6,8 +6,12 @@ import type {
   WorkspaceFileContent,
   WorkspaceFileEntry,
   WorkspaceProject,
+  WorkspaceCreateDirectoryRequest,
+  WorkspaceCreatedDirectory,
   WorkspaceDeleteFileRequest,
   WorkspaceDeletedFile,
+  WorkspaceDeleteDirectoryRequest,
+  WorkspaceDeletedDirectory,
   WorkspaceReadFileRequest,
   WorkspaceRenameFileRequest,
   WorkspaceRecentState,
@@ -136,6 +140,21 @@ export class WorkspaceProjectStore {
     };
   }
 
+  async createDirectory(request: WorkspaceCreateDirectoryRequest): Promise<WorkspaceCreatedDirectory> {
+    const project = await this.loadProject(request.rootPath);
+    const relativePath = normalizeWorkspaceRelativePath(request.relativePath);
+    const absolutePath = resolveInside(project.rootPath, relativePath);
+    await mkdir(absolutePath, { recursive: true });
+    const info = await stat(absolutePath);
+    if (!info.isDirectory()) throw new Error('Workspace path is not a directory.');
+    return {
+      name: basename(relativePath),
+      relativePath: toPortablePath(relativePath),
+      absolutePath,
+      updatedAt: info.mtime.toISOString(),
+    };
+  }
+
   async renameFile(request: WorkspaceRenameFileRequest): Promise<WorkspaceSavedFile> {
     const project = await this.loadProject(request.rootPath);
     const fromRelativePath = normalizeWorkspaceRelativePath(request.fromRelativePath);
@@ -169,6 +188,19 @@ export class WorkspaceProjectStore {
     const info = await stat(absolutePath);
     if (!info.isFile()) throw new Error('Workspace path is not a file.');
     await rm(absolutePath);
+    return { relativePath: toPortablePath(relativePath) };
+  }
+
+  async deleteDirectory(request: WorkspaceDeleteDirectoryRequest): Promise<WorkspaceDeletedDirectory> {
+    const project = await this.loadProject(request.rootPath);
+    const relativePath = normalizeWorkspaceRelativePath(request.relativePath);
+    if (relativePath.split('/').length < 2) {
+      throw new Error('Top-level workspace directories cannot be deleted.');
+    }
+    const absolutePath = resolveInside(project.rootPath, relativePath);
+    const info = await stat(absolutePath);
+    if (!info.isDirectory()) throw new Error('Workspace path is not a directory.');
+    await rm(absolutePath, { recursive: true });
     return { relativePath: toPortablePath(relativePath) };
   }
 

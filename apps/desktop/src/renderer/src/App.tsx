@@ -46,6 +46,7 @@ import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTer
 import {
   createWorkspaceFileTemplate,
   inferWorkspaceFileLanguage,
+  normalizeNewWorkspaceDirectoryPath,
   normalizeNewWorkspaceFilePath,
 } from './workspace-file.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
@@ -185,7 +186,10 @@ export function App() {
   const [saveSqlNameDraft, setSaveSqlNameDraft] = useState('');
   const [newFileDialogOpen, setNewFileDialogOpen] = useState(false);
   const [newFilePathDraft, setNewFilePathDraft] = useState('scripts/analysis.py');
-  const [fileContextMenu, setFileContextMenu] = useState<{ x: number; y: number; file: WorkspaceFileEntry } | undefined>();
+  const [newDirectoryDialogOpen, setNewDirectoryDialogOpen] = useState(false);
+  const [newDirectoryPathDraft, setNewDirectoryPathDraft] = useState('docs/runbooks');
+  const [fileContextMenu, setFileContextMenu] =
+    useState<{ x: number; y: number; entry: WorkspaceFileEntry } | undefined>();
   const [renameFileDialog, setRenameFileDialog] = useState<{ file: WorkspaceFileEntry; path: string } | undefined>();
   const [createConnectionDuringWorkspace, setCreateConnectionDuringWorkspace] = useState(false);
   const [selectedDatabaseEngine, setSelectedDatabaseEngine] = useState<ConnectionInput['engine']>('postgres');
@@ -1141,6 +1145,31 @@ export function App() {
     setMessage(`${t('fileCreated')}: ${response.data.relativePath}`);
   }
 
+  async function createWorkspaceDirectory() {
+    if (!activeWorkspace) {
+      setMessage(t('openProjectFirst'));
+      return;
+    }
+    let relativePath = '';
+    try {
+      relativePath = normalizeNewWorkspaceDirectoryPath(newDirectoryPathDraft);
+    } catch {
+      setMessage(t('invalidDirectoryPath'));
+      return;
+    }
+    const response = await window.dbagent.invoke(ipcChannels.workspace.createDirectory, {
+      rootPath: activeWorkspace.rootPath,
+      relativePath,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    await refreshWorkspaceFiles(activeWorkspace.rootPath);
+    setNewDirectoryDialogOpen(false);
+    setMessage(`${t('directoryCreated')}: ${response.data.relativePath}`);
+  }
+
   function requestRenameWorkspaceFile(file: WorkspaceFileEntry) {
     setFileContextMenu(undefined);
     setRenameFileDialog({ file, path: file.relativePath });
@@ -1201,6 +1230,22 @@ export function App() {
       setEditorLanguage('plaintext');
       setEditorDocument(defaultEditorDocument);
     }
+    setFileContextMenu(undefined);
+    setMessage(`${t('delete')}: ${response.data.relativePath}`);
+  }
+
+  async function deleteWorkspaceDirectory(directory: WorkspaceFileEntry) {
+    if (!activeWorkspace || directory.type !== 'directory') return;
+    if (!window.confirm(`${t('deleteDirectoryConfirm')}\n\n${directory.relativePath}`)) return;
+    const response = await window.dbagent.invoke(ipcChannels.workspace.deleteDirectory, {
+      rootPath: activeWorkspace.rootPath,
+      relativePath: directory.relativePath,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    await refreshWorkspaceFiles(activeWorkspace.rootPath);
     setFileContextMenu(undefined);
     setMessage(`${t('delete')}: ${response.data.relativePath}`);
   }
@@ -1314,11 +1359,15 @@ export function App() {
                 openCreateProjectDialog();
               }}
               onCreateFile={() => setNewFileDialogOpen(true)}
+              onCreateDirectory={() => setNewDirectoryDialogOpen(true)}
               onOpenFile={(file) => void openWorkspaceFile(file)}
               onOpenProject={() => void chooseAndOpenWorkspace()}
-              onOpenFileMenu={(file, event) => {
+              onRefreshFiles={() => {
+                if (activeWorkspace) void refreshWorkspaceFiles(activeWorkspace.rootPath);
+              }}
+              onOpenEntryMenu={(entry, event) => {
                 event.preventDefault();
-                setFileContextMenu({ x: event.clientX, y: event.clientY, file });
+                setFileContextMenu({ x: event.clientX, y: event.clientY, entry });
               }}
             />
             {!leftSidebarCollapsed ? (
@@ -1486,6 +1535,15 @@ export function App() {
           onCreate={() => void createWorkspaceFile()}
         />
       ) : null}
+      {newDirectoryDialogOpen ? (
+        <NewDirectoryDialog
+          path={newDirectoryPathDraft}
+          setPath={setNewDirectoryPathDraft}
+          t={t}
+          onClose={() => setNewDirectoryDialogOpen(false)}
+          onCreate={() => void createWorkspaceDirectory()}
+        />
+      ) : null}
       {renameFileDialog ? (
         <RenameFileDialog
           path={renameFileDialog.path}
@@ -1497,15 +1555,45 @@ export function App() {
       ) : null}
       {fileContextMenu ? (
         <div className="editor-context-menu file-context-menu" style={{ left: fileContextMenu.x, top: fileContextMenu.y }}>
-          <button type="button" onClick={() => void openWorkspaceFile(fileContextMenu.file)}>
-            {t('openFile')}
-          </button>
-          <button type="button" onClick={() => requestRenameWorkspaceFile(fileContextMenu.file)}>
-            {t('rename')}
-          </button>
-          <button type="button" onClick={() => void deleteWorkspaceFile(fileContextMenu.file)}>
-            {t('delete')}
-          </button>
+          {fileContextMenu.entry.type === 'file' ? (
+            <>
+              <button type="button" onClick={() => void openWorkspaceFile(fileContextMenu.entry)}>
+                {t('openFile')}
+              </button>
+              <button type="button" onClick={() => requestRenameWorkspaceFile(fileContextMenu.entry)}>
+                {t('rename')}
+              </button>
+              <button type="button" onClick={() => void deleteWorkspaceFile(fileContextMenu.entry)}>
+                {t('delete')}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setNewFilePathDraft(`${fileContextMenu.entry.relativePath}/analysis.py`);
+                  setNewFileDialogOpen(true);
+                  setFileContextMenu(undefined);
+                }}
+              >
+                {t('newFile')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setNewDirectoryPathDraft(`${fileContextMenu.entry.relativePath}/new-folder`);
+                  setNewDirectoryDialogOpen(true);
+                  setFileContextMenu(undefined);
+                }}
+              >
+                {t('newFolder')}
+              </button>
+              <button type="button" onClick={() => void deleteWorkspaceDirectory(fileContextMenu.entry)}>
+                {t('delete')}
+              </button>
+            </>
+          )}
         </div>
       ) : null}
     </main>
@@ -1711,6 +1799,59 @@ function NewFileDialog({
             />
           </label>
           <p className="field-hint">{t('newFileExamples')}</p>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+          <button className="primary-action" type="button" onClick={onCreate}>
+            {t('create')}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function NewDirectoryDialog({
+  path,
+  setPath,
+  t,
+  onClose,
+  onCreate,
+}: {
+  path: string;
+  setPath: (value: string) => void;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onClose: () => void;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="save-sql-panel" role="dialog" aria-modal="true" aria-label={t('newFolder')}>
+        <div className="modal-heading">
+          <div>
+            <strong>{t('newFolder')}</strong>
+            <small>{t('newFolderHint')}</small>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+        </div>
+        <div className="save-sql-grid single">
+          <label>
+            <span>{t('folderPath')}</span>
+            <input
+              autoFocus
+              placeholder={t('folderPathPlaceholder')}
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') onCreate();
+              }}
+            />
+          </label>
+          <p className="field-hint">{t('newFolderExamples')}</p>
         </div>
         <div className="modal-actions">
           <button className="secondary" type="button" onClick={onClose}>
@@ -2885,21 +3026,25 @@ function ProjectPanel({
   activeFilePath,
   files,
   t,
+  onCreateDirectory,
   onCreateFile,
   onCreateProject,
   onOpenFile,
-  onOpenFileMenu,
+  onOpenEntryMenu,
   onOpenProject,
+  onRefreshFiles,
 }: {
   activeWorkspace: WorkspaceProject | undefined;
   activeFilePath?: string;
   files: WorkspaceFileEntry[];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onCreateDirectory: () => void;
   onCreateFile: () => void;
   onCreateProject: () => void;
   onOpenFile: (file: WorkspaceFileEntry) => void;
-  onOpenFileMenu: (file: WorkspaceFileEntry, event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onOpenEntryMenu: (entry: WorkspaceFileEntry, event: ReactMouseEvent<HTMLButtonElement>) => void;
   onOpenProject: () => void;
+  onRefreshFiles: () => void;
 }) {
   return (
     <section className="project-panel">
@@ -2909,9 +3054,17 @@ function ProjectPanel({
           <small title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</small>
         </div>
         {activeWorkspace ? (
-          <button className="explorer-action" title={t('newFile')} type="button" onClick={onCreateFile}>
-            +
-          </button>
+          <div className="explorer-actions">
+            <button className="explorer-action" title={t('newFile')} type="button" onClick={onCreateFile}>
+              +
+            </button>
+            <button className="explorer-action folder" title={t('newFolder')} type="button" onClick={onCreateDirectory}>
+              □
+            </button>
+            <button className="explorer-action refresh" title={t('refreshFiles')} type="button" onClick={onRefreshFiles}>
+              ↻
+            </button>
+          </div>
         ) : null}
       </div>
       {activeWorkspace ? (
@@ -2927,7 +3080,7 @@ function ProjectPanel({
                   key={file.relativePath}
                   {...(activeFilePath ? { activeFilePath } : {})}
                   onOpenFile={onOpenFile}
-                  onOpenFileMenu={onOpenFileMenu}
+                  onOpenEntryMenu={onOpenEntryMenu}
                 />
               ))
             ) : (
@@ -2963,13 +3116,13 @@ function FileNode({
   entry,
   label,
   onOpenFile,
-  onOpenFileMenu,
+  onOpenEntryMenu,
 }: {
   activeFilePath?: string;
   entry?: WorkspaceFileEntry;
   label?: string;
   onOpenFile?: (file: WorkspaceFileEntry) => void;
-  onOpenFileMenu?: (file: WorkspaceFileEntry, event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onOpenEntryMenu?: (entry: WorkspaceFileEntry, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
   const display = entry?.type === 'directory' ? `${entry.name}/` : (entry?.name ?? label ?? '');
   const isActive = Boolean(entry?.relativePath && activeFilePath === entry.relativePath);
@@ -2983,7 +3136,7 @@ function FileNode({
           if (entry) onOpenFile?.(entry);
         }}
         onContextMenu={(event) => {
-          if (entry?.type === 'file') onOpenFileMenu?.(entry, event);
+          if (entry) onOpenEntryMenu?.(entry, event);
         }}
       >
         <span />
@@ -2997,7 +3150,7 @@ function FileNode({
               key={child.relativePath}
               {...(activeFilePath ? { activeFilePath } : {})}
               {...(onOpenFile ? { onOpenFile } : {})}
-              {...(onOpenFileMenu ? { onOpenFileMenu } : {})}
+              {...(onOpenEntryMenu ? { onOpenEntryMenu } : {})}
             />
           ))}
         </div>

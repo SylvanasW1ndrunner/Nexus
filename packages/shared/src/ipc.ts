@@ -42,8 +42,10 @@ export const ipcChannels = {
     listFiles: 'workspace:list-files',
     readFile: 'workspace:read-file',
     writeFile: 'workspace:write-file',
+    createDirectory: 'workspace:create-directory',
     renameFile: 'workspace:rename-file',
     deleteFile: 'workspace:delete-file',
+    deleteDirectory: 'workspace:delete-directory',
     saveSqlFile: 'workspace:save-sql-file',
     updateSettings: 'workspace:update-settings',
   },
@@ -472,6 +474,18 @@ export type WorkspaceWriteFileRequest = {
   content: string;
 };
 
+export type WorkspaceCreateDirectoryRequest = {
+  rootPath: string;
+  relativePath: string;
+};
+
+export type WorkspaceCreatedDirectory = {
+  name: string;
+  relativePath: string;
+  absolutePath: string;
+  updatedAt: string;
+};
+
 export type WorkspaceRenameFileRequest = {
   rootPath: string;
   fromRelativePath: string;
@@ -484,6 +498,15 @@ export type WorkspaceDeleteFileRequest = {
 };
 
 export type WorkspaceDeletedFile = {
+  relativePath: string;
+};
+
+export type WorkspaceDeleteDirectoryRequest = {
+  rootPath: string;
+  relativePath: string;
+};
+
+export type WorkspaceDeletedDirectory = {
   relativePath: string;
 };
 
@@ -545,8 +568,10 @@ export type IpcRequestMap = {
   'workspace:list-files': { rootPath: string };
   'workspace:read-file': WorkspaceReadFileRequest;
   'workspace:write-file': WorkspaceWriteFileRequest;
+  'workspace:create-directory': WorkspaceCreateDirectoryRequest;
   'workspace:rename-file': WorkspaceRenameFileRequest;
   'workspace:delete-file': WorkspaceDeleteFileRequest;
+  'workspace:delete-directory': WorkspaceDeleteDirectoryRequest;
   'workspace:save-sql-file': WorkspaceSaveSqlFileRequest;
   'workspace:update-settings': WorkspaceUpdateSettingsRequest;
 };
@@ -601,8 +626,10 @@ export type IpcResponseMap = {
   'workspace:list-files': Result<WorkspaceFileEntry[]>;
   'workspace:read-file': Result<WorkspaceFileContent>;
   'workspace:write-file': Result<WorkspaceSavedFile>;
+  'workspace:create-directory': Result<WorkspaceCreatedDirectory>;
   'workspace:rename-file': Result<WorkspaceSavedFile>;
   'workspace:delete-file': Result<WorkspaceDeletedFile>;
+  'workspace:delete-directory': Result<WorkspaceDeletedDirectory>;
   'workspace:save-sql-file': Result<WorkspaceSavedFile>;
   'workspace:update-settings': Result<WorkspaceProject>;
 };
