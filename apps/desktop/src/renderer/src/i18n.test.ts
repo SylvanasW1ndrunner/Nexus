@@ -11,4 +11,30 @@ describe('renderer i18n', () => {
     expect(createTranslator('en')('project')).toBe('Project');
     expect(createTranslator('zh-CN')('pythonEnvironment')).toBe('Python 环境');
   });
+
+  it('keeps critical Chinese workbench labels readable', () => {
+    const t = createTranslator('zh-CN');
+    const criticalLabels = [
+      t('createProject'),
+      t('openProject'),
+      t('ideSettings'),
+      t('projectSettings'),
+      t('terminal'),
+      t('pluginMarketplace'),
+      t('passwordLogin'),
+      t('sendCode'),
+    ];
+
+    expect(criticalLabels).toEqual([
+      '新建项目',
+      '打开项目',
+      'IDE 设置',
+      '项目设置',
+      '终端',
+      '插件市场',
+      '账密登录',
+      '发送验证码',
+    ]);
+    expect(criticalLabels.join('')).not.toMatch(/[\u951F\uFFFD\u93B5\u7481\u940E\u7F01]/);
+  });
 });
