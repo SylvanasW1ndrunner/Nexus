@@ -28,6 +28,11 @@ describe('renderer i18n', () => {
       t('newTerminal'),
       t('splitTerminal'),
       t('maximizePanel'),
+      t('commandRunPython'),
+      t('commandRunSql'),
+      t('commandOpenIdeSettings'),
+      t('commandToggleExplorer'),
+      t('commandSourceCore'),
     ];
 
     expect(criticalLabels).toEqual([
@@ -44,6 +49,11 @@ describe('renderer i18n', () => {
       '新建终端',
       '拆分终端',
       '最大化面板',
+      '运行当前 Python 文件',
+      '运行当前 SQL',
+      '打开 IDE 设置',
+      '切换资源管理器',
+      '核心',
     ]);
     expect(criticalLabels.join('')).not.toMatch(/[\u951F\uFFFD\u93B5\u7481\u940E\u7F01]/);
   });

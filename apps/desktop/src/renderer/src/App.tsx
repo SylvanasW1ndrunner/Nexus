@@ -202,8 +202,8 @@ export function App() {
     [activeConnectionId, connections],
   );
   const commandPaletteItems = useMemo(
-    () => buildCommandPaletteItems({ activeConnection, activeWorkspace, editorLanguage, plugins, result }),
-    [activeConnection, activeWorkspace, editorLanguage, plugins, result],
+    () => buildCommandPaletteItems({ activeConnection, activeWorkspace, editorLanguage, plugins, result, t }),
+    [activeConnection, activeWorkspace, editorLanguage, plugins, result, t],
   );
 
   useEffect(() => {
@@ -3828,43 +3828,49 @@ function buildCommandPaletteItems({
   editorLanguage,
   plugins,
   result,
+  t,
 }: {
   activeConnection: SavedConnection | undefined;
   activeWorkspace: WorkspaceProject | undefined;
   editorLanguage: EditorLanguage;
   plugins: PluginManifest[];
   result: QueryExecutionResult | undefined;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
 }): CommandPaletteItem[] {
   const isSql = editorLanguage === 'sql';
+  const coreSource = t('commandSourceCore');
+  const fileCategory = t('commandCategoryFile');
+  const settingsCategory = t('commandCategorySettings');
+  const viewCategory = t('commandCategoryView');
   const coreCommands: CommandPaletteItem[] = [
-    { id: 'core.newProject', title: 'New Project', category: 'File', source: 'Core', enabled: true },
-    { id: 'core.openProject', title: 'Open Project', category: 'File', source: 'Core', enabled: true },
-    { id: 'core.saveFile', title: 'Save File', category: 'File', source: 'Core', enabled: true },
+    { id: 'core.newProject', title: t('createProject'), category: fileCategory, source: coreSource, enabled: true },
+    { id: 'core.openProject', title: t('openProject'), category: fileCategory, source: coreSource, enabled: true },
+    { id: 'core.saveFile', title: t('saveFile'), category: fileCategory, source: coreSource, enabled: true },
     {
       id: 'core.runPython',
-      title: 'Run Current Python File',
+      title: t('commandRunPython'),
       category: 'Python',
-      source: 'Core',
+      source: coreSource,
       enabled: editorLanguage === 'python' && Boolean(activeWorkspace),
     },
-    { id: 'core.runSql', title: 'Run Current SQL', category: 'SQL', source: 'Core', enabled: isSql && Boolean(activeConnection) },
+    { id: 'core.runSql', title: t('commandRunSql'), category: 'SQL', source: coreSource, enabled: isSql && Boolean(activeConnection) },
     {
       id: 'core.explainSql',
-      title: 'Explain Current SQL',
+      title: t('commandExplainSql'),
       category: 'SQL',
-      source: 'Core',
+      source: coreSource,
       enabled: isSql && Boolean(activeConnection),
     },
-    { id: 'core.openIdeSettings', title: 'Open IDE Settings', category: 'Settings', source: 'Core', enabled: true },
+    { id: 'core.openIdeSettings', title: t('commandOpenIdeSettings'), category: settingsCategory, source: coreSource, enabled: true },
     {
       id: 'core.openProjectSettings',
-      title: 'Open Project Settings',
-      category: 'Settings',
-      source: 'Core',
+      title: t('commandOpenProjectSettings'),
+      category: settingsCategory,
+      source: coreSource,
       enabled: Boolean(activeWorkspace),
     },
-    { id: 'core.toggleLeftSidebar', title: 'Toggle Explorer', category: 'View', source: 'Core', enabled: true },
-    { id: 'core.toggleRightSidebar', title: 'Toggle Assistant Panel', category: 'View', source: 'Core', enabled: true },
+    { id: 'core.toggleLeftSidebar', title: t('commandToggleExplorer'), category: viewCategory, source: coreSource, enabled: true },
+    { id: 'core.toggleRightSidebar', title: t('commandToggleAgentPanel'), category: viewCategory, source: coreSource, enabled: true },
   ];
 
   const pluginCommands = plugins.flatMap((plugin) => {
