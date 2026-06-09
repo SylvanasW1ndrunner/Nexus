@@ -41,6 +41,7 @@ import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
+import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
 
@@ -3076,8 +3077,10 @@ function EditorPane({
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedSql: string } | undefined>();
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [terminalMenuOpen, setTerminalMenuOpen] = useState(false);
   const isSqlDocument = editorLanguage === 'sql';
   const activeTerminal = terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
+  const terminalActions = buildTerminalActionMenu({ hasActiveTerminal: Boolean(activeTerminal), maximized: terminalMaximized });
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -3089,6 +3092,10 @@ function EditorPane({
       window.removeEventListener('keydown', closeMenu);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    if (bottomPanel !== 'console') setTerminalMenuOpen(false);
+  }, [bottomPanel]);
 
   function getSelectedSql(): string {
     const editor = editorRef.current;
@@ -3108,6 +3115,15 @@ function EditorPane({
     setContextMenu(undefined);
     if (!nextSql.trim()) return;
     onExecuteSql(nextSql);
+  }
+
+  function runTerminalAction(actionId: TerminalActionId) {
+    setTerminalMenuOpen(false);
+    if (actionId === 'new') onCreateTerminal();
+    if (actionId === 'split') onSplitTerminal();
+    if (actionId === 'clear' && activeTerminal) onClearTerminal(activeTerminal.id);
+    if (actionId === 'close' && activeTerminal) onCloseTerminal(activeTerminal.id);
+    if (actionId === 'toggle-maximize') onToggleTerminalMaximized();
   }
 
   return (
@@ -3298,9 +3314,23 @@ function EditorPane({
               >
                 <span className="icon-glyph clear-terminal" aria-hidden="true" />
               </button>
-              <button className="terminal-tool" disabled type="button" title={t('moreActions')}>
+              <button
+                className={terminalMenuOpen ? 'terminal-tool active' : 'terminal-tool'}
+                type="button"
+                title={t('moreActions')}
+                onClick={() => setTerminalMenuOpen((open) => !open)}
+              >
                 <span className="icon-glyph more" aria-hidden="true" />
               </button>
+              {terminalMenuOpen ? (
+                <div className="tool-menu terminal-menu">
+                  {terminalActions.map((action) => (
+                    <button disabled={!action.enabled} key={action.id} type="button" onClick={() => runTerminalAction(action.id)}>
+                      {t(action.labelKey)}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <button
                 className={terminalMaximized ? 'terminal-tool active' : 'terminal-tool'}
                 type="button"
