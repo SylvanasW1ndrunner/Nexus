@@ -1222,6 +1222,23 @@ small {
   line-height: 1.55;
 }
 
+.terminal-output.cursor-blink::after {
+  content: " ";
+  display: inline-block;
+  width: 7px;
+  height: 1.1em;
+  margin-left: 2px;
+  background: #cccccc;
+  vertical-align: -0.2em;
+  animation: terminal-cursor-blink 1s steps(1) infinite;
+}
+
+@keyframes terminal-cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 .terminal-command-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

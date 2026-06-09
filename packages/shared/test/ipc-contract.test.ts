@@ -29,6 +29,8 @@ describe('ipc contract', () => {
       'db:describe-table',
       'app:load-workspace-state',
       'app:save-workspace-state',
+      'app:load-ide-settings',
+      'app:save-ide-settings',
       'workspace:choose-directory',
       'workspace:create',
       'workspace:open',

@@ -16,6 +16,7 @@ import {
   queryResultToJson,
   type ConnectionInput,
   type AuthStatus,
+  type IdeSettings,
   type PluginManifest,
   type PythonEnvironmentInfo,
   type QueryExecutionResult,
@@ -87,6 +88,29 @@ const defaultWorkspacePythonDraft: WorkspacePythonConfig = {
   requirementsPath: 'scripts/requirements.txt',
 };
 
+const defaultIdeSettings: IdeSettings = {
+  appearance: {
+    language: 'zh-CN',
+    theme: 'dark',
+    density: 'compact',
+  },
+  editor: {
+    fontFamily: 'JetBrains Mono, Consolas, SFMono-Regular, monospace',
+    fontSize: 13,
+    tabSize: 2,
+    wordWrap: 'on',
+    minimap: false,
+    lineNumbers: true,
+  },
+  terminal: {
+    defaultShell: '',
+    fontFamily: 'JetBrains Mono, Consolas, SFMono-Regular, monospace',
+    fontSize: 13,
+    scrollback: 5000,
+    cursorBlink: true,
+  },
+};
+
 const defaultEditorDocument: EditorDocument = {
   title: '欢迎',
   language: 'plaintext',
@@ -136,6 +160,7 @@ export function App() {
     docs: 'docs',
     outputs: 'outputs',
   });
+  const [ideSettings, setIdeSettings] = useState<IdeSettings>(defaultIdeSettings);
   const [workspacePythonDraft, setWorkspacePythonDraft] = useState<WorkspacePythonConfig>(defaultWorkspacePythonDraft);
   const [pythonEnvironments, setPythonEnvironments] = useState<PythonEnvironmentInfo[]>([]);
   const [terminals, setTerminals] = useState<TerminalView[]>([]);
@@ -163,7 +188,7 @@ export function App() {
   useEffect(() => {
     void refreshConnections();
     void refreshWorkspace();
-    void initializeTerminal();
+    void initializeIdeShell();
     void refreshPlugins();
   }, []);
 
@@ -241,6 +266,32 @@ export function App() {
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+  }
+
+  async function initializeIdeShell() {
+    await refreshIdeSettings();
+    await initializeTerminal();
+  }
+
+  async function refreshIdeSettings() {
+    const response = await window.dbagent.invoke(ipcChannels.app.loadIdeSettings, undefined);
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setIdeSettings(response.data);
+    setLanguage(response.data.appearance.language);
+  }
+
+  async function saveIdeSettings(nextSettings: IdeSettings) {
+    const response = await window.dbagent.invoke(ipcChannels.app.saveIdeSettings, nextSettings);
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setIdeSettings(response.data);
+    setLanguage(response.data.appearance.language);
+    setMessage(response.data.appearance.language === 'zh-CN' ? 'IDE 设置已保存。' : 'IDE settings saved.');
   }
 
   async function initializeTerminal() {
@@ -960,6 +1011,7 @@ export function App() {
               sql={sql}
               t={t}
               activeTerminalId={activeTerminalId}
+              ideSettings={ideSettings}
               terminals={terminals}
               onChangeSql={handleEditorChange}
               onCloseTerminal={(id) => void closeTerminal(id)}
@@ -1030,10 +1082,9 @@ export function App() {
           settingsDraft={workspaceSettingsDraft}
           pythonEnvironments={pythonEnvironments}
           plugins={plugins}
-          language={language}
+          ideSettings={ideSettings}
           setConnectionDraft={setConnectionDraft}
           setCreateConnection={setCreateConnectionDuringWorkspace}
-          setLanguage={setLanguage}
           setSelectedDatabaseEngine={setSelectedDatabaseEngine}
           setSettingsDraft={setWorkspaceSettingsDraft}
           setWorkspaceDraft={setWorkspaceDraft}
@@ -1054,6 +1105,7 @@ export function App() {
           onDisconnect={() => void disconnectActive()}
           onPreviewTable={previewTable}
           onSaveSettings={() => void updateWorkspaceSettings()}
+          onSaveIdeSettings={(settings) => void saveIdeSettings(settings)}
           onDetectPython={() => void detectPythonEnvironments()}
           onUpdatePlugin={(id, installed) => void updatePlugin(id, installed)}
           onSelectConnection={selectConnection}
@@ -1243,16 +1295,15 @@ function WorkspaceDialog({
   connectionDraft,
   connections,
   createConnection,
-  language,
   mode,
   selectedDatabaseEngine,
   selectedTable,
+  ideSettings,
   settingsDraft,
   pythonEnvironments,
   plugins,
   setConnectionDraft,
   setCreateConnection,
-  setLanguage,
   setSelectedDatabaseEngine,
   setSettingsDraft,
   setWorkspaceDraft,
@@ -1273,6 +1324,7 @@ function WorkspaceDialog({
   onDisconnect,
   onPreviewTable,
   onSaveSettings,
+  onSaveIdeSettings,
   onDetectPython,
   onUpdatePlugin,
   onSelectConnection,
@@ -1284,16 +1336,15 @@ function WorkspaceDialog({
   connectionDraft: ConnectionInput;
   connections: SavedConnection[];
   createConnection: boolean;
-  language: AppLanguage;
   mode: WorkspaceDialogMode;
   selectedDatabaseEngine: ConnectionInput['engine'];
   selectedTable: TableDetail | undefined;
+  ideSettings: IdeSettings;
   settingsDraft: WorkspaceProject['assetPaths'];
   pythonEnvironments: PythonEnvironmentInfo[];
   plugins: PluginManifest[];
   setConnectionDraft: (draft: ConnectionInput) => void;
   setCreateConnection: (enabled: boolean) => void;
-  setLanguage: (language: AppLanguage) => void;
   setSelectedDatabaseEngine: (engine: ConnectionInput['engine']) => void;
   setSettingsDraft: (draft: WorkspaceProject['assetPaths']) => void;
   setWorkspaceDraft: (draft: WorkspaceDraft) => void;
@@ -1314,6 +1365,7 @@ function WorkspaceDialog({
   onDisconnect: () => void;
   onPreviewTable: (table: TableSummary) => void;
   onSaveSettings: () => void;
+  onSaveIdeSettings: (settings: IdeSettings) => void;
   onDetectPython: () => void;
   onUpdatePlugin: (id: string, installed: boolean) => void;
   onSelectConnection: (connection: SavedConnection) => void;
@@ -1326,6 +1378,10 @@ function WorkspaceDialog({
   const [ideSettingsSection, setIdeSettingsSection] = useState<'appearance' | 'editor' | 'terminal' | 'account' | 'plugins'>(
     'appearance',
   );
+  const [ideDraft, setIdeDraft] = useState<IdeSettings>(ideSettings);
+  useEffect(() => {
+    setIdeDraft(ideSettings);
+  }, [ideSettings]);
   return (
     <div className="modal-backdrop" role="presentation">
       <section
@@ -1645,15 +1701,53 @@ function WorkspaceDialog({
                     <div className="modal-grid two">
                       <label>
                         <span>{t('language')}</span>
-                        <select value={language} onChange={(event) => setLanguage(event.target.value as AppLanguage)}>
+                        <select
+                          value={ideDraft.appearance.language}
+                          onChange={(event) =>
+                            setIdeDraft({
+                              ...ideDraft,
+                              appearance: { ...ideDraft.appearance, language: event.target.value as AppLanguage },
+                            })
+                          }
+                        >
                           <option value="zh-CN">中文</option>
                           <option value="en">English</option>
                         </select>
                       </label>
                       <label>
                         <span>{t('theme')}</span>
-                        <select value="dark" disabled>
+                        <select
+                          value={ideDraft.appearance.theme}
+                          onChange={(event) =>
+                            setIdeDraft({
+                              ...ideDraft,
+                              appearance: {
+                                ...ideDraft.appearance,
+                                theme: event.target.value as IdeSettings['appearance']['theme'],
+                              },
+                            })
+                          }
+                        >
                           <option value="dark">{t('themeDark')}</option>
+                          <option value="light">Light</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>密度</span>
+                        <select
+                          value={ideDraft.appearance.density}
+                          onChange={(event) =>
+                            setIdeDraft({
+                              ...ideDraft,
+                              appearance: {
+                                ...ideDraft.appearance,
+                                density: event.target.value as IdeSettings['appearance']['density'],
+                              },
+                            })
+                          }
+                        >
+                          <option value="compact">紧凑</option>
+                          <option value="comfortable">舒适</option>
                         </select>
                       </label>
                     </div>
@@ -1668,11 +1762,69 @@ function WorkspaceDialog({
                     <div className="modal-grid two">
                       <label>
                         <span>{t('fontFamily')}</span>
-                        <input disabled value="JetBrains Mono, Consolas" />
+                        <input
+                          value={ideDraft.editor.fontFamily}
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, editor: { ...ideDraft.editor, fontFamily: event.target.value } })
+                          }
+                        />
                       </label>
                       <label>
                         <span>{t('fontSize')}</span>
-                        <input disabled type="number" value={13} />
+                        <input
+                          max={28}
+                          min={10}
+                          type="number"
+                          value={ideDraft.editor.fontSize}
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, editor: { ...ideDraft.editor, fontSize: Number(event.target.value) } })
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>Tab Size</span>
+                        <input
+                          max={8}
+                          min={2}
+                          type="number"
+                          value={ideDraft.editor.tabSize}
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, editor: { ...ideDraft.editor, tabSize: Number(event.target.value) } })
+                          }
+                        />
+                      </label>
+                      <label className="switch-row">
+                        <input
+                          checked={ideDraft.editor.wordWrap === 'on'}
+                          type="checkbox"
+                          onChange={(event) =>
+                            setIdeDraft({
+                              ...ideDraft,
+                              editor: { ...ideDraft.editor, wordWrap: event.target.checked ? 'on' : 'off' },
+                            })
+                          }
+                        />
+                        <span>自动换行</span>
+                      </label>
+                      <label className="switch-row">
+                        <input
+                          checked={ideDraft.editor.minimap}
+                          type="checkbox"
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, editor: { ...ideDraft.editor, minimap: event.target.checked } })
+                          }
+                        />
+                        <span>Minimap</span>
+                      </label>
+                      <label className="switch-row">
+                        <input
+                          checked={ideDraft.editor.lineNumbers}
+                          type="checkbox"
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, editor: { ...ideDraft.editor, lineNumbers: event.target.checked } })
+                          }
+                        />
+                        <span>行号</span>
                       </label>
                     </div>
                   </section>
@@ -1686,11 +1838,57 @@ function WorkspaceDialog({
                     <div className="modal-grid two">
                       <label>
                         <span>{t('defaultShell')}</span>
-                        <input disabled value="PowerShell / bash" />
+                        <input
+                          placeholder="留空则使用系统默认 shell"
+                          value={ideDraft.terminal.defaultShell}
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, terminal: { ...ideDraft.terminal, defaultShell: event.target.value } })
+                          }
+                        />
                       </label>
                       <label>
-                        <span>{t('terminalCount')}</span>
-                        <input disabled type="number" value={1} />
+                        <span>{t('fontFamily')}</span>
+                        <input
+                          value={ideDraft.terminal.fontFamily}
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, terminal: { ...ideDraft.terminal, fontFamily: event.target.value } })
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>{t('fontSize')}</span>
+                        <input
+                          max={28}
+                          min={10}
+                          type="number"
+                          value={ideDraft.terminal.fontSize}
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, terminal: { ...ideDraft.terminal, fontSize: Number(event.target.value) } })
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>Scrollback</span>
+                        <input
+                          max={100000}
+                          min={1000}
+                          step={1000}
+                          type="number"
+                          value={ideDraft.terminal.scrollback}
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, terminal: { ...ideDraft.terminal, scrollback: Number(event.target.value) } })
+                          }
+                        />
+                      </label>
+                      <label className="switch-row">
+                        <input
+                          checked={ideDraft.terminal.cursorBlink}
+                          type="checkbox"
+                          onChange={(event) =>
+                            setIdeDraft({ ...ideDraft, terminal: { ...ideDraft.terminal, cursorBlink: event.target.checked } })
+                          }
+                        />
+                        <span>光标闪烁</span>
                       </label>
                     </div>
                   </section>
@@ -1702,8 +1900,11 @@ function WorkspaceDialog({
               </div>
             </div>
             <div className="modal-actions">
-              <button className="primary-action" type="button" onClick={onClose}>
-                {t('close')}
+              <button className="secondary" type="button" onClick={() => setIdeDraft(ideSettings)}>
+                重置
+              </button>
+              <button className="primary-action" type="button" onClick={() => onSaveIdeSettings(ideDraft)}>
+                {t('saveSettings')}
               </button>
             </div>
           </>
@@ -2418,6 +2619,7 @@ function EditorPane({
   bottomPanel,
   document,
   editorLanguage,
+  ideSettings,
   message,
   result,
   sql,
@@ -2442,6 +2644,7 @@ function EditorPane({
   bottomPanel: 'results' | 'console';
   document: EditorDocument;
   editorLanguage: EditorLanguage;
+  ideSettings: IdeSettings;
   message: string;
   result: QueryExecutionResult | undefined;
   sql: string;
@@ -2532,12 +2735,14 @@ function EditorPane({
             height="100%"
             language={editorLanguage}
             options={{
-              fontFamily: 'JetBrains Mono, Consolas, SFMono-Regular, monospace',
-              fontSize: 13,
-              minimap: { enabled: false },
+              fontFamily: ideSettings.editor.fontFamily,
+              fontSize: ideSettings.editor.fontSize,
+              lineNumbers: ideSettings.editor.lineNumbers ? 'on' : 'off',
+              minimap: { enabled: ideSettings.editor.minimap },
               padding: { top: 14 },
               scrollBeyondLastLine: false,
-              wordWrap: 'on',
+              tabSize: ideSettings.editor.tabSize,
+              wordWrap: ideSettings.editor.wordWrap,
             }}
             theme="vs-dark"
             value={sql}
@@ -2655,6 +2860,7 @@ function EditorPane({
           <TerminalPanel
             activeTerminalId={activeTerminalId}
             terminals={terminals}
+            terminalSettings={ideSettings.terminal}
             t={t}
             onCloseTerminal={onCloseTerminal}
             onCreateTerminal={onCreateTerminal}
@@ -2671,6 +2877,7 @@ function EditorPane({
 function TerminalPanel({
   activeTerminalId,
   terminals,
+  terminalSettings,
   t,
   onCloseTerminal,
   onCreateTerminal,
@@ -2680,6 +2887,7 @@ function TerminalPanel({
 }: {
   activeTerminalId: string;
   terminals: TerminalView[];
+  terminalSettings: IdeSettings['terminal'];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   onCloseTerminal: (id: string) => void;
   onCreateTerminal: () => void;
@@ -2723,7 +2931,12 @@ function TerminalPanel({
       </div>
       {activeTerminal ? (
         <>
-          <pre className="terminal-output">{activeTerminal.output || t('consoleHint')}</pre>
+          <pre
+            className={terminalSettings.cursorBlink ? 'terminal-output cursor-blink' : 'terminal-output'}
+            style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}
+          >
+            {activeTerminal.output || t('consoleHint')}
+          </pre>
           <div className="terminal-command-row">
             <span>&gt;</span>
             <input

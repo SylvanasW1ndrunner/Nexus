@@ -30,6 +30,8 @@ export const ipcChannels = {
   app: {
     loadWorkspaceState: 'app:load-workspace-state',
     saveWorkspaceState: 'app:save-workspace-state',
+    loadIdeSettings: 'app:load-ide-settings',
+    saveIdeSettings: 'app:save-ide-settings',
   },
   workspace: {
     chooseDirectory: 'workspace:choose-directory',
@@ -267,6 +269,29 @@ export type WorkspacePythonConfig = {
   requirementsPath: string;
 };
 
+export type IdeSettings = {
+  appearance: {
+    language: 'zh-CN' | 'en';
+    theme: 'dark' | 'light';
+    density: 'compact' | 'comfortable';
+  };
+  editor: {
+    fontFamily: string;
+    fontSize: number;
+    tabSize: number;
+    wordWrap: 'on' | 'off';
+    minimap: boolean;
+    lineNumbers: boolean;
+  };
+  terminal: {
+    defaultShell: string;
+    fontFamily: string;
+    fontSize: number;
+    scrollback: number;
+    cursorBlink: boolean;
+  };
+};
+
 export type PythonEnvironmentInfo = {
   id: string;
   mode: WorkspacePythonConfig['mode'];
@@ -465,6 +490,8 @@ export type IpcRequestMap = {
   'usage:history': { limit?: number };
   'app:load-workspace-state': void;
   'app:save-workspace-state': WorkspaceState;
+  'app:load-ide-settings': void;
+  'app:save-ide-settings': Partial<IdeSettings>;
   'workspace:choose-directory': { title?: string; buttonLabel?: string };
   'workspace:create': WorkspaceCreateRequest;
   'workspace:open': WorkspaceOpenRequest;
@@ -514,6 +541,8 @@ export type IpcResponseMap = {
   'usage:history': Result<UsageSnapshot[]>;
   'app:load-workspace-state': Result<WorkspaceState | undefined>;
   'app:save-workspace-state': Result<WorkspaceState>;
+  'app:load-ide-settings': Result<IdeSettings>;
+  'app:save-ide-settings': Result<IdeSettings>;
   'workspace:choose-directory': Result<{ path?: string }>;
   'workspace:create': Result<WorkspaceProject>;
   'workspace:open': Result<WorkspaceProject>;

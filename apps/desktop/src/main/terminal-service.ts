@@ -24,13 +24,19 @@ export class TerminalService {
   private readonly sessions = new Map<string, TerminalSession>();
   private readonly runtimes = new Map<string, TerminalRuntime>();
 
+  constructor(private options: { defaultShell?: string } = {}) {}
+
+  configure(options: { defaultShell?: string }): void {
+    this.options = { ...this.options, ...options };
+  }
+
   list(): TerminalSession[] {
     return [...this.sessions.values()];
   }
 
   create(input: { cwd?: string; name?: string } = {}): TerminalSession {
     const id = randomUUID();
-    const shell = getDefaultShell();
+    const shell = getDefaultShell(this.options.defaultShell);
     const cwd = input.cwd ?? process.cwd();
     const child = spawn(shell.command, shell.args, {
       cwd,
@@ -141,7 +147,15 @@ export class TerminalService {
   }
 }
 
-function getDefaultShell(): { command: string; args: string[]; label: string } {
+function getDefaultShell(configuredShell?: string): { command: string; args: string[]; label: string } {
+  if (configuredShell?.trim()) {
+    const command = configuredShell.trim();
+    return {
+      command,
+      args: [],
+      label: command.split(/[\\/]/).at(-1) ?? command,
+    };
+  }
   if (process.platform === 'win32') {
     return {
       command: process.env.ComSpec ?? 'cmd.exe',

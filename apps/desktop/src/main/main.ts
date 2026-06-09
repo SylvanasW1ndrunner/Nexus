@@ -20,6 +20,7 @@ import { CredentialVault } from './credential-vault.js';
 import { createExplainWorkflow } from './explain-workflow.js';
 import { createQueryWorkflow } from './query-workflow.js';
 import { createSchemaWorkflow } from './schema-workflow.js';
+import { IdeSettingsStore } from './ide-settings-store.js';
 import { PluginRegistry } from './plugin-registry.js';
 import { PythonEnvironmentService } from './python-environment.js';
 import { TerminalService } from './terminal-service.js';
@@ -33,11 +34,13 @@ const credentialPath = join(dataDir, 'credentials.json');
 const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
 const pluginStatePath = join(dataDir, 'plugins.json');
+const ideSettingsPath = join(dataDir, 'ide-settings.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
 const workspaceStateStore = new WorkspaceStateStore(workspaceStatePath);
 const workspaceProjectStore = new WorkspaceProjectStore(workspaceProjectStatePath);
+const ideSettingsStore = new IdeSettingsStore(ideSettingsPath);
 const authRepository = process.env.DBAGENT_AUTH_DATABASE_URL
   ? new PostgresAuthRepository(process.env.DBAGENT_AUTH_DATABASE_URL)
   : new UnavailableAuthRepository('Authentication requires DBAGENT_AUTH_DATABASE_URL pointing to a PostgreSQL database.');
@@ -247,6 +250,16 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.app.loadWorkspaceState, async () => ok(await workspaceStateStore.load()));
   handle(ipcChannels.app.saveWorkspaceState, async (state) => {
     return ok(await workspaceStateStore.save(state));
+  });
+  handle(ipcChannels.app.loadIdeSettings, async () => {
+    const settings = await ideSettingsStore.load();
+    terminalService.configure({ defaultShell: settings.terminal.defaultShell });
+    return ok(settings);
+  });
+  handle(ipcChannels.app.saveIdeSettings, async (patch) => {
+    const settings = await ideSettingsStore.save(patch);
+    terminalService.configure({ defaultShell: settings.terminal.defaultShell });
+    return ok(settings);
   });
 
   handle(ipcChannels.workspace.chooseDirectory, async (request) => {
