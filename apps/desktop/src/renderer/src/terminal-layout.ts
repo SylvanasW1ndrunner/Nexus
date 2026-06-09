@@ -32,3 +32,10 @@ export function resolveTerminalCloseState<T extends TerminalLayoutSession>(
     terminals: nextTerminals,
   };
 }
+
+export function selectTerminalOutputTarget<T extends TerminalLayoutSession>(
+  terminals: T[],
+  activeTerminalId: string,
+): T | undefined {
+  return terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
+}

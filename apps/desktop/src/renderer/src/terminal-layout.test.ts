@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveTerminalCloseState, selectVisibleTerminals } from './terminal-layout.js';
+import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
 
 describe('terminal panel layout', () => {
   const terminals = [{ id: 'one' }, { id: 'two' }, { id: 'three' }];
@@ -42,5 +42,11 @@ describe('terminal panel layout', () => {
       splitTerminalId: '',
       terminals: [],
     });
+  });
+
+  it('selects a real terminal for script output', () => {
+    expect(selectTerminalOutputTarget(terminals, 'two')?.id).toBe('two');
+    expect(selectTerminalOutputTarget(terminals, 'missing')?.id).toBe('one');
+    expect(selectTerminalOutputTarget([], 'missing')).toBeUndefined();
   });
 });

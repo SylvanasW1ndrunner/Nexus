@@ -41,7 +41,7 @@ import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 import { filterPlugins, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
-import { resolveTerminalCloseState, selectVisibleTerminals } from './terminal-layout.js';
+import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
 
 const starterSql = '';
@@ -875,8 +875,15 @@ export function App() {
       const saved = await saveCurrentDocument();
       if (saved === false) return;
     }
+    let outputTerminalId = selectTerminalOutputTarget(terminals, activeTerminalId)?.id;
+    if (!outputTerminalId) {
+      const terminal = await createTerminal();
+      if (!terminal) return;
+      outputTerminalId = terminal.id;
+    }
     setBottomPanel('console');
-    appendTerminalText(`\n> python ${editorDocument.relativePath ?? editorDocument.title}\n`);
+    setActiveTerminalId(outputTerminalId);
+    appendTerminalText(`\n> python ${editorDocument.relativePath ?? editorDocument.title}\n`, outputTerminalId);
     const response = await window.dbagent.invoke(ipcChannels.python.runScript, {
       rootPath: activeWorkspace.rootPath,
       config: workspacePythonDraft,
@@ -885,11 +892,14 @@ export function App() {
     });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
-      appendTerminalText(`${formatAppError(response.error)}\n`);
+      appendTerminalText(`${formatAppError(response.error)}\n`, outputTerminalId);
       return;
     }
     const output = [response.data.stdout, response.data.stderr].filter(Boolean).join('\n');
-    appendTerminalText(`${output}${output ? '\n' : ''}[python exit ${response.data.exitCode ?? 'unknown'} / ${response.data.elapsedMs} ms]\n`);
+    appendTerminalText(
+      `${output}${output ? '\n' : ''}[python exit ${response.data.exitCode ?? 'unknown'} / ${response.data.elapsedMs} ms]\n`,
+      outputTerminalId,
+    );
     setMessage(
       response.data.exitCode === 0
         ? language === 'zh-CN'
@@ -901,25 +911,12 @@ export function App() {
     );
   }
 
-  function appendTerminalText(text: string) {
+  function appendTerminalText(text: string, targetTerminalId = activeTerminalId) {
     setTerminals((current) => {
-      if (!current.length) {
-        return [
-          {
-            id: 'python-output',
-            name: 'Python',
-            createdAt: new Date().toISOString(),
-            input: '',
-            output: text,
-            running: false,
-            cursor: 0,
-          },
-        ];
-      }
-      const targetId = activeTerminalId || current[0]?.id;
+      const targetId = selectTerminalOutputTarget(current, targetTerminalId)?.id;
+      if (!targetId) return current;
       return current.map((terminal) => (terminal.id === targetId ? { ...terminal, output: `${terminal.output}${text}` } : terminal));
     });
-    if (!activeTerminalId) setActiveTerminalId((current) => current || 'python-output');
   }
 
   function previewTable(table: TableSummary) {
