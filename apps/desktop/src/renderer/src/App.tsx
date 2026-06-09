@@ -35,6 +35,7 @@ import {
   type AgentConversation,
   type AgentMessage,
 } from './agent-chat.js';
+import { authCodePurpose, canRequestAuthCode, canSubmitAuthForm, inferAuthChannel, type AuthFormMode } from './auth-form.js';
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
@@ -2224,12 +2225,15 @@ function AccountSettingsPanel({
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
 }) {
   const [status, setStatus] = useState<AuthStatus>({ authenticated: false });
-  const [mode, setMode] = useState<'login' | 'register' | 'code-login' | 'reset-password'>('login');
+  const [mode, setMode] = useState<AuthFormMode>('login');
   const [target, setTarget] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [message, setMessage] = useState('');
-  const channel = target.includes('@') ? 'email' : 'phone';
+  const [busy, setBusy] = useState(false);
+  const channel = inferAuthChannel(target);
+  const codeRequestEnabled = canRequestAuthCode({ mode, target, busy });
+  const submitEnabled = canSubmitAuthForm({ mode, target, password, code, busy });
 
   useEffect(() => {
     void window.dbagent.invoke(ipcChannels.auth.status, undefined).then((response) => {
@@ -2238,40 +2242,64 @@ function AccountSettingsPanel({
   }, []);
 
   async function requestCode() {
-    const purpose = mode === 'register' ? 'register' : mode === 'reset-password' ? 'reset-password' : 'login';
-    const response = await window.dbagent.invoke(ipcChannels.auth.requestCode, { target, channel, purpose });
-    setMessage(response.ok ? `${t('verificationCodeSent')}: ${response.data.devCode ?? response.data.expiresAt}` : formatAppError(response.error));
+    if (!codeRequestEnabled) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const response = await window.dbagent.invoke(ipcChannels.auth.requestCode, { target, channel, purpose: authCodePurpose(mode) });
+      setMessage(response.ok ? `${t('verificationCodeSent')}: ${response.data.devCode ?? response.data.expiresAt}` : formatAppError(response.error));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function submit() {
-    const response =
-      mode === 'login'
-        ? await window.dbagent.invoke(ipcChannels.auth.login, { identifier: target, password })
-        : mode === 'register'
-          ? await window.dbagent.invoke(ipcChannels.auth.register, {
-              ...(channel === 'email' ? { email: target } : { phone: target }),
-              password,
-              verificationCode: code,
-            })
-          : mode === 'code-login'
-            ? await window.dbagent.invoke(ipcChannels.auth.verifyCodeLogin, { target, channel, verificationCode: code })
-            : await window.dbagent.invoke(ipcChannels.auth.resetPassword, {
-                target,
-                channel,
+    if (!submitEnabled) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const response =
+        mode === 'login'
+          ? await window.dbagent.invoke(ipcChannels.auth.login, { identifier: target, password })
+          : mode === 'register'
+            ? await window.dbagent.invoke(ipcChannels.auth.register, {
+                ...(channel === 'email' ? { email: target } : { phone: target }),
+                password,
                 verificationCode: code,
-                newPassword: password,
-              });
-    if (response.ok) {
-      setStatus(response.data);
-      setMessage(t('accountUpdated'));
-    } else {
-      setMessage(formatAppError(response.error));
+              })
+            : mode === 'code-login'
+              ? await window.dbagent.invoke(ipcChannels.auth.verifyCodeLogin, { target, channel, verificationCode: code })
+              : await window.dbagent.invoke(ipcChannels.auth.resetPassword, {
+                  target,
+                  channel,
+                  verificationCode: code,
+                  newPassword: password,
+                });
+      if (response.ok) {
+        setStatus(response.data);
+        setMessage(t('accountUpdated'));
+      } else {
+        setMessage(formatAppError(response.error));
+      }
+    } finally {
+      setBusy(false);
     }
   }
 
   async function logout() {
-    const response = await window.dbagent.invoke(ipcChannels.auth.logout, undefined);
-    if (response.ok) setStatus(response.data);
+    setBusy(true);
+    try {
+      const response = await window.dbagent.invoke(ipcChannels.auth.logout, undefined);
+      if (response.ok) setStatus(response.data);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function changeMode(nextMode: AuthFormMode) {
+    setMode(nextMode);
+    setCode('');
+    setMessage('');
   }
 
   return (
@@ -2281,23 +2309,30 @@ function AccountSettingsPanel({
         <small>{status.authenticated ? status.user?.email || status.user?.phone : t('authDatabaseHint')}</small>
       </div>
       <div className="segmented-control">
-        <button className={mode === 'login' ? 'active' : ''} type="button" onClick={() => setMode('login')}>
+        <button className={mode === 'login' ? 'active' : ''} type="button" onClick={() => changeMode('login')}>
           {t('passwordLogin')}
         </button>
-        <button className={mode === 'code-login' ? 'active' : ''} type="button" onClick={() => setMode('code-login')}>
+        <button className={mode === 'code-login' ? 'active' : ''} type="button" onClick={() => changeMode('code-login')}>
           {t('codeLogin')}
         </button>
-        <button className={mode === 'register' ? 'active' : ''} type="button" onClick={() => setMode('register')}>
+        <button className={mode === 'register' ? 'active' : ''} type="button" onClick={() => changeMode('register')}>
           {t('register')}
         </button>
-        <button className={mode === 'reset-password' ? 'active' : ''} type="button" onClick={() => setMode('reset-password')}>
+        <button className={mode === 'reset-password' ? 'active' : ''} type="button" onClick={() => changeMode('reset-password')}>
           {t('forgotPassword')}
         </button>
       </div>
       <div className="modal-grid two">
         <label>
           <span>{t('emailOrPhone')}</span>
-          <input value={target} onChange={(event) => setTarget(event.target.value)} />
+          <input
+            value={target}
+            onChange={(event) => {
+              setTarget(event.target.value);
+              setCode('');
+              setMessage('');
+            }}
+          />
         </label>
         {mode === 'login' || mode === 'register' || mode === 'reset-password' ? (
           <label>
@@ -2310,8 +2345,8 @@ function AccountSettingsPanel({
             <span>{t('verificationCode')}</span>
             <div className="path-row">
               <input value={code} onChange={(event) => setCode(event.target.value)} />
-              <button className="secondary" type="button" onClick={() => void requestCode()}>
-                {t('sendCode')}
+              <button className="secondary" disabled={!codeRequestEnabled} type="button" onClick={() => void requestCode()}>
+                {busy ? t('running') : t('sendCode')}
               </button>
             </div>
           </label>
@@ -2321,12 +2356,12 @@ function AccountSettingsPanel({
         <small>{message}</small>
         <div>
           {status.authenticated ? (
-            <button className="secondary" type="button" onClick={() => void logout()}>
+            <button className="secondary" disabled={busy} type="button" onClick={() => void logout()}>
               {t('logout')}
             </button>
           ) : null}
-          <button className="primary-action" type="button" onClick={() => void submit()}>
-            {t('apply')}
+          <button className="primary-action" disabled={!submitEnabled} type="button" onClick={() => void submit()}>
+            {busy ? t('running') : t('apply')}
           </button>
         </div>
       </div>
