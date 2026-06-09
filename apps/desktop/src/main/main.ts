@@ -243,6 +243,8 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.plugin.list, async () => safeResult(() => pluginRegistry.list()));
   handle(ipcChannels.plugin.install, async ({ id }) => safeResult(() => pluginRegistry.install(id)));
   handle(ipcChannels.plugin.uninstall, async ({ id }) => safeResult(() => pluginRegistry.uninstall(id)));
+  handle(ipcChannels.plugin.enable, async ({ id }) => safeResult(() => pluginRegistry.enable(id)));
+  handle(ipcChannels.plugin.disable, async ({ id }) => safeResult(() => pluginRegistry.disable(id)));
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
   handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));

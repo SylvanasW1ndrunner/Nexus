@@ -1586,6 +1586,37 @@ select:focus {
   line-height: 1.5;
 }
 
+.plugin-meta,
+.plugin-contributes,
+.plugin-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.plugin-meta span,
+.plugin-contributes span {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid #303743;
+  border-radius: 4px;
+  color: #9aa4ad;
+  padding: 3px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.plugin-contributes span {
+  border-color: #25533a;
+  color: #7ee787;
+}
+
+.plugin-actions {
+  justify-content: flex-end;
+}
+
 .empty-state {
   border: 1px dashed #3a414d;
   border-radius: 8px;

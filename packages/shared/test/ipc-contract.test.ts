@@ -61,6 +61,8 @@ describe('ipc contract', () => {
       'plugin:list',
       'plugin:install',
       'plugin:uninstall',
+      'plugin:enable',
+      'plugin:disable',
       'usage:current-quota',
       'usage:history',
     ]);

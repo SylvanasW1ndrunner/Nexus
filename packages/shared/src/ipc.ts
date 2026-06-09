@@ -72,6 +72,8 @@ export const ipcChannels = {
     list: 'plugin:list',
     install: 'plugin:install',
     uninstall: 'plugin:uninstall',
+    enable: 'plugin:enable',
+    disable: 'plugin:disable',
   },
   usage: {
     currentQuota: 'usage:current-quota',
@@ -376,9 +378,30 @@ export type PluginManifest = {
   version: string;
   description: string;
   official: boolean;
+  builtin: boolean;
   enabled: boolean;
   installed: boolean;
   categories: Array<'database' | 'python' | 'visualization' | 'export' | 'productivity'>;
+  activationEvents: string[];
+  contributes: {
+    commands?: Array<{
+      id: string;
+      title: string;
+      category: string;
+    }>;
+    views?: Array<{
+      id: string;
+      title: string;
+      location: 'left-sidebar' | 'right-sidebar' | 'bottom-panel' | 'settings';
+    }>;
+    configuration?: Array<{
+      key: string;
+      type: 'string' | 'number' | 'boolean' | 'enum';
+      title: string;
+      defaultValue: string | number | boolean;
+      enumValues?: string[];
+    }>;
+  };
 };
 
 export type WorkspaceSummary = Pick<
@@ -486,6 +509,8 @@ export type IpcRequestMap = {
   'plugin:list': void;
   'plugin:install': { id: string };
   'plugin:uninstall': { id: string };
+  'plugin:enable': { id: string };
+  'plugin:disable': { id: string };
   'usage:current-quota': void;
   'usage:history': { limit?: number };
   'app:load-workspace-state': void;
@@ -537,6 +562,8 @@ export type IpcResponseMap = {
   'plugin:list': Result<PluginManifest[]>;
   'plugin:install': Result<PluginManifest>;
   'plugin:uninstall': Result<PluginManifest>;
+  'plugin:enable': Result<PluginManifest>;
+  'plugin:disable': Result<PluginManifest>;
   'usage:current-quota': Result<UsageSnapshot>;
   'usage:history': Result<UsageSnapshot[]>;
   'app:load-workspace-state': Result<WorkspaceState | undefined>;

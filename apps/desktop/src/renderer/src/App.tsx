@@ -394,6 +394,15 @@ export function App() {
     setPlugins((current) => current.map((plugin) => (plugin.id === id ? response.data : plugin)));
   }
 
+  async function setPluginEnabled(id: string, enabled: boolean) {
+    const response = await window.dbagent.invoke(enabled ? ipcChannels.plugin.disable : ipcChannels.plugin.enable, { id });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setPlugins((current) => current.map((plugin) => (plugin.id === id ? response.data : plugin)));
+  }
+
   async function detectPythonEnvironments() {
     const response = await window.dbagent.invoke(ipcChannels.python.detect, {
       ...(activeWorkspace ? { rootPath: activeWorkspace.rootPath } : {}),
@@ -1107,6 +1116,7 @@ export function App() {
           onSaveSettings={() => void updateWorkspaceSettings()}
           onSaveIdeSettings={(settings) => void saveIdeSettings(settings)}
           onDetectPython={() => void detectPythonEnvironments()}
+          onSetPluginEnabled={(id, enabled) => void setPluginEnabled(id, enabled)}
           onUpdatePlugin={(id, installed) => void updatePlugin(id, installed)}
           onSelectConnection={selectConnection}
           onTestConnection={() => void testConnection()}
@@ -1326,6 +1336,7 @@ function WorkspaceDialog({
   onSaveSettings,
   onSaveIdeSettings,
   onDetectPython,
+  onSetPluginEnabled,
   onUpdatePlugin,
   onSelectConnection,
   onTestConnection,
@@ -1367,6 +1378,7 @@ function WorkspaceDialog({
   onSaveSettings: () => void;
   onSaveIdeSettings: (settings: IdeSettings) => void;
   onDetectPython: () => void;
+  onSetPluginEnabled: (id: string, enabled: boolean) => void;
   onUpdatePlugin: (id: string, installed: boolean) => void;
   onSelectConnection: (connection: SavedConnection) => void;
   onTestConnection: () => void;
@@ -1895,7 +1907,12 @@ function WorkspaceDialog({
                 ) : null}
                 {ideSettingsSection === 'account' ? <AccountSettingsPanel t={t} /> : null}
                 {ideSettingsSection === 'plugins' ? (
-                  <PluginMarketplacePanel plugins={plugins} t={t} onUpdatePlugin={onUpdatePlugin} />
+                  <PluginMarketplacePanel
+                    plugins={plugins}
+                    t={t}
+                    onSetPluginEnabled={onSetPluginEnabled}
+                    onUpdatePlugin={onUpdatePlugin}
+                  />
                 ) : null}
               </div>
             </div>
@@ -2033,10 +2050,12 @@ function AccountSettingsPanel({
 function PluginMarketplacePanel({
   plugins,
   t,
+  onSetPluginEnabled,
   onUpdatePlugin,
 }: {
   plugins: PluginManifest[];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onSetPluginEnabled: (id: string, enabled: boolean) => void;
   onUpdatePlugin: (id: string, installed: boolean) => void;
 }) {
   return (
@@ -2051,13 +2070,35 @@ function PluginMarketplacePanel({
             <div>
               <strong>{plugin.name}</strong>
               <small>
-                {plugin.publisher} / {plugin.version} {plugin.official ? '/ Official' : ''}
+                {plugin.publisher} / {plugin.version} {plugin.official ? '/ Official' : ''}{' '}
+                {plugin.builtin ? '/ Built-in' : ''}
               </small>
             </div>
             <p>{plugin.description}</p>
-            <button className="secondary" type="button" onClick={() => onUpdatePlugin(plugin.id, plugin.installed)}>
-              {plugin.installed ? t('uninstall') : t('install')}
-            </button>
+            <div className="plugin-meta">
+              <span>{plugin.categories.join(', ')}</span>
+              <span>{plugin.activationEvents.join(', ')}</span>
+            </div>
+            <div className="plugin-contributes">
+              {(plugin.contributes.commands ?? []).slice(0, 3).map((command) => (
+                <span key={command.id}>{command.title}</span>
+              ))}
+              {(plugin.contributes.views ?? []).slice(0, 2).map((view) => (
+                <span key={view.id}>{view.title}</span>
+              ))}
+            </div>
+            <div className="plugin-actions">
+              {plugin.installed ? (
+                <button className="secondary" type="button" onClick={() => onSetPluginEnabled(plugin.id, plugin.enabled)}>
+                  {plugin.enabled ? 'Disable' : 'Enable'}
+                </button>
+              ) : null}
+              {!plugin.builtin ? (
+                <button className="secondary" type="button" onClick={() => onUpdatePlugin(plugin.id, plugin.installed)}>
+                  {plugin.installed ? t('uninstall') : t('install')}
+                </button>
+              ) : null}
+            </div>
           </div>
         ))}
       </div>
