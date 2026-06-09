@@ -489,15 +489,20 @@ small {
 .explorer-heading {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-content: center;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  align-items: center;
   gap: 1px;
   border-bottom: 1px solid var(--border-subtle);
-  padding: 0 12px;
+  padding: 0 8px 0 12px;
   background: #ffffff;
 }
 
+.explorer-heading > div {
+  min-width: 0;
+}
+
 .explorer-heading span {
+  display: block;
   overflow: hidden;
   color: #223b2f;
   font-size: 12px;
@@ -513,6 +518,24 @@ small {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.explorer-action {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #42554a;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 20px;
+  padding: 0;
+}
+
+.explorer-action:hover {
+  background: #e6f4eb;
+  color: #0b7a3a;
 }
 
 .explorer-tree {
@@ -1737,12 +1760,23 @@ textarea {
   gap: 12px;
 }
 
+.save-sql-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .save-sql-grid > label {
   display: flex;
   flex-direction: column;
   gap: 6px;
   color: #c8d0d7;
   font-size: 13px;
+}
+
+.field-hint {
+  margin: -4px 0 0;
+  color: #8a939f;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .save-sql-summary {

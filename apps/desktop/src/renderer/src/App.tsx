@@ -43,6 +43,11 @@ import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type Plugi
 import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
 import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
+import {
+  createWorkspaceFileTemplate,
+  inferWorkspaceFileLanguage,
+  normalizeNewWorkspaceFilePath,
+} from './workspace-file.js';
 import { toWorkspaceRelativeDirectory } from './workspace-path.js';
 
 const starterSql = '';
@@ -178,6 +183,8 @@ export function App() {
   const [bottomPanel, setBottomPanel] = useState<'results' | 'console'>('results');
   const [saveSqlDialogOpen, setSaveSqlDialogOpen] = useState(false);
   const [saveSqlNameDraft, setSaveSqlNameDraft] = useState('');
+  const [newFileDialogOpen, setNewFileDialogOpen] = useState(false);
+  const [newFilePathDraft, setNewFilePathDraft] = useState('scripts/analysis.py');
   const [createConnectionDuringWorkspace, setCreateConnectionDuringWorkspace] = useState(false);
   const [selectedDatabaseEngine, setSelectedDatabaseEngine] = useState<ConnectionInput['engine']>('postgres');
   const [workspaceSettingsDraft, setWorkspaceSettingsDraft] = useState({
@@ -1089,6 +1096,38 @@ export function App() {
     setMessage(language === 'zh-CN' ? '项目配置已保存。' : 'Project settings saved.');
   }
 
+  async function createWorkspaceFile() {
+    if (!activeWorkspace) {
+      setMessage(t('openProjectFirst'));
+      return;
+    }
+    let relativePath = '';
+    try {
+      relativePath = normalizeNewWorkspaceFilePath(newFilePathDraft);
+    } catch {
+      setMessage(t('invalidFilePath'));
+      return;
+    }
+    const content = createWorkspaceFileTemplate(relativePath);
+    const response = await window.dbagent.invoke(ipcChannels.workspace.writeFile, {
+      rootPath: activeWorkspace.rootPath,
+      relativePath,
+      content,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    await refreshWorkspaceFiles(activeWorkspace.rootPath);
+    updateEditorContent(content, {
+      title: response.data.name,
+      relativePath: response.data.relativePath,
+      language: inferWorkspaceFileLanguage(response.data.relativePath),
+    });
+    setNewFileDialogOpen(false);
+    setMessage(`${t('fileCreated')}: ${response.data.relativePath}`);
+  }
+
   async function openWorkspaceFile(file: WorkspaceFileEntry) {
     if (!activeWorkspace || file.type !== 'file') return;
     const response = await window.dbagent.invoke(ipcChannels.workspace.readFile, {
@@ -1099,7 +1138,8 @@ export function App() {
       setMessage(formatAppError(response.error));
       return;
     }
-    if (response.data.relativePath.endsWith('.sql')) {
+    const fileLanguage = inferWorkspaceFileLanguage(response.data.relativePath);
+    if (fileLanguage === 'sql') {
       updateEditorContent(stripSqlMetadata(response.data.content), {
         title: response.data.name,
         relativePath: response.data.relativePath,
@@ -1108,11 +1148,11 @@ export function App() {
       setMessage(language === 'zh-CN' ? `已打开 ${response.data.relativePath}` : `Opened ${response.data.relativePath}`);
       return;
     }
-    if (response.data.relativePath.endsWith('.py')) {
+    if (fileLanguage === 'python' || fileLanguage === 'markdown') {
       updateEditorContent(response.data.content, {
         title: response.data.name,
         relativePath: response.data.relativePath,
-        language: 'python',
+        language: fileLanguage,
       });
       setMessage(language === 'zh-CN' ? `已打开 ${response.data.relativePath}` : `Opened ${response.data.relativePath}`);
       return;
@@ -1196,6 +1236,7 @@ export function App() {
               onCreateProject={() => {
                 openCreateProjectDialog();
               }}
+              onCreateFile={() => setNewFileDialogOpen(true)}
               onOpenFile={(file) => void openWorkspaceFile(file)}
               onOpenProject={() => void chooseAndOpenWorkspace()}
             />
@@ -1355,6 +1396,15 @@ export function App() {
           onSave={() => void confirmSaveSql()}
         />
       ) : null}
+      {newFileDialogOpen ? (
+        <NewFileDialog
+          path={newFilePathDraft}
+          setPath={setNewFilePathDraft}
+          t={t}
+          onClose={() => setNewFileDialogOpen(false)}
+          onCreate={() => void createWorkspaceFile()}
+        />
+      ) : null}
     </main>
   );
 }
@@ -1512,6 +1562,59 @@ function SaveSqlDialog({
           </button>
           <button className="primary-action" type="button" onClick={onSave}>
             {t('saveSql')}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function NewFileDialog({
+  path,
+  setPath,
+  t,
+  onClose,
+  onCreate,
+}: {
+  path: string;
+  setPath: (value: string) => void;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onClose: () => void;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="save-sql-panel" role="dialog" aria-modal="true" aria-label={t('newFile')}>
+        <div className="modal-heading">
+          <div>
+            <strong>{t('newFile')}</strong>
+            <small>{t('newFileHint')}</small>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+        </div>
+        <div className="save-sql-grid single">
+          <label>
+            <span>{t('filePath')}</span>
+            <input
+              autoFocus
+              placeholder={t('filePathPlaceholder')}
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') onCreate();
+              }}
+            />
+          </label>
+          <p className="field-hint">{t('newFileExamples')}</p>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+          <button className="primary-action" type="button" onClick={onCreate}>
+            {t('create')}
           </button>
         </div>
       </section>
@@ -2628,6 +2731,7 @@ function ProjectPanel({
   activeFilePath,
   files,
   t,
+  onCreateFile,
   onCreateProject,
   onOpenFile,
   onOpenProject,
@@ -2636,6 +2740,7 @@ function ProjectPanel({
   activeFilePath?: string;
   files: WorkspaceFileEntry[];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onCreateFile: () => void;
   onCreateProject: () => void;
   onOpenFile: (file: WorkspaceFileEntry) => void;
   onOpenProject: () => void;
@@ -2643,8 +2748,15 @@ function ProjectPanel({
   return (
     <section className="project-panel">
       <div className="explorer-heading">
-        <span>{t('workspaceFiles')}</span>
-        <small title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</small>
+        <div>
+          <span>{t('workspaceFiles')}</span>
+          <small title={activeWorkspace?.rootPath ?? t('noProject')}>{activeWorkspace?.name ?? t('noProject')}</small>
+        </div>
+        {activeWorkspace ? (
+          <button className="explorer-action" title={t('newFile')} type="button" onClick={onCreateFile}>
+            +
+          </button>
+        ) : null}
       </div>
       {activeWorkspace ? (
         <div className="explorer-tree" aria-label={t('workspaceFiles')}>
