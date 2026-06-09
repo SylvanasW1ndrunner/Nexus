@@ -14,7 +14,7 @@
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
     "test": "turbo test",
-    "test:postgres": "pnpm --filter @dbagent/core-db test:postgres",
+    "test:postgres": "node scripts/run-postgres-tests.mjs",
     "smoke": "node scripts/smoke.mjs",
     "ci": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke",
     "package": "pnpm build && pnpm --filter @dbagent/desktop package",

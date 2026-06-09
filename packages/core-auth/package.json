@@ -10,7 +10,8 @@
     "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:postgres": "node ../../scripts/run-postgres-tests.mjs"
   },
   "dependencies": {
     "@dbagent/shared": "workspace:*",

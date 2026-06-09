@@ -3,7 +3,7 @@
 ## 测试分层
 
 - 单元测试覆盖纯业务规则，例如 SQL 安全判断、PostgreSQL identifier quote、预览 SQL limit、连接校验、查询历史、CSV/JSON 导出、用量窗口、认证与会话持久化。
-- 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts`。
+- 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts` 和 `packages/core-auth/test/postgres.integration.test.ts`。
 - 远程连接风险以可复现单测覆盖连接建立失败和连接后运行期中断分类，以真实 PostgreSQL 集成测试覆盖成功连接、查询、断连和事务回滚。弱网、VPN、云安全组和跨系统防火墙场景后续进入发布前手工 QA 矩阵。
 - E2E 测试覆盖桌面端用户路径：打开应用、创建连接、执行 SQL、查看结果表、查看查询历史、验证只读拦截、导出 CSV、重启后恢复 SQL 草稿。
 - Smoke 测试是零外部依赖的仓库健康检查，入口为 `pnpm smoke`，实现文件为 `scripts/smoke.mjs`。它检查关键文件存在、SQL 安全关键字和 IPC 契约片段。
@@ -123,7 +123,7 @@ pnpm db:up
 - `disconnect(connectionId)` 后再次 `describeTable(connectionId, ...)` 必须返回 `CONNECTION_FAILED`。
 - 可写连接中批量 SQL 先插入数据、再执行错误语句时必须失败，并且前序插入后的计数仍为 `0`，证明事务已回滚。
 
-环境变量 `DBAGENT_TEST_PG_HOST`、`DBAGENT_TEST_PG_PORT`、`DBAGENT_TEST_PG_DATABASE`、`DBAGENT_TEST_PG_USER` 和 `DBAGENT_TEST_PG_PASSWORD` 可覆盖默认连接。CI 已把 `pnpm test:postgres` 作为独立真实数据库门禁；候选发布仍建议在目标操作系统上额外跑一次本地或远程 PostgreSQL 验证。
+环境变量 `DBAGENT_TEST_PG_HOST`、`DBAGENT_TEST_PG_PORT`、`DBAGENT_TEST_PG_DATABASE`、`DBAGENT_TEST_PG_USER` 和 `DBAGENT_TEST_PG_PASSWORD` 可覆盖默认连接。认证模块也可单独使用 `DBAGENT_TEST_AUTH_DATABASE_URL` 指向账号测试库。CI 已把 `pnpm test:postgres` 作为独立真实数据库门禁；候选发布仍建议在目标操作系统上额外跑一次本地或远程 PostgreSQL 验证。
 
 ## M0-M1.5 发布风险
 
