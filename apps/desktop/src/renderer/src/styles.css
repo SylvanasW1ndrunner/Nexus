@@ -1124,6 +1124,106 @@ small {
   background: #202329;
 }
 
+.icon-glyph {
+  position: relative;
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  color: currentColor;
+}
+
+.icon-glyph::before,
+.icon-glyph::after {
+  position: absolute;
+  content: "";
+}
+
+.icon-glyph.history::before {
+  inset: 2px;
+  border: 1.6px solid currentColor;
+  border-radius: 50%;
+}
+
+.icon-glyph.history::after {
+  left: 7px;
+  top: 4px;
+  width: 5px;
+  height: 4px;
+  border-left: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+}
+
+.icon-glyph.settings::before {
+  inset: 2px;
+  border: 1.6px solid currentColor;
+  border-radius: 50%;
+}
+
+.icon-glyph.settings::after {
+  left: 6px;
+  top: 6px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.icon-glyph.new-chat::before {
+  left: 7px;
+  top: 3px;
+  width: 2px;
+  height: 10px;
+  background: currentColor;
+}
+
+.icon-glyph.new-chat::after {
+  left: 3px;
+  top: 7px;
+  width: 10px;
+  height: 2px;
+  background: currentColor;
+}
+
+.icon-glyph.export::before {
+  left: 3px;
+  top: 8px;
+  width: 10px;
+  height: 5px;
+  border: 1.5px solid currentColor;
+  border-top: 0;
+  border-radius: 0 0 2px 2px;
+}
+
+.icon-glyph.export::after {
+  left: 5px;
+  top: 2px;
+  width: 6px;
+  height: 8px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.icon-glyph.filter::before {
+  left: 2px;
+  top: 3px;
+  width: 12px;
+  height: 10px;
+  border: 1.6px solid currentColor;
+  border-bottom: 0;
+  clip-path: polygon(0 0, 100% 0, 62% 55%, 62% 100%, 38% 100%, 38% 55%);
+}
+
+.icon-glyph.filter::after {
+  left: 6px;
+  top: 10px;
+  width: 4px;
+  height: 3px;
+  background: currentColor;
+  border-radius: 0 0 1px 1px;
+}
+
+
 .tool-menu,
 .editor-context-menu {
   position: fixed;

@@ -3093,7 +3093,7 @@ function EditorPane({
               type="button"
               onClick={() => setExportMenuOpen((open) => !open)}
             >
-              ⇩
+              <span className="icon-glyph export" aria-hidden="true" />
             </button>
             {exportMenuOpen && result ? (
               <div className="tool-menu">
@@ -3332,7 +3332,7 @@ function ResultTable({
         />
         <div className="column-filter">
           <button className="icon-tool" title={t('filterColumns')} type="button" onClick={() => setColumnMenuOpen((open) => !open)}>
-            ⛃
+            <span className="icon-glyph filter" aria-hidden="true" />
           </button>
           {columnMenuOpen ? (
             <div className="tool-menu column-menu">
@@ -3403,13 +3403,13 @@ function ChatPanel({
         </div>
         <div className="agent-toolbar" aria-label="Agent toolbar">
           <button type="button" title={t('conversationHistory')}>
-            ◷
+            <span className="icon-glyph history" aria-hidden="true" />
           </button>
           <button type="button" title={t('settings')}>
-            ⚙
+            <span className="icon-glyph settings" aria-hidden="true" />
           </button>
           <button type="button" title={t('newConversation')}>
-            +
+            <span className="icon-glyph new-chat" aria-hidden="true" />
           </button>
         </div>
       </div>
