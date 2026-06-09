@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { PluginManifest } from '@dbagent/shared';
+import { validatePluginManifests } from './plugin-manifest-validation.js';
 
 const officialPlugins: PluginManifest[] = [
   {
@@ -52,7 +53,7 @@ const officialPlugins: PluginManifest[] = [
       views: [{ id: 'dbagent.python.environments', title: 'Python Environments', location: 'settings' }],
       configuration: [
         {
-          key: 'python.defaultMode',
+          key: 'python-runner.defaultMode',
           type: 'enum',
           title: 'Default Python mode',
           defaultValue: 'system',
@@ -82,7 +83,7 @@ const officialPlugins: PluginManifest[] = [
       views: [{ id: 'dbagent.result.export', title: 'Result Export', location: 'bottom-panel' }],
       configuration: [
         {
-          key: 'resultExport.includeHeaders',
+          key: 'result-export.includeHeaders',
           type: 'boolean',
           title: 'Include column headers',
           defaultValue: true,
@@ -107,7 +108,7 @@ const officialPlugins: PluginManifest[] = [
       views: [{ id: 'dbagent.chart.preview', title: 'Chart Preview', location: 'bottom-panel' }],
       configuration: [
         {
-          key: 'chartPreview.defaultChart',
+          key: 'chart-preview.defaultChart',
           type: 'enum',
           title: 'Default chart type',
           defaultValue: 'bar',
@@ -124,6 +125,7 @@ export class PluginRegistry {
   constructor(private readonly statePath: string) {}
 
   async list(): Promise<PluginManifest[]> {
+    validatePluginManifests(officialPlugins);
     const state = await this.loadState();
     return officialPlugins.map((plugin) => ({
       ...plugin,
