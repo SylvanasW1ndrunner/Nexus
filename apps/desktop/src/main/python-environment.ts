@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { mkdir, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   PythonCreateEnvironmentRequest,
@@ -64,9 +64,10 @@ export class PythonEnvironmentService {
   async runScript(request: PythonRunScriptRequest): Promise<PythonRunResult> {
     const cwd = resolve(request.rootPath);
     const command = resolvePythonCommand(cwd, request.config);
+    const args = resolvePythonArgs(cwd, request);
     const startedAt = Date.now();
     try {
-      const output = await execFileAsync(command, ['-c', request.code], {
+      const output = await execFileAsync(command, args, {
         cwd,
         timeout: request.timeoutMs ?? defaultTimeoutMs,
         maxBuffer: 1024 * 1024 * 4,
@@ -91,6 +92,23 @@ export class PythonEnvironmentService {
       };
     }
   }
+}
+
+function resolvePythonArgs(rootPath: string, request: PythonRunScriptRequest): string[] {
+  if (request.relativePath?.trim()) return [resolveWorkspaceScriptPath(rootPath, request.relativePath)];
+  if (typeof request.code === 'string') return ['-c', request.code];
+  throw new Error('Python run requires code or a workspace relative path.');
+}
+
+function resolveWorkspaceScriptPath(rootPath: string, relativePath: string): string {
+  if (isAbsolute(relativePath)) throw new Error('Python script path must be relative to the workspace.');
+  const resolved = resolve(rootPath, relativePath);
+  const relativeToRoot = relative(rootPath, resolved);
+  if (relativeToRoot.startsWith('..') || isAbsolute(relativeToRoot)) {
+    throw new Error('Python script path must stay inside the workspace.');
+  }
+  if (!relativePath.endsWith('.py')) throw new Error('Only Python files can be executed by the Python runner.');
+  return resolved;
 }
 
 function resolvePythonCommand(rootPath: string, config: WorkspacePythonConfig): string {

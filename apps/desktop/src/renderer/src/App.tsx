@@ -837,12 +837,16 @@ export function App() {
       setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
       return;
     }
+    if (editorDocument.relativePath && editorDocument.dirty) {
+      const saved = await saveCurrentDocument();
+      if (saved === false) return;
+    }
     setBottomPanel('console');
     appendTerminalText(`\n> python ${editorDocument.relativePath ?? editorDocument.title}\n`);
     const response = await window.dbagent.invoke(ipcChannels.python.runScript, {
       rootPath: activeWorkspace.rootPath,
       config: workspacePythonDraft,
-      code: sql,
+      ...(editorDocument.relativePath ? { relativePath: editorDocument.relativePath } : { code: sql }),
       timeoutMs: 120_000,
     });
     if (!response.ok) {
@@ -963,14 +967,14 @@ export function App() {
     );
   }
 
-  async function saveCurrentDocument() {
+  async function saveCurrentDocument(): Promise<boolean | undefined> {
     if (!activeWorkspace) {
       setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
       return;
     }
     if (!editorDocument.relativePath) {
       requestSaveSql();
-      return;
+      return false;
     }
     const response = await window.dbagent.invoke(ipcChannels.workspace.writeFile, {
       rootPath: activeWorkspace.rootPath,
@@ -979,7 +983,7 @@ export function App() {
     });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
-      return;
+      return false;
     }
     await refreshWorkspaceFiles(activeWorkspace.rootPath);
     setEditorDocument((document) => ({ ...document, dirty: false }));

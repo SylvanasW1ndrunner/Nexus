@@ -321,7 +321,8 @@ export type PythonCreateEnvironmentRequest = {
 export type PythonRunScriptRequest = {
   rootPath: string;
   config: WorkspacePythonConfig;
-  code: string;
+  code?: string;
+  relativePath?: string;
   timeoutMs?: number;
 };
 
