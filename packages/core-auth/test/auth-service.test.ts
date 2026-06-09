@@ -2,7 +2,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AuthService, type AuthAccount, type AuthCodeRecord, type AuthRepository } from '../src/auth-service.js';
+import {
+  AuthService,
+  hashSecret,
+  verifyPassword,
+  type AuthAccount,
+  type AuthCodeRecord,
+  type AuthRepository,
+} from '../src/auth-service.js';
 
 const tempDirs: string[] = [];
 
@@ -37,6 +44,10 @@ describe('AuthService', () => {
 
     expect(status.authenticated).toBe(true);
     expect(status.user?.email).toBe('analyst@example.com');
+    const account = await repository.findAccountByIdentifier('analyst@example.com');
+    expect(account?.passwordHash.startsWith('pbkdf2-sha256$')).toBe(true);
+    expect(account?.passwordHash).not.toBe(hashSecret('password-123'));
+    expect(verifyPassword('password-123', account!.passwordHash)).toBe(true);
     await expect(service.status()).resolves.toEqual(status);
     await expect(readFile(path, 'utf8')).resolves.toBe(`${JSON.stringify(status, null, 2)}\n`);
   });
@@ -71,6 +82,26 @@ describe('AuthService', () => {
 
     await expect(service.login('user@example.com', 'old-password')).rejects.toThrow(/invalid/i);
     await expect(service.login('user@example.com', 'new-password')).resolves.toMatchObject({ authenticated: true });
+  });
+
+  it('accepts legacy sha256 password hashes and upgrades them after login', async () => {
+    const repository = new MemoryAuthRepository();
+    const account: AuthAccount = {
+      id: 'legacy-user',
+      email: 'legacy@example.com',
+      passwordHash: hashSecret('legacy-password'),
+      plan: 'free',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await repository.createAccount(account);
+    const service = new AuthService(await sessionPath(), repository);
+
+    await expect(service.login('legacy@example.com', 'legacy-password')).resolves.toMatchObject({ authenticated: true });
+
+    const upgraded = await repository.findAccountByIdentifier('legacy@example.com');
+    expect(upgraded?.passwordHash.startsWith('pbkdf2-sha256$')).toBe(true);
+    expect(upgraded?.passwordHash).not.toBe(account.passwordHash);
   });
 
   it('overwrites an authenticated session on logout', async () => {

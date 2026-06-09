@@ -1,4 +1,4 @@
-import { createHash, randomInt, randomUUID } from 'node:crypto';
+import { createHash, pbkdf2Sync, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type {
@@ -58,7 +58,10 @@ export class AuthService {
   async login(identifier: string, password: string): Promise<AuthStatus> {
     const normalized = normalizeIdentifier(identifier);
     const account = await this.repository.findAccountByIdentifier(normalized);
-    if (!account || account.passwordHash !== hashSecret(password)) throw new Error('Invalid account or password.');
+    if (!account || !verifyPassword(password, account.passwordHash)) throw new Error('Invalid account or password.');
+    if (shouldUpgradePasswordHash(account.passwordHash)) {
+      await this.repository.updatePassword(normalized, hashPassword(password));
+    }
     const status = this.statusForAccount(account);
     await this.save(status);
     return status;
@@ -76,7 +79,7 @@ export class AuthService {
     const account = await this.repository.createAccount({
       id: `local-${randomUUID()}`,
       ...(channel === 'email' ? { email: target } : { phone: target }),
-      passwordHash: hashSecret(request.password),
+      passwordHash: hashPassword(request.password),
       plan: 'free',
       createdAt: now,
       updatedAt: now,
@@ -119,7 +122,7 @@ export class AuthService {
     const target = normalizeIdentifier(request.target);
     if (request.newPassword.length < 8) throw new Error('Password must be at least 8 characters.');
     await this.verifyCode({ target, channel: request.channel, purpose: 'reset-password', verificationCode: request.verificationCode });
-    const account = await this.repository.updatePassword(target, hashSecret(request.newPassword));
+    const account = await this.repository.updatePassword(target, hashPassword(request.newPassword));
     if (!account) throw new Error('Account does not exist.');
     const status = this.statusForAccount(account);
     await this.save(status);
@@ -165,6 +168,32 @@ export class AuthService {
 
 export function hashSecret(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+export function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString('base64url');
+  const iterations = 210_000;
+  const derived = pbkdf2Sync(password, salt, iterations, 32, 'sha256').toString('base64url');
+  return `pbkdf2-sha256$${iterations}$${salt}$${derived}`;
+}
+
+export function verifyPassword(password: string, storedHash: string): boolean {
+  if (isLegacySha256Hash(storedHash)) return hashSecret(password) === storedHash;
+  const [algorithm, iterationsRaw, salt, hash] = storedHash.split('$');
+  if (algorithm !== 'pbkdf2-sha256' || !iterationsRaw || !salt || !hash) return false;
+  const iterations = Number(iterationsRaw);
+  if (!Number.isInteger(iterations) || iterations < 100_000) return false;
+  const expected = Buffer.from(hash, 'base64url');
+  const actual = pbkdf2Sync(password, salt, iterations, expected.length, 'sha256');
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function shouldUpgradePasswordHash(storedHash: string): boolean {
+  return isLegacySha256Hash(storedHash);
+}
+
+function isLegacySha256Hash(storedHash: string): boolean {
+  return /^[a-f0-9]{64}$/i.test(storedHash);
 }
 
 function normalizeIdentifier(value: string | undefined): string {
