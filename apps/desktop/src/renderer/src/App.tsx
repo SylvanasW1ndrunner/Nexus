@@ -43,6 +43,7 @@ import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type Plugi
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
 import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
 import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
+import { terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
 import {
   createWorkspaceFileTemplate,
@@ -3732,8 +3733,11 @@ function EditorPane({
                     onClick={() => onSelectTerminal(terminal.id)}
                   >
                     <span className="icon-glyph terminal-shell" aria-hidden="true" />
-                    <span>{terminal.shell ?? terminal.name}</span>
-                    <small>{terminal.lastExitCode === undefined ? '' : terminal.lastExitCode}</small>
+                    <span>{terminalTabLabel(terminal)}</span>
+                    <small>
+                      {t(terminalStatusLabelKey(terminal))}
+                      {terminalStatusValue(terminal) ? ` ${terminalStatusValue(terminal)}` : ''}
+                    </small>
                   </button>
                 ))}
               </div>
