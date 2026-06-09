@@ -2354,6 +2354,15 @@ function PythonConfigForm({
   onDetectPython: () => void;
 }) {
   const [newEnvironmentName, setNewEnvironmentName] = useState('.venv');
+  const modeEnvironments = useMemo(
+    () => environments.filter((environment) => environment.mode === pythonDraft.mode),
+    [environments, pythonDraft.mode],
+  );
+
+  useEffect(() => {
+    setNewEnvironmentName(pythonDraft.mode === 'conda' ? 'dbagent-analytics' : '.venv');
+  }, [pythonDraft.mode]);
+
   function switchMode(mode: WorkspacePythonConfig['mode']) {
     setPythonDraft({
       mode,
@@ -2370,7 +2379,9 @@ function PythonConfigForm({
     const path = await onChoosePythonPath(mode);
     if (!path) return;
     if (pythonDraft.mode === 'venv') setPythonDraft({ ...pythonDraft, venvPath: path });
-    else setPythonDraft({ ...pythonDraft, pythonPath: path });
+    else if (pythonDraft.mode === 'conda') {
+      setPythonDraft({ mode: 'conda', requirementsPath: pythonDraft.requirementsPath, condaPrefix: path });
+    } else setPythonDraft({ ...pythonDraft, pythonPath: path });
   }
 
   function selectEnvironment(id: string) {
@@ -2398,7 +2409,7 @@ function PythonConfigForm({
         </button>
         <select value="" onChange={(event) => selectEnvironment(event.target.value)}>
           <option value="">{t('detectedPythonPlaceholder')}</option>
-          {environments.map((environment) => (
+          {(modeEnvironments.length > 0 ? modeEnvironments : environments).map((environment) => (
             <option disabled={!environment.valid} key={environment.id} value={environment.id}>
               {environment.label} {environment.version ? `(${environment.version})` : ''} {environment.valid ? '' : ' - invalid'}
             </option>
@@ -2454,13 +2465,18 @@ function PythonConfigForm({
         {pythonDraft.mode === 'conda' ? (
           <label>
             <span>{t('condaEnvironment')}</span>
-            <input
-              placeholder="base / analytics"
-              value={pythonDraft.condaEnvName ?? pythonDraft.condaPrefix ?? ''}
-              onChange={(event) =>
-                setPythonDraft({ mode: 'conda', requirementsPath: pythonDraft.requirementsPath, condaEnvName: event.target.value })
-              }
-            />
+            <div className="path-row">
+              <input
+                placeholder="base / analytics / C:\\Miniconda3\\envs\\analytics"
+                value={pythonDraft.condaEnvName ?? pythonDraft.condaPrefix ?? ''}
+                onChange={(event) =>
+                  setPythonDraft({ mode: 'conda', requirementsPath: pythonDraft.requirementsPath, condaEnvName: event.target.value })
+                }
+              />
+              <button className="icon-button" type="button" onClick={() => void choosePath('directory')}>
+                ...
+              </button>
+            </div>
           </label>
         ) : null}
       </div>

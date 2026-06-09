@@ -63,17 +63,17 @@ export class PythonEnvironmentService {
 
   async runScript(request: PythonRunScriptRequest): Promise<PythonRunResult> {
     const cwd = resolve(request.rootPath);
-    const command = resolvePythonCommand(cwd, request.config);
-    const args = resolvePythonArgs(cwd, request);
+    const scriptArgs = resolvePythonArgs(cwd, request);
+    const invocation = resolvePythonInvocation(cwd, request.config, scriptArgs);
     const startedAt = Date.now();
     try {
-      const output = await execFileAsync(command, args, {
+      const output = await execFileAsync(invocation.command, invocation.args, {
         cwd,
         timeout: request.timeoutMs ?? defaultTimeoutMs,
         maxBuffer: 1024 * 1024 * 4,
       });
       return {
-        command,
+        command: describeInvocation(invocation),
         cwd,
         exitCode: 0,
         stdout: output.stdout,
@@ -83,7 +83,7 @@ export class PythonEnvironmentService {
     } catch (error) {
       const failed = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number | null };
       return {
-        command,
+        command: describeInvocation(invocation),
         cwd,
         exitCode: typeof failed.code === 'number' ? failed.code : null,
         stdout: failed.stdout ?? '',
@@ -111,15 +111,26 @@ function resolveWorkspaceScriptPath(rootPath: string, relativePath: string): str
   return resolved;
 }
 
-function resolvePythonCommand(rootPath: string, config: WorkspacePythonConfig): string {
-  if (config.mode === 'system') return config.pythonPath?.trim() || 'python';
+function resolvePythonInvocation(
+  rootPath: string,
+  config: WorkspacePythonConfig,
+  scriptArgs: string[],
+): { command: string; args: string[] } {
+  if (config.mode === 'system') return { command: config.pythonPath?.trim() || 'python', args: scriptArgs };
   if (config.mode === 'venv') {
     const venvPath = config.venvPath ? resolve(rootPath, config.venvPath) : join(rootPath, '.venv');
-    return pythonFromVenvPath(venvPath);
+    return { command: pythonFromVenvPath(venvPath), args: scriptArgs };
   }
-  if (config.pythonPath?.trim()) return config.pythonPath.trim();
-  if (config.condaPrefix) return pythonFromCondaPrefix(config.condaPrefix);
-  throw new Error('Conda environment requires a selected environment path.');
+  if (config.pythonPath?.trim()) return { command: config.pythonPath.trim(), args: scriptArgs };
+  if (config.condaPrefix) return { command: pythonFromCondaPrefix(config.condaPrefix), args: scriptArgs };
+  if (config.condaEnvName?.trim()) {
+    return { command: 'conda', args: ['run', '-n', config.condaEnvName.trim(), 'python', ...scriptArgs] };
+  }
+  throw new Error('Conda environment requires a selected environment name or path.');
+}
+
+function describeInvocation(invocation: { command: string; args: string[] }): string {
+  return [invocation.command, ...invocation.args].join(' ');
 }
 
 async function inspectPython(

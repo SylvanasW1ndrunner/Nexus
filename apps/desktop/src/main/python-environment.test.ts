@@ -71,4 +71,23 @@ describe('PythonEnvironmentService', () => {
       }),
     ).rejects.toThrow('inside the workspace');
   });
+
+  it('runs Conda environments by environment name when conda is available', async () => {
+    try {
+      await execFileAsync('conda', ['--version']);
+      await execFileAsync('conda', ['run', '-n', 'base', 'python', '--version']);
+    } catch {
+      return;
+    }
+
+    const result = await new PythonEnvironmentService().runScript({
+      rootPath: process.cwd(),
+      config: { mode: 'conda', condaEnvName: 'base', requirementsPath: 'requirements.txt' },
+      code: 'print("conda-name-ok")',
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('conda-name-ok');
+    expect(result.command).toContain('conda run -n base python');
+  });
 });
