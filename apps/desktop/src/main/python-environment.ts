@@ -118,15 +118,31 @@ function resolvePythonInvocation(
 ): { command: string; args: string[] } {
   if (config.mode === 'system') return { command: config.pythonPath?.trim() || 'python', args: scriptArgs };
   if (config.mode === 'venv') {
-    const venvPath = config.venvPath ? resolve(rootPath, config.venvPath) : join(rootPath, '.venv');
+    const venvPath = config.venvPath ? resolveWorkspaceDirectory(rootPath, config.venvPath, 'Python venv path') : join(rootPath, '.venv');
     return { command: pythonFromVenvPath(venvPath), args: scriptArgs };
   }
   if (config.pythonPath?.trim()) return { command: config.pythonPath.trim(), args: scriptArgs };
   if (config.condaPrefix) return { command: pythonFromCondaPrefix(config.condaPrefix), args: scriptArgs };
   if (config.condaEnvName?.trim()) {
-    return { command: 'conda', args: ['run', '-n', config.condaEnvName.trim(), 'python', ...scriptArgs] };
+    const condaEnvName = config.condaEnvName.trim();
+    if (isCondaPrefixInput(condaEnvName)) return { command: pythonFromCondaPrefix(condaEnvName), args: scriptArgs };
+    return { command: 'conda', args: ['run', '-n', condaEnvName, 'python', ...scriptArgs] };
   }
   throw new Error('Conda environment requires a selected environment name or path.');
+}
+
+function resolveWorkspaceDirectory(rootPath: string, path: string, label: string): string {
+  if (isAbsolute(path)) throw new Error(`${label} must be relative to the workspace.`);
+  const resolved = resolve(rootPath, path);
+  const relativeToRoot = relative(rootPath, resolved);
+  if (relativeToRoot.startsWith('..') || isAbsolute(relativeToRoot)) {
+    throw new Error(`${label} must stay inside the workspace.`);
+  }
+  return resolved;
+}
+
+function isCondaPrefixInput(value: string): boolean {
+  return isAbsolute(value) || /[\\/]/.test(value);
 }
 
 function describeInvocation(invocation: { command: string; args: string[] }): string {

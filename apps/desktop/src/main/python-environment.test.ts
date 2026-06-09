@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PythonEnvironmentService } from './python-environment.js';
@@ -70,6 +70,42 @@ describe('PythonEnvironmentService', () => {
         relativePath: '../escape.py',
       }),
     ).rejects.toThrow('inside the workspace');
+  });
+
+  it('rejects venv paths outside the workspace before launching Python', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-python-run-'));
+    tempDirs.push(rootPath);
+
+    await expect(
+      new PythonEnvironmentService().runScript({
+        rootPath,
+        config: { mode: 'venv', venvPath: '../outside-venv', requirementsPath: 'requirements.txt' },
+        code: 'print("should-not-run")',
+      }),
+    ).rejects.toThrow('inside the workspace');
+  });
+
+  it('treats a Conda environment input that looks like a path as a prefix', async () => {
+    try {
+      await execFileAsync('python', ['--version']);
+    } catch {
+      return;
+    }
+    const locator = process.platform === 'win32' ? 'where' : 'which';
+    const located = await execFileAsync(locator, ['python']);
+    const pythonPath = located.stdout.split(/\r?\n/).find(Boolean);
+    if (!pythonPath) return;
+    const prefix = process.platform === 'win32' ? dirname(pythonPath) : dirname(dirname(pythonPath));
+
+    const result = await new PythonEnvironmentService().runScript({
+      rootPath: process.cwd(),
+      config: { mode: 'conda', condaEnvName: prefix, requirementsPath: 'requirements.txt' },
+      code: 'print("conda-prefix-input-ok")',
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('conda-prefix-input-ok');
+    expect(result.command).not.toContain('conda run -n');
   });
 
   it('runs Conda environments by environment name when conda is available', async () => {
