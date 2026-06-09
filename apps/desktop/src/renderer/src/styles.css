@@ -2509,3 +2509,149 @@ td {
   align-self: stretch;
   max-width: 100%;
 }
+
+/* Runtime theme and density settings. This block stays last so saved IDE
+   preferences override older fixed workbench colors. */
+.app-shell.theme-light {
+  color: #24292f;
+  background: #ffffff;
+  --bg-app: #ffffff;
+  --bg-panel: #f6f8fa;
+  --bg-panel-soft: #eef2f6;
+  --bg-field: #ffffff;
+  --border-subtle: #d0d7de;
+  --border-strong: #afb8c1;
+  --text-main: #24292f;
+  --text-muted: #57606a;
+  --text-faint: #6e7781;
+  --accent: #1f883d;
+  --accent-hover: #1a7f37;
+  --accent-soft: rgba(31, 136, 61, 0.12);
+  --accent-ring: rgba(31, 136, 61, 0.2);
+}
+
+.app-shell.theme-light,
+.app-shell.theme-light .center-stage,
+.app-shell.theme-light .topbar,
+.app-shell.theme-light .left-rail,
+.app-shell.theme-light .right-rail,
+.app-shell.theme-light .project-panel,
+.app-shell.theme-light .chat-panel,
+.app-shell.theme-light .result-pane,
+.app-shell.theme-light .explorer-heading,
+.app-shell.theme-light .editor-tabs,
+.app-shell.theme-light .explorer-tree,
+.app-shell.theme-light .settings-card,
+.app-shell.theme-light .settings-content > .panel,
+.app-shell.theme-light .wizard-card,
+.app-shell.theme-light .subform-section,
+.app-shell.theme-light .modal-panel,
+.app-shell.theme-light .save-sql-panel,
+.app-shell.theme-light .command-palette {
+  background: var(--bg-panel);
+  color: var(--text-main);
+}
+
+.app-shell.theme-light .editor-pane,
+.app-shell.theme-light .editor-tab.active,
+.app-shell.theme-light .simple-message-list,
+.app-shell.theme-light .simple-chat-panel {
+  background: #ffffff;
+}
+
+.app-shell.theme-light button {
+  border-color: var(--border-strong);
+  background: #f6f8fa;
+  color: var(--text-main);
+}
+
+.app-shell.theme-light button:hover,
+.app-shell.theme-light .settings-nav button:hover,
+.app-shell.theme-light .settings-nav button.active,
+.app-shell.theme-light .file-node.file:hover,
+.app-shell.theme-light .file-node.active,
+.app-shell.theme-light .editor-tab,
+.app-shell.theme-light .command-item:hover {
+  background: #eaeef2;
+}
+
+.app-shell.theme-light input,
+.app-shell.theme-light select,
+.app-shell.theme-light textarea,
+.app-shell.theme-light .command-context span,
+.app-shell.theme-light .editor-context-strip span,
+.app-shell.theme-light .language-switch,
+.app-shell.theme-light .terminal-output,
+.app-shell.theme-light .terminal-command-row,
+.app-shell.theme-light .agent-composer,
+.app-shell.theme-light .agent-composer-input {
+  border-color: var(--border-subtle);
+  background: #ffffff;
+  color: var(--text-main);
+}
+
+.app-shell.theme-light .brand-lockup strong,
+.app-shell.theme-light .panel-heading span,
+.app-shell.theme-light .pane-toolbar span,
+.app-shell.theme-light .explorer-heading span,
+.app-shell.theme-light .subform-heading strong,
+.app-shell.theme-light .modal-heading strong,
+.app-shell.theme-light .agent-heading strong,
+.app-shell.theme-light .simple-chat-panel .chat-message,
+.app-shell.theme-light .file-node small {
+  color: var(--text-main);
+}
+
+.app-shell.theme-light small,
+.app-shell.theme-light .editor-path,
+.app-shell.theme-light .editor-tab small,
+.app-shell.theme-light .agent-heading small,
+.app-shell.theme-light .agent-composer-actions span {
+  color: var(--text-muted);
+}
+
+.app-shell.theme-light .simple-chat-panel .chat-message.user {
+  background: #eaeef2;
+}
+
+.app-shell.theme-light .agent-send,
+.app-shell.theme-light .primary-action,
+.app-shell.theme-light .language-switch button.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.app-shell.theme-light .statusbar {
+  background: #0969da;
+  color: #ffffff;
+}
+
+.app-shell.density-comfortable button {
+  min-height: 34px;
+  padding: 8px 12px;
+}
+
+.app-shell.density-comfortable input,
+.app-shell.density-comfortable select {
+  padding: 9px 11px;
+}
+
+.app-shell.density-comfortable .topbar {
+  height: 52px;
+  flex-basis: 52px;
+}
+
+.app-shell.density-comfortable .editor-context-strip,
+.app-shell.density-comfortable .pane-toolbar,
+.app-shell.density-comfortable .explorer-heading,
+.app-shell.density-comfortable .chat-titlebar {
+  min-height: 48px;
+}
+
+.app-shell.density-comfortable .simple-message-list,
+.app-shell.density-comfortable .settings-card,
+.app-shell.density-comfortable .wizard-card,
+.app-shell.density-comfortable .modal-panel {
+  padding: 18px;
+}

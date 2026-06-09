@@ -1113,7 +1113,7 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell theme-${ideSettings.appearance.theme} density-${ideSettings.appearance.density}`}>
       <TopBar
         activeConnection={activeConnection}
         activeWorkspace={activeWorkspace}
@@ -3015,7 +3015,7 @@ function EditorPane({
               tabSize: ideSettings.editor.tabSize,
               wordWrap: ideSettings.editor.wordWrap,
             }}
-            theme="vs-dark"
+            theme={ideSettings.appearance.theme === 'light' ? 'light' : 'vs-dark'}
             value={sql}
             onChange={(value: string | undefined) => onChangeSql(value ?? '')}
             onMount={(editor) => {
