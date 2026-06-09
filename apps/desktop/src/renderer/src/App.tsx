@@ -334,8 +334,10 @@ export function App() {
         return;
       case 'core.openProjectSettings':
       case 'dbagent.postgres.connect':
-      case 'dbagent.python.createVenv':
         openSettingsDialog();
+        return;
+      case 'dbagent.python.createVenv':
+        await createPythonEnvironment('venv', '.venv');
         return;
       case 'dbagent.python.detect':
         await detectPythonEnvironments();
@@ -348,10 +350,10 @@ export function App() {
         return;
       case 'dbagent.chart.preview':
         setBottomPanel('results');
-        setMessage(language === 'zh-CN' ? '图表预览插件接口已注册，运行时视图将在后续接入。' : 'Chart preview contribution is registered; runtime view mounting will follow.');
+        setMessage(t('chartPreviewRegistered'));
         return;
       default:
-        setMessage(language === 'zh-CN' ? `命令 ${id} 尚未绑定处理器。` : `Command ${id} is not bound to a handler yet.`);
+        setMessage(`${id}: ${t('commandNotBound')}`);
     }
   }
 

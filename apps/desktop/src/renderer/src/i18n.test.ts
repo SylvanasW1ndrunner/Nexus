@@ -33,6 +33,8 @@ describe('renderer i18n', () => {
       t('commandOpenIdeSettings'),
       t('commandToggleExplorer'),
       t('commandSourceCore'),
+      t('chartPreviewRegistered'),
+      t('commandNotBound'),
     ];
 
     expect(criticalLabels).toEqual([
@@ -54,6 +56,8 @@ describe('renderer i18n', () => {
       '打开 IDE 设置',
       '切换资源管理器',
       '核心',
+      '图表预览插件接口已注册，运行时视图将在后续接入。',
+      '命令尚未绑定处理器。',
     ]);
     expect(criticalLabels.join('')).not.toMatch(/[\u951F\uFFFD\u93B5\u7481\u940E\u7F01]/);
   });
