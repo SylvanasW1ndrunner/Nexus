@@ -40,6 +40,7 @@ import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
+import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
 import { selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
 import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
@@ -910,7 +911,6 @@ export function App() {
     }
     setBottomPanel('console');
     setActiveTerminalId(outputTerminalId);
-    appendTerminalText(`\n> python ${editorDocument.relativePath ?? editorDocument.title}\n`, outputTerminalId);
     const response = await window.dbagent.invoke(ipcChannels.python.runScript, {
       rootPath: activeWorkspace.rootPath,
       config: workspacePythonDraft,
@@ -922,13 +922,9 @@ export function App() {
       appendTerminalText(`${formatAppError(response.error)}\n`, outputTerminalId);
       return;
     }
-    const output = [response.data.stdout, response.data.stderr].filter(Boolean).join('\n');
-    appendTerminalText(
-      `${output}${output ? '\n' : ''}[python exit ${response.data.exitCode ?? 'unknown'} / ${response.data.elapsedMs} ms]\n`,
-      outputTerminalId,
-    );
+    appendTerminalText(formatPythonRunTranscript(response.data), outputTerminalId);
     setMessage(
-      response.data.exitCode === 0
+      pythonRunSucceeded(response.data)
         ? language === 'zh-CN'
           ? `Python 运行完成，耗时 ${response.data.elapsedMs} ms。`
           : `Python finished in ${response.data.elapsedMs} ms.`
@@ -1407,6 +1403,7 @@ export function App() {
               onExportExcel={exportExcel}
               onExportJson={exportJson}
               onSaveSql={() => void saveCurrentDocument()}
+              onRunPython={() => void runPythonScript()}
               onRunTerminal={(id) => void runTerminalCommand(id)}
               onSelectTerminal={setActiveTerminalId}
               onSplitTerminal={() => void splitTerminal()}
@@ -3464,6 +3461,7 @@ function EditorPane({
   onExportCsv,
   onExportExcel,
   onExportJson,
+  onRunPython,
   onSaveSql,
   onRunTerminal,
   onSelectTerminal,
@@ -3494,6 +3492,7 @@ function EditorPane({
   onExportCsv: () => void;
   onExportExcel: () => void;
   onExportJson: () => void;
+  onRunPython: () => void;
   onSaveSql: () => void;
   onRunTerminal: (id: string) => void;
   onSelectTerminal: (id: string) => void;
@@ -3507,6 +3506,7 @@ function EditorPane({
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [terminalMenuOpen, setTerminalMenuOpen] = useState(false);
   const isSqlDocument = editorLanguage === 'sql';
+  const isPythonDocument = editorLanguage === 'python';
   const activeTerminal = terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
   const terminalActions = buildTerminalActionMenu({ hasActiveTerminal: Boolean(activeTerminal), maximized: terminalMaximized });
 
@@ -3533,8 +3533,8 @@ function EditorPane({
     return model.getValueInRange(selection).trim();
   }
 
-  function openSqlContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
-    if (!isSqlDocument) return;
+  function openEditorContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
+    if (!isSqlDocument && !isPythonDocument) return;
     event.preventDefault();
     setContextMenu({ x: event.clientX, y: event.clientY, selectedSql: getSelectedSql() });
   }
@@ -3584,7 +3584,7 @@ function EditorPane({
           <span>{document.dirty ? t('statusUnsaved') : t('statusSaved')}</span>
           {activeConnection?.readOnly ? <span>{t('readOnly')}</span> : null}
         </div>
-        <div className="monaco-shell" onContextMenu={openSqlContextMenu}>
+        <div className="monaco-shell" onContextMenu={openEditorContextMenu}>
           <Editor
             height="100%"
             language={editorLanguage}
@@ -3607,30 +3607,45 @@ function EditorPane({
           />
           {contextMenu ? (
             <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
-              <button disabled={!contextMenu.selectedSql} type="button" onClick={() => runSqlText(contextMenu.selectedSql)}>
-                {t('runSelectedSql')}
-              </button>
-              <button type="button" onClick={() => runSqlText(sql)}>
-                {t('runFileSql')}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setContextMenu(undefined);
-                  onExplain();
-                }}
-              >
-                {t('explain')}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setContextMenu(undefined);
-                  onSaveSql();
-                }}
-              >
-                {t('saveFile')}
-              </button>
+              {isSqlDocument ? (
+                <>
+                  <button disabled={!contextMenu.selectedSql} type="button" onClick={() => runSqlText(contextMenu.selectedSql)}>
+                    {t('runSelectedSql')}
+                  </button>
+                  <button type="button" onClick={() => runSqlText(sql)}>
+                    {t('runFileSql')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setContextMenu(undefined);
+                      onExplain();
+                    }}
+                  >
+                    {t('explain')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setContextMenu(undefined);
+                      onSaveSql();
+                    }}
+                  >
+                    {t('saveFile')}
+                  </button>
+                </>
+              ) : null}
+              {isPythonDocument ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setContextMenu(undefined);
+                    onRunPython();
+                  }}
+                >
+                  {t('commandRunPython')}
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>
