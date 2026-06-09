@@ -68,9 +68,11 @@ export class AuthService {
   }
 
   async register(request: AuthRegisterRequest): Promise<AuthStatus> {
+    if (request.email && request.phone) throw new Error('Register with either email or phone, not both.');
     const target = normalizeIdentifier(request.email ?? request.phone);
     const channel = request.email ? 'email' : 'phone';
     if (!target) throw new Error('Email or phone is required.');
+    validateVerificationTarget(target, channel);
     if (request.password.length < 8) throw new Error('Password must be at least 8 characters.');
     await this.verifyCode({ target, channel, purpose: 'register', verificationCode: request.verificationCode });
     const existing = await this.repository.findAccountByIdentifier(target);
@@ -92,6 +94,7 @@ export class AuthService {
   async requestCode(request: AuthCodeRequest): Promise<AuthCodeResponse> {
     const target = normalizeIdentifier(request.target);
     if (!target) throw new Error('Verification target is required.');
+    validateVerificationTarget(target, request.channel);
     const code = String(randomInt(100000, 999999));
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     await this.repository.upsertCode({
@@ -110,6 +113,7 @@ export class AuthService {
 
   async verifyCodeLogin(request: AuthVerifyCodeLoginRequest): Promise<AuthStatus> {
     const target = normalizeIdentifier(request.target);
+    validateVerificationTarget(target, request.channel);
     await this.verifyCode({ ...request, target, purpose: 'login' });
     const account = await this.repository.findAccountByIdentifier(target);
     if (!account) throw new Error('Account does not exist.');
@@ -120,6 +124,7 @@ export class AuthService {
 
   async resetPassword(request: AuthResetPasswordRequest): Promise<AuthStatus> {
     const target = normalizeIdentifier(request.target);
+    validateVerificationTarget(target, request.channel);
     if (request.newPassword.length < 8) throw new Error('Password must be at least 8 characters.');
     await this.verifyCode({ target, channel: request.channel, purpose: 'reset-password', verificationCode: request.verificationCode });
     const account = await this.repository.updatePassword(target, hashPassword(request.newPassword));
@@ -198,4 +203,17 @@ function isLegacySha256Hash(storedHash: string): boolean {
 
 function normalizeIdentifier(value: string | undefined): string {
   return value?.trim().toLowerCase() ?? '';
+}
+
+function validateVerificationTarget(target: string, channel: AuthCodeRequest['channel']): void {
+  if (channel === 'email' && !isEmail(target)) throw new Error('A valid email address is required.');
+  if (channel === 'phone' && !isPhone(target)) throw new Error('A valid phone number is required.');
+}
+
+function isEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function isPhone(value: string): boolean {
+  return /^\+?[0-9][0-9\s-]{6,18}[0-9]$/.test(value);
 }

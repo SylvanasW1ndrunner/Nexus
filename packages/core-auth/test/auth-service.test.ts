@@ -84,6 +84,31 @@ describe('AuthService', () => {
     await expect(service.login('user@example.com', 'new-password')).resolves.toMatchObject({ authenticated: true });
   });
 
+  it('rejects verification codes when the target does not match the channel', async () => {
+    const service = new AuthService(await sessionPath(), new MemoryAuthRepository());
+
+    await expect(
+      service.requestCode({ target: 'not-an-email', channel: 'email', purpose: 'register' }),
+    ).rejects.toThrow(/email/i);
+    await expect(
+      service.requestCode({ target: 'analyst@example.com', channel: 'phone', purpose: 'login' }),
+    ).rejects.toThrow(/phone/i);
+  });
+
+  it('requires registration to use exactly one verified identifier type', async () => {
+    const service = new AuthService(await sessionPath(), new MemoryAuthRepository());
+    const code = await service.requestCode({ target: 'analyst@example.com', channel: 'email', purpose: 'register' });
+
+    await expect(
+      service.register({
+        email: 'analyst@example.com',
+        phone: '+8613800000000',
+        password: 'password-123',
+        verificationCode: code.devCode!,
+      }),
+    ).rejects.toThrow(/either email or phone/i);
+  });
+
   it('accepts legacy sha256 password hashes and upgrades them after login', async () => {
     const repository = new MemoryAuthRepository();
     const account: AuthAccount = {
