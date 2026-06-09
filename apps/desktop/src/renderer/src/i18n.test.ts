@@ -35,6 +35,12 @@ describe('renderer i18n', () => {
       t('commandSourceCore'),
       t('chartPreviewRegistered'),
       t('commandNotBound'),
+      t('editorSettingsHint'),
+      t('densityCompact'),
+      t('densityComfortable'),
+      t('tabSize'),
+      t('wordWrap'),
+      t('lineNumbers'),
     ];
 
     expect(criticalLabels).toEqual([
@@ -58,6 +64,12 @@ describe('renderer i18n', () => {
       '核心',
       '图表预览插件接口已注册，运行时视图将在后续接入。',
       '命令尚未绑定处理器。',
+      '配置代码字体、字号、换行、缩略图和行号显示。',
+      '紧凑',
+      '舒适',
+      'Tab 大小',
+      '自动换行',
+      '行号',
     ]);
     expect(criticalLabels.join('')).not.toMatch(/[\u951F\uFFFD\u93B5\u7481\u940E\u7F01]/);
   });

@@ -2031,11 +2031,11 @@ function WorkspaceDialog({
                           }
                         >
                           <option value="dark">{t('themeDark')}</option>
-                          <option value="light">Light</option>
+                          <option value="light">{t('themeLight')}</option>
                         </select>
                       </label>
                       <label>
-                        <span>密度</span>
+                        <span>{t('density')}</span>
                         <select
                           value={ideDraft.appearance.density}
                           onChange={(event) =>
@@ -2048,8 +2048,8 @@ function WorkspaceDialog({
                             })
                           }
                         >
-                          <option value="compact">紧凑</option>
-                          <option value="comfortable">舒适</option>
+                          <option value="compact">{t('densityCompact')}</option>
+                          <option value="comfortable">{t('densityComfortable')}</option>
                         </select>
                       </label>
                     </div>
@@ -2084,7 +2084,7 @@ function WorkspaceDialog({
                         />
                       </label>
                       <label>
-                        <span>Tab Size</span>
+                        <span>{t('tabSize')}</span>
                         <input
                           max={8}
                           min={2}
@@ -2106,7 +2106,7 @@ function WorkspaceDialog({
                             })
                           }
                         />
-                        <span>自动换行</span>
+                        <span>{t('wordWrap')}</span>
                       </label>
                       <label className="switch-row">
                         <input
@@ -2116,7 +2116,7 @@ function WorkspaceDialog({
                             setIdeDraft({ ...ideDraft, editor: { ...ideDraft.editor, minimap: event.target.checked } })
                           }
                         />
-                        <span>Minimap</span>
+                        <span>{t('minimap')}</span>
                       </label>
                       <label className="switch-row">
                         <input
@@ -2126,7 +2126,7 @@ function WorkspaceDialog({
                             setIdeDraft({ ...ideDraft, editor: { ...ideDraft.editor, lineNumbers: event.target.checked } })
                           }
                         />
-                        <span>行号</span>
+                        <span>{t('lineNumbers')}</span>
                       </label>
                     </div>
                   </section>
@@ -2141,7 +2141,7 @@ function WorkspaceDialog({
                       <label>
                         <span>{t('defaultShell')}</span>
                         <input
-                          placeholder="留空则使用系统默认 shell"
+                          placeholder={t('defaultShellPlaceholder')}
                           value={ideDraft.terminal.defaultShell}
                           onChange={(event) =>
                             setIdeDraft({ ...ideDraft, terminal: { ...ideDraft.terminal, defaultShell: event.target.value } })
