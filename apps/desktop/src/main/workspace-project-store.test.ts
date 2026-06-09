@@ -117,6 +117,53 @@ describe('WorkspaceProjectStore', () => {
     ).rejects.toThrow('managed project directory');
   });
 
+  it('renames and deletes workspace files without allowing overwrite or path escapes', async () => {
+    const rootPath = join(await tempDir(), 'ecommerce-analytics');
+    const store = new WorkspaceProjectStore(join(await tempDir(), 'workspaces.json'));
+    const project = await store.create({ name: 'File Operations Project', rootPath });
+
+    await store.writeFile({
+      rootPath: project.rootPath,
+      relativePath: 'scripts/clean_orders.py',
+      content: 'print("clean orders")\n',
+    });
+    await store.writeFile({
+      rootPath: project.rootPath,
+      relativePath: 'scripts/existing.py',
+      content: 'print("existing")\n',
+    });
+
+    const renamed = await store.renameFile({
+      rootPath: project.rootPath,
+      fromRelativePath: 'scripts/clean_orders.py',
+      toRelativePath: 'scripts/prepare_orders.py',
+    });
+    const reopened = await store.readFile({ rootPath: project.rootPath, relativePath: renamed.relativePath });
+    const deleted = await store.deleteFile({ rootPath: project.rootPath, relativePath: renamed.relativePath });
+
+    expect(renamed.relativePath).toBe('scripts/prepare_orders.py');
+    expect(reopened.content).toContain('clean orders');
+    expect(deleted.relativePath).toBe('scripts/prepare_orders.py');
+    await expect(store.readFile({ rootPath: project.rootPath, relativePath: renamed.relativePath })).rejects.toThrow();
+    await expect(
+      store.renameFile({
+        rootPath: project.rootPath,
+        fromRelativePath: 'scripts/existing.py',
+        toRelativePath: '../escape.py',
+      }),
+    ).rejects.toThrow('managed project directory');
+    await expect(
+      store.renameFile({
+        rootPath: project.rootPath,
+        fromRelativePath: 'scripts/existing.py',
+        toRelativePath: 'scripts/existing.py',
+      }),
+    ).rejects.toThrow('already exists');
+    await expect(store.deleteFile({ rootPath: project.rootPath, relativePath: '.dbagent/workspace.json' })).rejects.toThrow(
+      'managed project directory',
+    );
+  });
+
   it('updates workspace SQL library settings and saves future SQL there', async () => {
     const rootPath = join(await tempDir(), 'ecommerce-analytics');
     const store = new WorkspaceProjectStore(join(await tempDir(), 'workspaces.json'));

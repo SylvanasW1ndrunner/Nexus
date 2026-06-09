@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type {
   WorkspaceCreateRequest,
   WorkspaceFileContent,
   WorkspaceFileEntry,
   WorkspaceProject,
+  WorkspaceDeleteFileRequest,
+  WorkspaceDeletedFile,
   WorkspaceReadFileRequest,
+  WorkspaceRenameFileRequest,
   WorkspaceRecentState,
   WorkspaceSavedFile,
   WorkspaceSaveSqlFileRequest,
@@ -131,6 +134,42 @@ export class WorkspaceProjectStore {
       bytes: info.size,
       updatedAt: info.mtime.toISOString(),
     };
+  }
+
+  async renameFile(request: WorkspaceRenameFileRequest): Promise<WorkspaceSavedFile> {
+    const project = await this.loadProject(request.rootPath);
+    const fromRelativePath = normalizeWorkspaceRelativePath(request.fromRelativePath);
+    const toRelativePath = normalizeWorkspaceRelativePath(request.toRelativePath);
+    const fromAbsolutePath = resolveInside(project.rootPath, fromRelativePath);
+    const toAbsolutePath = resolveInside(project.rootPath, toRelativePath);
+    const fromInfo = await stat(fromAbsolutePath);
+    if (!fromInfo.isFile()) throw new Error('Workspace path is not a file.');
+    try {
+      await stat(toAbsolutePath);
+      throw new Error('Target workspace file already exists.');
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
+    }
+    await mkdir(dirname(toAbsolutePath), { recursive: true });
+    await rename(fromAbsolutePath, toAbsolutePath);
+    const info = await stat(toAbsolutePath);
+    return {
+      name: basename(toRelativePath),
+      relativePath: toPortablePath(toRelativePath),
+      absolutePath: toAbsolutePath,
+      bytes: info.size,
+      updatedAt: info.mtime.toISOString(),
+    };
+  }
+
+  async deleteFile(request: WorkspaceDeleteFileRequest): Promise<WorkspaceDeletedFile> {
+    const project = await this.loadProject(request.rootPath);
+    const relativePath = normalizeWorkspaceRelativePath(request.relativePath);
+    const absolutePath = resolveInside(project.rootPath, relativePath);
+    const info = await stat(absolutePath);
+    if (!info.isFile()) throw new Error('Workspace path is not a file.');
+    await rm(absolutePath);
+    return { relativePath: toPortablePath(relativePath) };
   }
 
   async saveSqlFile(request: WorkspaceSaveSqlFileRequest): Promise<WorkspaceSavedFile> {

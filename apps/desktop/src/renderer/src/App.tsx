@@ -185,6 +185,7 @@ export function App() {
   const [saveSqlNameDraft, setSaveSqlNameDraft] = useState('');
   const [newFileDialogOpen, setNewFileDialogOpen] = useState(false);
   const [newFilePathDraft, setNewFilePathDraft] = useState('scripts/analysis.py');
+  const [fileContextMenu, setFileContextMenu] = useState<{ x: number; y: number; file: WorkspaceFileEntry } | undefined>();
   const [createConnectionDuringWorkspace, setCreateConnectionDuringWorkspace] = useState(false);
   const [selectedDatabaseEngine, setSelectedDatabaseEngine] = useState<ConnectionInput['engine']>('postgres');
   const [workspaceSettingsDraft, setWorkspaceSettingsDraft] = useState({
@@ -229,6 +230,17 @@ export function App() {
   useEffect(() => {
     terminalsRef.current = terminals;
   }, [terminals]);
+
+  useEffect(() => {
+    if (!fileContextMenu) return undefined;
+    const closeMenu = () => setFileContextMenu(undefined);
+    window.addEventListener('click', closeMenu);
+    window.addEventListener('keydown', closeMenu);
+    return () => {
+      window.removeEventListener('click', closeMenu);
+      window.removeEventListener('keydown', closeMenu);
+    };
+  }, [fileContextMenu]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -1128,6 +1140,62 @@ export function App() {
     setMessage(`${t('fileCreated')}: ${response.data.relativePath}`);
   }
 
+  async function renameWorkspaceFile(file: WorkspaceFileEntry) {
+    if (!activeWorkspace || file.type !== 'file') return;
+    const nextPath = window.prompt(t('renameFilePrompt'), file.relativePath);
+    if (!nextPath) return;
+    let relativePath = '';
+    try {
+      relativePath = normalizeNewWorkspaceFilePath(nextPath);
+    } catch {
+      setMessage(t('invalidFilePath'));
+      return;
+    }
+    if (relativePath === file.relativePath) return;
+    const response = await window.dbagent.invoke(ipcChannels.workspace.renameFile, {
+      rootPath: activeWorkspace.rootPath,
+      fromRelativePath: file.relativePath,
+      toRelativePath: relativePath,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    await refreshWorkspaceFiles(activeWorkspace.rootPath);
+    if (editorDocument.relativePath === file.relativePath) {
+      setEditorDocument((document) => ({
+        ...document,
+        title: response.data.name,
+        relativePath: response.data.relativePath,
+        language: inferWorkspaceFileLanguage(response.data.relativePath),
+      }));
+      setEditorLanguage(inferWorkspaceFileLanguage(response.data.relativePath));
+    }
+    setFileContextMenu(undefined);
+    setMessage(`${t('renameFile')}: ${response.data.relativePath}`);
+  }
+
+  async function deleteWorkspaceFile(file: WorkspaceFileEntry) {
+    if (!activeWorkspace || file.type !== 'file') return;
+    if (!window.confirm(`${t('deleteFileConfirm')}\n\n${file.relativePath}`)) return;
+    const response = await window.dbagent.invoke(ipcChannels.workspace.deleteFile, {
+      rootPath: activeWorkspace.rootPath,
+      relativePath: file.relativePath,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    await refreshWorkspaceFiles(activeWorkspace.rootPath);
+    if (editorDocument.relativePath === file.relativePath) {
+      setSql('');
+      setEditorLanguage('plaintext');
+      setEditorDocument(defaultEditorDocument);
+    }
+    setFileContextMenu(undefined);
+    setMessage(`${t('delete')}: ${response.data.relativePath}`);
+  }
+
   async function openWorkspaceFile(file: WorkspaceFileEntry) {
     if (!activeWorkspace || file.type !== 'file') return;
     const response = await window.dbagent.invoke(ipcChannels.workspace.readFile, {
@@ -1239,6 +1307,10 @@ export function App() {
               onCreateFile={() => setNewFileDialogOpen(true)}
               onOpenFile={(file) => void openWorkspaceFile(file)}
               onOpenProject={() => void chooseAndOpenWorkspace()}
+              onOpenFileMenu={(file, event) => {
+                event.preventDefault();
+                setFileContextMenu({ x: event.clientX, y: event.clientY, file });
+              }}
             />
             {!leftSidebarCollapsed ? (
               <div
@@ -1404,6 +1476,19 @@ export function App() {
           onClose={() => setNewFileDialogOpen(false)}
           onCreate={() => void createWorkspaceFile()}
         />
+      ) : null}
+      {fileContextMenu ? (
+        <div className="editor-context-menu file-context-menu" style={{ left: fileContextMenu.x, top: fileContextMenu.y }}>
+          <button type="button" onClick={() => void openWorkspaceFile(fileContextMenu.file)}>
+            {t('openFile')}
+          </button>
+          <button type="button" onClick={() => void renameWorkspaceFile(fileContextMenu.file)}>
+            {t('rename')}
+          </button>
+          <button type="button" onClick={() => void deleteWorkspaceFile(fileContextMenu.file)}>
+            {t('delete')}
+          </button>
+        </div>
       ) : null}
     </main>
   );
@@ -2734,6 +2819,7 @@ function ProjectPanel({
   onCreateFile,
   onCreateProject,
   onOpenFile,
+  onOpenFileMenu,
   onOpenProject,
 }: {
   activeWorkspace: WorkspaceProject | undefined;
@@ -2743,6 +2829,7 @@ function ProjectPanel({
   onCreateFile: () => void;
   onCreateProject: () => void;
   onOpenFile: (file: WorkspaceFileEntry) => void;
+  onOpenFileMenu: (file: WorkspaceFileEntry, event: ReactMouseEvent<HTMLButtonElement>) => void;
   onOpenProject: () => void;
 }) {
   return (
@@ -2771,6 +2858,7 @@ function ProjectPanel({
                   key={file.relativePath}
                   {...(activeFilePath ? { activeFilePath } : {})}
                   onOpenFile={onOpenFile}
+                  onOpenFileMenu={onOpenFileMenu}
                 />
               ))
             ) : (
@@ -2806,11 +2894,13 @@ function FileNode({
   entry,
   label,
   onOpenFile,
+  onOpenFileMenu,
 }: {
   activeFilePath?: string;
   entry?: WorkspaceFileEntry;
   label?: string;
   onOpenFile?: (file: WorkspaceFileEntry) => void;
+  onOpenFileMenu?: (file: WorkspaceFileEntry, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
   const display = entry?.type === 'directory' ? `${entry.name}/` : (entry?.name ?? label ?? '');
   const isActive = Boolean(entry?.relativePath && activeFilePath === entry.relativePath);
@@ -2822,6 +2912,9 @@ function FileNode({
         type="button"
         onClick={() => {
           if (entry) onOpenFile?.(entry);
+        }}
+        onContextMenu={(event) => {
+          if (entry?.type === 'file') onOpenFileMenu?.(entry, event);
         }}
       >
         <span />
@@ -2835,6 +2928,7 @@ function FileNode({
               key={child.relativePath}
               {...(activeFilePath ? { activeFilePath } : {})}
               {...(onOpenFile ? { onOpenFile } : {})}
+              {...(onOpenFileMenu ? { onOpenFileMenu } : {})}
             />
           ))}
         </div>

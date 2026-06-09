@@ -341,6 +341,28 @@ function registerIpcHandlers(): void {
       });
     }
   });
+  handle(ipcChannels.workspace.renameFile, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.renameFile(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to rename workspace file.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
+  handle(ipcChannels.workspace.deleteFile, async (request) => {
+    try {
+      return ok(await workspaceProjectStore.deleteFile(request));
+    } catch (error) {
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Unable to delete workspace file.',
+        ...(error instanceof Error ? { detail: error.message } : {}),
+      });
+    }
+  });
   handle(ipcChannels.workspace.saveSqlFile, async (request) => {
     try {
       return ok(await workspaceProjectStore.saveSqlFile(request));

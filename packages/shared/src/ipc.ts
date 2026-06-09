@@ -42,6 +42,8 @@ export const ipcChannels = {
     listFiles: 'workspace:list-files',
     readFile: 'workspace:read-file',
     writeFile: 'workspace:write-file',
+    renameFile: 'workspace:rename-file',
+    deleteFile: 'workspace:delete-file',
     saveSqlFile: 'workspace:save-sql-file',
     updateSettings: 'workspace:update-settings',
   },
@@ -470,6 +472,21 @@ export type WorkspaceWriteFileRequest = {
   content: string;
 };
 
+export type WorkspaceRenameFileRequest = {
+  rootPath: string;
+  fromRelativePath: string;
+  toRelativePath: string;
+};
+
+export type WorkspaceDeleteFileRequest = {
+  rootPath: string;
+  relativePath: string;
+};
+
+export type WorkspaceDeletedFile = {
+  relativePath: string;
+};
+
 export type WorkspaceFileContent = {
   name: string;
   relativePath: string;
@@ -528,6 +545,8 @@ export type IpcRequestMap = {
   'workspace:list-files': { rootPath: string };
   'workspace:read-file': WorkspaceReadFileRequest;
   'workspace:write-file': WorkspaceWriteFileRequest;
+  'workspace:rename-file': WorkspaceRenameFileRequest;
+  'workspace:delete-file': WorkspaceDeleteFileRequest;
   'workspace:save-sql-file': WorkspaceSaveSqlFileRequest;
   'workspace:update-settings': WorkspaceUpdateSettingsRequest;
 };
@@ -582,6 +601,8 @@ export type IpcResponseMap = {
   'workspace:list-files': Result<WorkspaceFileEntry[]>;
   'workspace:read-file': Result<WorkspaceFileContent>;
   'workspace:write-file': Result<WorkspaceSavedFile>;
+  'workspace:rename-file': Result<WorkspaceSavedFile>;
+  'workspace:delete-file': Result<WorkspaceDeletedFile>;
   'workspace:save-sql-file': Result<WorkspaceSavedFile>;
   'workspace:update-settings': Result<WorkspaceProject>;
 };
