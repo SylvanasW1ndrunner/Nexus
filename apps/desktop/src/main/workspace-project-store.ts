@@ -464,9 +464,17 @@ function normalizePythonConfig(value: unknown): WorkspaceProject['python'] {
   if (!isRecord(value)) return { ...defaultPythonConfig };
   const mode = value.mode === 'venv' || value.mode === 'conda' ? value.mode : defaultPythonConfig.mode;
   const pythonPath = typeof value.pythonPath === 'string' && value.pythonPath.trim() ? value.pythonPath.trim() : undefined;
-  const venvPath = typeof value.venvPath === 'string' && value.venvPath.trim()
+  const venvPath = mode === 'venv' && typeof value.venvPath === 'string' && value.venvPath.trim()
     ? normalizeWorkspaceRelativeDirectory(value.venvPath)
     : undefined;
+  const condaEnvName =
+    mode === 'conda' && typeof value.condaEnvName === 'string' && value.condaEnvName.trim()
+      ? value.condaEnvName.trim()
+      : undefined;
+  const condaPrefix =
+    mode === 'conda' && typeof value.condaPrefix === 'string' && value.condaPrefix.trim()
+      ? value.condaPrefix.trim()
+      : undefined;
   const requirementsPath =
     typeof value.requirementsPath === 'string'
       ? normalizeWorkspaceRelativePath(value.requirementsPath)
@@ -475,6 +483,8 @@ function normalizePythonConfig(value: unknown): WorkspaceProject['python'] {
     mode,
     ...(pythonPath ? { pythonPath } : {}),
     ...(venvPath ? { venvPath } : {}),
+    ...(condaEnvName ? { condaEnvName } : {}),
+    ...(condaPrefix ? { condaPrefix } : {}),
     requirementsPath,
   };
 }

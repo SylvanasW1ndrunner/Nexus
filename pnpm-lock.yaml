@@ -96,7 +96,13 @@ importers:
       '@dbagent/shared':
         specifier: workspace:*
         version: link:../shared
+      pg:
+        specifier: ^8.13.1
+        version: 8.21.0
     devDependencies:
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.20)

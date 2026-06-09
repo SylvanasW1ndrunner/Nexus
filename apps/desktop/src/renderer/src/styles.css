@@ -1191,6 +1191,9 @@ small {
 }
 
 .terminal-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-height: 24px;
   border-color: transparent;
   background: transparent;
@@ -1198,11 +1201,16 @@ small {
   font-size: 12px;
 }
 
+.terminal-tabs button i {
+  color: #8b949e;
+  font-style: normal;
+}
+
 .terminal-tabs button.active {
   background: #2d2d30;
 }
 
-.console-panel pre {
+.terminal-output {
   flex: 1;
   overflow: auto;
   margin: 0;
@@ -1212,6 +1220,50 @@ small {
   font-family: "JetBrains Mono", Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
+}
+
+.terminal-command-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border-subtle);
+  background: #181a1f;
+  padding: 8px;
+}
+
+.terminal-command-row span {
+  color: #7ee787;
+  font-family: "JetBrains Mono", Consolas, monospace;
+}
+
+.terminal-command-row input {
+  min-height: 28px;
+  border-color: #303743;
+  background: #101318;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.python-toolbar,
+.python-create-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.python-env-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.python-env-list button {
+  display: grid;
+  gap: 3px;
+  justify-items: start;
+  text-align: left;
 }
 
 textarea {
@@ -1420,6 +1472,17 @@ textarea {
   margin-top: 14px;
 }
 
+.modal-actions.split {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modal-actions.split > div {
+  display: flex;
+  gap: 8px;
+}
+
 textarea:focus,
 input:focus,
 select:focus {
@@ -1473,6 +1536,37 @@ select:focus {
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   background: #ffffff;
+}
+
+.settings-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: #1b1d22;
+  padding: 12px;
+}
+
+.plugin-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.plugin-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  border: 1px solid #303743;
+  border-radius: 8px;
+  background: #171b22;
+  padding: 10px;
+}
+
+.plugin-item p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #9aa4ad;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .empty-state {
@@ -2126,37 +2220,24 @@ td {
   padding: 0 10px 0 14px;
 }
 
-.agent-tabs {
-  display: flex;
-  align-items: stretch;
-  align-self: stretch;
-  gap: 18px;
+.agent-heading {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
 }
 
-.agent-tabs button {
-  position: relative;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: #a6a6a6;
-  min-height: 44px;
-  padding: 0;
+.agent-heading strong {
+  color: #f0f6fc;
+  font-size: 13px;
+}
+
+.agent-heading small {
+  max-width: 190px;
+  overflow: hidden;
+  color: #8b949e;
   font-size: 11px;
-  font-weight: 600;
-}
-
-.agent-tabs button.active {
-  color: #ffffff;
-}
-
-.agent-tabs button.active::after {
-  content: "";
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 1px;
-  background: #58a6ff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-toolbar {

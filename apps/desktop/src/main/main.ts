@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ConnectionStore, QueryHistoryStore, createDefaultDatabaseDriverRegistry } from '@dbagent/core-db';
-import { AuthService } from '@dbagent/core-auth';
+import { AuthService, PostgresAuthRepository, UnavailableAuthRepository } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import {
@@ -20,6 +20,9 @@ import { CredentialVault } from './credential-vault.js';
 import { createExplainWorkflow } from './explain-workflow.js';
 import { createQueryWorkflow } from './query-workflow.js';
 import { createSchemaWorkflow } from './schema-workflow.js';
+import { PluginRegistry } from './plugin-registry.js';
+import { PythonEnvironmentService } from './python-environment.js';
+import { TerminalService } from './terminal-service.js';
 import { WorkspaceStateStore } from './workspace-state-store.js';
 import { WorkspaceProjectStore } from './workspace-project-store.js';
 
@@ -29,14 +32,21 @@ const dataDir = join(userDataDir, 'data');
 const credentialPath = join(dataDir, 'credentials.json');
 const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
+const pluginStatePath = join(dataDir, 'plugins.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
 const workspaceStateStore = new WorkspaceStateStore(workspaceStatePath);
 const workspaceProjectStore = new WorkspaceProjectStore(workspaceProjectStatePath);
-const authService = new AuthService(join(dataDir, 'auth-session.json'));
+const authRepository = process.env.DBAGENT_AUTH_DATABASE_URL
+  ? new PostgresAuthRepository(process.env.DBAGENT_AUTH_DATABASE_URL)
+  : new UnavailableAuthRepository('Authentication requires DBAGENT_AUTH_DATABASE_URL pointing to a PostgreSQL database.');
+const authService = new AuthService(join(dataDir, 'auth-session.json'), authRepository);
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
+const pythonEnvironmentService = new PythonEnvironmentService();
+const terminalService = new TerminalService();
+const pluginRegistry = new PluginRegistry(pluginStatePath);
 const databaseDrivers = createDefaultDatabaseDriverRegistry();
 const connectionWorkflow = createConnectionWorkflow({
   connections: connectionStore,
@@ -170,6 +180,17 @@ function handle<Channel extends IpcChannel>(
   ipcMain.handle(channel, (_event, request: IpcRequestMap[Channel]) => listener(request));
 }
 
+async function safeResult<T>(operation: () => Promise<T>): Promise<ReturnType<typeof ok<T>> | ReturnType<typeof err>> {
+  try {
+    return ok(await operation());
+  } catch (error) {
+    return err({
+      code: 'VALIDATION_ERROR',
+      message: error instanceof Error ? error.message : 'Operation failed.',
+    });
+  }
+}
+
 function registerIpcHandlers(): void {
   handle(ipcChannels.connection.list, async () => connectionWorkflow.list());
   handle(ipcChannels.connection.test, async (input) => connectionWorkflow.test(input));
@@ -188,8 +209,35 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.db.queryHistory, async (request) => ok(await queryHistoryStore.list(request ?? {})));
 
   handle(ipcChannels.auth.status, async () => ok(await authService.status()));
-  handle(ipcChannels.auth.login, async (request) => ok(await authService.login(request.email)));
+  handle(ipcChannels.auth.login, async (request) => safeResult(() => authService.login(request.identifier, request.password)));
+  handle(ipcChannels.auth.register, async (request) => safeResult(() => authService.register(request)));
+  handle(ipcChannels.auth.requestCode, async (request) => safeResult(() => authService.requestCode(request)));
+  handle(ipcChannels.auth.verifyCodeLogin, async (request) => safeResult(() => authService.verifyCodeLogin(request)));
+  handle(ipcChannels.auth.resetPassword, async (request) => safeResult(() => authService.resetPassword(request)));
   handle(ipcChannels.auth.logout, async () => ok(await authService.logout()));
+
+  handle(ipcChannels.python.detect, async (request) => safeResult(() => pythonEnvironmentService.detect(request)));
+  handle(ipcChannels.python.choosePath, async (request) => {
+    const selection = await dialog.showOpenDialog(mainWindow!, {
+      title: request?.title ?? 'Choose Python path',
+      properties: request.mode === 'directory' ? ['openDirectory'] : ['openFile'],
+    });
+    const path = selection.canceled ? undefined : selection.filePaths[0];
+    return ok(path ? { path } : {});
+  });
+  handle(ipcChannels.python.createEnvironment, async (request) =>
+    safeResult(() => pythonEnvironmentService.createEnvironment(request)),
+  );
+  handle(ipcChannels.python.runScript, async (request) => safeResult(() => pythonEnvironmentService.runScript(request)));
+
+  handle(ipcChannels.terminal.create, (request) => Promise.resolve(ok(terminalService.create(request ?? {}))));
+  handle(ipcChannels.terminal.close, ({ id }) => Promise.resolve(ok(terminalService.close(id))));
+  handle(ipcChannels.terminal.run, async (request) => safeResult(() => terminalService.run(request)));
+  handle(ipcChannels.terminal.list, () => Promise.resolve(ok(terminalService.list())));
+
+  handle(ipcChannels.plugin.list, async () => safeResult(() => pluginRegistry.list()));
+  handle(ipcChannels.plugin.install, async ({ id }) => safeResult(() => pluginRegistry.install(id)));
+  handle(ipcChannels.plugin.uninstall, async ({ id }) => safeResult(() => pluginRegistry.uninstall(id)));
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
   handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));

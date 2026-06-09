@@ -1,0 +1,4 @@
+﻿e29e1ca61a7bd0b65a2a8604b4a7d6dc042c464e8b03ec296b04ec34f7652fdb  DBAgent-BetaV0.1.1-Setup.exe
+3a9bdc88c1937b321b41f9cb1670b527f1b7035f800022103b98e2dfebc51533  DBAgent-BetaV0.1.1-Setup.exe.blockmap
+66ef955be41338e467397ba0b55ea3dbc8eeef68562c7fbf9409f3d1c634195e  DBAgent-BetaV0.1.1-win-unpacked.zip
+3fb9b5273ac714ca03511f8c6f88ce5b7248b6e87dbfa87ae77f14d774d38930  README.txt

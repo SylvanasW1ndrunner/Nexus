@@ -15,10 +15,15 @@ import {
   queryResultToCsv,
   queryResultToJson,
   type ConnectionInput,
+  type AuthStatus,
+  type PluginManifest,
+  type PythonEnvironmentInfo,
+  type PythonRunResult,
   type QueryExecutionResult,
   type SavedConnection,
   type TableDetail,
   type TableSummary,
+  type TerminalSession,
   type WorkspaceProject,
   type WorkspaceFileEntry,
   type WorkspacePythonConfig,
@@ -45,6 +50,12 @@ type ChatMessage = {
   id: string;
   role: 'assistant' | 'user';
   content: string;
+};
+
+type TerminalView = TerminalSession & {
+  input: string;
+  output: string;
+  running: boolean;
 };
 
 type EditorLanguage = 'sql' | 'python' | 'markdown' | 'plaintext';
@@ -126,6 +137,10 @@ export function App() {
     outputs: 'outputs',
   });
   const [workspacePythonDraft, setWorkspacePythonDraft] = useState<WorkspacePythonConfig>(defaultWorkspacePythonDraft);
+  const [pythonEnvironments, setPythonEnvironments] = useState<PythonEnvironmentInfo[]>([]);
+  const [terminals, setTerminals] = useState<TerminalView[]>([]);
+  const [activeTerminalId, setActiveTerminalId] = useState('');
+  const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [chatDraft, setChatDraft] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
@@ -147,6 +162,8 @@ export function App() {
   useEffect(() => {
     void refreshConnections();
     void refreshWorkspace();
+    void initializeTerminal();
+    void refreshPlugins();
   }, []);
 
   useEffect(() => {
@@ -212,6 +229,145 @@ export function App() {
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+  }
+
+  async function initializeTerminal() {
+    const response = await window.dbagent.invoke(ipcChannels.terminal.create, {});
+    if (!response.ok) return;
+    const terminal = toTerminalView(response.data);
+    setTerminals([terminal]);
+    setActiveTerminalId(terminal.id);
+  }
+
+  async function createTerminal() {
+    const response = await window.dbagent.invoke(ipcChannels.terminal.create, {
+      ...(activeWorkspace ? { cwd: activeWorkspace.rootPath } : {}),
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    const terminal = toTerminalView(response.data);
+    setTerminals((current) => [...current, terminal]);
+    setActiveTerminalId(terminal.id);
+  }
+
+  async function closeTerminal(id: string) {
+    const response = await window.dbagent.invoke(ipcChannels.terminal.close, { id });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setTerminals((current) => {
+      const next = current.filter((terminal) => terminal.id !== id);
+      if (activeTerminalId === id) setActiveTerminalId(next[0]?.id ?? '');
+      return next;
+    });
+  }
+
+  function updateTerminalInput(id: string, input: string) {
+    setTerminals((current) => current.map((terminal) => (terminal.id === id ? { ...terminal, input } : terminal)));
+  }
+
+  async function runTerminalCommand(id: string) {
+    const terminal = terminals.find((item) => item.id === id);
+    if (!terminal || !terminal.input.trim()) return;
+    const command = terminal.input.trim();
+    setTerminals((current) =>
+      current.map((item) =>
+        item.id === id ? { ...item, running: true, output: `${item.output}\n> ${command}\n` } : item,
+      ),
+    );
+    const response = await window.dbagent.invoke(ipcChannels.terminal.run, {
+      terminalId: id,
+      command,
+      ...(activeWorkspace ? { cwd: activeWorkspace.rootPath } : {}),
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      setTerminals((current) => current.map((item) => (item.id === id ? { ...item, running: false } : item)));
+      return;
+    }
+    appendTerminalResult(id, response.data);
+  }
+
+  function appendTerminalResult(id: string, result: PythonRunResult) {
+    const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
+    setTerminals((current) =>
+      current.map((terminal) =>
+        terminal.id === id
+          ? {
+              ...terminal,
+              running: false,
+              input: '',
+              output: `${terminal.output}${output}${output ? '\n' : ''}[exit ${result.exitCode ?? 'unknown'} / ${result.elapsedMs} ms]\n`,
+              lastExitCode: result.exitCode,
+              lastCommand: result.command,
+            }
+          : terminal,
+      ),
+    );
+  }
+
+  async function refreshPlugins() {
+    const response = await window.dbagent.invoke(ipcChannels.plugin.list, undefined);
+    if (response.ok) setPlugins(response.data);
+  }
+
+  async function updatePlugin(id: string, installed: boolean) {
+    const response = await window.dbagent.invoke(installed ? ipcChannels.plugin.uninstall : ipcChannels.plugin.install, { id });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setPlugins((current) => current.map((plugin) => (plugin.id === id ? response.data : plugin)));
+  }
+
+  async function detectPythonEnvironments() {
+    const response = await window.dbagent.invoke(ipcChannels.python.detect, {
+      ...(activeWorkspace ? { rootPath: activeWorkspace.rootPath } : {}),
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setPythonEnvironments(response.data);
+    setMessage(
+      language === 'zh-CN' ? `检测到 ${response.data.length} 个 Python 环境。` : `Detected ${response.data.length} Python environments.`,
+    );
+  }
+
+  async function choosePythonPath(mode: 'file' | 'directory') {
+    const response = await window.dbagent.invoke(ipcChannels.python.choosePath, {
+      mode,
+      title: mode === 'file' ? 'Choose Python executable' : 'Choose Python environment directory',
+    });
+    return response.ok ? response.data.path : undefined;
+  }
+
+  async function createPythonEnvironment(mode: 'venv' | 'conda', name: string) {
+    if (!activeWorkspace) {
+      setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
+      return;
+    }
+    const response = await window.dbagent.invoke(ipcChannels.python.createEnvironment, {
+      rootPath: activeWorkspace.rootPath,
+      mode,
+      name,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+      return;
+    }
+    setPythonEnvironments((current) => [response.data, ...current.filter((item) => item.id !== response.data.id)]);
+    setWorkspacePythonDraft((current) => ({
+      ...current,
+      mode,
+      ...(response.data.pythonPath ? { pythonPath: response.data.pythonPath } : {}),
+      ...(response.data.venvPath ? { venvPath: response.data.venvPath } : {}),
+      ...(response.data.condaEnvName ? { condaEnvName: response.data.condaEnvName } : {}),
+      ...(response.data.condaPrefix ? { condaPrefix: response.data.condaPrefix } : {}),
+    }));
   }
 
   useEffect(() => {
@@ -783,13 +939,20 @@ export function App() {
               result={result}
               sql={sql}
               t={t}
+              activeTerminalId={activeTerminalId}
+              terminals={terminals}
               onChangeSql={handleEditorChange}
+              onCloseTerminal={(id) => void closeTerminal(id)}
+              onCreateTerminal={() => void createTerminal()}
               onExecuteSql={(nextSql) => void executeSql(nextSql)}
               onExplain={() => void explain()}
               onExportCsv={exportCsv}
               onExportExcel={exportExcel}
               onExportJson={exportJson}
               onSaveSql={() => void saveCurrentDocument()}
+              onRunTerminal={(id) => void runTerminalCommand(id)}
+              onSelectTerminal={setActiveTerminalId}
+              onUpdateTerminalInput={updateTerminalInput}
               setBottomPanel={setBottomPanel}
             />
           </section>
@@ -845,6 +1008,8 @@ export function App() {
           selectedDatabaseEngine={selectedDatabaseEngine}
           selectedTable={selectedTable}
           settingsDraft={workspaceSettingsDraft}
+          pythonEnvironments={pythonEnvironments}
+          plugins={plugins}
           language={language}
           setConnectionDraft={setConnectionDraft}
           setCreateConnection={setCreateConnectionDuringWorkspace}
@@ -858,8 +1023,10 @@ export function App() {
           workspaceDraft={workspaceDraft}
           pythonDraft={workspacePythonDraft}
           onChooseDirectory={() => void chooseWorkspaceDirectory()}
+          onChoosePythonPath={(mode) => choosePythonPath(mode)}
           onConnect={() => void connectActive()}
           onClose={() => setWorkspaceDialogOpen(false)}
+          onCreatePythonEnvironment={(mode, name) => void createPythonEnvironment(mode, name)}
           onCreate={() => void createWorkspace()}
           onCreateConnection={() => void createConnection()}
           onDeleteConnection={() => void removeActiveConnection()}
@@ -867,6 +1034,8 @@ export function App() {
           onDisconnect={() => void disconnectActive()}
           onPreviewTable={previewTable}
           onSaveSettings={() => void updateWorkspaceSettings()}
+          onDetectPython={() => void detectPythonEnvironments()}
+          onUpdatePlugin={(id, installed) => void updatePlugin(id, installed)}
           onSelectConnection={selectConnection}
           onTestConnection={() => void testConnection()}
           onUpdateConnection={() => void updateActiveConnection()}
@@ -1059,6 +1228,8 @@ function WorkspaceDialog({
   selectedDatabaseEngine,
   selectedTable,
   settingsDraft,
+  pythonEnvironments,
+  plugins,
   setConnectionDraft,
   setCreateConnection,
   setLanguage,
@@ -1071,15 +1242,19 @@ function WorkspaceDialog({
   workspaceDraft,
   pythonDraft,
   onChooseDirectory,
+  onChoosePythonPath,
   onConnect,
   onClose,
   onCreate,
+  onCreatePythonEnvironment,
   onCreateConnection,
   onDeleteConnection,
   onDescribeTable,
   onDisconnect,
   onPreviewTable,
   onSaveSettings,
+  onDetectPython,
+  onUpdatePlugin,
   onSelectConnection,
   onTestConnection,
   onUpdateConnection,
@@ -1094,6 +1269,8 @@ function WorkspaceDialog({
   selectedDatabaseEngine: ConnectionInput['engine'];
   selectedTable: TableDetail | undefined;
   settingsDraft: WorkspaceProject['assetPaths'];
+  pythonEnvironments: PythonEnvironmentInfo[];
+  plugins: PluginManifest[];
   setConnectionDraft: (draft: ConnectionInput) => void;
   setCreateConnection: (enabled: boolean) => void;
   setLanguage: (language: AppLanguage) => void;
@@ -1106,15 +1283,19 @@ function WorkspaceDialog({
   workspaceDraft: WorkspaceDraft;
   pythonDraft: WorkspacePythonConfig;
   onChooseDirectory: () => void;
+  onChoosePythonPath: (mode: 'file' | 'directory') => Promise<string | undefined>;
   onConnect: () => void;
   onClose: () => void;
   onCreate: () => void;
+  onCreatePythonEnvironment: (mode: 'venv' | 'conda', name: string) => void;
   onCreateConnection: () => void;
   onDeleteConnection: () => void;
   onDescribeTable: (table: TableSummary) => void;
   onDisconnect: () => void;
   onPreviewTable: (table: TableSummary) => void;
   onSaveSettings: () => void;
+  onDetectPython: () => void;
+  onUpdatePlugin: (id: string, installed: boolean) => void;
   onSelectConnection: (connection: SavedConnection) => void;
   onTestConnection: () => void;
   onUpdateConnection: () => void;
@@ -1122,7 +1303,9 @@ function WorkspaceDialog({
   const isCreate = mode === 'create';
   const isProjectSettings = mode === 'project-settings';
   const [settingsSection, setSettingsSection] = useState<'assets' | 'python' | 'connections'>('assets');
-  const [ideSettingsSection, setIdeSettingsSection] = useState<'appearance' | 'editor' | 'terminal'>('appearance');
+  const [ideSettingsSection, setIdeSettingsSection] = useState<'appearance' | 'editor' | 'terminal' | 'account' | 'plugins'>(
+    'appearance',
+  );
   return (
     <div className="modal-backdrop" role="presentation">
       <section
@@ -1271,7 +1454,15 @@ function WorkspaceDialog({
                     </div>
                   </section>
                 ) : null}
-                <PythonConfigForm pythonDraft={pythonDraft} setPythonDraft={setPythonDraft} t={t} />
+                <PythonConfigForm
+                  environments={pythonEnvironments}
+                  pythonDraft={pythonDraft}
+                  setPythonDraft={setPythonDraft}
+                  t={t}
+                  onChoosePythonPath={onChoosePythonPath}
+                  onCreateEnvironment={onCreatePythonEnvironment}
+                  onDetectPython={onDetectPython}
+                />
               </div>
             </div>
             <div className="modal-actions">
@@ -1346,7 +1537,15 @@ function WorkspaceDialog({
                   </>
                 ) : null}
                 {settingsSection === 'python' ? (
-                  <PythonConfigForm pythonDraft={pythonDraft} setPythonDraft={setPythonDraft} t={t} />
+                  <PythonConfigForm
+                    environments={pythonEnvironments}
+                    pythonDraft={pythonDraft}
+                    setPythonDraft={setPythonDraft}
+                    t={t}
+                    onChoosePythonPath={onChoosePythonPath}
+                    onCreateEnvironment={onCreatePythonEnvironment}
+                    onDetectPython={onDetectPython}
+                  />
                 ) : null}
                 {settingsSection === 'connections' ? (
                   <ConnectionPanel
@@ -1400,6 +1599,20 @@ function WorkspaceDialog({
                   onClick={() => setIdeSettingsSection('terminal')}
                 >
                   {t('terminalSettings')}
+                </button>
+                <button
+                  className={ideSettingsSection === 'account' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setIdeSettingsSection('account')}
+                >
+                  {t('accountSettings')}
+                </button>
+                <button
+                  className={ideSettingsSection === 'plugins' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setIdeSettingsSection('plugins')}
+                >
+                  {t('pluginMarketplace')}
                 </button>
               </aside>
               <div className="settings-content">
@@ -1462,6 +1675,10 @@ function WorkspaceDialog({
                     </div>
                   </section>
                 ) : null}
+                {ideSettingsSection === 'account' ? <AccountSettingsPanel t={t} /> : null}
+                {ideSettingsSection === 'plugins' ? (
+                  <PluginMarketplacePanel plugins={plugins} t={t} onUpdatePlugin={onUpdatePlugin} />
+                ) : null}
               </div>
             </div>
             <div className="modal-actions">
@@ -1476,30 +1693,230 @@ function WorkspaceDialog({
   );
 }
 
+function AccountSettingsPanel({
+  t,
+}: {
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+}) {
+  const [status, setStatus] = useState<AuthStatus>({ authenticated: false });
+  const [mode, setMode] = useState<'login' | 'register' | 'code-login' | 'reset-password'>('login');
+  const [target, setTarget] = useState('');
+  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
+  const [message, setMessage] = useState('');
+  const channel = target.includes('@') ? 'email' : 'phone';
+
+  useEffect(() => {
+    void window.dbagent.invoke(ipcChannels.auth.status, undefined).then((response) => {
+      if (response.ok) setStatus(response.data);
+    });
+  }, []);
+
+  async function requestCode() {
+    const purpose = mode === 'register' ? 'register' : mode === 'reset-password' ? 'reset-password' : 'login';
+    const response = await window.dbagent.invoke(ipcChannels.auth.requestCode, { target, channel, purpose });
+    setMessage(response.ok ? `${t('verificationCodeSent')}: ${response.data.devCode ?? response.data.expiresAt}` : formatAppError(response.error));
+  }
+
+  async function submit() {
+    const response =
+      mode === 'login'
+        ? await window.dbagent.invoke(ipcChannels.auth.login, { identifier: target, password })
+        : mode === 'register'
+          ? await window.dbagent.invoke(ipcChannels.auth.register, {
+              ...(channel === 'email' ? { email: target } : { phone: target }),
+              password,
+              verificationCode: code,
+            })
+          : mode === 'code-login'
+            ? await window.dbagent.invoke(ipcChannels.auth.verifyCodeLogin, { target, channel, verificationCode: code })
+            : await window.dbagent.invoke(ipcChannels.auth.resetPassword, {
+                target,
+                channel,
+                verificationCode: code,
+                newPassword: password,
+              });
+    if (response.ok) {
+      setStatus(response.data);
+      setMessage(t('accountUpdated'));
+    } else {
+      setMessage(formatAppError(response.error));
+    }
+  }
+
+  async function logout() {
+    const response = await window.dbagent.invoke(ipcChannels.auth.logout, undefined);
+    if (response.ok) setStatus(response.data);
+  }
+
+  return (
+    <section className="settings-card">
+      <div className="subform-heading">
+        <strong>{t('accountSettings')}</strong>
+        <small>{status.authenticated ? status.user?.email || status.user?.phone : t('authDatabaseHint')}</small>
+      </div>
+      <div className="segmented-control">
+        <button className={mode === 'login' ? 'active' : ''} type="button" onClick={() => setMode('login')}>
+          {t('passwordLogin')}
+        </button>
+        <button className={mode === 'code-login' ? 'active' : ''} type="button" onClick={() => setMode('code-login')}>
+          {t('codeLogin')}
+        </button>
+        <button className={mode === 'register' ? 'active' : ''} type="button" onClick={() => setMode('register')}>
+          {t('register')}
+        </button>
+        <button className={mode === 'reset-password' ? 'active' : ''} type="button" onClick={() => setMode('reset-password')}>
+          {t('forgotPassword')}
+        </button>
+      </div>
+      <div className="modal-grid two">
+        <label>
+          <span>{t('emailOrPhone')}</span>
+          <input value={target} onChange={(event) => setTarget(event.target.value)} />
+        </label>
+        {mode === 'login' || mode === 'register' || mode === 'reset-password' ? (
+          <label>
+            <span>{mode === 'reset-password' ? t('newPassword') : t('password')}</span>
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          </label>
+        ) : null}
+        {mode !== 'login' ? (
+          <label>
+            <span>{t('verificationCode')}</span>
+            <div className="path-row">
+              <input value={code} onChange={(event) => setCode(event.target.value)} />
+              <button className="secondary" type="button" onClick={() => void requestCode()}>
+                {t('sendCode')}
+              </button>
+            </div>
+          </label>
+        ) : null}
+      </div>
+      <div className="modal-actions split">
+        <small>{message}</small>
+        <div>
+          {status.authenticated ? (
+            <button className="secondary" type="button" onClick={() => void logout()}>
+              {t('logout')}
+            </button>
+          ) : null}
+          <button className="primary-action" type="button" onClick={() => void submit()}>
+            {t('apply')}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PluginMarketplacePanel({
+  plugins,
+  t,
+  onUpdatePlugin,
+}: {
+  plugins: PluginManifest[];
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onUpdatePlugin: (id: string, installed: boolean) => void;
+}) {
+  return (
+    <section className="settings-card">
+      <div className="subform-heading">
+        <strong>{t('pluginMarketplace')}</strong>
+        <small>{t('pluginMarketplaceHint')}</small>
+      </div>
+      <div className="plugin-grid">
+        {plugins.map((plugin) => (
+          <div className="plugin-item" key={plugin.id}>
+            <div>
+              <strong>{plugin.name}</strong>
+              <small>
+                {plugin.publisher} / {plugin.version} {plugin.official ? '/ Official' : ''}
+              </small>
+            </div>
+            <p>{plugin.description}</p>
+            <button className="secondary" type="button" onClick={() => onUpdatePlugin(plugin.id, plugin.installed)}>
+              {plugin.installed ? t('uninstall') : t('install')}
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function PythonConfigForm({
+  environments,
   pythonDraft,
   setPythonDraft,
   t,
+  onChoosePythonPath,
+  onCreateEnvironment,
+  onDetectPython,
 }: {
+  environments: PythonEnvironmentInfo[];
   pythonDraft: WorkspacePythonConfig;
   setPythonDraft: (draft: WorkspacePythonConfig) => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onChoosePythonPath: (mode: 'file' | 'directory') => Promise<string | undefined>;
+  onCreateEnvironment: (mode: 'venv' | 'conda', name: string) => void;
+  onDetectPython: () => void;
 }) {
+  const [newEnvironmentName, setNewEnvironmentName] = useState('.venv');
+  function switchMode(mode: WorkspacePythonConfig['mode']) {
+    setPythonDraft({
+      mode,
+      requirementsPath: pythonDraft.requirementsPath,
+      ...(mode === 'system' && pythonDraft.pythonPath ? { pythonPath: pythonDraft.pythonPath } : {}),
+      ...(mode === 'venv' && pythonDraft.venvPath ? { venvPath: pythonDraft.venvPath } : {}),
+      ...(mode === 'conda' && pythonDraft.condaEnvName ? { condaEnvName: pythonDraft.condaEnvName } : {}),
+      ...(mode === 'conda' && pythonDraft.condaPrefix ? { condaPrefix: pythonDraft.condaPrefix } : {}),
+      ...(mode === 'conda' && pythonDraft.pythonPath ? { pythonPath: pythonDraft.pythonPath } : {}),
+    });
+  }
+
+  async function choosePath(mode: 'file' | 'directory') {
+    const path = await onChoosePythonPath(mode);
+    if (!path) return;
+    if (pythonDraft.mode === 'venv') setPythonDraft({ ...pythonDraft, venvPath: path });
+    else setPythonDraft({ ...pythonDraft, pythonPath: path });
+  }
+
+  function selectEnvironment(id: string) {
+    const environment = environments.find((item) => item.id === id);
+    if (!environment) return;
+    setPythonDraft({
+      mode: environment.mode,
+      requirementsPath: pythonDraft.requirementsPath,
+      ...(environment.pythonPath ? { pythonPath: environment.pythonPath } : {}),
+      ...(environment.venvPath ? { venvPath: environment.venvPath } : {}),
+      ...(environment.condaEnvName ? { condaEnvName: environment.condaEnvName } : {}),
+      ...(environment.condaPrefix ? { condaPrefix: environment.condaPrefix } : {}),
+    });
+  }
+
   return (
     <section className="subform-section">
       <div className="subform-heading">
         <strong>{t('pythonEnvironment')}</strong>
         <small>{t('pythonEnvironmentHint')}</small>
       </div>
+      <div className="python-toolbar">
+        <button className="secondary" type="button" onClick={onDetectPython}>
+          {t('detectPython')}
+        </button>
+        <select value="" onChange={(event) => selectEnvironment(event.target.value)}>
+          <option value="">{t('detectedPythonPlaceholder')}</option>
+          {environments.map((environment) => (
+            <option disabled={!environment.valid} key={environment.id} value={environment.id}>
+              {environment.label} {environment.version ? `(${environment.version})` : ''} {environment.valid ? '' : ' - invalid'}
+            </option>
+          ))}
+        </select>
+      </div>
       <div className="modal-grid two">
         <label>
           <span>{t('pythonMode')}</span>
-          <select
-            value={pythonDraft.mode}
-            onChange={(event) =>
-              setPythonDraft({ ...pythonDraft, mode: event.target.value as WorkspacePythonConfig['mode'] })
-            }
-          >
+          <select value={pythonDraft.mode} onChange={(event) => switchMode(event.target.value as WorkspacePythonConfig['mode'])}>
             <option value="system">{t('pythonModeSystem')}</option>
             <option value="venv">{t('pythonModeVenv')}</option>
             <option value="conda">{t('pythonModeConda')}</option>
@@ -1512,33 +1929,75 @@ function PythonConfigForm({
             onChange={(event) => setPythonDraft({ ...pythonDraft, requirementsPath: event.target.value })}
           />
         </label>
-        <label>
-          <span>{t('pythonPath')}</span>
-          <input
-            placeholder={t('pythonPathPlaceholder')}
-            value={pythonDraft.pythonPath ?? ''}
-            onChange={(event) => {
-              const next = { ...pythonDraft };
-              if (event.target.value.trim()) next.pythonPath = event.target.value;
-              else delete next.pythonPath;
-              setPythonDraft(next);
-            }}
-          />
-        </label>
-        <label>
-          <span>{t('venvPath')}</span>
-          <input
-            placeholder=".venv"
-            value={pythonDraft.venvPath ?? ''}
-            onChange={(event) => {
-              const next = { ...pythonDraft };
-              if (event.target.value.trim()) next.venvPath = event.target.value;
-              else delete next.venvPath;
-              setPythonDraft(next);
-            }}
-          />
-        </label>
+        {pythonDraft.mode === 'system' ? (
+          <label>
+            <span>{t('pythonPath')}</span>
+            <div className="path-row">
+              <input
+                placeholder={t('pythonPathPlaceholder')}
+                value={pythonDraft.pythonPath ?? ''}
+                onChange={(event) => setPythonDraft({ ...pythonDraft, pythonPath: event.target.value })}
+              />
+              <button className="icon-button" type="button" onClick={() => void choosePath('file')}>
+                ...
+              </button>
+            </div>
+          </label>
+        ) : null}
+        {pythonDraft.mode === 'venv' ? (
+          <label>
+            <span>{t('venvPath')}</span>
+            <div className="path-row">
+              <input
+                placeholder=".venv"
+                value={pythonDraft.venvPath ?? ''}
+                onChange={(event) => setPythonDraft({ mode: 'venv', requirementsPath: pythonDraft.requirementsPath, venvPath: event.target.value })}
+              />
+              <button className="icon-button" type="button" onClick={() => void choosePath('directory')}>
+                ...
+              </button>
+            </div>
+          </label>
+        ) : null}
+        {pythonDraft.mode === 'conda' ? (
+          <label>
+            <span>{t('condaEnvironment')}</span>
+            <input
+              placeholder="base / analytics"
+              value={pythonDraft.condaEnvName ?? pythonDraft.condaPrefix ?? ''}
+              onChange={(event) =>
+                setPythonDraft({ mode: 'conda', requirementsPath: pythonDraft.requirementsPath, condaEnvName: event.target.value })
+              }
+            />
+          </label>
+        ) : null}
       </div>
+      {pythonDraft.mode === 'venv' || pythonDraft.mode === 'conda' ? (
+        <div className="python-create-row">
+          <input value={newEnvironmentName} onChange={(event) => setNewEnvironmentName(event.target.value)} />
+          <button
+            className="secondary"
+            type="button"
+            onClick={() => {
+              if (pythonDraft.mode === 'venv' || pythonDraft.mode === 'conda') {
+                onCreateEnvironment(pythonDraft.mode, newEnvironmentName);
+              }
+            }}
+          >
+            {t('createPythonEnvironment')}
+          </button>
+        </div>
+      ) : null}
+      {environments.length > 0 ? (
+        <div className="python-env-list">
+          {environments.slice(0, 6).map((environment) => (
+            <button key={environment.id} type="button" onClick={() => selectEnvironment(environment.id)}>
+              <strong>{environment.label}</strong>
+              <small>{environment.version ?? environment.detail ?? environment.pythonPath}</small>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1935,6 +2394,7 @@ function TableDetailPanel({ detail }: { detail: TableDetail }) {
 
 function EditorPane({
   activeConnection,
+  activeTerminalId,
   bottomPanel,
   document,
   editorLanguage,
@@ -1942,16 +2402,23 @@ function EditorPane({
   result,
   sql,
   t,
+  terminals,
   onChangeSql,
+  onCloseTerminal,
+  onCreateTerminal,
   onExecuteSql,
   onExplain,
   onExportCsv,
   onExportExcel,
   onExportJson,
   onSaveSql,
+  onRunTerminal,
+  onSelectTerminal,
+  onUpdateTerminalInput,
   setBottomPanel,
 }: {
   activeConnection: SavedConnection | undefined;
+  activeTerminalId: string;
   bottomPanel: 'results' | 'console';
   document: EditorDocument;
   editorLanguage: EditorLanguage;
@@ -1959,13 +2426,19 @@ function EditorPane({
   result: QueryExecutionResult | undefined;
   sql: string;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  terminals: TerminalView[];
   onChangeSql: (sql: string) => void;
+  onCloseTerminal: (id: string) => void;
+  onCreateTerminal: () => void;
   onExecuteSql: (sql: string) => void;
   onExplain: () => void;
   onExportCsv: () => void;
   onExportExcel: () => void;
   onExportJson: () => void;
   onSaveSql: () => void;
+  onRunTerminal: (id: string) => void;
+  onSelectTerminal: (id: string) => void;
+  onUpdateTerminalInput: (id: string, input: string) => void;
   setBottomPanel: (panel: 'results' | 'console') => void;
 }) {
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
@@ -2159,18 +2632,94 @@ function EditorPane({
             )}
           </div>
         ) : (
-          <div className="console-panel">
-            <div className="terminal-tabs">
-              <button className="active" type="button">
-                Terminal 1
-              </button>
-              <button type="button">+</button>
-            </div>
-            <pre>{`DBAgent console\n\n${t('consoleHint')}`}</pre>
-          </div>
+          <TerminalPanel
+            activeTerminalId={activeTerminalId}
+            terminals={terminals}
+            t={t}
+            onCloseTerminal={onCloseTerminal}
+            onCreateTerminal={onCreateTerminal}
+            onRunTerminal={onRunTerminal}
+            onSelectTerminal={onSelectTerminal}
+            onUpdateTerminalInput={onUpdateTerminalInput}
+          />
         )}
       </section>
     </>
+  );
+}
+
+function TerminalPanel({
+  activeTerminalId,
+  terminals,
+  t,
+  onCloseTerminal,
+  onCreateTerminal,
+  onRunTerminal,
+  onSelectTerminal,
+  onUpdateTerminalInput,
+}: {
+  activeTerminalId: string;
+  terminals: TerminalView[];
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onCloseTerminal: (id: string) => void;
+  onCreateTerminal: () => void;
+  onRunTerminal: (id: string) => void;
+  onSelectTerminal: (id: string) => void;
+  onUpdateTerminalInput: (id: string, input: string) => void;
+}) {
+  const activeTerminal = terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
+  return (
+    <div className="console-panel">
+      <div className="terminal-tabs">
+        {terminals.map((terminal) => (
+          <button
+            className={terminal.id === activeTerminal?.id ? 'active' : ''}
+            key={terminal.id}
+            type="button"
+            onClick={() => onSelectTerminal(terminal.id)}
+          >
+            <span>{terminal.name}</span>
+            <small>{terminal.lastExitCode === undefined ? '' : terminal.lastExitCode}</small>
+            {terminals.length > 1 ? (
+              <i
+                role="button"
+                tabIndex={0}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCloseTerminal(terminal.id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') onCloseTerminal(terminal.id);
+                }}
+              >
+                x
+              </i>
+            ) : null}
+          </button>
+        ))}
+        <button type="button" onClick={onCreateTerminal}>
+          +
+        </button>
+      </div>
+      {activeTerminal ? (
+        <>
+          <pre className="terminal-output">{activeTerminal.output || t('consoleHint')}</pre>
+          <div className="terminal-command-row">
+            <span>&gt;</span>
+            <input
+              value={activeTerminal.input}
+              onChange={(event) => onUpdateTerminalInput(activeTerminal.id, event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') onRunTerminal(activeTerminal.id);
+              }}
+            />
+            <button disabled={activeTerminal.running} type="button" onClick={() => onRunTerminal(activeTerminal.id)}>
+              {activeTerminal.running ? t('running') : t('runCommand')}
+            </button>
+          </div>
+        </>
+      ) : null}
+    </div>
   );
 }
 
@@ -2328,23 +2877,18 @@ function ChatPanel({
   return (
     <section className="panel chat-panel simple-chat-panel">
       <div className="chat-titlebar">
-        <div className="agent-tabs" aria-label={t('chat')}>
-          <button type="button">CHAT</button>
-          <button className="active" type="button">
-            AGENT
-          </button>
+        <div className="agent-heading">
+          <strong>DBAgent</strong>
+          <small>{t('assistantReady')}</small>
         </div>
         <div className="agent-toolbar" aria-label="Agent toolbar">
-          <button type="button" title="More">
-            ...
-          </button>
-          <button type="button" title="Refresh">
-            o
+          <button type="button" title={t('conversationHistory')}>
+            ◷
           </button>
           <button type="button" title={t('settings')}>
-            *
+            ⚙
           </button>
-          <button type="button" title="New chat">
+          <button type="button" title={t('newConversation')}>
             +
           </button>
         </div>
@@ -2440,6 +2984,15 @@ function queryResultToExcelHtml(result: QueryExecutionResult): string {
     )
     .join('');
   return `<!doctype html><html><head><meta charset="utf-8"></head><body><table>${header ? `<thead><tr>${header}</tr></thead>` : ''}<tbody>${rows}</tbody></table></body></html>`;
+}
+
+function toTerminalView(session: TerminalSession): TerminalView {
+  return {
+    ...session,
+    input: '',
+    output: '',
+    running: false,
+  };
 }
 
 function escapeHtml(value: string): string {
