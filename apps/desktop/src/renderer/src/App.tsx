@@ -186,6 +186,7 @@ export function App() {
   const [newFileDialogOpen, setNewFileDialogOpen] = useState(false);
   const [newFilePathDraft, setNewFilePathDraft] = useState('scripts/analysis.py');
   const [fileContextMenu, setFileContextMenu] = useState<{ x: number; y: number; file: WorkspaceFileEntry } | undefined>();
+  const [renameFileDialog, setRenameFileDialog] = useState<{ file: WorkspaceFileEntry; path: string } | undefined>();
   const [createConnectionDuringWorkspace, setCreateConnectionDuringWorkspace] = useState(false);
   const [selectedDatabaseEngine, setSelectedDatabaseEngine] = useState<ConnectionInput['engine']>('postgres');
   const [workspaceSettingsDraft, setWorkspaceSettingsDraft] = useState({
@@ -1140,18 +1141,26 @@ export function App() {
     setMessage(`${t('fileCreated')}: ${response.data.relativePath}`);
   }
 
-  async function renameWorkspaceFile(file: WorkspaceFileEntry) {
+  function requestRenameWorkspaceFile(file: WorkspaceFileEntry) {
+    setFileContextMenu(undefined);
+    setRenameFileDialog({ file, path: file.relativePath });
+  }
+
+  async function confirmRenameWorkspaceFile() {
+    if (!renameFileDialog) return;
+    const file = renameFileDialog.file;
     if (!activeWorkspace || file.type !== 'file') return;
-    const nextPath = window.prompt(t('renameFilePrompt'), file.relativePath);
-    if (!nextPath) return;
     let relativePath = '';
     try {
-      relativePath = normalizeNewWorkspaceFilePath(nextPath);
+      relativePath = normalizeNewWorkspaceFilePath(renameFileDialog.path);
     } catch {
       setMessage(t('invalidFilePath'));
       return;
     }
-    if (relativePath === file.relativePath) return;
+    if (relativePath === file.relativePath) {
+      setRenameFileDialog(undefined);
+      return;
+    }
     const response = await window.dbagent.invoke(ipcChannels.workspace.renameFile, {
       rootPath: activeWorkspace.rootPath,
       fromRelativePath: file.relativePath,
@@ -1171,7 +1180,7 @@ export function App() {
       }));
       setEditorLanguage(inferWorkspaceFileLanguage(response.data.relativePath));
     }
-    setFileContextMenu(undefined);
+    setRenameFileDialog(undefined);
     setMessage(`${t('renameFile')}: ${response.data.relativePath}`);
   }
 
@@ -1477,12 +1486,21 @@ export function App() {
           onCreate={() => void createWorkspaceFile()}
         />
       ) : null}
+      {renameFileDialog ? (
+        <RenameFileDialog
+          path={renameFileDialog.path}
+          setPath={(path) => setRenameFileDialog((current) => (current ? { ...current, path } : current))}
+          t={t}
+          onClose={() => setRenameFileDialog(undefined)}
+          onRename={() => void confirmRenameWorkspaceFile()}
+        />
+      ) : null}
       {fileContextMenu ? (
         <div className="editor-context-menu file-context-menu" style={{ left: fileContextMenu.x, top: fileContextMenu.y }}>
           <button type="button" onClick={() => void openWorkspaceFile(fileContextMenu.file)}>
             {t('openFile')}
           </button>
-          <button type="button" onClick={() => void renameWorkspaceFile(fileContextMenu.file)}>
+          <button type="button" onClick={() => requestRenameWorkspaceFile(fileContextMenu.file)}>
             {t('rename')}
           </button>
           <button type="button" onClick={() => void deleteWorkspaceFile(fileContextMenu.file)}>
@@ -1700,6 +1718,57 @@ function NewFileDialog({
           </button>
           <button className="primary-action" type="button" onClick={onCreate}>
             {t('create')}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RenameFileDialog({
+  path,
+  setPath,
+  t,
+  onClose,
+  onRename,
+}: {
+  path: string;
+  setPath: (value: string) => void;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onClose: () => void;
+  onRename: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="save-sql-panel" role="dialog" aria-modal="true" aria-label={t('renameFile')}>
+        <div className="modal-heading">
+          <div>
+            <strong>{t('renameFile')}</strong>
+            <small>{t('renameFilePrompt')}</small>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+        </div>
+        <div className="save-sql-grid single">
+          <label>
+            <span>{t('filePath')}</span>
+            <input
+              autoFocus
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') onRename();
+              }}
+            />
+          </label>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+          <button className="primary-action" type="button" onClick={onRename}>
+            {t('rename')}
           </button>
         </div>
       </section>
