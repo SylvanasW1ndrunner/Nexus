@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { PythonEnvironmentInfo, WorkspacePythonConfig } from '@dbagent/shared';
-import { canCreatePythonEnvironment, selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
+import {
+  canCreatePythonEnvironment,
+  pythonExecutableForEnvironmentCreation,
+  selectPythonEnvironment,
+  setCondaEnvironmentInput,
+  switchPythonMode,
+} from './python-config.js';
 
 describe('Python configuration user flows', () => {
   const baseDraft: WorkspacePythonConfig = {
@@ -65,5 +71,20 @@ describe('Python configuration user flows', () => {
     expect(canCreatePythonEnvironment('../outside')).toBe(false);
     expect(canCreatePythonEnvironment('envs/analytics')).toBe(false);
     expect(canCreatePythonEnvironment('envs\\analytics')).toBe(false);
+  });
+
+  it('uses the selected system Python executable when creating venv environments', () => {
+    expect(
+      pythonExecutableForEnvironmentCreation(
+        { mode: 'system', requirementsPath: 'requirements.txt', pythonPath: 'C:\\Python312\\python.exe' },
+        'venv',
+      ),
+    ).toBe('C:\\Python312\\python.exe');
+    expect(
+      pythonExecutableForEnvironmentCreation(
+        { mode: 'conda', requirementsPath: 'requirements.txt', pythonPath: 'C:\\Miniconda3\\envs\\analytics\\python.exe' },
+        'conda',
+      ),
+    ).toBeUndefined();
   });
 });

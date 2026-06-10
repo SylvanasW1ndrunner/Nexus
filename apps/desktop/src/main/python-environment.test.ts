@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { PythonEnvironmentService } from './python-environment.js';
+import { PythonEnvironmentService, systemPythonCandidates } from './python-environment.js';
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
@@ -14,6 +14,11 @@ afterEach(async () => {
 });
 
 describe('PythonEnvironmentService', () => {
+  it('checks common Python launchers for each operating system', () => {
+    expect(systemPythonCandidates('linux').map((candidate) => candidate.command)).toEqual(['python', 'python3']);
+    expect(systemPythonCandidates('win32').map((candidate) => candidate.command)).toEqual(['python', 'python3', 'py']);
+  });
+
   it('detects Python environments without throwing', async () => {
     const service = new PythonEnvironmentService();
     const environments = await service.detect();

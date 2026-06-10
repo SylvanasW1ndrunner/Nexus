@@ -16,9 +16,7 @@ const defaultTimeoutMs = 30_000;
 
 export class PythonEnvironmentService {
   async detect(request: PythonDetectRequest = {}): Promise<PythonEnvironmentInfo[]> {
-    const environments: PythonEnvironmentInfo[] = [];
-    const system = await inspectPython('python', 'system-python', 'System Python', 'system');
-    environments.push(system);
+    const environments: PythonEnvironmentInfo[] = await detectSystemPythonEnvironments();
 
     if (request.rootPath) {
       const venvPath = join(request.rootPath, '.venv');
@@ -30,7 +28,7 @@ export class PythonEnvironmentService {
     }
 
     environments.push(...(await detectCondaEnvironments()));
-    return environments;
+    return dedupeEnvironments(environments);
   }
 
   async createEnvironment(request: PythonCreateEnvironmentRequest): Promise<PythonEnvironmentInfo> {
@@ -92,6 +90,30 @@ export class PythonEnvironmentService {
       };
     }
   }
+}
+
+async function detectSystemPythonEnvironments(): Promise<PythonEnvironmentInfo[]> {
+  const candidates = systemPythonCandidates();
+  const inspected = await Promise.all(
+    candidates.map((candidate) => inspectPython(candidate.command, candidate.id, candidate.label, 'system')),
+  );
+  const valid = inspected.filter((environment) => environment.valid);
+  if (valid.length) return valid;
+  return inspected.slice(0, 1);
+}
+
+export function systemPythonCandidates(platform: NodeJS.Platform = process.platform): Array<{ command: string; id: string; label: string }> {
+  const candidates = [
+    { command: 'python', id: 'system-python', label: 'System Python' },
+    { command: 'python3', id: 'system-python3', label: 'System Python 3' },
+  ];
+  if (platform === 'win32') {
+    return [
+      ...candidates,
+      { command: 'py', id: 'windows-py-launcher', label: 'Windows Python Launcher' },
+    ];
+  }
+  return candidates;
 }
 
 function resolvePythonArgs(rootPath: string, request: PythonRunScriptRequest): string[] {
@@ -175,6 +197,24 @@ async function inspectPython(
       detail: error instanceof Error ? error.message : 'Python executable is not available.',
     };
   }
+}
+
+function dedupeEnvironments(environments: PythonEnvironmentInfo[]): PythonEnvironmentInfo[] {
+  const seen = new Set<string>();
+  const result: PythonEnvironmentInfo[] = [];
+  for (const environment of environments) {
+    const key = [
+      environment.mode,
+      environment.pythonPath?.toLowerCase() ?? '',
+      environment.venvPath?.toLowerCase() ?? '',
+      environment.condaPrefix?.toLowerCase() ?? '',
+      environment.condaEnvName?.toLowerCase() ?? '',
+    ].join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(environment);
+  }
+  return result;
 }
 
 async function detectCondaEnvironments(): Promise<PythonEnvironmentInfo[]> {

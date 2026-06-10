@@ -43,6 +43,14 @@ export function canCreatePythonEnvironment(name: string): boolean {
   return Boolean(trimmed) && !trimmed.includes('..') && !/[\\/]/.test(trimmed);
 }
 
+export function pythonExecutableForEnvironmentCreation(
+  draft: WorkspacePythonConfig,
+  mode: 'venv' | 'conda',
+): string | undefined {
+  if (mode !== 'venv') return undefined;
+  return draft.pythonPath?.trim() || undefined;
+}
+
 function isPathLike(value: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('/') || value.includes('\\') || value.includes('/');
 }

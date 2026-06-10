@@ -45,7 +45,13 @@ import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
-import { canCreatePythonEnvironment, selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
+import {
+  canCreatePythonEnvironment,
+  pythonExecutableForEnvironmentCreation,
+  selectPythonEnvironment,
+  setCondaEnvironmentInput,
+  switchPythonMode,
+} from './python-config.js';
 import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
 import { normalizeTerminalName, terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
@@ -600,24 +606,19 @@ export function App() {
       setMessage(language === 'zh-CN' ? '请先打开项目。' : 'Open a project first.');
       return;
     }
+    const pythonExecutable = pythonExecutableForEnvironmentCreation(workspacePythonDraft, mode);
     const response = await window.dbagent.invoke(ipcChannels.python.createEnvironment, {
       rootPath: activeWorkspace.rootPath,
       mode,
       name,
+      ...(pythonExecutable ? { pythonExecutable } : {}),
     });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
       return;
     }
     setPythonEnvironments((current) => [response.data, ...current.filter((item) => item.id !== response.data.id)]);
-    setWorkspacePythonDraft((current) => ({
-      ...current,
-      mode,
-      ...(response.data.pythonPath ? { pythonPath: response.data.pythonPath } : {}),
-      ...(response.data.venvPath ? { venvPath: response.data.venvPath } : {}),
-      ...(response.data.condaEnvName ? { condaEnvName: response.data.condaEnvName } : {}),
-      ...(response.data.condaPrefix ? { condaPrefix: response.data.condaPrefix } : {}),
-    }));
+    setWorkspacePythonDraft((current) => selectPythonEnvironment(current, response.data));
   }
 
   useEffect(() => {
