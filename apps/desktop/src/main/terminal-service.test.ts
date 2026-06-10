@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { TerminalService } from './terminal-service.js';
 
 describe('TerminalService', () => {
@@ -36,6 +39,30 @@ describe('TerminalService', () => {
       expect(service.list()[0]?.status).toBe('running');
     } finally {
       service.close(terminal.id);
+    }
+  });
+
+  it('starts interactive shell sessions in the requested working directory', async () => {
+    const service = new TerminalService();
+    const cwd = await mkdtemp(join(tmpdir(), 'dbagent-terminal-cwd-'));
+    const terminal = service.create({ cwd, name: 'Project Shell' });
+
+    try {
+      service.write({
+        terminalId: terminal.id,
+        data: process.platform === 'win32' ? 'cd\r' : 'pwd\r',
+      });
+
+      const output = await waitForOutput(service, terminal.id, cwd);
+      expect(output.replaceAll('\\', '/')).toContain(cwd.replaceAll('\\', '/'));
+      expect(service.list()[0]).toMatchObject({
+        cwd,
+        name: 'Project Shell',
+        status: 'running',
+      });
+    } finally {
+      service.close(terminal.id);
+      await rm(cwd, { force: true, recursive: true });
     }
   });
 
