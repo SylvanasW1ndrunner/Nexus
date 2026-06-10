@@ -1797,7 +1797,7 @@ textarea {
 .auth-startup-hero {
   position: relative;
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 28px;
+  grid-template-columns: 36px minmax(0, 1fr);
   align-items: center;
   gap: 11px;
   border-bottom: 1px solid #303030;

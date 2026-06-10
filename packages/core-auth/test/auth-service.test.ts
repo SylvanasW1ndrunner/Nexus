@@ -10,6 +10,7 @@ import {
   type AuthCodeRecord,
   type AuthRepository,
 } from '../src/auth-service.js';
+import { TestAuthRepository } from '../src/test-auth-repository.js';
 import { AuthDatabaseUnavailableError, UnavailableAuthRepository } from '../src/unavailable-auth-repository.js';
 
 const tempDirs: string[] = [];
@@ -173,6 +174,16 @@ describe('AuthService', () => {
     await expect(service.requestCode({ target: 'analyst@example.com', channel: 'email', purpose: 'register' })).rejects.toThrow(
       AuthDatabaseUnavailableError,
     );
+  });
+
+  it('allows the built-in local test account for packaged smoke testing', async () => {
+    const service = new AuthService(await sessionPath(), new TestAuthRepository());
+
+    await expect(service.login('test', 'test')).resolves.toMatchObject({
+      authenticated: true,
+      user: { id: 'local-test-user', email: 'test' },
+    });
+    await expect(service.login('test', 'wrong')).rejects.toThrow(/invalid/i);
   });
 });
 

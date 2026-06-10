@@ -30,8 +30,9 @@ describe('auth form user flows', () => {
 
   it('enables submit only when the selected login flow has required fields', () => {
     expect(canSubmitAuthForm({ mode: 'login', target: 'user@example.com', password: '', code: '', busy: false })).toBe(false);
-    expect(canSubmitAuthForm({ mode: 'login', target: 'bad-email@', password: 'password-123', code: '', busy: false })).toBe(false);
+    expect(canSubmitAuthForm({ mode: 'login', target: 'test', password: 'test', code: '', busy: false })).toBe(true);
     expect(canSubmitAuthForm({ mode: 'login', target: 'user@example.com', password: 'password-123', code: '', busy: false })).toBe(true);
+    expect(canSubmitAuthForm({ mode: 'code-login', target: 'test', password: '', code: '123456', busy: false })).toBe(false);
     expect(canSubmitAuthForm({ mode: 'code-login', target: 'user@example.com', password: '', code: '123456', busy: false })).toBe(true);
     expect(canSubmitAuthForm({ mode: 'reset-password', target: 'user@example.com', password: 'password-123', code: '', busy: false })).toBe(false);
     expect(canSubmitAuthForm({ mode: 'register', target: 'user@example.com', password: 'password-123', code: '123456', busy: true })).toBe(false);

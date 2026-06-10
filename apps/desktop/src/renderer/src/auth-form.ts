@@ -28,8 +28,9 @@ export function canSubmitAuthForm(input: {
   code: string;
   busy: boolean;
 }): boolean {
-  if (input.busy || !isValidAuthTarget(input.target)) return false;
-  if (input.mode === 'login') return Boolean(input.password);
+  if (input.busy) return false;
+  if (input.mode === 'login') return Boolean(input.target.trim()) && Boolean(input.password);
+  if (!isValidAuthTarget(input.target)) return false;
   if (input.mode === 'code-login') return Boolean(input.code.trim());
   return Boolean(input.password) && Boolean(input.code.trim());
 }

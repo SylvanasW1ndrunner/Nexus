@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ConnectionStore, QueryHistoryStore, createDefaultDatabaseDriverRegistry } from '@dbagent/core-db';
-import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, UnavailableAuthRepository } from '@dbagent/core-auth';
+import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, TestAuthRepository } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import {
@@ -43,7 +43,7 @@ const workspaceProjectStore = new WorkspaceProjectStore(workspaceProjectStatePat
 const ideSettingsStore = new IdeSettingsStore(ideSettingsPath);
 const authRepository = process.env.DBAGENT_AUTH_DATABASE_URL
   ? new PostgresAuthRepository(process.env.DBAGENT_AUTH_DATABASE_URL)
-  : new UnavailableAuthRepository('Authentication requires DBAGENT_AUTH_DATABASE_URL pointing to a PostgreSQL database.');
+  : new TestAuthRepository();
 const authService = new AuthService(join(dataDir, 'auth-session.json'), authRepository);
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);

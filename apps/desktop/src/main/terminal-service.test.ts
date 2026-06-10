@@ -43,6 +43,26 @@ describe('TerminalService', () => {
     }
   });
 
+  it('accepts character-by-character interactive input', async () => {
+    const service = new TerminalService();
+    const terminal = service.create({ name: 'Interactive Shell' });
+
+    try {
+      for (const char of 'echo dbagent-char-input\r') {
+        service.write({
+          terminalId: terminal.id,
+          data: char,
+        });
+      }
+
+      const output = await waitForOutput(service, terminal.id, 'dbagent-char-input');
+      expect(output).toContain('dbagent-char-input');
+      expect(service.list()[0]?.status).toBe('running');
+    } finally {
+      service.close(terminal.id);
+    }
+  });
+
   it('starts interactive shell sessions in the requested working directory', async () => {
     const service = new TerminalService();
     const cwd = await mkdtemp(join(tmpdir(), 'dbagent-terminal-cwd-'));

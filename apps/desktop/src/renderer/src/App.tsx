@@ -227,6 +227,7 @@ export function App() {
   const [pythonEnvironments, setPythonEnvironments] = useState<PythonEnvironmentInfo[]>([]);
   const [terminals, setTerminals] = useState<TerminalView[]>([]);
   const terminalsRef = useRef<TerminalView[]>([]);
+  const terminalPollingRef = useRef(false);
   const [activeTerminalId, setActiveTerminalId] = useState('');
   const [splitTerminalId, setSplitTerminalId] = useState('');
   const [terminalMaximized, setTerminalMaximized] = useState(false);
@@ -547,30 +548,36 @@ export function App() {
   }, []);
 
   async function pollTerminalOutputs() {
+    if (terminalPollingRef.current) return;
     const snapshot = terminalsRef.current;
     if (!snapshot.length) return;
-    const responses = await Promise.all(
-      snapshot.map((terminal) =>
-        window.dbagent.invoke(ipcChannels.terminal.read, {
-          terminalId: terminal.id,
-          cursor: terminal.cursor,
+    terminalPollingRef.current = true;
+    try {
+      const responses = await Promise.all(
+        snapshot.map((terminal) =>
+          window.dbagent.invoke(ipcChannels.terminal.read, {
+            terminalId: terminal.id,
+            cursor: terminal.cursor,
+          }),
+        ),
+      );
+      setTerminals((current) =>
+        current.map((terminal) => {
+          const response = responses.find((item) => item.ok && item.data.terminalId === terminal.id);
+          if (!response?.ok) return terminal;
+          return {
+            ...terminal,
+            output: response.data.chunk ? `${terminal.output}${response.data.chunk}` : terminal.output,
+            cursor: response.data.cursor,
+            status: response.data.status,
+            running: false,
+            ...(response.data.exitCode !== undefined ? { lastExitCode: response.data.exitCode } : {}),
+          };
         }),
-      ),
-    );
-    setTerminals((current) =>
-      current.map((terminal) => {
-        const response = responses.find((item) => item.ok && item.data.terminalId === terminal.id);
-        if (!response?.ok) return terminal;
-        return {
-          ...terminal,
-          output: response.data.chunk ? `${terminal.output}${response.data.chunk}` : terminal.output,
-          cursor: response.data.cursor,
-          status: response.data.status,
-          running: false,
-          ...(response.data.exitCode !== undefined ? { lastExitCode: response.data.exitCode } : {}),
-        };
-      }),
-    );
+      );
+    } finally {
+      terminalPollingRef.current = false;
+    }
   }
 
   async function refreshPlugins() {
@@ -2817,9 +2824,6 @@ function AuthStartupDialog({
             <strong>{t('authWelcomeTitle')}</strong>
             <span>{t('authWelcomeSubtitle')}</span>
           </div>
-          <button className="auth-close" type="button" onClick={onClose} aria-label={t('close')}>
-            x
-          </button>
         </div>
         <AccountSettingsPanel compact t={t} onAuthenticated={onClose} />
       </section>
@@ -2844,7 +2848,7 @@ function AccountSettingsPanel({
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const channel = inferAuthChannel(target);
-  const targetInvalid = Boolean(target.trim()) && !isValidAuthTarget(target);
+  const targetInvalid = mode !== 'login' && Boolean(target.trim()) && !isValidAuthTarget(target);
   const codeRequestEnabled = canRequestAuthCode({ mode, target, busy });
   const submitEnabled = canSubmitAuthForm({ mode, target, password, code, busy });
 
@@ -2947,7 +2951,7 @@ function AccountSettingsPanel({
       {compact ? (
         <div className="auth-form-heading">
           <strong>{formTitle}</strong>
-          <span>{t('authSecureHint')}</span>
+          <span>{mode === 'login' ? t('authTestAccountHint') : t('authSecureHint')}</span>
         </div>
       ) : null}
       <div className="segmented-control auth-login-tabs">
@@ -2968,10 +2972,10 @@ function AccountSettingsPanel({
       </div>
       <div className="modal-grid two">
         <label>
-          <span>{t('emailOrPhone')}</span>
+          <span>{mode === 'login' ? t('accountIdentifier') : t('emailOrPhone')}</span>
           <input
             autoFocus={compact}
-            placeholder={t('emailOrPhone')}
+            placeholder={mode === 'login' ? t('accountIdentifierPlaceholder') : t('emailOrPhone')}
             value={target}
             onChange={(event) => {
               setTarget(event.target.value);
