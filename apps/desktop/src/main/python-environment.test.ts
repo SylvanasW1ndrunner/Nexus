@@ -64,6 +64,40 @@ describe('PythonEnvironmentService', () => {
     expect(result.stdout.trim()).toBe('file-run-ok');
   });
 
+  it('creates a venv and runs code through that environment when Python venv is available', async () => {
+    try {
+      await execFileAsync('python', ['-m', 'venv', '--help']);
+    } catch {
+      return;
+    }
+    const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-python-venv-'));
+    tempDirs.push(rootPath);
+    const service = new PythonEnvironmentService();
+
+    const environment = await service.createEnvironment({
+      rootPath,
+      mode: 'venv',
+      name: 'smoke',
+      pythonExecutable: 'python',
+    });
+
+    expect(environment).toMatchObject({
+      mode: 'venv',
+      valid: true,
+      venvPath: join('.venv', 'smoke'),
+    });
+
+    const result = await service.runScript({
+      rootPath,
+      config: { mode: 'venv', requirementsPath: 'requirements.txt', venvPath: join('.venv', 'smoke') },
+      code: 'import sys; print("venv-run-ok"); print(sys.prefix)',
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('venv-run-ok');
+    expect(result.stdout.replaceAll('\\', '/')).toContain(join(rootPath, '.venv', 'smoke').replaceAll('\\', '/'));
+  });
+
   it('rejects Python file paths outside the workspace', async () => {
     const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-python-run-'));
     tempDirs.push(rootPath);
