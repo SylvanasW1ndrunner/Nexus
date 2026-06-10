@@ -457,9 +457,10 @@ export function App() {
     setActiveTerminalId(terminal.id);
   }
 
-  async function createTerminal(): Promise<TerminalView | undefined> {
+  async function createTerminal(options: { cwd?: string; name?: string } = {}): Promise<TerminalView | undefined> {
     const response = await window.dbagent.invoke(ipcChannels.terminal.create, {
-      ...(activeWorkspace ? { cwd: activeWorkspace.rootPath } : {}),
+      ...(options.cwd ? { cwd: options.cwd } : activeWorkspace ? { cwd: activeWorkspace.rootPath } : {}),
+      ...(options.name ? { name: options.name } : {}),
     });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
@@ -741,6 +742,7 @@ export function App() {
     setWorkspacePythonDraft(response.data.python);
     await refreshWorkspaceFiles(response.data.rootPath);
     setWorkspaceDraft({ ...defaultWorkspaceDraft, rootPath: response.data.rootPath });
+    await createTerminal({ cwd: response.data.rootPath, name: response.data.name });
     setMessage(language === 'zh-CN' ? `已打开项目 ${response.data.name}` : `Opened ${response.data.name}`);
     if (createConnectionDuringWorkspace) {
       const connectionResponse = await window.dbagent.invoke(ipcChannels.connection.create, {
@@ -770,6 +772,7 @@ export function App() {
     setWorkspaceSettingsDraft(response.data.assetPaths);
     setWorkspacePythonDraft(response.data.python);
     await refreshWorkspaceFiles(response.data.rootPath);
+    await createTerminal({ cwd: response.data.rootPath, name: response.data.name });
     setMessage(language === 'zh-CN' ? `已打开项目 ${response.data.name}` : `Opened ${response.data.name}`);
     await refreshWorkspace();
   }
