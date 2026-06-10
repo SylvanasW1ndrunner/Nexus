@@ -10,6 +10,7 @@ describe('TerminalService', () => {
     const terminal = service.create({ name: 'Python' });
 
     expect(service.list()).toHaveLength(1);
+    if (process.platform === 'win32') expect(terminal.shell).toBe('powershell.exe');
 
     const result = await service.run({
       terminalId: terminal.id,
@@ -50,7 +51,7 @@ describe('TerminalService', () => {
     try {
       service.write({
         terminalId: terminal.id,
-        data: process.platform === 'win32' ? 'cd\r' : 'pwd\r',
+        data: 'pwd\r',
       });
 
       const output = await waitForOutput(service, terminal.id, cwd);
@@ -62,7 +63,7 @@ describe('TerminalService', () => {
       });
     } finally {
       service.close(terminal.id);
-      await rm(cwd, { force: true, recursive: true });
+      await removeWhenUnlocked(cwd);
     }
   });
 
@@ -117,4 +118,17 @@ async function waitForOutput(service: TerminalService, terminalId: string, expec
     if (output.includes(expected)) return output;
   }
   return output;
+}
+
+async function removeWhenUnlocked(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await rm(path, { force: true, recursive: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EBUSY') throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  await rm(path, { force: true, recursive: true });
 }

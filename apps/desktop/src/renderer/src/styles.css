@@ -1786,34 +1786,34 @@ textarea {
 }
 
 .auth-startup-panel {
-  width: min(448px, calc(100vw - 48px));
+  width: min(420px, calc(100vw - 48px));
   overflow: hidden;
-  border: 1px solid #3c3c3c;
-  border-radius: 12px;
-  background: #1f1f1f;
-  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.56);
+  border: 1px solid #343434;
+  border-radius: 10px;
+  background: #202020;
+  box-shadow: 0 30px 100px rgba(0, 0, 0, 0.58);
 }
 
 .auth-startup-hero {
   position: relative;
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) 28px;
+  grid-template-columns: 36px minmax(0, 1fr) 28px;
   align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid #333333;
-  background: #252526;
-  padding: 18px 18px 16px;
+  gap: 11px;
+  border-bottom: 1px solid #303030;
+  background: #242424;
+  padding: 16px 18px 14px;
 }
 
 .auth-brand-mark {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
-  border: 1px solid #3fb950;
-  border-radius: 9px;
-  background: #17351f;
-  color: #9be9a8;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(63, 185, 80, 0.5);
+  border-radius: 8px;
+  background: #12351c;
+  color: #b7f7c2;
   font-size: 12px;
   font-weight: 700;
 }
@@ -1822,7 +1822,7 @@ textarea {
 .auth-form-heading strong {
   display: block;
   color: #f0f0f0;
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 650;
 }
 
@@ -1854,7 +1854,7 @@ textarea {
 }
 
 .auth-card {
-  gap: 14px;
+  gap: 13px;
 }
 
 .auth-card.compact {
@@ -1870,17 +1870,17 @@ textarea {
 }
 
 .auth-card .segmented-control {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border: 1px solid #3c3c3c;
-  border-radius: 8px;
-  background: #181818;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid #343434;
+  border-radius: 7px;
+  background: #171717;
   padding: 3px;
 }
 
 .auth-card .segmented-control button {
   min-height: 32px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 5px;
   background: transparent;
   color: #b8b8b8;
   padding: 0 6px;
@@ -1893,8 +1893,32 @@ textarea {
 }
 
 .auth-card .segmented-control button.active {
-  background: #2ea043;
+  background: #2f6f42;
   color: #ffffff;
+}
+
+.auth-mode-links {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: -4px;
+}
+
+.auth-mode-links button {
+  min-height: 24px;
+  border: 0;
+  background: transparent;
+  color: #9be9a8;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.auth-mode-links button:hover,
+.auth-mode-links button.active {
+  background: transparent;
+  color: #ffffff;
+  text-decoration: underline;
 }
 
 .auth-card .modal-grid.two {
@@ -1906,15 +1930,17 @@ textarea {
 
 .auth-card .modal-grid > label {
   gap: 7px;
-  color: #cccccc;
+  color: #c9c9c9;
   font-size: 12px;
 }
 
 .auth-card input {
-  height: 38px;
-  border-radius: 7px;
+  height: 36px;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
   background: #181818;
-  padding: 8px 10px;
+  color: #e6e6e6;
+  padding: 7px 10px;
 }
 
 .auth-card input:focus {
@@ -1924,12 +1950,13 @@ textarea {
 
 .auth-card .path-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 92px;
+  grid-template-columns: minmax(0, 1fr) 86px;
   gap: 8px;
 }
 
 .auth-card .path-row button {
-  min-height: 38px;
+  min-height: 36px;
+  border-radius: 6px;
   white-space: normal;
 }
 
@@ -1946,15 +1973,19 @@ textarea {
 
 .auth-form-footer > div {
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(0, auto);
-  justify-content: end;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
 .auth-form-footer .primary-action {
-  min-width: 132px;
+  width: 100%;
   min-height: 36px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.auth-form-footer .secondary + .primary-action {
+  margin-top: 2px;
 }
 
 .danger-action {

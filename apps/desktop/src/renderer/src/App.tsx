@@ -269,7 +269,7 @@ export function App() {
   useEffect(() => {
     const interval = window.setInterval(() => {
       void pollTerminalOutputs();
-    }, 500);
+    }, 120);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -533,7 +533,9 @@ export function App() {
     });
     if (!response.ok) {
       setMessage(formatAppError(response.error));
+      return;
     }
+    void pollTerminalOutputs();
   }, []);
 
   async function pollTerminalOutputs() {
@@ -2939,13 +2941,15 @@ function AccountSettingsPanel({
           <span>{t('authSecureHint')}</span>
         </div>
       ) : null}
-      <div className="segmented-control">
+      <div className="segmented-control auth-login-tabs">
         <button className={mode === 'login' ? 'active' : ''} type="button" onClick={() => changeMode('login')}>
           {t('passwordLogin')}
         </button>
         <button className={mode === 'code-login' ? 'active' : ''} type="button" onClick={() => changeMode('code-login')}>
           {t('codeLogin')}
         </button>
+      </div>
+      <div className="auth-mode-links">
         <button className={mode === 'register' ? 'active' : ''} type="button" onClick={() => changeMode('register')}>
           {t('register')}
         </button>
@@ -2991,7 +2995,7 @@ function AccountSettingsPanel({
         ) : null}
       </div>
       <div className="auth-form-footer">
-        <small>{message || t('authDatabaseHint')}</small>
+        <small>{message || (compact ? '' : t('authDatabaseHint'))}</small>
         <div>
           {status.authenticated ? (
             <button className="secondary" disabled={busy} type="button" onClick={() => void logout()}>
@@ -4218,6 +4222,16 @@ function TerminalViewport({
   }, [terminalSettings.cursorBlink, terminalSettings.fontFamily, terminalSettings.fontSize, terminalSettings.scrollback]);
 
   useEffect(() => {
+    if (!active) return;
+    try {
+      fitAddonRef.current?.fit();
+      terminalRef.current?.focus();
+    } catch {
+      // Ignore transient focus/fit failures while the terminal is being mounted or resized.
+    }
+  }, [active]);
+
+  useEffect(() => {
     const xterm = terminalRef.current;
     if (!xterm) return;
     if (terminal.output.length < writtenLengthRef.current) {
@@ -4235,7 +4249,8 @@ function TerminalViewport({
     <div
       className={active ? 'terminal-viewport active' : 'terminal-viewport'}
       style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}
-      onClick={() => {
+      tabIndex={0}
+      onMouseDown={() => {
         onSelectTerminal(terminal.id);
         terminalRef.current?.focus();
       }}

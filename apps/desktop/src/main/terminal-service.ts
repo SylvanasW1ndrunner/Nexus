@@ -175,9 +175,9 @@ function getDefaultShell(configuredShell?: string): { command: string; args: str
   }
   if (process.platform === 'win32') {
     return {
-      command: process.env.ComSpec ?? 'cmd.exe',
-      args: [],
-      label: process.env.ComSpec?.split(/[\\/]/).at(-1) ?? 'cmd.exe',
+      command: 'powershell.exe',
+      args: ['-NoLogo'],
+      label: 'powershell.exe',
     };
   }
   const shell = process.env.SHELL ?? '/bin/sh';
