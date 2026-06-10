@@ -53,6 +53,7 @@ import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type Plugi
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
 import {
   canCreatePythonEnvironment,
+  pythonEnvironmentsForMode,
   pythonExecutableForEnvironmentCreation,
   selectPythonEnvironment,
   setCondaEnvironmentInput,
@@ -3127,10 +3128,13 @@ function PythonConfigForm({
   const [newEnvironmentName, setNewEnvironmentName] = useState('.venv');
   const [pathError, setPathError] = useState('');
   const modeEnvironments = useMemo(
-    () => environments.filter((environment) => environment.mode === pythonDraft.mode),
+    () => pythonEnvironmentsForMode(environments, pythonDraft.mode),
     [environments, pythonDraft.mode],
   );
-  const canCreateEnvironment = canCreatePythonEnvironment(newEnvironmentName);
+  const canCreateEnvironment =
+    pythonDraft.mode === 'venv' || pythonDraft.mode === 'conda'
+      ? canCreatePythonEnvironment(newEnvironmentName, pythonDraft.mode)
+      : false;
 
   useEffect(() => {
     setNewEnvironmentName(pythonDraft.mode === 'conda' ? 'dbagent-analytics' : '.venv');
@@ -3176,9 +3180,9 @@ function PythonConfigForm({
         </button>
         <select value="" onChange={(event) => selectEnvironment(event.target.value)}>
           <option value="">{t('detectedPythonPlaceholder')}</option>
-          {(modeEnvironments.length > 0 ? modeEnvironments : environments).map((environment) => (
+          {modeEnvironments.map((environment) => (
             <option disabled={!environment.valid} key={environment.id} value={environment.id}>
-              {environment.label} {environment.version ? `(${environment.version})` : ''} {environment.valid ? '' : ' - invalid'}
+              {environment.label} {environment.version ? `(${environment.version})` : ''} {environment.valid ? '' : ` - ${t('invalidEnvironment')}`}
             </option>
           ))}
         </select>

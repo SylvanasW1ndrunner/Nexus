@@ -29,6 +29,13 @@ export function selectPythonEnvironment(
   };
 }
 
+export function pythonEnvironmentsForMode(
+  environments: PythonEnvironmentInfo[],
+  mode: WorkspacePythonConfig['mode'],
+): PythonEnvironmentInfo[] {
+  return environments.filter((environment) => environment.mode === mode);
+}
+
 export function setCondaEnvironmentInput(draft: WorkspacePythonConfig, value: string): WorkspacePythonConfig {
   const input = value.trim();
   return {
@@ -38,9 +45,11 @@ export function setCondaEnvironmentInput(draft: WorkspacePythonConfig, value: st
   };
 }
 
-export function canCreatePythonEnvironment(name: string): boolean {
+export function canCreatePythonEnvironment(name: string, mode: 'venv' | 'conda' = 'venv'): boolean {
   const trimmed = name.trim();
-  return Boolean(trimmed) && !trimmed.includes('..') && !/[\\/]/.test(trimmed);
+  if (!trimmed || trimmed.includes('..') || /[\\/]/.test(trimmed)) return false;
+  if (mode === 'conda' && trimmed.startsWith('.')) return false;
+  return true;
 }
 
 export function pythonExecutableForEnvironmentCreation(

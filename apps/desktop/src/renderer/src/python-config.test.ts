@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PythonEnvironmentInfo, WorkspacePythonConfig } from '@dbagent/shared';
 import {
   canCreatePythonEnvironment,
+  pythonEnvironmentsForMode,
   pythonExecutableForEnvironmentCreation,
   selectPythonEnvironment,
   setCondaEnvironmentInput,
@@ -64,9 +65,22 @@ describe('Python configuration user flows', () => {
     });
   });
 
+  it('shows detected environments only for the selected Python mode', () => {
+    const environments: PythonEnvironmentInfo[] = [
+      { id: 'system-python', mode: 'system', label: 'System Python', valid: true },
+      { id: 'workspace-venv', mode: 'venv', label: 'Workspace .venv', valid: true },
+      { id: 'conda-base', mode: 'conda', label: 'conda base', valid: true },
+    ];
+
+    expect(pythonEnvironmentsForMode(environments, 'venv').map((environment) => environment.id)).toEqual(['workspace-venv']);
+    expect(pythonEnvironmentsForMode(environments, 'conda').map((environment) => environment.id)).toEqual(['conda-base']);
+  });
+
   it('guards Python environment creation names before shelling out', () => {
     expect(canCreatePythonEnvironment('.venv')).toBe(true);
     expect(canCreatePythonEnvironment('dbagent-analytics')).toBe(true);
+    expect(canCreatePythonEnvironment('dbagent-analytics', 'conda')).toBe(true);
+    expect(canCreatePythonEnvironment('.venv', 'conda')).toBe(false);
     expect(canCreatePythonEnvironment('')).toBe(false);
     expect(canCreatePythonEnvironment('../outside')).toBe(false);
     expect(canCreatePythonEnvironment('envs/analytics')).toBe(false);
