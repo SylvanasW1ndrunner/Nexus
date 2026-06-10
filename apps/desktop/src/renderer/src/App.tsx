@@ -35,7 +35,6 @@ import {
 } from '@dbagent/shared';
 import {
   archiveConversation,
-  createWelcomeMessage,
   type AgentConversation,
   type AgentMessage,
 } from './agent-chat.js';
@@ -54,6 +53,7 @@ import {
 } from './python-config.js';
 import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
 import { normalizeTerminalName, terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
+import { shouldForwardTerminalData } from './terminal-input.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
 import {
   createWorkspaceFileTemplate,
@@ -84,6 +84,15 @@ type CommandPaletteItem = {
   category: string;
   source: string;
   enabled: boolean;
+};
+
+type ConfirmDialogState = {
+  title: string;
+  message: string;
+  detail?: string;
+  confirmLabel: string;
+  tone?: 'default' | 'danger';
+  onConfirm: () => void | Promise<void>;
 };
 
 type TerminalView = TerminalSession & {
@@ -146,18 +155,10 @@ const defaultIdeSettings: IdeSettings = {
 };
 
 const defaultEditorDocument: EditorDocument = {
-  title: '欢迎',
+  title: 'Untitled',
   language: 'plaintext',
   dirty: false,
 };
-
-function createAgentWelcomeMessage(language: AppLanguage): AgentMessage {
-  return createWelcomeMessage(
-    language === 'zh-CN'
-      ? '工作台已就绪。你可以在项目中沉淀 SQL、脚本和文档。'
-      : 'Workspace ready. You can organize SQL, scripts, and docs in this project.',
-  );
-}
 
 const databaseEngineOptions: DatabaseEngineOption[] = [
   {
@@ -187,6 +188,7 @@ export function App() {
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileEntry[]>([]);
   const [workspaceDialogMode, setWorkspaceDialogMode] = useState<WorkspaceDialogMode>('create');
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [authDialogOpen, setAuthDialogOpen] = useState(true);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState('');
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
@@ -203,6 +205,7 @@ export function App() {
   const [fileContextMenu, setFileContextMenu] =
     useState<{ x: number; y: number; entry: WorkspaceFileEntry } | undefined>();
   const [renameFileDialog, setRenameFileDialog] = useState<{ file: WorkspaceFileEntry; path: string } | undefined>();
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | undefined>();
   const [createConnectionDuringWorkspace, setCreateConnectionDuringWorkspace] = useState(false);
   const [selectedDatabaseEngine, setSelectedDatabaseEngine] = useState<ConnectionInput['engine']>('postgres');
   const [workspaceSettingsDraft, setWorkspaceSettingsDraft] = useState({
@@ -222,7 +225,7 @@ export function App() {
   const [renameTerminalDialog, setRenameTerminalDialog] = useState<{ id: string; name: string } | undefined>();
   const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [chatDraft, setChatDraft] = useState('');
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [createAgentWelcomeMessage(language)]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatHistory, setChatHistory] = useState<AgentConversation[]>([]);
   const activeConnection = useMemo(
     () => connections.find((connection) => connection.id === activeConnectionId),
@@ -243,6 +246,9 @@ export function App() {
     void refreshWorkspace();
     void initializeIdeShell();
     void refreshPlugins();
+    void window.dbagent.invoke(ipcChannels.auth.status, undefined).then((response) => {
+      if (response.ok && response.data.authenticated) setAuthDialogOpen(false);
+    });
   }, []);
 
   useEffect(() => {
@@ -833,21 +839,31 @@ export function App() {
     await refreshConnections();
   }
 
-  async function removeActiveConnection() {
+  function removeActiveConnection() {
     if (!activeConnectionId || !activeConnection) return;
-    if (!window.confirm(`Delete connection "${activeConnection.name}"?`)) return;
-    const response = await window.dbagent.invoke(ipcChannels.connection.remove, { id: activeConnectionId });
-    if (!response.ok) {
-      setMessage(formatAppError(response.error));
-      return;
-    }
-    setActiveConnectionId('');
-    setTables([]);
-    setSelectedTable(undefined);
-    setResult(undefined);
-    setConnectionDraft(defaultConnectionDraft);
-    setMessage(language === 'zh-CN' ? `已删除 ${activeConnection.name}` : `Deleted ${activeConnection.name}`);
-    await refreshConnections();
+    const connectionId = activeConnectionId;
+    const connectionName = activeConnection.name;
+    setConfirmDialog({
+      title: t('deleteConnection'),
+      message: t('deleteConnectionConfirm'),
+      detail: connectionName,
+      confirmLabel: t('delete'),
+      tone: 'danger',
+      onConfirm: async () => {
+        const response = await window.dbagent.invoke(ipcChannels.connection.remove, { id: connectionId });
+        if (!response.ok) {
+          setMessage(formatAppError(response.error));
+          return;
+        }
+        setActiveConnectionId('');
+        setTables([]);
+        setSelectedTable(undefined);
+        setResult(undefined);
+        setConnectionDraft(defaultConnectionDraft);
+        setMessage(language === 'zh-CN' ? `已删除 ${connectionName}` : `Deleted ${connectionName}`);
+        await refreshConnections();
+      },
+    });
   }
 
   async function testConnection() {
@@ -1003,10 +1019,14 @@ export function App() {
       setMessage(`${response.data.rowCount} rows / ${response.data.elapsedMs} ms`);
     } else {
       if (response.error.code === 'CONFIRMATION_REQUIRED' && !confirmed) {
-        const confirmedByUser = window.confirm(
-          `${response.error.message}\n\n${response.error.detail ?? ''}\n\nExecute this SQL now?`,
-        );
-        if (confirmedByUser) await executeSql(nextSql, true);
+        setConfirmDialog({
+          title: t('dangerousSqlTitle'),
+          message: response.error.message,
+          confirmLabel: t('executeAnyway'),
+          tone: 'danger',
+          onConfirm: () => executeSql(nextSql, true),
+          ...(response.error.detail ? { detail: response.error.detail } : {}),
+        });
         return;
       }
       setMessage(formatAppError(response.error));
@@ -1224,41 +1244,61 @@ export function App() {
     setMessage(`${t('renameFile')}: ${response.data.relativePath}`);
   }
 
-  async function deleteWorkspaceFile(file: WorkspaceFileEntry) {
+  function deleteWorkspaceFile(file: WorkspaceFileEntry) {
     if (!activeWorkspace || file.type !== 'file') return;
-    if (!window.confirm(`${t('deleteFileConfirm')}\n\n${file.relativePath}`)) return;
-    const response = await window.dbagent.invoke(ipcChannels.workspace.deleteFile, {
-      rootPath: activeWorkspace.rootPath,
-      relativePath: file.relativePath,
+    const rootPath = activeWorkspace.rootPath;
+    const relativePath = file.relativePath;
+    setConfirmDialog({
+      title: t('deleteFile'),
+      message: t('deleteFileConfirm'),
+      detail: relativePath,
+      confirmLabel: t('delete'),
+      tone: 'danger',
+      onConfirm: async () => {
+        const response = await window.dbagent.invoke(ipcChannels.workspace.deleteFile, {
+          rootPath,
+          relativePath,
+        });
+        if (!response.ok) {
+          setMessage(formatAppError(response.error));
+          return;
+        }
+        await refreshWorkspaceFiles(rootPath);
+        if (editorDocument.relativePath === relativePath) {
+          setSql('');
+          setEditorLanguage('plaintext');
+          setEditorDocument(defaultEditorDocument);
+        }
+        setFileContextMenu(undefined);
+        setMessage(`${t('delete')}: ${response.data.relativePath}`);
+      },
     });
-    if (!response.ok) {
-      setMessage(formatAppError(response.error));
-      return;
-    }
-    await refreshWorkspaceFiles(activeWorkspace.rootPath);
-    if (editorDocument.relativePath === file.relativePath) {
-      setSql('');
-      setEditorLanguage('plaintext');
-      setEditorDocument(defaultEditorDocument);
-    }
-    setFileContextMenu(undefined);
-    setMessage(`${t('delete')}: ${response.data.relativePath}`);
   }
 
-  async function deleteWorkspaceDirectory(directory: WorkspaceFileEntry) {
+  function deleteWorkspaceDirectory(directory: WorkspaceFileEntry) {
     if (!activeWorkspace || directory.type !== 'directory') return;
-    if (!window.confirm(`${t('deleteDirectoryConfirm')}\n\n${directory.relativePath}`)) return;
-    const response = await window.dbagent.invoke(ipcChannels.workspace.deleteDirectory, {
-      rootPath: activeWorkspace.rootPath,
-      relativePath: directory.relativePath,
+    const rootPath = activeWorkspace.rootPath;
+    const relativePath = directory.relativePath;
+    setConfirmDialog({
+      title: t('deleteFolder'),
+      message: t('deleteDirectoryConfirm'),
+      detail: relativePath,
+      confirmLabel: t('delete'),
+      tone: 'danger',
+      onConfirm: async () => {
+        const response = await window.dbagent.invoke(ipcChannels.workspace.deleteDirectory, {
+          rootPath,
+          relativePath,
+        });
+        if (!response.ok) {
+          setMessage(formatAppError(response.error));
+          return;
+        }
+        await refreshWorkspaceFiles(rootPath);
+        setFileContextMenu(undefined);
+        setMessage(`${t('delete')}: ${response.data.relativePath}`);
+      },
     });
-    if (!response.ok) {
-      setMessage(formatAppError(response.error));
-      return;
-    }
-    await refreshWorkspaceFiles(activeWorkspace.rootPath);
-    setFileContextMenu(undefined);
-    setMessage(`${t('delete')}: ${response.data.relativePath}`);
   }
 
   async function openWorkspaceFile(file: WorkspaceFileEntry) {
@@ -1322,7 +1362,7 @@ export function App() {
   function startNewChatConversation() {
     const now = Date.now();
     setChatHistory((history) => archiveConversation(history, chatMessages, t('newConversation'), now));
-    setChatMessages([createAgentWelcomeMessage(language)]);
+    setChatMessages([]);
     setChatDraft('');
   }
 
@@ -1516,6 +1556,7 @@ export function App() {
           onUpdateConnection={() => void updateActiveConnection()}
         />
       ) : null}
+      {authDialogOpen ? <AuthStartupDialog t={t} onClose={() => setAuthDialogOpen(false)} /> : null}
       {commandPaletteOpen ? (
         <CommandPalette
           commands={commandPaletteItems}
@@ -1572,6 +1613,18 @@ export function App() {
           t={t}
           onClose={() => setRenameTerminalDialog(undefined)}
           onRename={confirmRenameTerminal}
+        />
+      ) : null}
+      {confirmDialog ? (
+        <ConfirmDialog
+          dialog={confirmDialog}
+          t={t}
+          onClose={() => setConfirmDialog(undefined)}
+          onConfirm={() => {
+            const action = confirmDialog.onConfirm;
+            setConfirmDialog(undefined);
+            void action();
+          }}
         />
       ) : null}
       {fileContextMenu ? (
@@ -1983,6 +2036,48 @@ function RenameTerminalDialog({
           </button>
           <button className="primary-action" type="button" onClick={onRename}>
             {t('rename')}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  dialog,
+  t,
+  onClose,
+  onConfirm,
+}: {
+  dialog: ConfirmDialogState;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className={dialog.tone === 'danger' ? 'save-sql-panel confirm-panel danger' : 'save-sql-panel confirm-panel'}
+        role="dialog"
+        aria-modal="true"
+        aria-label={dialog.title}
+      >
+        <div className="modal-heading">
+          <div>
+            <strong>{dialog.title}</strong>
+            <small>{dialog.message}</small>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+        </div>
+        {dialog.detail ? <pre className="confirm-detail">{dialog.detail}</pre> : null}
+        <div className="modal-actions">
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('cancel')}
+          </button>
+          <button className={dialog.tone === 'danger' ? 'danger-action' : 'primary-action'} type="button" onClick={onConfirm}>
+            {dialog.confirmLabel}
           </button>
         </div>
       </section>
@@ -2693,9 +2788,38 @@ function WorkspaceDialog({
   );
 }
 
+function AuthStartupDialog({
+  t,
+  onClose,
+}: {
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop auth-backdrop" role="presentation">
+      <section className="auth-startup-panel" role="dialog" aria-modal="true" aria-label={t('accountSettings')}>
+        <div className="modal-heading">
+          <div>
+            <strong>DBAgent</strong>
+            <small>{t('authDatabaseHint')}</small>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+        </div>
+        <AccountSettingsPanel compact t={t} onAuthenticated={onClose} />
+      </section>
+    </div>
+  );
+}
+
 function AccountSettingsPanel({
+  compact = false,
+  onAuthenticated,
   t,
 }: {
+  compact?: boolean;
+  onAuthenticated?: () => void;
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
 }) {
   const [status, setStatus] = useState<AuthStatus>({ authenticated: false });
@@ -2711,9 +2835,12 @@ function AccountSettingsPanel({
 
   useEffect(() => {
     void window.dbagent.invoke(ipcChannels.auth.status, undefined).then((response) => {
-      if (response.ok) setStatus(response.data);
+      if (response.ok) {
+        setStatus(response.data);
+        if (response.data.authenticated) onAuthenticated?.();
+      }
     });
-  }, []);
+  }, [onAuthenticated]);
 
   async function requestCode() {
     if (!codeRequestEnabled) return;
@@ -2752,6 +2879,7 @@ function AccountSettingsPanel({
       if (response.ok) {
         setStatus(response.data);
         setMessage(t('accountUpdated'));
+        if (response.data.authenticated) onAuthenticated?.();
       } else {
         setMessage(formatAppError(response.error));
       }
@@ -2777,11 +2905,13 @@ function AccountSettingsPanel({
   }
 
   return (
-    <section className="settings-card">
-      <div className="subform-heading">
-        <strong>{t('accountSettings')}</strong>
-        <small>{status.authenticated ? status.user?.email || status.user?.phone : t('authDatabaseHint')}</small>
-      </div>
+    <section className={compact ? 'settings-card auth-card compact' : 'settings-card auth-card'}>
+      {!compact ? (
+        <div className="subform-heading">
+          <strong>{t('accountSettings')}</strong>
+          <small>{status.authenticated ? status.user?.email || status.user?.phone : t('authDatabaseHint')}</small>
+        </div>
+      ) : null}
       <div className="segmented-control">
         <button className={mode === 'login' ? 'active' : ''} type="button" onClick={() => changeMode('login')}>
           {t('passwordLogin')}
@@ -2949,6 +3079,7 @@ function PythonConfigForm({
   onDetectPython: () => void;
 }) {
   const [newEnvironmentName, setNewEnvironmentName] = useState('.venv');
+  const [pathError, setPathError] = useState('');
   const modeEnvironments = useMemo(
     () => environments.filter((environment) => environment.mode === pythonDraft.mode),
     [environments, pythonDraft.mode],
@@ -2960,16 +3091,18 @@ function PythonConfigForm({
   }, [pythonDraft.mode]);
 
   function switchMode(mode: WorkspacePythonConfig['mode']) {
+    setPathError('');
     setPythonDraft(switchPythonMode(pythonDraft, mode));
   }
 
   async function choosePath(mode: 'file' | 'directory') {
     const path = await onChoosePythonPath(mode);
     if (!path) return;
+    setPathError('');
     if (pythonDraft.mode === 'venv') {
       const relativePath = toWorkspaceRelativeDirectory(path, workspaceRoot);
       if (!relativePath) {
-        window.alert(t('venvMustBeInsideWorkspace'));
+        setPathError(t('venvMustBeInsideWorkspace'));
         return;
       }
       setPythonDraft({ ...pythonDraft, venvPath: relativePath });
@@ -2981,6 +3114,7 @@ function PythonConfigForm({
   function selectEnvironment(id: string) {
     const environment = environments.find((item) => item.id === id);
     if (!environment) return;
+    setPathError('');
     setPythonDraft(selectPythonEnvironment(pythonDraft, environment));
   }
 
@@ -3047,6 +3181,7 @@ function PythonConfigForm({
                 ...
               </button>
             </div>
+            {pathError ? <p className="field-hint danger">{pathError}</p> : null}
           </label>
         ) : null}
         {pythonDraft.mode === 'conda' ? (
@@ -4001,7 +4136,9 @@ function TerminalViewport({
     fitAddon.fit();
     xterm.focus();
 
-    const dataDisposable = xterm.onData((data) => onWriteTerminalData(terminal.id, data));
+    const dataDisposable = xterm.onData((data) => {
+      if (shouldForwardTerminalData(data)) onWriteTerminalData(terminal.id, data);
+    });
     const resize = () => {
       try {
         fitAddon.fit();
@@ -4242,7 +4379,6 @@ function ChatPanel({
       <div className="chat-titlebar">
         <div className="agent-heading">
           <strong>DBAgent</strong>
-          <small>{t('assistantReady')}</small>
         </div>
         <div className="agent-toolbar" aria-label="Agent toolbar">
           <button

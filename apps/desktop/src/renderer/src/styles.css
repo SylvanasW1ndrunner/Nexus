@@ -1106,10 +1106,12 @@ small {
   flex: 0 0 34px;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
+  min-width: 0;
   border-bottom: 1px solid var(--border-subtle);
   background: #181818;
   padding: 0 10px 0 18px;
+  overflow: hidden;
 }
 
 .bottom-panel-tabs button {
@@ -1141,6 +1143,7 @@ small {
 
 .bottom-panel-tabs small {
   min-width: 0;
+  max-width: 28%;
   overflow: hidden;
   color: #969696;
   font-size: 12px;
@@ -1153,6 +1156,8 @@ small {
   position: relative;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
   margin-left: auto;
 }
 
@@ -1416,18 +1421,21 @@ small {
 }
 
 .terminal-title-tools {
-  min-width: 0;
+  flex: 0 1 min(58%, 620px);
+  min-width: 180px;
   gap: 4px;
 }
 
 .terminal-session-list {
   min-width: 0;
-  max-width: 360px;
+  flex: 1 1 auto;
+  max-width: 420px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 2px;
   margin-right: 2px;
+  overflow: hidden;
 }
 
 .terminal-session-list button,
@@ -1445,7 +1453,8 @@ small {
 }
 
 .terminal-session-list button {
-  max-width: 180px;
+  min-width: 0;
+  max-width: 160px;
   justify-content: flex-start;
   gap: 5px;
 }
@@ -1727,6 +1736,76 @@ textarea {
   color: #8a939f;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.field-hint.danger {
+  color: #f85149;
+}
+
+.confirm-panel {
+  width: min(520px, calc(100vw - 48px));
+}
+
+.confirm-panel.danger {
+  border-color: rgba(248, 81, 73, 0.45);
+}
+
+.confirm-detail {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0 0 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: #111318;
+  color: #d4d4d4;
+  padding: 10px;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.auth-backdrop {
+  align-items: flex-start;
+  padding-top: min(12vh, 96px);
+}
+
+.auth-startup-panel {
+  width: min(460px, calc(100vw - 48px));
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: #252526;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+  padding: 16px;
+}
+
+.auth-card {
+  gap: 14px;
+}
+
+.auth-card.compact {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+.auth-card .segmented-control {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.auth-card .modal-grid.two {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.danger-action {
+  border-color: #da3633;
+  background: #da3633;
+  color: #ffffff;
+}
+
+.danger-action:hover {
+  background: #f85149;
 }
 
 .save-sql-summary {
