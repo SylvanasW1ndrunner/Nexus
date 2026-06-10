@@ -41,6 +41,10 @@ describe('renderer i18n', () => {
       t('tabSize'),
       t('wordWrap'),
       t('lineNumbers'),
+      t('authWelcomeTitle'),
+      t('authSecureHint'),
+      t('createAccount'),
+      t('resetPasswordAction'),
     ];
 
     expect(criticalLabels).toEqual([
@@ -49,8 +53,8 @@ describe('renderer i18n', () => {
       'IDE 设置',
       '项目设置',
       '终端',
-      '插件市场',
-      '账密登录',
+      '插件',
+      '账号登录',
       '发送验证码',
       '命令面板',
       '搜索命令',
@@ -70,7 +74,11 @@ describe('renderer i18n', () => {
       'Tab 大小',
       '自动换行',
       '行号',
+      '欢迎使用 DBAgent',
+      '支持密码或验证码登录，账户数据保存在你配置的 PostgreSQL 中。',
+      '创建账户',
+      '重置密码',
     ]);
-    expect(criticalLabels.join('')).not.toMatch(/[\u951F\uFFFD\u93B5\u7481\u940E\u7F01]/);
+    expect(criticalLabels.join('')).not.toMatch(/锟|�|鎵|璁|鐜|缁|椤|杩|鏁|閫|€|鈱/);
   });
 });

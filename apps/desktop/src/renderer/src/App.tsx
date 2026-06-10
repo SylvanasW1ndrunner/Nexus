@@ -2798,13 +2798,14 @@ function AuthStartupDialog({
   return (
     <div className="modal-backdrop auth-backdrop" role="presentation">
       <section className="auth-startup-panel" role="dialog" aria-modal="true" aria-label={t('accountSettings')}>
-        <div className="modal-heading">
+        <div className="auth-startup-hero">
+          <div className="auth-brand-mark">DB</div>
           <div>
-            <strong>DBAgent</strong>
-            <small>{t('authDatabaseHint')}</small>
+            <strong>{t('authWelcomeTitle')}</strong>
+            <span>{t('authWelcomeSubtitle')}</span>
           </div>
-          <button className="secondary" type="button" onClick={onClose}>
-            {t('close')}
+          <button className="auth-close" type="button" onClick={onClose} aria-label={t('close')}>
+            x
           </button>
         </div>
         <AccountSettingsPanel compact t={t} onAuthenticated={onClose} />
@@ -2904,12 +2905,35 @@ function AccountSettingsPanel({
     setMessage('');
   }
 
+  const submitLabel =
+    mode === 'login'
+      ? t('passwordLogin')
+      : mode === 'code-login'
+        ? t('codeLogin')
+        : mode === 'register'
+          ? t('createAccount')
+          : t('resetPasswordAction');
+  const formTitle =
+    mode === 'login'
+      ? t('passwordLogin')
+      : mode === 'code-login'
+        ? t('codeLogin')
+        : mode === 'register'
+          ? t('createAccount')
+          : t('forgotPassword');
+
   return (
     <section className={compact ? 'settings-card auth-card compact' : 'settings-card auth-card'}>
       {!compact ? (
         <div className="subform-heading">
           <strong>{t('accountSettings')}</strong>
           <small>{status.authenticated ? status.user?.email || status.user?.phone : t('authDatabaseHint')}</small>
+        </div>
+      ) : null}
+      {compact ? (
+        <div className="auth-form-heading">
+          <strong>{formTitle}</strong>
+          <span>{t('authSecureHint')}</span>
         </div>
       ) : null}
       <div className="segmented-control">
@@ -2930,6 +2954,8 @@ function AccountSettingsPanel({
         <label>
           <span>{t('emailOrPhone')}</span>
           <input
+            autoFocus={compact}
+            placeholder={t('emailOrPhone')}
             value={target}
             onChange={(event) => {
               setTarget(event.target.value);
@@ -2941,14 +2967,19 @@ function AccountSettingsPanel({
         {mode === 'login' || mode === 'register' || mode === 'reset-password' ? (
           <label>
             <span>{mode === 'reset-password' ? t('newPassword') : t('password')}</span>
-            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+            <input
+              placeholder={mode === 'reset-password' ? t('newPassword') : t('password')}
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
           </label>
         ) : null}
         {mode !== 'login' ? (
           <label>
             <span>{t('verificationCode')}</span>
             <div className="path-row">
-              <input value={code} onChange={(event) => setCode(event.target.value)} />
+              <input placeholder={t('verificationCode')} value={code} onChange={(event) => setCode(event.target.value)} />
               <button className="secondary" disabled={!codeRequestEnabled} type="button" onClick={() => void requestCode()}>
                 {busy ? t('running') : t('sendCode')}
               </button>
@@ -2956,8 +2987,8 @@ function AccountSettingsPanel({
           </label>
         ) : null}
       </div>
-      <div className="modal-actions split">
-        <small>{message}</small>
+      <div className="auth-form-footer">
+        <small>{message || t('authDatabaseHint')}</small>
         <div>
           {status.authenticated ? (
             <button className="secondary" disabled={busy} type="button" onClick={() => void logout()}>
@@ -2965,7 +2996,7 @@ function AccountSettingsPanel({
             </button>
           ) : null}
           <button className="primary-action" disabled={!submitEnabled} type="button" onClick={() => void submit()}>
-            {busy ? t('running') : t('apply')}
+            {busy ? t('running') : submitLabel}
           </button>
         </div>
       </div>
@@ -3935,8 +3966,25 @@ function EditorPane({
               ) : null}
             </div>
           ) : null}
-          {bottomPanel === 'console' ? (
-            <div className="bottom-panel-tools terminal-title-tools">
+        </div>
+        {bottomPanel === 'results' ? (
+          <div className="bottom-panel-body">
+            {result ? (
+              <>
+                <ResultSummary result={result} t={t} />
+                <PerformanceWarnings result={result} />
+                <ResultTable result={result} t={t} />
+              </>
+            ) : (
+              <div className="result-empty">
+                <strong>{t('resultEmptyTitle')}</strong>
+                <span>{t('resultEmptyDescription')}</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className="terminal-command-bar">
               <div className="terminal-session-list">
                 {terminals.map((terminal) => (
                   <button
@@ -3955,94 +4003,79 @@ function EditorPane({
                   </button>
                 ))}
               </div>
-              <button className="terminal-tool" type="button" title={t('newTerminal')} onClick={onCreateTerminal}>
-                <span className="icon-glyph new-chat" aria-hidden="true" />
-              </button>
-              <button
-                className="terminal-tool"
-                disabled={!activeTerminal}
-                type="button"
-                title={t('splitTerminal')}
-                onClick={onSplitTerminal}
-              >
-                <span className="icon-glyph split-terminal" aria-hidden="true" />
-              </button>
-              <button
-                className="terminal-tool"
-                disabled={!activeTerminal}
-                type="button"
-                title={t('clear')}
-                onClick={() => {
-                  if (activeTerminal) onClearTerminal(activeTerminal.id);
-                }}
-              >
-                <span className="icon-glyph clear-terminal" aria-hidden="true" />
-              </button>
-              <button
-                className={terminalMenuOpen ? 'terminal-tool active' : 'terminal-tool'}
-                type="button"
-                title={t('moreActions')}
-                onClick={() => setTerminalMenuOpen((open) => !open)}
-              >
-                <span className="icon-glyph more" aria-hidden="true" />
-              </button>
-              {terminalMenuOpen ? (
-                <div className="tool-menu terminal-menu">
-                  {terminalActions.map((action) => (
-                    <button disabled={!action.enabled} key={action.id} type="button" onClick={() => runTerminalAction(action.id)}>
-                      {t(action.labelKey)}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-              <button
-                className={terminalMaximized ? 'terminal-tool active' : 'terminal-tool'}
-                type="button"
-                title={terminalMaximized ? t('restorePanel') : t('maximizePanel')}
-                onClick={onToggleTerminalMaximized}
-              >
-                <span className="icon-glyph maximize" aria-hidden="true" />
-              </button>
-              <button
-                className="terminal-tool"
-                disabled={!activeTerminal}
-                type="button"
-                title={t('close')}
-                onClick={() => {
-                  if (activeTerminal) onCloseTerminal(activeTerminal.id);
-                }}
-              >
-                <span className="icon-glyph close" aria-hidden="true" />
-              </button>
-            </div>
-          ) : null}
-        </div>
-        {bottomPanel === 'results' ? (
-          <div className="bottom-panel-body">
-            {result ? (
-              <>
-                <ResultSummary result={result} t={t} />
-                <PerformanceWarnings result={result} />
-                <ResultTable result={result} t={t} />
-              </>
-            ) : (
-              <div className="result-empty">
-                <strong>{t('resultEmptyTitle')}</strong>
-                <span>{t('resultEmptyDescription')}</span>
+              <div className="terminal-command-actions">
+                <button className="terminal-tool" type="button" title={t('newTerminal')} onClick={onCreateTerminal}>
+                  <span className="icon-glyph new-chat" aria-hidden="true" />
+                </button>
+                <button
+                  className="terminal-tool"
+                  disabled={!activeTerminal}
+                  type="button"
+                  title={t('splitTerminal')}
+                  onClick={onSplitTerminal}
+                >
+                  <span className="icon-glyph split-terminal" aria-hidden="true" />
+                </button>
+                <button
+                  className="terminal-tool"
+                  disabled={!activeTerminal}
+                  type="button"
+                  title={t('clear')}
+                  onClick={() => {
+                    if (activeTerminal) onClearTerminal(activeTerminal.id);
+                  }}
+                >
+                  <span className="icon-glyph clear-terminal" aria-hidden="true" />
+                </button>
+                <button
+                  className={terminalMenuOpen ? 'terminal-tool active' : 'terminal-tool'}
+                  type="button"
+                  title={t('moreActions')}
+                  onClick={() => setTerminalMenuOpen((open) => !open)}
+                >
+                  <span className="icon-glyph more" aria-hidden="true" />
+                </button>
+                {terminalMenuOpen ? (
+                  <div className="tool-menu terminal-menu">
+                    {terminalActions.map((action) => (
+                      <button disabled={!action.enabled} key={action.id} type="button" onClick={() => runTerminalAction(action.id)}>
+                        {t(action.labelKey)}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                <button
+                  className={terminalMaximized ? 'terminal-tool active' : 'terminal-tool'}
+                  type="button"
+                  title={terminalMaximized ? t('restorePanel') : t('maximizePanel')}
+                  onClick={onToggleTerminalMaximized}
+                >
+                  <span className="icon-glyph maximize" aria-hidden="true" />
+                </button>
+                <button
+                  className="terminal-tool"
+                  disabled={!activeTerminal}
+                  type="button"
+                  title={t('close')}
+                  onClick={() => {
+                    if (activeTerminal) onCloseTerminal(activeTerminal.id);
+                  }}
+                >
+                  <span className="icon-glyph close" aria-hidden="true" />
+                </button>
               </div>
-            )}
-          </div>
-        ) : (
-          <TerminalPanel
-            activeTerminalId={activeTerminalId}
-            splitTerminalId={splitTerminalId}
-            terminals={terminals}
-            terminalSettings={ideSettings.terminal}
-            t={t}
-            onCreateTerminal={onCreateTerminal}
-            onSelectTerminal={onSelectTerminal}
-            onWriteTerminalData={onWriteTerminalData}
-          />
+            </div>
+            <TerminalPanel
+              activeTerminalId={activeTerminalId}
+              splitTerminalId={splitTerminalId}
+              terminals={terminals}
+              terminalSettings={ideSettings.terminal}
+              t={t}
+              onCreateTerminal={onCreateTerminal}
+              onSelectTerminal={onSelectTerminal}
+              onWriteTerminalData={onWriteTerminalData}
+            />
+          </>
         )}
       </section>
     </>
@@ -4076,6 +4109,7 @@ function TerminalPanel({
           {visibleTerminals.map((terminal) => (
             <TerminalViewport
               key={terminal.id}
+              active={terminal.id === activeTerminalId}
               terminal={terminal}
               terminalSettings={terminalSettings}
               onSelectTerminal={onSelectTerminal}
@@ -4096,11 +4130,13 @@ function TerminalPanel({
 }
 
 function TerminalViewport({
+  active,
   terminal,
   terminalSettings,
   onSelectTerminal,
   onWriteTerminalData,
 }: {
+  active: boolean;
   terminal: TerminalView;
   terminalSettings: IdeSettings['terminal'];
   onSelectTerminal: (id: string) => void;
@@ -4134,7 +4170,6 @@ function TerminalViewport({
     xterm.loadAddon(fitAddon);
     xterm.open(container);
     fitAddon.fit();
-    xterm.focus();
 
     const dataDisposable = xterm.onData((data) => {
       if (shouldForwardTerminalData(data)) onWriteTerminalData(terminal.id, data);
@@ -4195,7 +4230,7 @@ function TerminalViewport({
 
   return (
     <div
-      className="terminal-viewport"
+      className={active ? 'terminal-viewport active' : 'terminal-viewport'}
       style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}
       onClick={() => {
         onSelectTerminal(terminal.id);
