@@ -1,11 +1,12 @@
 import { exec } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import * as pty from 'node-pty';
 import type {
   PythonRunResult,
   TerminalReadRequest,
   TerminalReadResult,
+  TerminalResizeRequest,
   TerminalRunRequest,
   TerminalSession,
   TerminalWriteRequest,
@@ -14,7 +15,7 @@ import type {
 const execAsync = promisify(exec);
 
 type TerminalRuntime = {
-  process: ChildProcessWithoutNullStreams;
+  process: pty.IPty;
   output: string;
   status: 'running' | 'exited';
   exitCode?: number | null;
@@ -38,10 +39,13 @@ export class TerminalService {
     const id = randomUUID();
     const shell = getDefaultShell(this.options.defaultShell);
     const cwd = input.cwd ?? process.cwd();
-    const child = spawn(shell.command, shell.args, {
+    const child = pty.spawn(shell.command, shell.args, {
+      cols: 100,
+      rows: 30,
       cwd,
       env: process.env,
-      windowsHide: true,
+      name: process.platform === 'win32' ? 'xterm-256color' : 'xterm-color',
+      useConptyDll: process.platform === 'win32',
     });
     const session: TerminalSession = {
       id,
@@ -57,17 +61,14 @@ export class TerminalService {
       output: '',
       status: 'running',
     };
-    child.stdout.on('data', (chunk: Buffer) => {
-      runtime.output += chunk.toString('utf8');
+    child.onData((data) => {
+      runtime.output += data;
     });
-    child.stderr.on('data', (chunk: Buffer) => {
-      runtime.output += chunk.toString('utf8');
-    });
-    child.on('exit', (code) => {
+    child.onExit(({ exitCode }) => {
       runtime.status = 'exited';
-      runtime.exitCode = code;
+      runtime.exitCode = exitCode;
       const current = this.sessions.get(id);
-      if (current) this.sessions.set(id, { ...current, status: 'exited', lastExitCode: code });
+      if (current) this.sessions.set(id, { ...current, status: 'exited', lastExitCode: exitCode });
     });
     this.sessions.set(id, session);
     this.runtimes.set(id, runtime);
@@ -89,13 +90,22 @@ export class TerminalService {
     return { id };
   }
 
+  resize(request: TerminalResizeRequest): { id: string; cols: number; rows: number } {
+    const runtime = this.runtimes.get(request.terminalId);
+    if (!runtime || runtime.status !== 'running') throw new Error('Terminal session is not running.');
+    const cols = Math.max(2, Math.floor(request.cols));
+    const rows = Math.max(1, Math.floor(request.rows));
+    runtime.process.resize(cols, rows);
+    return { id: request.terminalId, cols, rows };
+  }
+
   write(request: TerminalWriteRequest): { id: string } {
     const runtime = this.runtimes.get(request.terminalId);
     if (!runtime || runtime.status !== 'running') throw new Error('Terminal session is not running.');
-    runtime.process.stdin.write(request.data);
+    runtime.process.write(request.data);
     const current = this.sessions.get(request.terminalId);
     if (current) {
-      const command = request.data.replace(/\r?\n$/, '').trim();
+      const command = request.data.replace(/[\r\n]+$/, '').trim();
       this.sessions.set(request.terminalId, command ? { ...current, lastCommand: command } : current);
     }
     return { id: request.terminalId };

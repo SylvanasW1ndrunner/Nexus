@@ -246,6 +246,7 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.terminal.create, (request) => Promise.resolve(ok(terminalService.create(request ?? {}))));
   handle(ipcChannels.terminal.close, ({ id }) => Promise.resolve(ok(terminalService.close(id))));
   handle(ipcChannels.terminal.clear, ({ id }) => Promise.resolve(ok(terminalService.clear(id))));
+  handle(ipcChannels.terminal.resize, (request) => Promise.resolve(ok(terminalService.resize(request))));
   handle(ipcChannels.terminal.write, (request) => Promise.resolve(ok(terminalService.write(request))));
   handle(ipcChannels.terminal.read, (request) => Promise.resolve(ok(terminalService.read(request))));
   handle(ipcChannels.terminal.run, async (request) => safeResult(() => terminalService.run(request)));

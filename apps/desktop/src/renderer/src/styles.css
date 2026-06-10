@@ -1501,10 +1501,10 @@ small {
 .terminal-viewport {
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   color: #cccccc;
   background: #181818;
-  padding: 3px 9px 12px;
+  padding: 6px 8px;
   font-family: "JetBrains Mono", Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
@@ -1514,79 +1514,18 @@ small {
   border-left: 1px solid #2b2b2b;
 }
 
-.terminal-output {
-  min-height: 0;
-  overflow: visible;
-  margin: 0;
-  color: inherit;
-  background: transparent;
-  padding: 0;
-  font-family: inherit;
-  font-size: inherit;
-  line-height: inherit;
-  white-space: pre-wrap;
+.terminal-xterm {
+  width: 100%;
+  height: 100%;
 }
 
-.terminal-output.cursor-blink::after {
-  content: " ";
-  display: inline-block;
-  width: 7px;
-  height: 1.1em;
-  margin-left: 2px;
-  background: #cccccc;
-  vertical-align: -0.2em;
-  animation: terminal-cursor-blink 1s steps(1) infinite;
-}
-
-@keyframes terminal-cursor-blink {
-  50% {
-    opacity: 0;
-  }
-}
-
-.terminal-command-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: baseline;
-  gap: 5px;
-  border-top: 0;
-  background: transparent;
+.terminal-xterm .xterm {
+  height: 100%;
   padding: 0;
 }
 
-.terminal-prompt {
-  max-width: min(520px, 48vw);
-  overflow: hidden;
-  color: #d4d4d4;
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.terminal-command-row input {
-  min-height: 20px;
-  border-color: transparent;
+.terminal-xterm .xterm-viewport {
   background: transparent;
-  color: #d4d4d4;
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 12px;
-  padding: 0;
-}
-
-.terminal-command-row input:focus {
-  border-color: transparent;
-  box-shadow: none;
-}
-
-.terminal-run {
-  width: 18px;
-  min-width: 18px;
-  min-height: 20px;
-  border-color: transparent;
-  background: transparent;
-  color: #d4d4d4;
-  padding: 0;
 }
 
 .terminal-empty {
@@ -3028,8 +2967,6 @@ td {
 .app-shell.theme-light .command-context span,
 .app-shell.theme-light .editor-context-strip span,
 .app-shell.theme-light .language-switch,
-.app-shell.theme-light .terminal-output,
-.app-shell.theme-light .terminal-command-row,
 .app-shell.theme-light .agent-composer,
 .app-shell.theme-light .agent-composer-input {
   border-color: var(--border-subtle);

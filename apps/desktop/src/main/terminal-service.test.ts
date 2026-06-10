@@ -28,7 +28,7 @@ describe('TerminalService', () => {
     try {
       service.write({
         terminalId: terminal.id,
-        data: 'echo dbagent-terminal-ready\n',
+        data: 'echo dbagent-terminal-ready\r',
       });
 
       const output = await waitForOutput(service, terminal.id, 'dbagent-terminal-ready');
@@ -46,7 +46,7 @@ describe('TerminalService', () => {
     try {
       service.write({
         terminalId: terminal.id,
-        data: 'echo dbagent-clear-output\n',
+        data: 'echo dbagent-clear-output\r',
       });
       await waitForOutput(service, terminal.id, 'dbagent-clear-output');
 
@@ -62,12 +62,27 @@ describe('TerminalService', () => {
       service.close(terminal.id);
     }
   });
+
+  it('resizes an interactive PTY session', () => {
+    const service = new TerminalService();
+    const terminal = service.create({ name: 'Resizable Shell' });
+
+    try {
+      expect(service.resize({ terminalId: terminal.id, cols: 120.8, rows: 36.2 })).toEqual({
+        id: terminal.id,
+        cols: 120,
+        rows: 36,
+      });
+    } finally {
+      service.close(terminal.id);
+    }
+  });
 });
 
 async function waitForOutput(service: TerminalService, terminalId: string, expected: string): Promise<string> {
   let cursor = 0;
   let output = '';
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 100));
     const result = service.read({ terminalId, cursor });
     cursor = result.cursor;

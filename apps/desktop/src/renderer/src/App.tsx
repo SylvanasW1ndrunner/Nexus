@@ -1,5 +1,6 @@
 import {
   Component,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -10,6 +11,9 @@ import {
 } from 'react';
 import type { editor as MonacoEditor } from 'monaco-editor';
 import { Editor } from '@monaco-editor/react';
+import { FitAddon } from '@xterm/addon-fit';
+import { Terminal as XTerm } from '@xterm/xterm';
+import '@xterm/xterm/css/xterm.css';
 import {
   ipcChannels,
   queryResultToCsv,
@@ -509,9 +513,15 @@ export function App() {
     setMessage(`${t('renameTerminal')}: ${nextName}`);
   }
 
-  function updateTerminalInput(id: string, input: string) {
-    setTerminals((current) => current.map((terminal) => (terminal.id === id ? { ...terminal, input } : terminal)));
-  }
+  const writeTerminalData = useCallback(async (id: string, data: string) => {
+    const response = await window.dbagent.invoke(ipcChannels.terminal.write, {
+      terminalId: id,
+      data,
+    });
+    if (!response.ok) {
+      setMessage(formatAppError(response.error));
+    }
+  }, []);
 
   async function pollTerminalOutputs() {
     const snapshot = terminalsRef.current;
@@ -538,27 +548,6 @@ export function App() {
         };
       }),
     );
-  }
-
-  async function runTerminalCommand(id: string) {
-    const terminal = terminals.find((item) => item.id === id);
-    if (!terminal || !terminal.input.trim()) return;
-    const command = terminal.input.trim();
-    setTerminals((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, running: true, input: '', output: `${item.output}\n> ${command}\n` } : item,
-      ),
-    );
-    const response = await window.dbagent.invoke(ipcChannels.terminal.write, {
-      terminalId: id,
-      data: `${command}\n`,
-    });
-    if (!response.ok) {
-      setMessage(formatAppError(response.error));
-      setTerminals((current) => current.map((item) => (item.id === id ? { ...item, running: false } : item)));
-      return;
-    }
-    await pollTerminalOutputs();
   }
 
   async function refreshPlugins() {
@@ -1429,12 +1418,11 @@ export function App() {
               onExportJson={exportJson}
               onSaveSql={() => void saveCurrentDocument()}
               onRunPython={() => void runPythonScript()}
-              onRunTerminal={(id) => void runTerminalCommand(id)}
               onRenameTerminal={requestRenameTerminal}
               onSelectTerminal={setActiveTerminalId}
               onSplitTerminal={() => void splitTerminal()}
               onToggleTerminalMaximized={() => setTerminalMaximized((maximized) => !maximized)}
-              onUpdateTerminalInput={updateTerminalInput}
+              onWriteTerminalData={(id, data) => void writeTerminalData(id, data)}
               setBottomPanel={setBottomPanel}
             />
           </section>
@@ -3556,12 +3544,11 @@ function EditorPane({
   onExportJson,
   onRunPython,
   onSaveSql,
-  onRunTerminal,
   onRenameTerminal,
   onSelectTerminal,
   onSplitTerminal,
   onToggleTerminalMaximized,
-  onUpdateTerminalInput,
+  onWriteTerminalData,
   setBottomPanel,
 }: {
   activeConnection: SavedConnection | undefined;
@@ -3588,12 +3575,11 @@ function EditorPane({
   onExportJson: () => void;
   onRunPython: () => void;
   onSaveSql: () => void;
-  onRunTerminal: (id: string) => void;
   onRenameTerminal: (id: string) => void;
   onSelectTerminal: (id: string) => void;
   onSplitTerminal: () => void;
   onToggleTerminalMaximized: () => void;
-  onUpdateTerminalInput: (id: string, input: string) => void;
+  onWriteTerminalData: (id: string, data: string) => void;
   setBottomPanel: (panel: 'results' | 'console') => void;
 }) {
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
@@ -3918,9 +3904,8 @@ function EditorPane({
             terminalSettings={ideSettings.terminal}
             t={t}
             onCreateTerminal={onCreateTerminal}
-            onRunTerminal={onRunTerminal}
             onSelectTerminal={onSelectTerminal}
-            onUpdateTerminalInput={onUpdateTerminalInput}
+            onWriteTerminalData={onWriteTerminalData}
           />
         )}
       </section>
@@ -3935,9 +3920,8 @@ function TerminalPanel({
   terminalSettings,
   t,
   onCreateTerminal,
-  onRunTerminal,
   onSelectTerminal,
-  onUpdateTerminalInput,
+  onWriteTerminalData,
 }: {
   activeTerminalId: string;
   splitTerminalId: string;
@@ -3945,9 +3929,8 @@ function TerminalPanel({
   terminalSettings: IdeSettings['terminal'];
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
   onCreateTerminal: () => void;
-  onRunTerminal: (id: string) => void;
   onSelectTerminal: (id: string) => void;
-  onUpdateTerminalInput: (id: string, input: string) => void;
+  onWriteTerminalData: (id: string, data: string) => void;
 }) {
   const visibleTerminals = selectVisibleTerminals(terminals, activeTerminalId, splitTerminalId);
   return (
@@ -3959,10 +3942,8 @@ function TerminalPanel({
               key={terminal.id}
               terminal={terminal}
               terminalSettings={terminalSettings}
-              t={t}
-              onRunTerminal={onRunTerminal}
               onSelectTerminal={onSelectTerminal}
-              onUpdateTerminalInput={onUpdateTerminalInput}
+              onWriteTerminalData={onWriteTerminalData}
             />
           ))}
         </div>
@@ -3981,44 +3962,109 @@ function TerminalPanel({
 function TerminalViewport({
   terminal,
   terminalSettings,
-  t,
-  onRunTerminal,
   onSelectTerminal,
-  onUpdateTerminalInput,
+  onWriteTerminalData,
 }: {
   terminal: TerminalView;
   terminalSettings: IdeSettings['terminal'];
-  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
-  onRunTerminal: (id: string) => void;
   onSelectTerminal: (id: string) => void;
-  onUpdateTerminalInput: (id: string, input: string) => void;
+  onWriteTerminalData: (id: string, data: string) => void;
 }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<XTerm | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const writtenLengthRef = useRef(0);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return undefined;
+
+    const xterm = new XTerm({
+      convertEol: true,
+      cursorBlink: terminalSettings.cursorBlink,
+      fontFamily: terminalSettings.fontFamily,
+      fontSize: terminalSettings.fontSize,
+      scrollback: terminalSettings.scrollback,
+      theme: {
+        background: '#181818',
+        foreground: '#cccccc',
+        cursor: '#7ee787',
+        selectionBackground: '#264f78',
+      },
+    });
+    const fitAddon = new FitAddon();
+    terminalRef.current = xterm;
+    fitAddonRef.current = fitAddon;
+    xterm.loadAddon(fitAddon);
+    xterm.open(container);
+    fitAddon.fit();
+    xterm.focus();
+
+    const dataDisposable = xterm.onData((data) => onWriteTerminalData(terminal.id, data));
+    const resize = () => {
+      try {
+        fitAddon.fit();
+        void window.dbagent.invoke(ipcChannels.terminal.resize, {
+          terminalId: terminal.id,
+          cols: xterm.cols,
+          rows: xterm.rows,
+        });
+      } catch {
+        // xterm can throw while the container is temporarily hidden during panel resizing.
+      }
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
+    resize();
+
+    return () => {
+      observer.disconnect();
+      dataDisposable.dispose();
+      xterm.dispose();
+      terminalRef.current = null;
+      fitAddonRef.current = null;
+      writtenLengthRef.current = 0;
+    };
+  }, [onWriteTerminalData, terminal.id]);
+
+  useEffect(() => {
+    const xterm = terminalRef.current;
+    if (!xterm) return;
+    xterm.options.cursorBlink = terminalSettings.cursorBlink;
+    xterm.options.fontFamily = terminalSettings.fontFamily;
+    xterm.options.fontSize = terminalSettings.fontSize;
+    xterm.options.scrollback = terminalSettings.scrollback;
+    try {
+      fitAddonRef.current?.fit();
+    } catch {
+      // Ignore transient fit failures while the panel is collapsed.
+    }
+  }, [terminalSettings.cursorBlink, terminalSettings.fontFamily, terminalSettings.fontSize, terminalSettings.scrollback]);
+
+  useEffect(() => {
+    const xterm = terminalRef.current;
+    if (!xterm) return;
+    if (terminal.output.length < writtenLengthRef.current) {
+      xterm.clear();
+      writtenLengthRef.current = 0;
+    }
+    const nextChunk = terminal.output.slice(writtenLengthRef.current);
+    if (nextChunk) {
+      xterm.write(nextChunk);
+      writtenLengthRef.current = terminal.output.length;
+    }
+  }, [terminal.output]);
+
   return (
     <div
       className="terminal-viewport"
       style={{ fontFamily: terminalSettings.fontFamily, fontSize: terminalSettings.fontSize }}
-      onClick={() => onSelectTerminal(terminal.id)}
+      onClick={() => {
+        onSelectTerminal(terminal.id);
+        terminalRef.current?.focus();
+      }}
     >
-      <pre className={terminalSettings.cursorBlink ? 'terminal-output cursor-blink' : 'terminal-output'}>
-        {terminal.output}
-      </pre>
-      <div className="terminal-command-row">
-        <span className="terminal-prompt">
-          {terminal.shell?.toLowerCase().includes('powershell') ? 'PS' : '$'} {terminal.cwd ? `${terminal.cwd}>` : '>'}
-        </span>
-        <input
-          aria-label={t('terminalCommand')}
-          placeholder={terminal.output ? '' : t('consoleHint')}
-          value={terminal.input}
-          onChange={(event) => onUpdateTerminalInput(terminal.id, event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') onRunTerminal(terminal.id);
-          }}
-        />
-        <button className="terminal-run" disabled={terminal.running} type="button" onClick={() => onRunTerminal(terminal.id)}>
-          {terminal.running ? '...' : '>'}
-        </button>
-      </div>
+      <div ref={containerRef} className="terminal-xterm" />
     </div>
   );
 }

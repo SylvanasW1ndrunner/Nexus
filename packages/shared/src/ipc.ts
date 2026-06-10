@@ -68,6 +68,7 @@ export const ipcChannels = {
     create: 'terminal:create',
     close: 'terminal:close',
     clear: 'terminal:clear',
+    resize: 'terminal:resize',
     write: 'terminal:write',
     read: 'terminal:read',
     run: 'terminal:run',
@@ -357,6 +358,12 @@ export type TerminalWriteRequest = {
   data: string;
 };
 
+export type TerminalResizeRequest = {
+  terminalId: string;
+  cols: number;
+  rows: number;
+};
+
 export type TerminalReadRequest = {
   terminalId: string;
   cursor: number;
@@ -545,6 +552,7 @@ export type IpcRequestMap = {
   'terminal:create': { cwd?: string; name?: string };
   'terminal:close': { id: string };
   'terminal:clear': { id: string };
+  'terminal:resize': TerminalResizeRequest;
   'terminal:write': TerminalWriteRequest;
   'terminal:read': TerminalReadRequest;
   'terminal:run': TerminalRunRequest;
@@ -603,6 +611,7 @@ export type IpcResponseMap = {
   'terminal:create': Result<TerminalSession>;
   'terminal:close': Result<{ id: string }>;
   'terminal:clear': Result<{ id: string }>;
+  'terminal:resize': Result<{ id: string; cols: number; rows: number }>;
   'terminal:write': Result<{ id: string }>;
   'terminal:read': Result<TerminalReadResult>;
   'terminal:run': Result<PythonRunResult>;

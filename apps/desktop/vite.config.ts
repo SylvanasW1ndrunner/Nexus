@@ -9,6 +9,7 @@ const external = [
   'electron',
   ...builtinModules,
   ...builtinModules.map((moduleName) => `node:${moduleName}`),
+  'node-pty',
   'pg',
 ];
 

@@ -59,6 +59,7 @@ describe('ipc contract', () => {
       'terminal:create',
       'terminal:close',
       'terminal:clear',
+      'terminal:resize',
       'terminal:write',
       'terminal:read',
       'terminal:run',
