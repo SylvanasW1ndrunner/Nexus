@@ -4,6 +4,7 @@ import { shouldForwardTerminalData } from './terminal-input.js';
 describe('terminal input forwarding', () => {
   it('drops xterm generated capability reports that shells can echo as garbage', () => {
     expect(shouldForwardTerminalData('\x1b[?1;2c')).toBe(false);
+    expect(shouldForwardTerminalData('\x1b[>0;276;0c')).toBe(false);
     expect(shouldForwardTerminalData('\x1b[?25h')).toBe(false);
     expect(shouldForwardTerminalData('\x1b[?2004l')).toBe(false);
     expect(shouldForwardTerminalData('\x1b[6n')).toBe(false);

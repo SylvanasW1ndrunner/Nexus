@@ -38,7 +38,14 @@ import {
   type AgentConversation,
   type AgentMessage,
 } from './agent-chat.js';
-import { authCodePurpose, canRequestAuthCode, canSubmitAuthForm, inferAuthChannel, type AuthFormMode } from './auth-form.js';
+import {
+  authCodePurpose,
+  canRequestAuthCode,
+  canSubmitAuthForm,
+  inferAuthChannel,
+  isValidAuthTarget,
+  type AuthFormMode,
+} from './auth-form.js';
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
@@ -2836,6 +2843,7 @@ function AccountSettingsPanel({
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const channel = inferAuthChannel(target);
+  const targetInvalid = Boolean(target.trim()) && !isValidAuthTarget(target);
   const codeRequestEnabled = canRequestAuthCode({ mode, target, busy });
   const submitEnabled = canSubmitAuthForm({ mode, target, password, code, busy });
 
@@ -2995,7 +3003,7 @@ function AccountSettingsPanel({
         ) : null}
       </div>
       <div className="auth-form-footer">
-        <small>{message || (compact ? '' : t('authDatabaseHint'))}</small>
+        <small>{message || (targetInvalid ? t('authTargetInvalid') : compact ? '' : t('authDatabaseHint'))}</small>
         <div>
           {status.authenticated ? (
             <button className="secondary" disabled={busy} type="button" onClick={() => void logout()}>

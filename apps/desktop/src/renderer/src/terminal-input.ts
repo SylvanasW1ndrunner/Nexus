@@ -10,6 +10,7 @@ function isGeneratedTerminalReport(data: string): boolean {
   if (isCommonInteractiveKey(data)) return false;
   const body = data.slice(2);
   if (body.startsWith('?') && body.endsWith('c')) return body.slice(1, -1).split(';').every(isDigits);
+  if (body.startsWith('>') && body.endsWith('c')) return body.slice(1, -1).split(';').every(isDigits);
   if (body.startsWith('?') && (body.endsWith('h') || body.endsWith('l'))) return body.slice(1, -1).split(';').every(isDigits);
   if (body.endsWith('n')) return body.slice(0, -1).split(';').every(isDigits);
   if (body.endsWith('t')) return body.slice(0, -1).split(';').every(isDigits);
