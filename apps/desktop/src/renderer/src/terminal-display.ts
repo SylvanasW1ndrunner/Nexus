@@ -20,3 +20,7 @@ export function terminalStatusValue(terminal: Pick<TerminalSession, 'lastExitCod
   if (terminal.lastExitCode === undefined || terminal.lastExitCode === null) return '';
   return String(terminal.lastExitCode);
 }
+
+export function normalizeTerminalName(value: string): string {
+  return value.trim().replace(/\s+/g, ' ');
+}

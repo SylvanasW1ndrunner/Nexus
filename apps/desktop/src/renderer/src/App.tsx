@@ -43,7 +43,7 @@ import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type Plugi
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
 import { canCreatePythonEnvironment, selectPythonEnvironment, setCondaEnvironmentInput, switchPythonMode } from './python-config.js';
 import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
-import { terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
+import { normalizeTerminalName, terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
 import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
 import {
   createWorkspaceFileTemplate,
@@ -209,6 +209,7 @@ export function App() {
   const [activeTerminalId, setActiveTerminalId] = useState('');
   const [splitTerminalId, setSplitTerminalId] = useState('');
   const [terminalMaximized, setTerminalMaximized] = useState(false);
+  const [renameTerminalDialog, setRenameTerminalDialog] = useState<{ id: string; name: string } | undefined>();
   const [plugins, setPlugins] = useState<PluginManifest[]>([]);
   const [chatDraft, setChatDraft] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [createAgentWelcomeMessage(language)]);
@@ -486,6 +487,26 @@ export function App() {
     setTerminals((current) =>
       current.map((terminal) => (terminal.id === id ? { ...terminal, output: '', cursor: 0 } : terminal)),
     );
+  }
+
+  function requestRenameTerminal(id: string) {
+    const terminal = terminals.find((item) => item.id === id);
+    if (!terminal) return;
+    setRenameTerminalDialog({ id, name: terminalTabLabel(terminal) });
+  }
+
+  function confirmRenameTerminal() {
+    if (!renameTerminalDialog) return;
+    const nextName = normalizeTerminalName(renameTerminalDialog.name);
+    if (!nextName) {
+      setMessage(t('terminalNameRequired'));
+      return;
+    }
+    setTerminals((current) =>
+      current.map((terminal) => (terminal.id === renameTerminalDialog.id ? { ...terminal, name: nextName } : terminal)),
+    );
+    setRenameTerminalDialog(undefined);
+    setMessage(`${t('renameTerminal')}: ${nextName}`);
   }
 
   function updateTerminalInput(id: string, input: string) {
@@ -1409,6 +1430,7 @@ export function App() {
               onSaveSql={() => void saveCurrentDocument()}
               onRunPython={() => void runPythonScript()}
               onRunTerminal={(id) => void runTerminalCommand(id)}
+              onRenameTerminal={requestRenameTerminal}
               onSelectTerminal={setActiveTerminalId}
               onSplitTerminal={() => void splitTerminal()}
               onToggleTerminalMaximized={() => setTerminalMaximized((maximized) => !maximized)}
@@ -1552,6 +1574,15 @@ export function App() {
           t={t}
           onClose={() => setRenameFileDialog(undefined)}
           onRename={() => void confirmRenameWorkspaceFile()}
+        />
+      ) : null}
+      {renameTerminalDialog ? (
+        <RenameTerminalDialog
+          name={renameTerminalDialog.name}
+          setName={(name) => setRenameTerminalDialog((current) => (current ? { ...current, name } : current))}
+          t={t}
+          onClose={() => setRenameTerminalDialog(undefined)}
+          onRename={confirmRenameTerminal}
         />
       ) : null}
       {fileContextMenu ? (
@@ -1899,6 +1930,58 @@ function RenameFileDialog({
               autoFocus
               value={path}
               onChange={(event) => setPath(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') onRename();
+              }}
+            />
+          </label>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+          <button className="primary-action" type="button" onClick={onRename}>
+            {t('rename')}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RenameTerminalDialog({
+  name,
+  setName,
+  t,
+  onClose,
+  onRename,
+}: {
+  name: string;
+  setName: (value: string) => void;
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+  onClose: () => void;
+  onRename: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="save-sql-panel" role="dialog" aria-modal="true" aria-label={t('renameTerminal')}>
+        <div className="modal-heading">
+          <div>
+            <strong>{t('renameTerminal')}</strong>
+            <small>{t('terminalName')}</small>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            {t('close')}
+          </button>
+        </div>
+        <div className="save-sql-grid single">
+          <label>
+            <span>{t('terminalName')}</span>
+            <input
+              autoFocus
+              placeholder={t('terminalNamePlaceholder')}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') onRename();
               }}
@@ -3474,6 +3557,7 @@ function EditorPane({
   onRunPython,
   onSaveSql,
   onRunTerminal,
+  onRenameTerminal,
   onSelectTerminal,
   onSplitTerminal,
   onToggleTerminalMaximized,
@@ -3505,6 +3589,7 @@ function EditorPane({
   onRunPython: () => void;
   onSaveSql: () => void;
   onRunTerminal: (id: string) => void;
+  onRenameTerminal: (id: string) => void;
   onSelectTerminal: (id: string) => void;
   onSplitTerminal: () => void;
   onToggleTerminalMaximized: () => void;
@@ -3559,6 +3644,7 @@ function EditorPane({
     setTerminalMenuOpen(false);
     if (actionId === 'new') onCreateTerminal();
     if (actionId === 'split') onSplitTerminal();
+    if (actionId === 'rename' && activeTerminal) onRenameTerminal(activeTerminal.id);
     if (actionId === 'clear' && activeTerminal) onClearTerminal(activeTerminal.id);
     if (actionId === 'close' && activeTerminal) onCloseTerminal(activeTerminal.id);
     if (actionId === 'toggle-maximize') onToggleTerminalMaximized();

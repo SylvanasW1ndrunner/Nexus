@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
+import { normalizeTerminalName, terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
 
 describe('terminal display helpers', () => {
   it('uses the terminal session name before shell details', () => {
@@ -15,5 +15,10 @@ describe('terminal display helpers', () => {
     expect(terminalStatusLabelKey({ lastExitCode: 2 })).toBe('terminalFailed');
     expect(terminalStatusValue({ lastExitCode: 2 })).toBe('2');
     expect(terminalStatusLabelKey({})).toBe('terminalReady');
+  });
+
+  it('normalizes terminal names typed by users', () => {
+    expect(normalizeTerminalName('  Python   ETL  ')).toBe('Python ETL');
+    expect(normalizeTerminalName('')).toBe('');
   });
 });
