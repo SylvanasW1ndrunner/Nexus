@@ -51,6 +51,7 @@ import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { shouldCloseAuthDialog, shouldInitializeIdeShell } from './ide-shell-startup.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
+import { isPluginCommandAvailable } from './plugin-command.js';
 import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
 import {
@@ -4759,38 +4760,18 @@ function buildCommandPaletteItems({
       title: command.title,
       category: command.category,
       source: plugin.name,
-      enabled: isPluginCommandEnabled(command.id, { activeConnection, activeWorkspace, editorLanguage, result }),
+      enabled: isPluginCommandAvailable(plugin, command.id, {
+        editorLanguage,
+        hasWorkspace: Boolean(activeWorkspace),
+        hasResult: Boolean(result),
+        ...(activeConnection ? { activeDatabaseEngine: activeConnection.engine } : {}),
+      }),
     }));
   });
 
   return [...coreCommands, ...pluginCommands].sort((left, right) =>
     `${left.category}:${left.title}`.localeCompare(`${right.category}:${right.title}`),
   );
-}
-
-function isPluginCommandEnabled(
-  commandId: string,
-  context: {
-    activeConnection: SavedConnection | undefined;
-    activeWorkspace: WorkspaceProject | undefined;
-    editorLanguage: EditorLanguage;
-    result: QueryExecutionResult | undefined;
-  },
-): boolean {
-  if (commandId === 'dbagent.postgres.connect') return true;
-  if (commandId === 'dbagent.postgres.explain') return context.editorLanguage === 'sql' && Boolean(context.activeConnection);
-  if (commandId === 'dbagent.python.detect') return true;
-  if (commandId === 'dbagent.python.runCurrentFile') return context.editorLanguage === 'python' && Boolean(context.activeWorkspace);
-  if (commandId === 'dbagent.python.createVenv') return Boolean(context.activeWorkspace);
-  if (
-    commandId === 'dbagent.result.exportCsv' ||
-    commandId === 'dbagent.result.exportExcel' ||
-    commandId === 'dbagent.result.exportJson'
-  ) {
-    return Boolean(context.result);
-  }
-  if (commandId === 'dbagent.chart.preview') return Boolean(context.result);
-  return false;
 }
 
 function escapeHtml(value: string): string {
