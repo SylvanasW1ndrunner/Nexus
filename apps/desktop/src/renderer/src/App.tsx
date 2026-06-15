@@ -51,6 +51,7 @@ import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
 import { shouldCloseAuthDialog, shouldInitializeIdeShell } from './ide-shell-startup.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
+import { resolvePluginCommandAction } from './plugin-command-handler.js';
 import { isPluginCommandAvailable } from './plugin-command.js';
 import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
@@ -382,11 +383,9 @@ export function App() {
         await execute();
         return;
       case 'core.runPython':
-      case 'dbagent.python.runCurrentFile':
         await runPythonScript();
         return;
       case 'core.explainSql':
-      case 'dbagent.postgres.explain':
         await explain();
         return;
       case 'core.toggleLeftSidebar':
@@ -400,29 +399,44 @@ export function App() {
         setWorkspaceDialogOpen(true);
         return;
       case 'core.openProjectSettings':
-      case 'dbagent.postgres.connect':
         openSettingsDialog();
         return;
-      case 'dbagent.python.createVenv':
+      default:
+        await runPluginCommandAction(id);
+    }
+  }
+
+  async function runPluginCommandAction(id: string) {
+    switch (resolvePluginCommandAction(id)) {
+      case 'open-settings':
+        openSettingsDialog();
+        return;
+      case 'explain-sql':
+        await explain();
+        return;
+      case 'run-python':
+        await runPythonScript();
+        return;
+      case 'create-venv':
         await createPythonEnvironment('venv', '.venv');
         return;
-      case 'dbagent.python.detect':
+      case 'detect-python':
         await detectPythonEnvironments();
         return;
-      case 'dbagent.result.exportCsv':
+      case 'export-csv':
         exportCsv();
         return;
-      case 'dbagent.result.exportExcel':
+      case 'export-excel':
         exportExcel();
         return;
-      case 'dbagent.result.exportJson':
+      case 'export-json':
         exportJson();
         return;
-      case 'dbagent.chart.preview':
+      case 'preview-chart':
         setBottomPanel('results');
         setMessage(t('chartPreviewRegistered'));
         return;
-      default:
+      case 'unbound':
         setMessage(`${id}: ${t('commandNotBound')}`);
     }
   }
