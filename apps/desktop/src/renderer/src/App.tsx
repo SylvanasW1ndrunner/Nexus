@@ -320,6 +320,7 @@ export function App() {
 
   useEffect(() => {
     return window.dbagent.onMenuCommand((command) => {
+      if (runBottomPanelCommandAction(command)) return;
       if (command === 'new-project') {
         openCreateProjectDialog();
         return;

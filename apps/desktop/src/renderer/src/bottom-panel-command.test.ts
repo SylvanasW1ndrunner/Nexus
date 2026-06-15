@@ -9,6 +9,13 @@ describe('bottom panel command actions', () => {
     expect(resolveBottomPanelCommandAction('core.showPorts')).toEqual({ type: 'show-panel', panel: 'ports' });
   });
 
+  it('maps native menu commands to the same bottom panel actions', () => {
+    expect(resolveBottomPanelCommandAction('show-problems')).toEqual({ type: 'show-panel', panel: 'problems' });
+    expect(resolveBottomPanelCommandAction('show-results')).toEqual({ type: 'show-panel', panel: 'results' });
+    expect(resolveBottomPanelCommandAction('show-terminal')).toEqual({ type: 'open-terminal' });
+    expect(resolveBottomPanelCommandAction('show-ports')).toEqual({ type: 'show-panel', panel: 'ports' });
+  });
+
   it('keeps unknown commands unbound', () => {
     expect(resolveBottomPanelCommandAction('core.showDebugConsole')).toEqual({ type: 'unbound' });
   });

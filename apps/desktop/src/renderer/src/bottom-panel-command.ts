@@ -10,6 +10,10 @@ const bottomPanelCommands: Record<string, BottomPanelCommandAction> = {
   'core.showResults': { type: 'show-panel', panel: 'results' },
   'core.showTerminal': { type: 'open-terminal' },
   'core.showPorts': { type: 'show-panel', panel: 'ports' },
+  'show-problems': { type: 'show-panel', panel: 'problems' },
+  'show-results': { type: 'show-panel', panel: 'results' },
+  'show-terminal': { type: 'open-terminal' },
+  'show-ports': { type: 'show-panel', panel: 'ports' },
 };
 
 export function resolveBottomPanelCommandAction(commandId: string): BottomPanelCommandAction {
