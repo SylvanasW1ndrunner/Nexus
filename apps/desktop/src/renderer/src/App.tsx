@@ -40,10 +40,12 @@ import {
 } from './agent-chat.js';
 import { agentPanelActions, type AgentPanelActionId } from './agent-panel.js';
 import {
+  availableAuthModes,
   authCodePurpose,
   canRequestAuthCode,
   canSubmitAuthForm,
   inferAuthChannel,
+  isAuthModeAvailable,
   isValidAuthTarget,
   type AuthFormMode,
 } from './auth-form.js';
@@ -2917,9 +2919,13 @@ function AccountSettingsPanel({
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const channel = inferAuthChannel(target);
+  const authModes = useMemo(() => availableAuthModes(status.capabilities), [status.capabilities]);
+  const verificationFeaturesAvailable = Boolean(
+    status.capabilities?.verificationLogin || status.capabilities?.registration || status.capabilities?.passwordReset,
+  );
   const targetInvalid = mode !== 'login' && Boolean(target.trim()) && !isValidAuthTarget(target);
-  const codeRequestEnabled = canRequestAuthCode({ mode, target, busy });
-  const submitEnabled = canSubmitAuthForm({ mode, target, password, code, busy });
+  const codeRequestEnabled = canRequestAuthCode({ mode, target, busy }) && isAuthModeAvailable(mode, status.capabilities);
+  const submitEnabled = canSubmitAuthForm({ mode, target, password, code, busy, capabilities: status.capabilities });
 
   useEffect(() => {
     void window.dbagent.invoke(ipcChannels.auth.status, undefined).then((response) => {
@@ -2929,6 +2935,14 @@ function AccountSettingsPanel({
       }
     });
   }, [onAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthModeAvailable(mode, status.capabilities)) {
+      setMode(authModes[0] ?? 'login');
+      setCode('');
+      setMessage('');
+    }
+  }, [authModes, mode, status.capabilities]);
 
   async function requestCode() {
     if (!codeRequestEnabled) return;
@@ -2987,6 +3001,7 @@ function AccountSettingsPanel({
   }
 
   function changeMode(nextMode: AuthFormMode) {
+    if (!isAuthModeAvailable(nextMode, status.capabilities)) return;
     setMode(nextMode);
     setCode('');
     setMessage('');
@@ -3020,25 +3035,37 @@ function AccountSettingsPanel({
       {compact ? (
         <div className="auth-form-heading">
           <strong>{formTitle}</strong>
-          <span>{mode === 'login' ? t('authTestAccountHint') : t('authSecureHint')}</span>
+          <span>
+            {status.capabilities?.testAccount ? t('authTestAccountHint') : mode === 'login' ? t('authPasswordHint') : t('authSecureHint')}
+          </span>
         </div>
       ) : null}
       <div className="segmented-control auth-login-tabs">
-        <button className={mode === 'login' ? 'active' : ''} type="button" onClick={() => changeMode('login')}>
-          {t('passwordLogin')}
-        </button>
-        <button className={mode === 'code-login' ? 'active' : ''} type="button" onClick={() => changeMode('code-login')}>
-          {t('codeLogin')}
-        </button>
+        {authModes.includes('login') ? (
+          <button className={mode === 'login' ? 'active' : ''} type="button" onClick={() => changeMode('login')}>
+            {t('passwordLogin')}
+          </button>
+        ) : null}
+        {authModes.includes('code-login') ? (
+          <button className={mode === 'code-login' ? 'active' : ''} type="button" onClick={() => changeMode('code-login')}>
+            {t('codeLogin')}
+          </button>
+        ) : null}
       </div>
-      <div className="auth-mode-links">
-        <button className={mode === 'register' ? 'active' : ''} type="button" onClick={() => changeMode('register')}>
-          {t('register')}
-        </button>
-        <button className={mode === 'reset-password' ? 'active' : ''} type="button" onClick={() => changeMode('reset-password')}>
-          {t('forgotPassword')}
-        </button>
-      </div>
+      {verificationFeaturesAvailable ? (
+        <div className="auth-mode-links">
+          {authModes.includes('register') ? (
+            <button className={mode === 'register' ? 'active' : ''} type="button" onClick={() => changeMode('register')}>
+              {t('register')}
+            </button>
+          ) : null}
+          {authModes.includes('reset-password') ? (
+            <button className={mode === 'reset-password' ? 'active' : ''} type="button" onClick={() => changeMode('reset-password')}>
+              {t('forgotPassword')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="modal-grid two">
         <label>
           <span>{mode === 'login' ? t('accountIdentifier') : t('emailOrPhone')}</span>

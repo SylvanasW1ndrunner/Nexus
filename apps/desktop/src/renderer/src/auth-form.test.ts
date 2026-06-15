@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  availableAuthModes,
   authCodePurpose,
   canRequestAuthCode,
   canSubmitAuthForm,
@@ -9,6 +10,24 @@ import {
 } from './auth-form.js';
 
 describe('auth form user flows', () => {
+  const postgresCapabilities = {
+    mode: 'postgres' as const,
+    passwordLogin: true,
+    verificationLogin: true,
+    registration: true,
+    passwordReset: true,
+    testAccount: false,
+  };
+
+  const localTestCapabilities = {
+    mode: 'local-test' as const,
+    passwordLogin: true,
+    verificationLogin: false,
+    registration: false,
+    passwordReset: false,
+    testAccount: true,
+  };
+
   it('infers email and phone channels from the target input', () => {
     expect(inferAuthChannel('analyst@example.com')).toBe('email');
     expect(inferAuthChannel('+86 138-0000-0000')).toBe('phone');
@@ -27,6 +46,12 @@ describe('auth form user flows', () => {
     expect(authCodePurpose('code-login')).toBe('login');
   });
 
+  it('exposes only available authentication modes for the configured auth backend', () => {
+    expect(availableAuthModes(postgresCapabilities)).toEqual(['login', 'code-login', 'register', 'reset-password']);
+    expect(availableAuthModes(localTestCapabilities)).toEqual(['login']);
+    expect(availableAuthModes(undefined)).toEqual(['login']);
+  });
+
   it('prevents requesting codes without a target or while busy', () => {
     expect(canRequestAuthCode({ mode: 'login', target: 'user@example.com', busy: false })).toBe(false);
     expect(canRequestAuthCode({ mode: 'register', target: '', busy: false })).toBe(false);
@@ -40,11 +65,30 @@ describe('auth form user flows', () => {
     expect(canSubmitAuthForm({ mode: 'login', target: 'test', password: 'test', code: '', busy: false })).toBe(true);
     expect(canSubmitAuthForm({ mode: 'login', target: 'user@example.com', password: 'password-123', code: '', busy: false })).toBe(true);
     expect(canSubmitAuthForm({ mode: 'code-login', target: 'test', password: '', code: '123456', busy: false })).toBe(false);
-    expect(canSubmitAuthForm({ mode: 'code-login', target: 'user@example.com', password: '', code: '123456', busy: false })).toBe(true);
+    expect(
+      canSubmitAuthForm({
+        mode: 'code-login',
+        target: 'user@example.com',
+        password: '',
+        code: '123456',
+        busy: false,
+        capabilities: postgresCapabilities,
+      }),
+    ).toBe(true);
     expect(canSubmitAuthForm({ mode: 'reset-password', target: 'user@example.com', password: 'password-123', code: '', busy: false })).toBe(false);
     expect(canSubmitAuthForm({ mode: 'register', target: 'user@example.com', password: 'short', code: '123456', busy: false })).toBe(false);
     expect(canSubmitAuthForm({ mode: 'reset-password', target: 'user@example.com', password: 'short', code: '123456', busy: false })).toBe(false);
     expect(canSubmitAuthForm({ mode: 'register', target: 'user@example.com', password: 'password-123', code: '123456', busy: true })).toBe(false);
+    expect(
+      canSubmitAuthForm({
+        mode: 'register',
+        target: 'user@example.com',
+        password: 'password-123',
+        code: '123456',
+        busy: false,
+        capabilities: localTestCapabilities,
+      }),
+    ).toBe(false);
   });
 
   it('requires new passwords to match backend minimum length while keeping test login possible', () => {

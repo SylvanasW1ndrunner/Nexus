@@ -170,12 +170,22 @@ export type QueryHistoryItem = {
 
 export type AuthStatus = {
   authenticated: boolean;
+  capabilities?: AuthCapabilities;
   user?: {
     id: string;
     email: string;
     phone?: string;
     plan: 'free' | 'pro' | 'team';
   };
+};
+
+export type AuthCapabilities = {
+  mode: 'local-test' | 'postgres';
+  passwordLogin: boolean;
+  verificationLogin: boolean;
+  registration: boolean;
+  passwordReset: boolean;
+  testAccount: boolean;
 };
 
 export type AuthLoginRequest = {

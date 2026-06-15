@@ -11,6 +11,8 @@ import {
   ipcChannels,
   err,
   ok,
+  type AuthCapabilities,
+  type AuthStatus,
   type IpcChannel,
   type IpcRequestMap,
   type IpcResponseMap,
@@ -44,6 +46,23 @@ const ideSettingsStore = new IdeSettingsStore(ideSettingsPath);
 const authRepository = process.env.DBAGENT_AUTH_DATABASE_URL
   ? new PostgresAuthRepository(process.env.DBAGENT_AUTH_DATABASE_URL)
   : new TestAuthRepository();
+const authCapabilities: AuthCapabilities = process.env.DBAGENT_AUTH_DATABASE_URL
+  ? {
+      mode: 'postgres',
+      passwordLogin: true,
+      verificationLogin: true,
+      registration: true,
+      passwordReset: true,
+      testAccount: false,
+    }
+  : {
+      mode: 'local-test',
+      passwordLogin: true,
+      verificationLogin: false,
+      registration: false,
+      passwordReset: false,
+      testAccount: true,
+    };
 const authService = new AuthService(join(dataDir, 'auth-session.json'), authRepository);
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
@@ -72,6 +91,10 @@ let mainWindow: InstanceType<typeof BrowserWindow> | undefined;
 
 function sendMenuCommand(command: string): void {
   mainWindow?.webContents.send('app:menu-command', command);
+}
+
+function withAuthCapabilities(status: AuthStatus): AuthStatus {
+  return { ...status, capabilities: authCapabilities };
 }
 
 function installApplicationMenu(): void {
@@ -221,13 +244,19 @@ function registerIpcHandlers(): void {
   );
   handle(ipcChannels.db.queryHistory, async (request) => ok(await queryHistoryStore.list(request ?? {})));
 
-  handle(ipcChannels.auth.status, async () => ok(await authService.status()));
-  handle(ipcChannels.auth.login, async (request) => safeResult(() => authService.login(request.identifier, request.password)));
-  handle(ipcChannels.auth.register, async (request) => safeResult(() => authService.register(request)));
+  handle(ipcChannels.auth.status, async () => ok(withAuthCapabilities(await authService.status())));
+  handle(ipcChannels.auth.login, async (request) =>
+    safeResult(async () => withAuthCapabilities(await authService.login(request.identifier, request.password))),
+  );
+  handle(ipcChannels.auth.register, async (request) => safeResult(async () => withAuthCapabilities(await authService.register(request))));
   handle(ipcChannels.auth.requestCode, async (request) => safeResult(() => authService.requestCode(request)));
-  handle(ipcChannels.auth.verifyCodeLogin, async (request) => safeResult(() => authService.verifyCodeLogin(request)));
-  handle(ipcChannels.auth.resetPassword, async (request) => safeResult(() => authService.resetPassword(request)));
-  handle(ipcChannels.auth.logout, async () => ok(await authService.logout()));
+  handle(ipcChannels.auth.verifyCodeLogin, async (request) =>
+    safeResult(async () => withAuthCapabilities(await authService.verifyCodeLogin(request))),
+  );
+  handle(ipcChannels.auth.resetPassword, async (request) =>
+    safeResult(async () => withAuthCapabilities(await authService.resetPassword(request))),
+  );
+  handle(ipcChannels.auth.logout, async () => ok(withAuthCapabilities(await authService.logout())));
 
   handle(ipcChannels.python.detect, async (request) => safeResult(() => pythonEnvironmentService.detect(request)));
   handle(ipcChannels.python.choosePath, async (request) => {
