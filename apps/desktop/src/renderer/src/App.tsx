@@ -594,6 +594,13 @@ export function App() {
     void pollTerminalOutputs();
   }, []);
 
+  const handleWriteTerminalData = useCallback(
+    (id: string, data: string) => {
+      void writeTerminalData(id, data);
+    },
+    [writeTerminalData],
+  );
+
   async function pollTerminalOutputs() {
     if (terminalPollingRef.current) return;
     const snapshot = terminalsRef.current;
@@ -1536,7 +1543,7 @@ export function App() {
               onSelectTerminal={setActiveTerminalId}
               onSplitTerminal={() => void splitTerminal()}
               onToggleTerminalMaximized={() => setTerminalMaximized((maximized) => !maximized)}
-              onWriteTerminalData={(id, data) => void writeTerminalData(id, data)}
+              onWriteTerminalData={handleWriteTerminalData}
               onOpenTerminalPanel={() => void openTerminalPanel()}
               setBottomPanel={setBottomPanel}
             />
@@ -4243,6 +4250,11 @@ function TerminalViewport({
   const terminalRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const writtenLengthRef = useRef(0);
+  const onWriteTerminalDataRef = useRef(onWriteTerminalData);
+
+  useEffect(() => {
+    onWriteTerminalDataRef.current = onWriteTerminalData;
+  }, [onWriteTerminalData]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -4285,7 +4297,7 @@ function TerminalViewport({
     });
 
     const dataDisposable = xterm.onData((data) => {
-      if (shouldForwardTerminalData(data)) onWriteTerminalData(terminal.id, data);
+      if (shouldForwardTerminalData(data)) onWriteTerminalDataRef.current(terminal.id, data);
     });
     const resize = () => fitTerminal();
     const observer = new ResizeObserver(resize);
@@ -4300,7 +4312,7 @@ function TerminalViewport({
       fitAddonRef.current = null;
       writtenLengthRef.current = 0;
     };
-  }, [onWriteTerminalData, terminal.id]);
+  }, [terminal.id]);
 
   useEffect(() => {
     const xterm = terminalRef.current;
