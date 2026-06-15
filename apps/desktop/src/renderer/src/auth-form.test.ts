@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { authCodePurpose, canRequestAuthCode, canSubmitAuthForm, inferAuthChannel, isValidAuthTarget } from './auth-form.js';
+import {
+  authCodePurpose,
+  canRequestAuthCode,
+  canSubmitAuthForm,
+  inferAuthChannel,
+  isValidAuthTarget,
+  isValidNewPassword,
+} from './auth-form.js';
 
 describe('auth form user flows', () => {
   it('infers email and phone channels from the target input', () => {
@@ -35,6 +42,14 @@ describe('auth form user flows', () => {
     expect(canSubmitAuthForm({ mode: 'code-login', target: 'test', password: '', code: '123456', busy: false })).toBe(false);
     expect(canSubmitAuthForm({ mode: 'code-login', target: 'user@example.com', password: '', code: '123456', busy: false })).toBe(true);
     expect(canSubmitAuthForm({ mode: 'reset-password', target: 'user@example.com', password: 'password-123', code: '', busy: false })).toBe(false);
+    expect(canSubmitAuthForm({ mode: 'register', target: 'user@example.com', password: 'short', code: '123456', busy: false })).toBe(false);
+    expect(canSubmitAuthForm({ mode: 'reset-password', target: 'user@example.com', password: 'short', code: '123456', busy: false })).toBe(false);
     expect(canSubmitAuthForm({ mode: 'register', target: 'user@example.com', password: 'password-123', code: '123456', busy: true })).toBe(false);
+  });
+
+  it('requires new passwords to match backend minimum length while keeping test login possible', () => {
+    expect(isValidNewPassword('short')).toBe(false);
+    expect(isValidNewPassword('password')).toBe(true);
+    expect(canSubmitAuthForm({ mode: 'login', target: 'test', password: 'test', code: '', busy: false })).toBe(true);
   });
 });

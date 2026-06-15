@@ -32,5 +32,9 @@ export function canSubmitAuthForm(input: {
   if (input.mode === 'login') return Boolean(input.target.trim()) && Boolean(input.password);
   if (!isValidAuthTarget(input.target)) return false;
   if (input.mode === 'code-login') return Boolean(input.code.trim());
-  return Boolean(input.password) && Boolean(input.code.trim());
+  return isValidNewPassword(input.password) && Boolean(input.code.trim());
+}
+
+export function isValidNewPassword(password: string): boolean {
+  return password.length >= 8;
 }
