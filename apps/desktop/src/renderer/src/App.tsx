@@ -38,6 +38,7 @@ import {
   type AgentConversation,
   type AgentMessage,
 } from './agent-chat.js';
+import { agentPanelActions, type AgentPanelActionId } from './agent-panel.js';
 import {
   authCodePurpose,
   canRequestAuthCode,
@@ -467,6 +468,7 @@ export function App() {
   }
 
   async function createTerminal(options: { cwd?: string; name?: string } = {}): Promise<TerminalView | undefined> {
+    setBottomPanel('console');
     const response = await window.dbagent.invoke(ipcChannels.terminal.create, {
       ...(options.cwd ? { cwd: options.cwd } : activeWorkspace ? { cwd: activeWorkspace.rootPath } : {}),
       ...(options.name ? { name: options.name } : {}),
@@ -1499,7 +1501,7 @@ export function App() {
             >
               {rightSidebarCollapsed ? '<' : '>'}
             </button>
-            <ChatPanel
+            <AgentPanel
               activeConnection={activeConnection}
               activeWorkspace={activeWorkspace}
               document={editorDocument}
@@ -4006,7 +4008,7 @@ function EditorPane({
             )}
           </div>
         ) : (
-          <>
+          <div className="terminal-panel-body">
             <div className="terminal-command-bar">
               <div className="terminal-session-list">
                 {terminals.map((terminal) => (
@@ -4098,7 +4100,7 @@ function EditorPane({
               onSelectTerminal={onSelectTerminal}
               onWriteTerminalData={onWriteTerminalData}
             />
-          </>
+          </div>
         )}
       </section>
     </>
@@ -4192,12 +4194,7 @@ function TerminalViewport({
     fitAddonRef.current = fitAddon;
     xterm.loadAddon(fitAddon);
     xterm.open(container);
-    fitAddon.fit();
-
-    const dataDisposable = xterm.onData((data) => {
-      if (shouldForwardTerminalData(data)) onWriteTerminalData(terminal.id, data);
-    });
-    const resize = () => {
+    const fitTerminal = () => {
       try {
         fitAddon.fit();
         void window.dbagent.invoke(ipcChannels.terminal.resize, {
@@ -4209,6 +4206,16 @@ function TerminalViewport({
         // xterm can throw while the container is temporarily hidden during panel resizing.
       }
     };
+    fitTerminal();
+    window.requestAnimationFrame(() => {
+      fitTerminal();
+      if (active) xterm.focus();
+    });
+
+    const dataDisposable = xterm.onData((data) => {
+      if (shouldForwardTerminalData(data)) onWriteTerminalData(terminal.id, data);
+    });
+    const resize = () => fitTerminal();
     const observer = new ResizeObserver(resize);
     observer.observe(container);
     resize();
@@ -4407,7 +4414,7 @@ function ResultTable({
   );
 }
 
-function ChatPanel({
+function AgentPanel({
   activeConnection,
   activeWorkspace,
   document,
@@ -4438,44 +4445,39 @@ function ChatPanel({
     connection: true,
     file: true,
   });
+  const toolbarActions = useMemo(() => agentPanelActions(), []);
 
   function toggleMenu(menu: 'history' | 'settings') {
     setOpenMenu((current) => (current === menu ? undefined : menu));
   }
 
+  function runToolbarAction(actionId: AgentPanelActionId) {
+    if (actionId === 'new-conversation') {
+      setOpenMenu(undefined);
+      onNewConversation();
+      return;
+    }
+    toggleMenu(actionId);
+  }
+
   return (
-    <section className="panel chat-panel simple-chat-panel">
-      <div className="chat-titlebar">
+    <section className="panel agent-panel">
+      <div className="agent-titlebar">
         <div className="agent-heading">
           <strong>DBAgent</strong>
         </div>
         <div className="agent-toolbar" aria-label="Agent toolbar">
-          <button
-            className={openMenu === 'history' ? 'active' : ''}
-            type="button"
-            title={t('conversationHistory')}
-            onClick={() => toggleMenu('history')}
-          >
-            <span className="icon-glyph history" aria-hidden="true" />
-          </button>
-          <button
-            className={openMenu === 'settings' ? 'active' : ''}
-            type="button"
-            title={t('settings')}
-            onClick={() => toggleMenu('settings')}
-          >
-            <span className="icon-glyph settings" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            title={t('newConversation')}
-            onClick={() => {
-              setOpenMenu(undefined);
-              onNewConversation();
-            }}
-          >
-            <span className="icon-glyph new-chat" aria-hidden="true" />
-          </button>
+          {toolbarActions.map((action) => (
+            <button
+              className={openMenu === action.id ? 'active' : ''}
+              key={action.id}
+              type="button"
+              title={t(action.labelKey)}
+              onClick={() => runToolbarAction(action.id)}
+            >
+              <span className={`icon-glyph ${action.icon}`} aria-hidden="true" />
+            </button>
+          ))}
         </div>
         {openMenu === 'history' ? (
           <div className="agent-popover history-popover">
