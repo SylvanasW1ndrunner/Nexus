@@ -52,6 +52,17 @@ export function canCreatePythonEnvironment(name: string, mode: 'venv' | 'conda' 
   return true;
 }
 
+export function isWorkspaceRelativeDirectoryPath(path: string): boolean {
+  const trimmed = path.trim();
+  if (!trimmed) return false;
+  if (trimmed.includes('\0')) return false;
+  if (/^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('\\')) return false;
+  return trimmed
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .every((part) => part !== '.' && part !== '..');
+}
+
 export function pythonExecutableForEnvironmentCreation(
   draft: WorkspacePythonConfig,
   mode: 'venv' | 'conda',

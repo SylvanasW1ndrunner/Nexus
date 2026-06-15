@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PythonEnvironmentInfo, WorkspacePythonConfig } from '@dbagent/shared';
 import {
   canCreatePythonEnvironment,
+  isWorkspaceRelativeDirectoryPath,
   pythonEnvironmentsForMode,
   pythonExecutableForEnvironmentCreation,
   selectPythonEnvironment,
@@ -85,6 +86,17 @@ describe('Python configuration user flows', () => {
     expect(canCreatePythonEnvironment('../outside')).toBe(false);
     expect(canCreatePythonEnvironment('envs/analytics')).toBe(false);
     expect(canCreatePythonEnvironment('envs\\analytics')).toBe(false);
+  });
+
+  it('accepts only workspace relative venv directories from manual input', () => {
+    expect(isWorkspaceRelativeDirectoryPath('.venv')).toBe(true);
+    expect(isWorkspaceRelativeDirectoryPath('.venv/smoke')).toBe(true);
+    expect(isWorkspaceRelativeDirectoryPath('envs\\analytics')).toBe(true);
+    expect(isWorkspaceRelativeDirectoryPath('')).toBe(false);
+    expect(isWorkspaceRelativeDirectoryPath('../outside')).toBe(false);
+    expect(isWorkspaceRelativeDirectoryPath('envs/../outside')).toBe(false);
+    expect(isWorkspaceRelativeDirectoryPath('C:\\Project\\.venv')).toBe(false);
+    expect(isWorkspaceRelativeDirectoryPath('/tmp/project/.venv')).toBe(false);
   });
 
   it('uses the selected system Python executable when creating venv environments', () => {

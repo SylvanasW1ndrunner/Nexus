@@ -33,7 +33,7 @@ export class PythonEnvironmentService {
 
   async createEnvironment(request: PythonCreateEnvironmentRequest): Promise<PythonEnvironmentInfo> {
     const rootPath = resolve(request.rootPath);
-    const name = sanitizeEnvironmentName(request.name);
+    const name = sanitizeEnvironmentName(request.name, request.mode);
     if (request.mode === 'venv') {
       const relativeVenvPath = name === '.venv' ? '.venv' : join('.venv', name);
       const absoluteVenvPath = join(rootPath, relativeVenvPath);
@@ -245,9 +245,10 @@ function pythonFromCondaPrefix(prefix: string): string {
   return process.platform === 'win32' ? join(prefix, 'python.exe') : join(prefix, 'bin', 'python');
 }
 
-function sanitizeEnvironmentName(name: string): string {
+function sanitizeEnvironmentName(name: string, mode: PythonCreateEnvironmentRequest['mode']): string {
   const trimmed = name.trim();
   if (!trimmed || trimmed.includes('..') || /[\\/]/.test(trimmed)) throw new Error('Invalid environment name.');
+  if (mode === 'conda' && trimmed.startsWith('.')) throw new Error('Invalid conda environment name.');
   return trimmed;
 }
 

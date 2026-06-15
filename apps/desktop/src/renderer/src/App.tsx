@@ -55,6 +55,7 @@ import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type Plugi
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
 import {
   canCreatePythonEnvironment,
+  isWorkspaceRelativeDirectoryPath,
   pythonEnvironmentsForMode,
   pythonExecutableForEnvironmentCreation,
   selectPythonEnvironment,
@@ -3269,7 +3270,15 @@ function PythonConfigForm({
               <input
                 placeholder=".venv"
                 value={pythonDraft.venvPath ?? ''}
-                onChange={(event) => setPythonDraft({ mode: 'venv', requirementsPath: pythonDraft.requirementsPath, venvPath: event.target.value })}
+                onChange={(event) => {
+                  const nextPath = event.target.value;
+                  if (!isWorkspaceRelativeDirectoryPath(nextPath)) {
+                    setPathError(t('venvMustBeInsideWorkspace'));
+                    return;
+                  }
+                  setPathError('');
+                  setPythonDraft({ mode: 'venv', requirementsPath: pythonDraft.requirementsPath, venvPath: nextPath.trim() });
+                }}
               />
               <button className="icon-button" type="button" onClick={() => void choosePath('directory')}>
                 ...

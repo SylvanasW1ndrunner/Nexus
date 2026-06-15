@@ -124,6 +124,19 @@ describe('PythonEnvironmentService', () => {
     ).rejects.toThrow('inside the workspace');
   });
 
+  it('rejects conda environment names that are reserved for workspace venvs before launching conda', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-python-conda-'));
+    tempDirs.push(rootPath);
+
+    await expect(
+      new PythonEnvironmentService().createEnvironment({
+        rootPath,
+        mode: 'conda',
+        name: '.venv',
+      }),
+    ).rejects.toThrow('Invalid conda environment name');
+  });
+
   it('treats a Conda environment input that looks like a path as a prefix', async () => {
     try {
       await execFileAsync('python', ['--version']);
