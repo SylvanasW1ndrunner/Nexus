@@ -39,3 +39,7 @@ export function selectTerminalOutputTarget<T extends TerminalLayoutSession>(
 ): T | undefined {
   return terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
 }
+
+export function bottomPanelAfterTerminalCreate(): 'console' {
+  return 'console';
+}

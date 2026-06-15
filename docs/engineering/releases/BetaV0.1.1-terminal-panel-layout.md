@@ -7,6 +7,7 @@
 ## 本轮调整
 
 - 新建终端时强制切换到底部“终端”面板，避免创建成功但用户仍停留在输出面板。
+- 点击底部“终端”标签时，如果当前没有终端，会自动创建一个终端会话，避免空面板让用户误以为终端不可用。
 - 为终端区域增加 `terminal-panel-body` 容器，明确作为 flex 内容区，保证 xterm 父级有稳定高度。
 - xterm 初始化后先执行一次 fit，再通过 `requestAnimationFrame` 在 DOM 布局完成后重新 fit，并在活动终端上聚焦。
 - 保留真实 PTY 逐字符输入测试，用于验证终端后端可以按用户键盘输入方式工作。
@@ -20,5 +21,6 @@
 
 - `terminal-service.test.ts` 覆盖真实 PTY 创建、逐字符输入、输出读取、工作目录和清屏。
 - `terminal-input.test.ts` 覆盖 xterm 控制序列过滤。
+- `terminal-layout.test.ts` 覆盖新建终端后必须切换到终端面板。
 - `agent-panel.test.ts` 固定右侧 Agent 面板顶部三个动作。
 - TypeScript 与 ESLint 均通过。

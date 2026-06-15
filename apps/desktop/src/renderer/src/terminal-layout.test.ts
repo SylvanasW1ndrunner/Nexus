@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
+import {
+  bottomPanelAfterTerminalCreate,
+  resolveTerminalCloseState,
+  selectTerminalOutputTarget,
+  selectVisibleTerminals,
+} from './terminal-layout.js';
 
 describe('terminal panel layout', () => {
   const terminals = [{ id: 'one' }, { id: 'two' }, { id: 'three' }];
@@ -48,5 +53,9 @@ describe('terminal panel layout', () => {
     expect(selectTerminalOutputTarget(terminals, 'two')?.id).toBe('two');
     expect(selectTerminalOutputTarget(terminals, 'missing')?.id).toBe('one');
     expect(selectTerminalOutputTarget([], 'missing')).toBeUndefined();
+  });
+
+  it('opens the terminal panel whenever a terminal is created', () => {
+    expect(bottomPanelAfterTerminalCreate()).toBe('console');
   });
 });

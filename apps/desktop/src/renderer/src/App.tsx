@@ -63,7 +63,12 @@ import {
 import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actions.js';
 import { normalizeTerminalName, terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
 import { shouldForwardTerminalData } from './terminal-input.js';
-import { resolveTerminalCloseState, selectTerminalOutputTarget, selectVisibleTerminals } from './terminal-layout.js';
+import {
+  bottomPanelAfterTerminalCreate,
+  resolveTerminalCloseState,
+  selectTerminalOutputTarget,
+  selectVisibleTerminals,
+} from './terminal-layout.js';
 import {
   createWorkspaceFileTemplate,
   inferWorkspaceFileLanguage,
@@ -468,7 +473,7 @@ export function App() {
   }
 
   async function createTerminal(options: { cwd?: string; name?: string } = {}): Promise<TerminalView | undefined> {
-    setBottomPanel('console');
+    setBottomPanel(bottomPanelAfterTerminalCreate());
     const response = await window.dbagent.invoke(ipcChannels.terminal.create, {
       ...(options.cwd ? { cwd: options.cwd } : activeWorkspace ? { cwd: activeWorkspace.rootPath } : {}),
       ...(options.name ? { name: options.name } : {}),
@@ -490,6 +495,11 @@ export function App() {
     setActiveTerminalId(primaryTerminalId || terminal.id);
     setSplitTerminalId(terminal.id);
     setBottomPanel('console');
+  }
+
+  async function openTerminalPanel() {
+    setBottomPanel('console');
+    if (!terminalsRef.current.length) await createTerminal();
   }
 
   async function closeTerminal(id: string) {
@@ -1486,6 +1496,7 @@ export function App() {
               onSplitTerminal={() => void splitTerminal()}
               onToggleTerminalMaximized={() => setTerminalMaximized((maximized) => !maximized)}
               onWriteTerminalData={(id, data) => void writeTerminalData(id, data)}
+              onOpenTerminalPanel={() => void openTerminalPanel()}
               setBottomPanel={setBottomPanel}
             />
           </section>
@@ -3741,6 +3752,7 @@ function EditorPane({
   onSplitTerminal,
   onToggleTerminalMaximized,
   onWriteTerminalData,
+  onOpenTerminalPanel,
   setBottomPanel,
 }: {
   activeConnection: SavedConnection | undefined;
@@ -3772,6 +3784,7 @@ function EditorPane({
   onSplitTerminal: () => void;
   onToggleTerminalMaximized: () => void;
   onWriteTerminalData: (id: string, data: string) => void;
+  onOpenTerminalPanel: () => void;
   setBottomPanel: (panel: 'results' | 'console') => void;
 }) {
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
@@ -3939,7 +3952,9 @@ function EditorPane({
           <button
             className={bottomPanel === 'console' ? 'active' : ''}
             type="button"
-            onClick={() => setBottomPanel('console')}
+            onClick={() => {
+              onOpenTerminalPanel();
+            }}
           >
             {t('terminal')}
           </button>
