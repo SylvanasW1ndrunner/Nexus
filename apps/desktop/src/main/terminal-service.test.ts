@@ -43,6 +43,25 @@ describe('TerminalService', () => {
     }
   });
 
+  it('shows the PowerShell prompt after terminal capability negotiation on Windows', async () => {
+    if (process.platform !== 'win32') return;
+    const service = new TerminalService();
+    const terminal = service.create({ name: 'PowerShell Prompt' });
+
+    try {
+      service.write({
+        terminalId: terminal.id,
+        data: '\x1b[?1;2c',
+      });
+
+      const output = await waitForOutput(service, terminal.id, 'PS ');
+      expect(output).toContain('>');
+      expect(service.list()[0]?.status).toBe('running');
+    } finally {
+      service.close(terminal.id);
+    }
+  });
+
   it('falls back to the system shell when a configured shell cannot start', async () => {
     const service = new TerminalService({ defaultShell: 'dbagent-missing-shell-for-test' });
     const terminal = service.create({ name: 'Fallback Shell' });
