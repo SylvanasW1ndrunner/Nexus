@@ -49,6 +49,7 @@ import {
 } from './auth-form.js';
 import { connectionToDraft, defaultConnectionDraft } from './connection-draft.js';
 import { formatAppError, summarizePerformanceWarnings } from './diagnostics.js';
+import { shouldCloseAuthDialog, shouldInitializeIdeShell } from './ide-shell-startup.js';
 import { createTranslator, normalizeLanguage, type AppLanguage } from './i18n.js';
 import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
@@ -234,6 +235,7 @@ export function App() {
   const [terminals, setTerminals] = useState<TerminalView[]>([]);
   const terminalsRef = useRef<TerminalView[]>([]);
   const terminalPollingRef = useRef(false);
+  const ideShellInitializedRef = useRef(false);
   const [activeTerminalId, setActiveTerminalId] = useState('');
   const [splitTerminalId, setSplitTerminalId] = useState('');
   const [terminalMaximized, setTerminalMaximized] = useState(false);
@@ -259,10 +261,13 @@ export function App() {
   useEffect(() => {
     void refreshConnections();
     void refreshWorkspace();
-    void initializeIdeShell();
     void refreshPlugins();
     void window.dbagent.invoke(ipcChannels.auth.status, undefined).then((response) => {
-      if (response.ok && response.data.authenticated) setAuthDialogOpen(false);
+      if (!response.ok) return;
+      if (shouldCloseAuthDialog(response.data)) setAuthDialogOpen(false);
+      if (shouldInitializeIdeShell({ authenticated: response.data.authenticated, initialized: ideShellInitializedRef.current })) {
+        void ensureIdeShellInitialized();
+      }
     });
   }, []);
 
@@ -440,7 +445,12 @@ export function App() {
 
   async function initializeIdeShell() {
     await refreshIdeSettings();
-    await initializeTerminal();
+  }
+
+  async function ensureIdeShellInitialized() {
+    if (ideShellInitializedRef.current) return;
+    ideShellInitializedRef.current = true;
+    await initializeIdeShell();
   }
 
   async function refreshIdeSettings() {
@@ -462,14 +472,6 @@ export function App() {
     setIdeSettings(response.data);
     setLanguage(response.data.appearance.language);
     setMessage(response.data.appearance.language === 'zh-CN' ? 'IDE 设置已保存。' : 'IDE settings saved.');
-  }
-
-  async function initializeTerminal() {
-    const response = await window.dbagent.invoke(ipcChannels.terminal.create, {});
-    if (!response.ok) return;
-    const terminal = toTerminalView(response.data);
-    setTerminals([terminal]);
-    setActiveTerminalId(terminal.id);
   }
 
   async function createTerminal(options: { cwd?: string; name?: string } = {}): Promise<TerminalView | undefined> {
@@ -1589,7 +1591,15 @@ export function App() {
           onUpdateConnection={() => void updateActiveConnection()}
         />
       ) : null}
-      {authDialogOpen ? <AuthStartupDialog t={t} onClose={() => setAuthDialogOpen(false)} /> : null}
+      {authDialogOpen ? (
+        <AuthStartupDialog
+          t={t}
+          onAuthenticated={() => {
+            setAuthDialogOpen(false);
+            void ensureIdeShellInitialized();
+          }}
+        />
+      ) : null}
       {commandPaletteOpen ? (
         <CommandPalette
           commands={commandPaletteItems}
@@ -2823,10 +2833,10 @@ function WorkspaceDialog({
 
 function AuthStartupDialog({
   t,
-  onClose,
+  onAuthenticated,
 }: {
   t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
-  onClose: () => void;
+  onAuthenticated: () => void;
 }) {
   return (
     <div className="modal-backdrop auth-backdrop" role="presentation">
@@ -2838,7 +2848,7 @@ function AuthStartupDialog({
             <span>{t('authWelcomeSubtitle')}</span>
           </div>
         </div>
-        <AccountSettingsPanel compact t={t} onAuthenticated={onClose} />
+        <AccountSettingsPanel compact t={t} onAuthenticated={onAuthenticated} />
       </section>
     </div>
   );
