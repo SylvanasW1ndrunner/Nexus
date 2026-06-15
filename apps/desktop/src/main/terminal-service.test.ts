@@ -43,6 +43,23 @@ describe('TerminalService', () => {
     }
   });
 
+  it('falls back to the system shell when a configured shell cannot start', async () => {
+    const service = new TerminalService({ defaultShell: 'dbagent-missing-shell-for-test' });
+    const terminal = service.create({ name: 'Fallback Shell' });
+
+    try {
+      if (process.platform === 'win32') expect(terminal.shell).toBe('powershell.exe');
+      service.write({
+        terminalId: terminal.id,
+        data: 'echo dbagent-terminal-fallback\r',
+      });
+      const output = await waitForOutput(service, terminal.id, 'dbagent-terminal-fallback');
+      expect(output).toContain('dbagent-terminal-fallback');
+    } finally {
+      service.close(terminal.id);
+    }
+  });
+
   it('accepts character-by-character interactive input', async () => {
     const service = new TerminalService();
     const terminal = service.create({ name: 'Interactive Shell' });

@@ -11,6 +11,7 @@
 - 为终端区域增加 `terminal-panel-body` 容器，明确作为 flex 内容区，保证 xterm 父级有稳定高度。
 - xterm 初始化后先执行一次 fit，再通过 `requestAnimationFrame` 在 DOM 布局完成后重新 fit，并在活动终端上聚焦。
 - 保留真实 PTY 逐字符输入测试，用于验证终端后端可以按用户键盘输入方式工作。
+- 如果用户在 IDE 设置里配置了不可启动的默认 shell，主进程会回退到系统默认 shell，避免终端创建后空白或不可交互。
 
 ## 相关收敛
 
@@ -20,6 +21,7 @@
 ## 验证
 
 - `terminal-service.test.ts` 覆盖真实 PTY 创建、逐字符输入、输出读取、工作目录和清屏。
+- `terminal-service.test.ts` 也覆盖错误默认 shell 配置下的系统 shell 回退。
 - `terminal-input.test.ts` 覆盖 xterm 控制序列过滤。
 - `terminal-layout.test.ts` 覆盖新建终端后必须切换到终端面板。
 - `agent-panel.test.ts` 固定右侧 Agent 面板顶部三个动作。

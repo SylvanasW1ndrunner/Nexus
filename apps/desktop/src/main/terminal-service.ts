@@ -37,16 +37,9 @@ export class TerminalService {
 
   create(input: { cwd?: string; name?: string } = {}): TerminalSession {
     const id = randomUUID();
-    const shell = getDefaultShell(this.options.defaultShell);
+    const shellCandidates = getShellCandidates(this.options.defaultShell);
     const cwd = input.cwd ?? process.cwd();
-    const child = pty.spawn(shell.command, shell.args, {
-      cols: 100,
-      rows: 30,
-      cwd,
-      env: process.env,
-      name: process.platform === 'win32' ? 'xterm-256color' : 'xterm-color',
-      useConptyDll: process.platform === 'win32',
-    });
+    const { child, shell } = spawnFirstAvailableShell(shellCandidates, cwd);
     const session: TerminalSession = {
       id,
       name: input.name?.trim() || `Terminal ${this.sessions.size + 1}`,
@@ -164,15 +157,18 @@ export class TerminalService {
   }
 }
 
-function getDefaultShell(configuredShell?: string): { command: string; args: string[]; label: string } {
+type ShellCandidate = { command: string; args: string[]; label: string };
+
+function getShellCandidates(configuredShell?: string): ShellCandidate[] {
+  const systemShell = getSystemShell();
   if (configuredShell?.trim()) {
     const command = configuredShell.trim();
-    return {
-      command,
-      args: [],
-      label: command.split(/[\\/]/).at(-1) ?? command,
-    };
+    if (command !== systemShell.command) return [{ command, args: [], label: command.split(/[\\/]/).at(-1) ?? command }, systemShell];
   }
+  return [systemShell];
+}
+
+function getSystemShell(): ShellCandidate {
   if (process.platform === 'win32') {
     return {
       command: 'powershell.exe',
@@ -186,4 +182,26 @@ function getDefaultShell(configuredShell?: string): { command: string; args: str
     args: [],
     label: shell.split('/').at(-1) ?? shell,
   };
+}
+
+function spawnFirstAvailableShell(shells: ShellCandidate[], cwd: string): { child: pty.IPty; shell: ShellCandidate } {
+  let lastError: unknown;
+  for (const shell of shells) {
+    try {
+      return {
+        shell,
+        child: pty.spawn(shell.command, shell.args, {
+          cols: 100,
+          rows: 30,
+          cwd,
+          env: process.env,
+          name: process.platform === 'win32' ? 'xterm-256color' : 'xterm-color',
+          useConptyDll: process.platform === 'win32',
+        }),
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Unable to start terminal shell.');
 }
