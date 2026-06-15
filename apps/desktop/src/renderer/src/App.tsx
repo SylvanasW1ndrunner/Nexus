@@ -39,6 +39,7 @@ import {
   type AgentMessage,
 } from './agent-chat.js';
 import { agentPanelActions, type AgentPanelActionId } from './agent-panel.js';
+import { resolveBottomPanelCommandAction } from './bottom-panel-command.js';
 import { buildWorkbenchProblems, type BottomPanelId, type WorkbenchProblem } from './bottom-panel.js';
 import {
   availableAuthModes,
@@ -411,8 +412,22 @@ export function App() {
         openSettingsDialog();
         return;
       default:
+        if (runBottomPanelCommandAction(id)) return;
         await runPluginCommandAction(id);
     }
+  }
+
+  function runBottomPanelCommandAction(id: string): boolean {
+    const action = resolveBottomPanelCommandAction(id);
+    if (action.type === 'show-panel') {
+      setBottomPanel(action.panel);
+      return true;
+    }
+    if (action.type === 'open-terminal') {
+      void openTerminalPanel();
+      return true;
+    }
+    return false;
   }
 
   async function runPluginCommandAction(id: string) {
@@ -4874,6 +4889,10 @@ function buildCommandPaletteItems({
     },
     { id: 'core.toggleLeftSidebar', title: t('commandToggleExplorer'), category: viewCategory, source: coreSource, enabled: true },
     { id: 'core.toggleRightSidebar', title: t('commandToggleAgentPanel'), category: viewCategory, source: coreSource, enabled: true },
+    { id: 'core.showProblems', title: t('commandShowProblems'), category: viewCategory, source: coreSource, enabled: true },
+    { id: 'core.showResults', title: t('commandShowResults'), category: viewCategory, source: coreSource, enabled: true },
+    { id: 'core.showTerminal', title: t('commandShowTerminal'), category: viewCategory, source: coreSource, enabled: true },
+    { id: 'core.showPorts', title: t('commandShowPorts'), category: viewCategory, source: coreSource, enabled: true },
   ];
 
   const pluginCommands = plugins.flatMap((plugin) => {
