@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createTranslator, normalizeLanguage } from './i18n.js';
 
+const mojibakePattern = /锟|�|鎵|璁|鐜|缁|椤|杩|鏁|閫|€|鈱|涓|绔|缂|鍛|鐧|熷|蹇|閲|鏂|妫/;
+
 describe('renderer i18n', () => {
   it('defaults to Chinese and supports English switching', () => {
     expect(normalizeLanguage(undefined)).toBe('zh-CN');
@@ -45,6 +47,9 @@ describe('renderer i18n', () => {
       t('authSecureHint'),
       t('createAccount'),
       t('resetPasswordAction'),
+      t('newFileExamples'),
+      t('newFolderExamples'),
+      t('requirementsPath'),
     ];
 
     expect(criticalLabels).toEqual([
@@ -76,9 +81,12 @@ describe('renderer i18n', () => {
       '行号',
       '欢迎使用 DBAgent',
       '使用邮箱或手机号验证码继续。',
-      '创建账户',
+      '创建账号',
       '重置密码',
+      '示例：scripts/clean_orders.py、sql/analytics/orders.sql、docs/runbook.md',
+      '示例：docs/runbooks、scripts/jobs、sql/analytics/monthly',
+      'requirements 路径',
     ]);
-    expect(criticalLabels.join('')).not.toMatch(/锟|�|鎵|璁|鐜|缁|椤|杩|鏁|閫|€|鈱/);
+    expect(criticalLabels.join('')).not.toMatch(mojibakePattern);
   });
 });
