@@ -172,7 +172,7 @@ function getSystemShell(): ShellCandidate {
   if (process.platform === 'win32') {
     return {
       command: 'powershell.exe',
-      args: ['-NoLogo'],
+      args: ['-NoLogo', '-NoProfile'],
       label: 'powershell.exe',
     };
   }

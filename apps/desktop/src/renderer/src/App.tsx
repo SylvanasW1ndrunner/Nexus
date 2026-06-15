@@ -65,6 +65,7 @@ import { buildTerminalActionMenu, type TerminalActionId } from './terminal-actio
 import { normalizeTerminalName, terminalStatusLabelKey, terminalStatusValue, terminalTabLabel } from './terminal-display.js';
 import { shouldForwardTerminalData } from './terminal-input.js';
 import {
+  appendTerminalSession,
   bottomPanelAfterTerminalCreate,
   resolveTerminalCloseState,
   selectTerminalOutputTarget,
@@ -485,8 +486,15 @@ export function App() {
       return undefined;
     }
     const terminal = toTerminalView(response.data);
-    setTerminals((current) => [...current, terminal]);
+    setTerminals((current) => {
+      const next = appendTerminalSession(current, terminal);
+      terminalsRef.current = next;
+      return next;
+    });
     setActiveTerminalId(terminal.id);
+    window.setTimeout(() => {
+      void pollTerminalOutputs();
+    }, 0);
     return terminal;
   }
 
@@ -512,6 +520,7 @@ export function App() {
     }
     setTerminals((current) => {
       const next = resolveTerminalCloseState(current, id, activeTerminalId, splitTerminalId);
+      terminalsRef.current = next.terminals;
       setActiveTerminalId(next.activeTerminalId);
       setSplitTerminalId(next.splitTerminalId);
       return next.terminals;
@@ -524,9 +533,11 @@ export function App() {
       setMessage(formatAppError(response.error));
       return;
     }
-    setTerminals((current) =>
-      current.map((terminal) => (terminal.id === id ? { ...terminal, output: '', cursor: 0 } : terminal)),
-    );
+    setTerminals((current) => {
+      const next = current.map((terminal) => (terminal.id === id ? { ...terminal, output: '', cursor: 0 } : terminal));
+      terminalsRef.current = next;
+      return next;
+    });
   }
 
   function requestRenameTerminal(id: string) {
@@ -575,8 +586,8 @@ export function App() {
           }),
         ),
       );
-      setTerminals((current) =>
-        current.map((terminal) => {
+      setTerminals((current) => {
+        const next = current.map((terminal) => {
           const response = responses.find((item) => item.ok && item.data.terminalId === terminal.id);
           if (!response?.ok) return terminal;
           return {
@@ -587,8 +598,10 @@ export function App() {
             running: false,
             ...(response.data.exitCode !== undefined ? { lastExitCode: response.data.exitCode } : {}),
           };
-        }),
-      );
+        });
+        terminalsRef.current = next;
+        return next;
+      });
     } finally {
       terminalPollingRef.current = false;
     }
@@ -1003,7 +1016,11 @@ export function App() {
     setTerminals((current) => {
       const targetId = selectTerminalOutputTarget(current, targetTerminalId)?.id;
       if (!targetId) return current;
-      return current.map((terminal) => (terminal.id === targetId ? { ...terminal, output: `${terminal.output}${text}` } : terminal));
+      const next = current.map((terminal) =>
+        terminal.id === targetId ? { ...terminal, output: `${terminal.output}${text}` } : terminal,
+      );
+      terminalsRef.current = next;
+      return next;
     });
   }
 

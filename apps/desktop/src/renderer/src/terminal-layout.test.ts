@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  appendTerminalSession,
   bottomPanelAfterTerminalCreate,
   resolveTerminalCloseState,
   selectTerminalOutputTarget,
@@ -57,5 +58,15 @@ describe('terminal panel layout', () => {
 
   it('opens the terminal panel whenever a terminal is created', () => {
     expect(bottomPanelAfterTerminalCreate()).toBe('console');
+  });
+
+  it('appends a created terminal and replaces stale copies by id', () => {
+    expect(appendTerminalSession(terminals, { id: 'four' }).map((terminal) => terminal.id)).toEqual([
+      'one',
+      'two',
+      'three',
+      'four',
+    ]);
+    expect(appendTerminalSession(terminals, { id: 'two' }).map((terminal) => terminal.id)).toEqual(['one', 'three', 'two']);
   });
 });

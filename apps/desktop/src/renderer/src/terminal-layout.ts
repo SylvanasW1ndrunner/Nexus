@@ -40,6 +40,10 @@ export function selectTerminalOutputTarget<T extends TerminalLayoutSession>(
   return terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
 }
 
+export function appendTerminalSession<T extends TerminalLayoutSession>(terminals: T[], terminal: T): T[] {
+  return [...terminals.filter((item) => item.id !== terminal.id), terminal];
+}
+
 export function bottomPanelAfterTerminalCreate(): 'console' {
   return 'console';
 }
