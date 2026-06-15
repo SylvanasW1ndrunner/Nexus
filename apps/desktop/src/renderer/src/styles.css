@@ -1411,6 +1411,59 @@ small {
   margin-bottom: 8px;
 }
 
+.diagnostics-panel,
+.ports-panel {
+  background: #181818;
+}
+
+.diagnostics-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid #252526;
+}
+
+.diagnostic-row {
+  display: grid;
+  grid-template-columns: 78px 82px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  border-bottom: 1px solid #252526;
+  color: #cccccc;
+  font-size: 12px;
+}
+
+.diagnostic-row span {
+  color: #9da5ad;
+}
+
+.diagnostic-row strong {
+  color: #d4d4d4;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.diagnostic-row p {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostic-row.error span {
+  color: #f48771;
+}
+
+.diagnostic-row.warning span {
+  color: #cca700;
+}
+
+.diagnostic-row.info span {
+  color: #75beff;
+}
+
 .console-panel {
   min-height: 0;
   flex: 1;
@@ -3274,6 +3327,22 @@ td {
 
 .app-shell.theme-light .agent-panel .chat-message.user {
   background: #eaeef2;
+}
+
+.app-shell.theme-light .diagnostics-panel,
+.app-shell.theme-light .ports-panel {
+  background: #ffffff;
+}
+
+.app-shell.theme-light .diagnostics-list,
+.app-shell.theme-light .diagnostic-row {
+  border-color: var(--border-subtle);
+}
+
+.app-shell.theme-light .diagnostic-row,
+.app-shell.theme-light .diagnostic-row strong,
+.app-shell.theme-light .diagnostic-row p {
+  color: var(--text-main);
 }
 
 .app-shell.theme-light .agent-send,

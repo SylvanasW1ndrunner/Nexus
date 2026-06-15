@@ -39,6 +39,7 @@ import {
   type AgentMessage,
 } from './agent-chat.js';
 import { agentPanelActions, type AgentPanelActionId } from './agent-panel.js';
+import { buildWorkbenchProblems, type BottomPanelId, type WorkbenchProblem } from './bottom-panel.js';
 import {
   availableAuthModes,
   authCodePurpose,
@@ -222,7 +223,7 @@ export function App() {
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(false);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(268);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(360);
-  const [bottomPanel, setBottomPanel] = useState<'results' | 'console'>('results');
+  const [bottomPanel, setBottomPanel] = useState<BottomPanelId>('results');
   const [saveSqlDialogOpen, setSaveSqlDialogOpen] = useState(false);
   const [saveSqlNameDraft, setSaveSqlNameDraft] = useState('');
   const [newFileDialogOpen, setNewFileDialogOpen] = useState(false);
@@ -3848,7 +3849,7 @@ function EditorPane({
 }: {
   activeConnection: SavedConnection | undefined;
   activeTerminalId: string;
-  bottomPanel: 'results' | 'console';
+  bottomPanel: BottomPanelId;
   document: EditorDocument;
   editorLanguage: EditorLanguage;
   ideSettings: IdeSettings;
@@ -3876,7 +3877,7 @@ function EditorPane({
   onToggleTerminalMaximized: () => void;
   onWriteTerminalData: (id: string, data: string) => void;
   onOpenTerminalPanel: () => void;
-  setBottomPanel: (panel: 'results' | 'console') => void;
+  setBottomPanel: (panel: BottomPanelId) => void;
 }) {
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedSql: string } | undefined>();
@@ -3886,6 +3887,10 @@ function EditorPane({
   const isPythonDocument = editorLanguage === 'python';
   const activeTerminal = terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
   const terminalActions = buildTerminalActionMenu({ hasActiveTerminal: Boolean(activeTerminal), maximized: terminalMaximized });
+  const problems = useMemo(
+    () => buildWorkbenchProblems({ activeConnection, document, result, sql }),
+    [activeConnection, document, result, sql],
+  );
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -4030,7 +4035,11 @@ function EditorPane({
       </section>
       <section className={terminalMaximized ? 'result-pane terminal-maximized' : 'result-pane'}>
         <div className="bottom-panel-tabs">
-          <button disabled type="button">
+          <button
+            className={bottomPanel === 'problems' ? 'active' : ''}
+            type="button"
+            onClick={() => setBottomPanel('problems')}
+          >
             {t('problems')}
           </button>
           <button
@@ -4049,7 +4058,11 @@ function EditorPane({
           >
             {t('terminal')}
           </button>
-          <button disabled type="button">
+          <button
+            className={bottomPanel === 'ports' ? 'active' : ''}
+            type="button"
+            onClick={() => setBottomPanel('ports')}
+          >
             {t('ports')}
           </button>
           <small>{message}</small>
@@ -4098,7 +4111,9 @@ function EditorPane({
             </div>
           ) : null}
         </div>
-        {bottomPanel === 'results' ? (
+        {bottomPanel === 'problems' ? (
+          <ProblemsPanel problems={problems} t={t} />
+        ) : bottomPanel === 'results' ? (
           <div className="bottom-panel-body">
             {result ? (
               <>
@@ -4113,6 +4128,8 @@ function EditorPane({
               </div>
             )}
           </div>
+        ) : bottomPanel === 'ports' ? (
+          <PortsPanel t={t} />
         ) : (
           <div className="terminal-panel-body">
             <div className="terminal-command-bar">
@@ -4211,6 +4228,61 @@ function EditorPane({
       </section>
     </>
   );
+}
+
+function ProblemsPanel({
+  problems,
+  t,
+}: {
+  problems: WorkbenchProblem[];
+  t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string;
+}) {
+  return (
+    <div className="bottom-panel-body diagnostics-panel">
+      {problems.length ? (
+        <div className="diagnostics-list">
+          {problems.map((problem, index) => (
+            <div className={`diagnostic-row ${problem.severity}`} key={`${problem.code}-${index}`}>
+              <span>{t(problemSeverityLabelKey(problem.severity))}</span>
+              <strong>{problem.source}</strong>
+              <p>{problem.detail || t(problemMessageKey(problem.code))}</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="result-empty">
+          <strong>{t('problemsEmptyTitle')}</strong>
+          <span>{t('problemsEmptyDescription')}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PortsPanel({ t }: { t: (key: Parameters<ReturnType<typeof createTranslator>>[0]) => string }) {
+  return (
+    <div className="bottom-panel-body ports-panel">
+      <div className="result-empty">
+        <strong>{t('portsEmptyTitle')}</strong>
+        <span>{t('portsEmptyDescription')}</span>
+      </div>
+    </div>
+  );
+}
+
+function problemSeverityLabelKey(severity: WorkbenchProblem['severity']): Parameters<ReturnType<typeof createTranslator>>[0] {
+  if (severity === 'error') return 'severityError';
+  if (severity === 'warning') return 'severityWarning';
+  return 'severityInfo';
+}
+
+function problemMessageKey(code: WorkbenchProblem['code']): Parameters<ReturnType<typeof createTranslator>>[0] {
+  if (code === 'SQL_NO_CONNECTION') return 'problemSqlNoConnection';
+  if (code === 'SQL_CONNECTION_DISCONNECTED') return 'problemSqlConnectionDisconnected';
+  if (code === 'SQL_EMPTY_DOCUMENT') return 'problemSqlEmptyDocument';
+  if (code === 'DOCUMENT_UNSAVED') return 'problemDocumentUnsaved';
+  if (code === 'QUERY_BLOCKED') return 'problemQueryBlocked';
+  return 'problemQueryPerformanceWarning';
 }
 
 function TerminalPanel({
