@@ -56,6 +56,12 @@ import { isPluginCommandAvailable } from './plugin-command.js';
 import { filterPlugins, getPluginPrimaryAction, listPluginCategories, type PluginMarketplaceFilter } from './plugin-marketplace.js';
 import { formatPythonRunTranscript, pythonRunSucceeded } from './python-run-output.js';
 import {
+  filterResultRows,
+  formatResultCell,
+  resolveVisibleResultColumns,
+  toggleResultColumnVisibility,
+} from './result-table.js';
+import {
   canCreatePythonEnvironment,
   isWorkspaceRelativeDirectoryPath,
   pythonEnvironmentsForMode,
@@ -4402,15 +4408,10 @@ function ResultTable({
   const [columnMenuOpen, setColumnMenuOpen] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState<string[]>(() => result.columns.map((column) => column.name));
   const activeColumns = useMemo(() => {
-    const selected = result.columns.filter((column) => visibleColumns.includes(column.name));
-    return selected.length > 0 ? selected : result.columns;
+    return resolveVisibleResultColumns(result.columns, visibleColumns);
   }, [result.columns, visibleColumns]);
   const filteredRows = useMemo(() => {
-    const keyword = searchText.trim().toLowerCase();
-    if (!keyword) return result.rows;
-    return result.rows.filter((row) =>
-      activeColumns.some((column) => formatValue(row[column.name]).toLowerCase().includes(keyword)),
-    );
+    return filterResultRows(result.rows, activeColumns, searchText);
   }, [activeColumns, result.rows, searchText]);
 
   useEffect(() => {
@@ -4420,10 +4421,7 @@ function ResultTable({
   }, [result.queryId, result.columns]);
 
   function toggleColumn(columnName: string) {
-    setVisibleColumns((current) => {
-      if (current.includes(columnName)) return current.filter((name) => name !== columnName);
-      return [...current, columnName];
-    });
+    setVisibleColumns((current) => toggleResultColumnVisibility(current, columnName));
   }
 
   return (
@@ -4468,7 +4466,7 @@ function ResultTable({
             {filteredRows.map((row, index) => (
               <tr key={index}>
                 {activeColumns.map((column) => (
-                  <td key={column.name}>{formatValue(row[column.name])}</td>
+                  <td key={column.name}>{formatResultCell(row[column.name])}</td>
                 ))}
               </tr>
             ))}
