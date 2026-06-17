@@ -40,6 +40,18 @@ export class UsageTracker {
     return next;
   }
 
+  async recordByokTokens(tokenEstimate: number): Promise<UsageSnapshot> {
+    const current = await this.current();
+    const next: UsageSnapshot = {
+      ...current,
+      mode: 'byok',
+      byokTokenEstimate: current.byokTokenEstimate + Math.max(0, Math.trunc(tokenEstimate)),
+    };
+    const history = await this.history(100);
+    await this.save([next, ...history].slice(0, 100));
+    return next;
+  }
+
   private async save(history: UsageSnapshot[]): Promise<void> {
     await mkdir(dirname(this.historyPath), { recursive: true });
     await writeFile(this.historyPath, `${JSON.stringify(history, null, 2)}\n`, 'utf8');

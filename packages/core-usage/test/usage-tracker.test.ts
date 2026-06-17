@@ -59,6 +59,21 @@ describe('UsageTracker', () => {
     expect(history[0]).toEqual(snapshot(101));
     expect(history.at(-1)).toEqual(snapshot(2));
   });
+
+  it('records BYOK token estimates without incrementing conversation rounds', async () => {
+    const path = await historyPath();
+    await saveHistory(path, [snapshot(5)]);
+
+    const tracker = new UsageTracker(path);
+    await expect(tracker.recordByokTokens(37.8)).resolves.toEqual({
+      ...snapshot(5),
+      byokTokenEstimate: 37,
+    });
+    await expect(tracker.recordByokTokens(-10)).resolves.toEqual({
+      ...snapshot(5),
+      byokTokenEstimate: 37,
+    });
+  });
 });
 
 function snapshot(usedRounds: number): UsageSnapshot {

@@ -157,16 +157,50 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 - 提供 LLM 路由边界。
 - 为 BYOK 和 DBAgent gateway 模式预留统一入口。
+- 提供 OpenAI-compatible provider 合约，支持 SiliconFlow 等兼容接口。
+- 解析文本、工具调用和 token usage。
 
 开发逻辑：
 
-- 当前只保留轻量边界，避免在 M1.5 引入模型 SDK 和远程依赖。
-- 后续 Agent/RAG 上线时，真实 LLM 测试要按产品设计使用真实 API key，不用 mock 替代核心可靠性验证。
+- 使用 Node 内置 `fetch`，不引入额外模型 SDK，降低打包体积和供应链风险。
+- Provider 通过 `LlmRouter` 注册，Agent 不直接持有具体厂商 SDK。
+- BYOK provider 调用后将 token 估算写入 `core-usage`。
+- API key 只从运行时配置或环境变量读取，不写入代码、文档或测试快照。
+- 真实 API 测试必须显式打开环境变量开关，默认测试不访问外网、不消耗额度。
 
 测试重点：
 
-- M1.5 暂不强行扩展。
-- M2/M3 开始补 BYOK provider、gateway provider 和真实 API eval。
+- OpenAI-compatible 请求格式。
+- 文本响应、工具调用响应和 usage 解析。
+- 认证失败、限流、5xx、超时和重试。
+- BYOK 不要求登录。
+- SiliconFlow 真实连通测试保留入口，但由环境变量显式启用。
+
+## `packages/core-agent`
+
+职责：
+
+- 提供无 UI 的 Agent ReAct 运行时。
+- 管理会话消息、token 使用、工具调用循环和中止边界。
+- 提供 Tool Registry 和 Permission Manager。
+- 让 Agent 能在最终 UI 完成前通过测试验证核心行为。
+
+开发逻辑：
+
+- Agent 只依赖 `core-llm` 的 provider/router 合约，不直接绑定任何模型厂商。
+- 工具定义使用结构化 schema，供模型 tool calling 和本地执行共享。
+- `readonly` 模式拒绝所有非只读工具；`ask` 模式在没有审批 provider 时不会执行有风险工具。
+- 工具执行失败会作为 tool message 回写给 LLM，让下一轮有机会修复，例如 SQL 报错后重写查询。
+- 每个 Agent round 完成后写入 `core-usage`，provider token 用量由 `core-llm` 写入。
+- 当前只实现最小 ReAct 闭环，不包含 UI 面板、流式展示、持久化 SQLite、子 Agent 和 Plan&Execute。
+
+测试重点：
+
+- 只读数据库工具自动执行并产出最终业务回答。
+- 只读模式阻止写操作且不产生副作用。
+- 询问模式在无审批 provider 时不执行中风险工具。
+- 工具失败能够回传给模型并在下一轮恢复。
+- 权限矩阵覆盖 safe、medium、high、critical。
 
 ## `scripts`
 
