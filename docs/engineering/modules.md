@@ -202,6 +202,35 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 工具失败能够回传给模型并在下一轮恢复。
 - 权限矩阵覆盖 safe、medium、high、critical。
 
+## `packages/core-rag`
+
+职责：
+
+- 将数据库 schema 元数据转换为可检索文档。
+- 建立表、字段和外键关系图。
+- 为 Agent 和 SQL 辅助能力提供 schema context。
+- 在 embedding/vector 能力接入前，先提供稳定的精确匹配和词法检索。
+
+开发逻辑：
+
+- 输入使用 `TableDetail[]`，直接承接 `core-db` 的 schema 抽取结果。
+- 每个连接独立建索引，断开连接时可清理对应索引。
+- 文档分为 table、column、relation 扩展三类语义。
+- 检索优先级：精确名称、标题包含、token 命中、正文命中、关系扩展。
+- 中文业务注释使用 CJK bigram，避免“用户订单”这类组合词无法命中“用户”和“订单”上下文。
+- 关系扩展优先保留外键和业务字段，再保留主键，避免有限上下文被 `id` 这类低信息字段占满。
+- 当前实现为内存索引；后续再接 per-connection SQLite / sqlite-vec / embedding。
+
+测试重点：
+
+- 表和字段生成稳定 document id。
+- 外键字段能连接到关联表。
+- 英文表名查询能召回表和关键字段。
+- 中文业务问题能通过注释召回字段。
+- 跨表问题能返回关系上下文。
+- context builder 遵守字符预算并标记截断。
+- 清理连接索引后不再返回旧 schema。
+
 ## `scripts`
 
 职责：
