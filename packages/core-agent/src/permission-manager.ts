@@ -21,6 +21,7 @@ export function decideAutomaticPermission(
   tool: { dangerLevel: 'safe' | 'medium' | 'high' | 'critical'; readonly?: boolean },
 ): ToolPermissionDecision {
   if (mode === 'readonly' && !tool.readonly) return 'deny';
+  if (mode === 'readonly' && tool.readonly) return 'allow';
   if (tool.dangerLevel === 'critical') return mode === 'full-auto' ? 'ask' : 'deny';
   if (tool.dangerLevel === 'safe') return 'allow';
   if (mode === 'full-auto') return 'allow';

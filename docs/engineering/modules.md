@@ -231,6 +231,33 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - context builder 遵守字符预算并标记截断。
 - 清理连接索引后不再返回旧 schema。
 
+## `packages/core-tools`
+
+职责：
+
+- 将 core 能力注册为 Agent 可调用的内置工具。
+- 维护工具参数校验、危险等级、只读标记和 workspace 沙箱边界。
+- 让 Agent 后端可以在没有最终 UI 的情况下完成“查 schema → 查数据 → 汇报”的真实闭环。
+
+开发逻辑：
+
+- `registerDatabaseTools()` 接收 `ToolRegistry`、`IDatabaseDriver`、活动连接获取函数和可选 `SchemaRagEngine`。
+- DB 工具直接复用 `core-db` driver，不绕开 SQL 安全、只读拦截、确认机制和错误分类。
+- RAG 工具直接复用 `core-rag`，当前提供 `search_schema` 和 `build_schema_context`。
+- 工具定义包含 `dangerLevel` 和 `readonly`，由 `core-agent` 的 `PermissionManager` 统一决策。
+- `query_database` 是只读 medium 工具；在 readonly Agent 模式下允许执行 SELECT 类分析。
+- `execute_sql` 是 high 且非只读工具；readonly Agent 模式会在 driver 执行前拒绝。
+- workspace 路径解析只接受相对路径，并拒绝 `..` 越界。
+- 当前不把 Electron main 的 Python/Terminal 服务反向依赖到 core 包；后续应通过抽象接口或 `core-workspace` 接入。
+
+测试重点：
+
+- Agent 能通过 `search_schema` 和 `query_database` 完成用户问题。
+- list/describe schema 工具返回稳定结构。
+- readonly 模式阻止写 SQL，且 driver 不执行。
+- 缺失活动连接时返回明确错误。
+- workspace 路径不能访问绝对路径或越过工作区根目录。
+
 ## `scripts`
 
 职责：

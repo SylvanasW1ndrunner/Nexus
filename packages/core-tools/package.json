@@ -1,0 +1,24 @@
+{
+  "name": "@dbagent/core-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "package.json"],
+  "scripts": {
+    "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@dbagent/core-agent": "workspace:*",
+    "@dbagent/core-db": "workspace:*",
+    "@dbagent/core-rag": "workspace:*",
+    "@dbagent/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}

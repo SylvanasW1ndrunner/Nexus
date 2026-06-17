@@ -11,6 +11,10 @@ describe('decideAutomaticPermission', () => {
     expect(decideAutomaticPermission('readonly', { dangerLevel: 'medium', readonly: false })).toBe('deny');
   });
 
+  it('allows readonly medium tools in readonly mode for SELECT-style work', () => {
+    expect(decideAutomaticPermission('readonly', { dangerLevel: 'medium', readonly: true })).toBe('allow');
+  });
+
   it('keeps critical tools behind a hard approval boundary even in full-auto', () => {
     expect(decideAutomaticPermission('full-auto', { dangerLevel: 'critical' })).toBe('ask');
   });
