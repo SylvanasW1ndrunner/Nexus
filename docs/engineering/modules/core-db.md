@@ -12,6 +12,7 @@
 - `packages/core-db/src/table-edit.ts`：表数据编辑的 SQL 预览、主键保护、批量确认和事务执行输入。
 - `packages/core-db/src/table-designer.ts`：表设计器 DDL 预览，覆盖新建表、添加字段、索引、外键和注释。
 - `packages/core-db/src/sql-object-preview.ts`：视图、函数、存储过程的 DDL 预览、删除预览和测试调用 SQL 生成。
+- `packages/core-db/src/index-preview.ts`：独立索引管理 DDL 预览，覆盖创建索引、部分索引、表达式索引、并发创建和删除索引。
 - `packages/core-db/src/import-plan.ts`：导入向导后端合同，覆盖 CSV/JSON 预览、字段映射和批量 INSERT/UPSERT 计划。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
@@ -62,6 +63,14 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 
 所有对象 DDL 预览都标记为 `dangerous` 且 `requiresConfirmation=true`，调用方必须在用户确认后才能执行。视图定义会拒绝非 `SELECT/WITH` 开头和多语句输入，避免用户在“视图编辑”入口中误执行 DML/DDL。函数/过程的参数类型、返回类型、语言名会做轻量 SQL token 检查；函数体使用 `$dbagent$` delimiter 包装，并拒绝正文包含保留 delimiter，避免生成不可解析的 SQL。测试调用始终使用 `$1`、`$2` 参数占位，不把用户输入值拼入 SQL 文本。
 
+索引管理使用 `index-preview.ts` 生成独立索引 DDL。它补足表设计器里“随表创建/修改”的简单索引能力，服务于产品文档中的索引列表和新建索引对话框。当前支持：
+
+- `buildCreateIndexPreview()`：生成 `CREATE [UNIQUE] INDEX [CONCURRENTLY]`，支持 btree、hash、gin、gist、brin。
+- 支持普通列索引、列排序、`NULLS FIRST/LAST`、operator class、表达式索引和部分索引 `WHERE`。
+- `buildDropIndexPreview()`：生成 `DROP INDEX`，支持 `CONCURRENTLY`、`IF EXISTS` 和 `CASCADE`。
+
+索引 DDL 同样只生成预览，不直接执行。所有索引变更标记为 `dangerous` 并要求确认。`CONCURRENTLY` 会返回 warning，因为 PostgreSQL 不允许它在显式事务块内执行；`DROP INDEX CONCURRENTLY` 与 `CASCADE` 的非法组合会在预览阶段直接拒绝。部分索引 WHERE 和表达式索引属于 SQL 片段，模块会拒绝多语句和注释 token，但仍要求调用方完整展示给用户审查。
+
 远程连接按真实桌面使用场景处理：默认连接超时、语句超时、TCP keepalive，并把认证失败、DNS 失败、端口关闭、超时和连接中断分类成产品错误码。这样 Windows 或 Linux 桌面连接服务器数据库时，用户能得到可操作提示，而不是只有“连接失败”。
 连接建立后的运行期错误也必须保持 `Result<T>` 契约。`PostgresDriver.execute`、`listTables` 和 `describeTable` 会把网络中断、端口拒绝和超时继续分类为可重试的远程连接错误；普通 SQL 语法错误、catalog 查询错误等则返回 `QUERY_FAILED`。这保证 Schema 树刷新或查询执行遇到远程数据库抖动时，不会把异常漏到 IPC 外层。
 
@@ -101,6 +110,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `table-edit.test.ts`：表格编辑 SQL 预览、identifier quote、字符串/JSON/bytea 等字面量处理、无主键拒绝更新/删除、主键列不可编辑、批量二次确认。
 - `table-designer.test.ts`：表设计器 CREATE/ALTER DDL 预览、注释转义、索引、外键、无主键提示和非法定义拦截。
 - `sql-object-preview.test.ts`：视图、函数、过程的 DDL 预览、危险视图定义拦截、函数/过程片段校验、参数化测试调用、limit clamp 和删除预览。
+- `index-preview.test.ts`：索引管理 CREATE/DROP DDL 预览、并发索引 warning、唯一部分索引、表达式索引、危险 SQL 片段拦截和 PostgreSQL 非法组合拦截。
 - `import-plan.test.ts`：CSV/JSON 预览、字段映射、批量 INSERT、UPSERT、TRUNCATE prelude、跳过错误策略 warning 和非法源/计划拦截。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
