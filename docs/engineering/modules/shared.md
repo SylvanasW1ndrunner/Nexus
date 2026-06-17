@@ -8,6 +8,7 @@
 - `packages/shared/src/csv.ts`：查询结果导出 CSV。
 - `packages/shared/src/export.ts`：查询结果导出 JSON。
 - `packages/shared/src/query-result-view.ts`：查询结果可见列、搜索过滤、分页视图和单元格格式化。
+- `packages/shared/src/result-export.ts`：查询结果导出统一合同，支持 CSV、JSON、NDJSON 和 Excel 兼容 XML 工作簿。
 - `packages/shared/src/index.ts`：包级导出边界。
 
 ## 开发逻辑
@@ -22,11 +23,14 @@
 
 查询结果视图 helper 也放在 `shared`，而不是 renderer。原因是列显示、搜索、分页和导出范围都会依赖同一套规则：如果 UI、导出服务和后续 IPC 分页各自实现，会出现“屏幕上看到的数据”和“导出的数据”不一致。`createQueryResultView()` 输入完整 `QueryExecutionResult` 和可见列、搜索词、offset、limit，输出稳定的视图结构，供结果表、导出和测试复用。
 
+`exportQueryResult()` 在视图合同之上生成导出制品，返回文件名、MIME、内容、导出行数和列数。默认导出完整列；如果调用方传入 `visibleColumnNames`、`searchText`、`offset`、`limit`，则严格导出当前视图。Excel 当前实现为 SpreadsheetML XML（`.xls`），包含 `Result` 和 `Metadata` 两个 worksheet。它能被 Excel/WPS/LibreOffice 打开，且不引入 `exceljs`/`xlsx` 等依赖，避免当前阶段增加包体和 native/打包风险。后续如果产品验收明确要求原生 `.xlsx`，需要单独评估依赖许可证、包体、离线安装和 Electron 打包影响。
+
 ## 测试覆盖
 
 - `packages/shared/test/csv.test.ts`：覆盖逗号、引号、换行、对象值和 `NULL`。
 - `packages/shared/test/export.test.ts`：覆盖 JSON metadata、列顺序、`Date`、`bigint`、`Buffer` 和嵌套对象。
 - `packages/shared/test/query-result-view.test.ts`：覆盖可见列至少保留一列、列切换、仅在可见列内搜索、分页视图、Date/Buffer/JSON 单元格格式化。
+- `packages/shared/test/result-export.test.ts`：覆盖旧 CSV/JSON helper 兼容性、筛选视图导出、NDJSON、Excel 兼容 XML 工作簿、文件名清洗和元信息 worksheet。
 - `packages/shared/test/ipc-contract.test.ts` 覆盖 IPC 契约：运行时快照固定 M0-M1.5 channel 集合，编译期断言保证 `IpcRequestMap` 和 `IpcResponseMap` 键集合一致。新增 channel 时必须同步更新该测试，避免 renderer、preload 和 main 只改一侧。
 
 ## 后续扩展
