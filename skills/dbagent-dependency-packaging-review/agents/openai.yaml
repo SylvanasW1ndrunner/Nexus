@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 依赖打包评审"
+  short_description: "评审依赖、许可证、包体积、离线与跨平台风险"
+  default_prompt: "Use $dbagent-dependency-packaging-review to assess a new dependency or packaging-sensitive DBAgent implementation choice."

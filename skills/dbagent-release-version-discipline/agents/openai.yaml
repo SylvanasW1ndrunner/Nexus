@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 版本发布纪律"
+  short_description: "执行提交、版本分支、release 包和验收记录规则"
+  default_prompt: "Use $dbagent-release-version-discipline to prepare a DBAgent version branch, release folder, or release validation note."

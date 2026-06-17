@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 中文文档同步"
+  short_description: "同步产品、工程、接口、测试与发布文档"
+  default_prompt: "Use $dbagent-docs-sync-development to update DBAgent Chinese docs alongside a backend feature change."
