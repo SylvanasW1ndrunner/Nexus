@@ -12,6 +12,7 @@
 - `packages/core-db/src/table-edit.ts`：表数据编辑的 SQL 预览、主键保护、批量确认和事务执行输入。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
+- `packages/core-db/src/query-snapshot.ts`：查询结果快照持久化，用于“钉住结果”和重启后复查。
 - `packages/core-db/src/json-file.ts`：JSON 文件原子读写 helper。
 
 ## 开发逻辑
@@ -46,6 +47,10 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 
 连接元数据和查询历史使用 `json-file.ts` 做临时文件加 rename 的原子写入。读取时如果文件缺失或 JSON 损坏，会返回空列表，让应用继续启动和执行查询；这避免单个损坏的本地 JSON 文件把桌面应用整体拖垮。后续如果进入多用户或大历史量阶段，应迁移到 SQLite 并保留迁移备份。
 
+结果快照由 `QuerySnapshotStore` 管理，服务于产品文档中的“查询结果可钉住，重启后保留”。快照保存 SQL、连接、列信息、行数据、耗时、安全报告、标签、备注和来源历史 ID。列表接口默认只返回前 5 行 `previewRows`，完整内容通过 `get(id)` 获取，避免快照列表页或后续 IPC 一次性搬运大结果集。
+
+快照写入前会显式规范化数据库值：`bigint`、`Date`、`Buffer`、非有限数字、JSONB/数组会转换成稳定 JSON 结构，避免真实 PostgreSQL 结果因为 `bigint` 无法 `JSON.stringify` 而写入失败。快照文件损坏时按空列表降级，保证 IDE 仍可继续执行查询；默认最多保留 200 条，后续如果支持大规模审计或团队协作，应迁移到 SQLite 并增加分页索引。
+
 ## 测试覆盖
 
 - `sql-safety.test.ts`：只读拦截、写操作风险、多语句风险。
@@ -57,6 +62,7 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 - `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
 - `query-history.test.ts`：查询历史写入、读取、审计上下文和损坏 JSON 降级。
+- `query-snapshot.test.ts`：结果快照钉住、特殊数据库值序列化、连接过滤、搜索、预览行、删除、容量上限和损坏 JSON 降级。
 - `postgres.integration.test.ts`：真实 PostgreSQL 连接、Schema 列表、表详情、join 查询、只读拦截、断连后失败、批量 SQL 事务回滚、表编辑 SQL 预览提交和失败回滚。
 
 本地真实数据库验证入口是：
