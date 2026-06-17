@@ -13,3 +13,4 @@ export * from './sql-performance.js';
 export * from './postgres-errors.js';
 export * from './sql-object-preview.js';
 export * from './index-preview.js';
+export * from './privilege-preview.js';
