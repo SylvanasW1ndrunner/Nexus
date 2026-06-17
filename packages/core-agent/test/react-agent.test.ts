@@ -310,6 +310,91 @@ describe('ReactAgent', () => {
       },
     ]);
   });
+
+  it('stops subscription Agent runs before calling the model when quota is exhausted', async () => {
+    const usage = new UsageTracker(await usagePath(), { subscriptionRoundLimit: 0 });
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: 'should not run',
+        toolCalls: [],
+      },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Run subscription task.',
+      mode: 'readonly',
+      usageMode: 'subscription',
+    });
+
+    expect(result.status).toBe('quota_exceeded');
+    expect(calls).toHaveLength(0);
+    await expect(usage.roundHistory()).resolves.toEqual([]);
+  });
+
+  it('counts user-aborted Agent rounds without calling the model', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: 'should not run',
+        toolCalls: [],
+      },
+    ]);
+    const signal = AbortSignal.abort();
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Start then stop.',
+      mode: 'readonly',
+      signal,
+    });
+
+    expect(result.status).toBe('aborted');
+    expect(calls).toHaveLength(0);
+    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 1 });
+    await expect(usage.roundHistory()).resolves.toMatchObject([{ status: 'aborted' }]);
+  });
+
+  it('does not count provider infrastructure failures as billable Agent rounds', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [throwingProvider('provider timeout')]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    await expect(
+      agent.run({
+        providerId: 'throwing',
+        model: 'fake-model',
+        userMessage: 'Analyze orders.',
+        mode: 'readonly',
+      }),
+    ).rejects.toThrow('provider timeout');
+
+    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
+    await expect(usage.roundHistory()).resolves.toMatchObject([
+      { sessionId: 'session_test', status: 'failed', errorMessage: 'provider timeout' },
+    ]);
+  });
 });
 
 function registryWithQueryTool(): ToolRegistry {
@@ -371,6 +456,20 @@ function scriptedProviderWithCalls(script: LlmChatResponse[]): { provider: LlmPr
     },
   };
   return { provider, calls };
+}
+
+function throwingProvider(message: string): LlmProvider {
+  return {
+    id: 'throwing',
+    name: 'Throwing Provider',
+    mode: 'byok',
+    async chat() {
+      throw new Error(message);
+    },
+    async isAvailable() {
+      return { available: true };
+    },
+  };
 }
 
 async function usagePath(): Promise<string> {

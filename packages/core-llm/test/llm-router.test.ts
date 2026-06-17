@@ -48,6 +48,64 @@ describe('LlmRouter', () => {
     });
   });
 
+  it('attributes provider token usage to an active Agent round when provided', async () => {
+    const tracker = new UsageTracker(await usagePath(), {
+      now: () => new Date('2026-06-17T00:00:00.000Z'),
+      createRoundId: () => 'round_router',
+    });
+    const round = await tracker.startConversationRound('session_router', 'byok');
+    const router = new LlmRouter(tracker, [fakeProvider(37)]);
+
+    await router.chat(
+      'fake',
+      {
+        model: 'fake-model',
+        messages: [{ role: 'user', content: '生成一个订单分析 SQL' }],
+      },
+      { round },
+    );
+    await tracker.endConversationRound(round, 'success');
+
+    await expect(tracker.current()).resolves.toMatchObject({
+      usedRounds: 1,
+      byokTokenEstimate: 37,
+    });
+    await expect(tracker.roundHistory()).resolves.toMatchObject([
+      {
+        id: 'round_router',
+        sessionId: 'session_router',
+        totalTokens: 37,
+        status: 'success',
+      },
+    ]);
+  });
+
+  it('does not count a provider failure as a completed Agent round', async () => {
+    const tracker = new UsageTracker(await usagePath(), {
+      now: () => new Date('2026-06-17T00:00:00.000Z'),
+      createRoundId: () => 'round_failed_router',
+    });
+    const round = await tracker.startConversationRound('session_failed_router', 'byok');
+    const router = new LlmRouter(tracker, [failingProvider()]);
+
+    await expect(
+      router.chat(
+        'failing',
+        {
+          model: 'fake-model',
+          messages: [{ role: 'user', content: 'ping' }],
+        },
+        { round },
+      ),
+    ).rejects.toThrow('provider timeout');
+    await tracker.endConversationRound(round, 'failed', 'provider timeout');
+
+    await expect(tracker.current()).resolves.toMatchObject({
+      usedRounds: 0,
+      byokTokenEstimate: 0,
+    });
+  });
+
   it('fails clearly when provider is missing', async () => {
     const router = new LlmRouter(new UsageTracker(await usagePath()));
 
@@ -77,6 +135,20 @@ function fakeProvider(totalTokens: number): LlmProvider {
         toolCalls: [],
         usage: { promptTokens: totalTokens - 1, completionTokens: 1, totalTokens },
       };
+    },
+    async isAvailable() {
+      return { available: true };
+    },
+  };
+}
+
+function failingProvider(): LlmProvider {
+  return {
+    id: 'failing',
+    name: 'Failing Provider',
+    mode: 'byok',
+    async chat() {
+      throw new Error('provider timeout');
     },
     async isAvailable() {
       return { available: true };

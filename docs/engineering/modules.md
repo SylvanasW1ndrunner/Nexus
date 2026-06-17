@@ -139,17 +139,24 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 - 记录本地查询轮次。
 - 为 BYOK 和订阅模式提供统一用量快照。
+- 记录 Agent conversation round 的开始、LLM token、结束状态和本地诊断历史。
 
 开发逻辑：
 
 - M1.5 只做本地记录，避免后续订阅 UX 需要重构。
-- Agent loop 上线后，每轮 Agent 对话也要经过该模块计量。
+- 存储文件使用版本化 JSON，同时兼容早期 `UsageSnapshot[]` 数组格式，避免升级后丢失历史用量。
+- 一轮 Agent 对话按“用户输入 → 最终 Agent 响应”计量；`success` 和 `aborted` 计入轮次，底层系统失败记录为 `failed` 但不增加已用轮次。
+- `subscription` 模式通过 `getCurrentQuota()` 输出本地配额状态；当前只做客户端骨架，云端 gateway 接入后继续复用该合约。
+- 手动 SQL 查询继续使用 `recordLocalQuery()`，不强制进入 Agent round。
 
 测试重点：
 
 - 本地查询轮次递增。
 - 快照窗口稳定。
 - 历史记录可读取。
+- 成功 Agent round 汇总 token 并计入 BYOK 估算。
+- 用户中止计入轮次，provider/基础设施失败不计入轮次。
+- 订阅配额耗尽状态可被稳定查询。
 
 ## `packages/core-llm`
 
@@ -164,7 +171,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 - 使用 Node 内置 `fetch`，不引入额外模型 SDK，降低打包体积和供应链风险。
 - Provider 通过 `LlmRouter` 注册，Agent 不直接持有具体厂商 SDK。
-- BYOK provider 调用后将 token 估算写入 `core-usage`。
+- BYOK provider 调用后将 token 估算写入 `core-usage`；如果调用属于某个 Agent round，则 token 先归属到该 round，round 结束后再汇总到快照。
 - API key 只从运行时配置或环境变量读取，不写入代码、文档或测试快照。
 - 真实 API 测试必须显式打开环境变量开关，默认测试不访问外网、不消耗额度。
 
@@ -172,6 +179,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 - OpenAI-compatible 请求格式。
 - 文本响应、工具调用响应和 usage 解析。
+- 有 Agent round 时，provider token usage 归属到 round；provider 异常不制造已完成用量。
 - 认证失败、限流、5xx、超时和重试。
 - BYOK 不要求登录。
 - SiliconFlow 真实连通测试保留入口，但由环境变量显式启用。
@@ -192,7 +200,8 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - `readonly` 模式拒绝所有非只读工具；`ask` 模式在没有审批 provider 时不会执行有风险工具。
 - `AgentRunOptions.allowedTools` 是运行级工具白名单：LLM 请求只暴露白名单工具；如果模型返回未暴露但已注册的工具调用，运行时仍会拒绝且不会执行 handler。
 - 工具执行失败会作为 tool message 回写给 LLM，让下一轮有机会修复，例如 SQL 报错后重写查询。
-- 每个 Agent round 完成后写入 `core-usage`，provider token 用量由 `core-llm` 写入。
+- 每个 Agent run 会先创建 `core-usage` round；订阅模式先检查本地配额，配额耗尽时不调用模型。
+- Agent run 正常完成、权限拒绝、token 预算耗尽和用户中止都会关闭 round；provider 等基础设施异常会以 `failed` 关闭，不计入已用轮次。
 - 当前只实现最小 ReAct 闭环，不包含 UI 面板、流式展示、持久化 SQLite、子 Agent 和 Plan&Execute。
 
 测试重点：
@@ -202,6 +211,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 询问模式在无审批 provider 时不执行中风险工具。
 - 工具失败能够回传给模型并在下一轮恢复。
 - Skill 执行计划传入的工具白名单会限制 LLM 可见工具，并拒绝隐藏/越权工具调用。
+- 订阅配额耗尽时不调用模型；用户中止计入 round；provider 异常不计入已用轮次。
 - 权限矩阵覆盖 safe、medium、high、critical。
 
 ## `packages/core-rag`

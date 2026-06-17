@@ -37,180 +37,210 @@ export class ReactAgent {
     });
     appendMessage(session, createMessage({ role: 'user', content: options.userMessage }, this.now));
 
+    const usageMode = options.usageMode ?? 'byok';
+    if (usageMode === 'subscription') {
+      const quota = await this.usageTracker.getCurrentQuota('subscription');
+      if (quota.exceeded) {
+        return {
+          status: 'quota_exceeded',
+          session,
+          finalText: 'Usage quota exceeded.',
+          iterations: 0,
+          toolExecutions: [],
+        };
+      }
+    }
+
+    const round = await this.usageTracker.startConversationRound(session.id, usageMode);
+    let roundClosed = false;
+    const closeRound = async (status: 'success' | 'aborted' | 'failed', errorMessage?: string) => {
+      if (roundClosed) return;
+      roundClosed = true;
+      await this.usageTracker.endConversationRound(round, status, errorMessage);
+    };
+
     const toolExecutions: AgentToolExecutionRecord[] = [];
     const maxIterations = options.maxIterations ?? 25;
     const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
     let finalText = '';
 
-    for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-      if (options.signal?.aborted || session.aborted) {
-        return { status: 'aborted', session, finalText, iterations: iteration - 1, toolExecutions };
-      }
+    try {
+      for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+        if (options.signal?.aborted || session.aborted) {
+          await closeRound('aborted');
+          return { status: 'aborted', session, finalText, iterations: iteration - 1, toolExecutions };
+        }
 
-      const request = {
-        model: options.model,
-        messages: toLlmMessages(session),
-        tools: this.toolRegistry.llmTools(options.allowedTools),
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      };
-      const response = await this.llmRouter.chat(options.providerId, request);
-      addUsage(session, response.usage);
-
-      appendMessage(
-        session,
-        createMessage({ role: 'assistant', content: response.text, toolCalls: response.toolCalls }, this.now),
-      );
-
-      if (response.usage?.totalTokens && options.tokenBudget && session.tokenUsage.totalTokens > options.tokenBudget) {
-        await this.usageTracker.recordLocalQuery();
-        return {
-          status: 'max_iterations_reached',
-          session,
-          finalText: 'Token budget exceeded.',
-          iterations: iteration,
-          toolExecutions,
+        const request = {
+          model: options.model,
+          messages: toLlmMessages(session),
+          tools: this.toolRegistry.llmTools(options.allowedTools),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
         };
-      }
+        const response = await this.llmRouter.chat(options.providerId, request, { round });
+        addUsage(session, response.usage);
 
-      if (response.toolCalls.length === 0) {
-        finalText = response.text;
-        await this.usageTracker.recordLocalQuery();
-        return { status: 'done', session, finalText, iterations: iteration, toolExecutions };
-      }
+        appendMessage(
+          session,
+          createMessage({ role: 'assistant', content: response.text, toolCalls: response.toolCalls }, this.now),
+        );
 
-      for (const toolCall of response.toolCalls) {
-        const startedAt = Date.now();
-        if (allowedToolSet !== undefined && !allowedToolSet.has(toolCall.name)) {
-          const record = executionRecord(
-            toolCall.id,
-            toolCall.name,
-            'denied',
-            startedAt,
-            'Tool not allowed by run policy.',
-          );
-          toolExecutions.push(record);
-          appendMessage(
-            session,
-            createMessage(
-              {
-                role: 'tool',
-                toolCallId: toolCall.id,
-                toolName: toolCall.name,
-                content: JSON.stringify({ error: 'Tool is not allowed for this run.' }),
-              },
-              this.now,
-            ),
-          );
-          await this.usageTracker.recordLocalQuery();
+        if (response.usage?.totalTokens && options.tokenBudget && session.tokenUsage.totalTokens > options.tokenBudget) {
+          await closeRound('success');
           return {
-            status: 'permission_denied',
+            status: 'max_iterations_reached',
             session,
-            finalText: 'Tool is not allowed for this run.',
+            finalText: 'Token budget exceeded.',
             iterations: iteration,
             toolExecutions,
           };
         }
 
-        const tool = this.toolRegistry.get(toolCall.name);
-        if (!tool) {
-          const record = executionRecord(toolCall.id, toolCall.name, 'failed', startedAt, 'Tool is not registered.');
-          toolExecutions.push(record);
-          appendMessage(
-            session,
-            createMessage(
-              {
-                role: 'tool',
-                toolCallId: toolCall.id,
-                toolName: toolCall.name,
-                content: JSON.stringify({ error: 'Tool is not registered.' }),
-              },
-              this.now,
-            ),
-          );
-          continue;
+        if (response.toolCalls.length === 0) {
+          finalText = response.text;
+          await closeRound('success');
+          return { status: 'done', session, finalText, iterations: iteration, toolExecutions };
         }
 
-        const permission = await this.permissionManager.check({
-          mode: session.mode,
-          tool,
-          toolCall,
-        });
-
-        if (permission !== 'allow') {
-          const record = executionRecord(toolCall.id, tool.name, 'denied', startedAt, `Permission: ${permission}`);
-          toolExecutions.push(record);
-          appendMessage(
-            session,
-            createMessage(
-              {
-                role: 'tool',
-                toolCallId: toolCall.id,
-                toolName: tool.name,
-                content: JSON.stringify({ error: 'Permission denied.', permission }),
-              },
-              this.now,
-            ),
-          );
-          if (permission === 'deny') {
-            await this.usageTracker.recordLocalQuery();
+        for (const toolCall of response.toolCalls) {
+          const startedAt = Date.now();
+          if (allowedToolSet !== undefined && !allowedToolSet.has(toolCall.name)) {
+            const record = executionRecord(
+              toolCall.id,
+              toolCall.name,
+              'denied',
+              startedAt,
+              'Tool not allowed by run policy.',
+            );
+            toolExecutions.push(record);
+            appendMessage(
+              session,
+              createMessage(
+                {
+                  role: 'tool',
+                  toolCallId: toolCall.id,
+                  toolName: toolCall.name,
+                  content: JSON.stringify({ error: 'Tool is not allowed for this run.' }),
+                },
+                this.now,
+              ),
+            );
+            await closeRound('success');
             return {
               status: 'permission_denied',
               session,
-              finalText: 'Permission denied.',
+              finalText: 'Tool is not allowed for this run.',
               iterations: iteration,
               toolExecutions,
             };
           }
-          continue;
-        }
 
-        try {
-          const context = {
-            session,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          };
-          const result = await tool.handler(toolCall.arguments, context);
-          const preview = serializeToolResult(result);
-          toolExecutions.push(executionRecord(toolCall.id, tool.name, 'success', startedAt, preview));
-          appendMessage(
-            session,
-            createMessage(
-              {
-                role: 'tool',
-                toolCallId: toolCall.id,
-                toolName: tool.name,
-                content: preview,
-              },
-              this.now,
-            ),
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          toolExecutions.push(executionRecord(toolCall.id, tool.name, 'failed', startedAt, message));
-          appendMessage(
-            session,
-            createMessage(
-              {
-                role: 'tool',
-                toolCallId: toolCall.id,
-                toolName: tool.name,
-                content: JSON.stringify({ error: message }),
-              },
-              this.now,
-            ),
-          );
+          const tool = this.toolRegistry.get(toolCall.name);
+          if (!tool) {
+            const record = executionRecord(toolCall.id, toolCall.name, 'failed', startedAt, 'Tool is not registered.');
+            toolExecutions.push(record);
+            appendMessage(
+              session,
+              createMessage(
+                {
+                  role: 'tool',
+                  toolCallId: toolCall.id,
+                  toolName: toolCall.name,
+                  content: JSON.stringify({ error: 'Tool is not registered.' }),
+                },
+                this.now,
+              ),
+            );
+            continue;
+          }
+
+          const permission = await this.permissionManager.check({
+            mode: session.mode,
+            tool,
+            toolCall,
+          });
+
+          if (permission !== 'allow') {
+            const record = executionRecord(toolCall.id, tool.name, 'denied', startedAt, `Permission: ${permission}`);
+            toolExecutions.push(record);
+            appendMessage(
+              session,
+              createMessage(
+                {
+                  role: 'tool',
+                  toolCallId: toolCall.id,
+                  toolName: tool.name,
+                  content: JSON.stringify({ error: 'Permission denied.', permission }),
+                },
+                this.now,
+              ),
+            );
+            if (permission === 'deny') {
+              await closeRound('success');
+              return {
+                status: 'permission_denied',
+                session,
+                finalText: 'Permission denied.',
+                iterations: iteration,
+                toolExecutions,
+              };
+            }
+            continue;
+          }
+
+          try {
+            const context = {
+              session,
+              ...(options.signal === undefined ? {} : { signal: options.signal }),
+            };
+            const result = await tool.handler(toolCall.arguments, context);
+            const preview = serializeToolResult(result);
+            toolExecutions.push(executionRecord(toolCall.id, tool.name, 'success', startedAt, preview));
+            appendMessage(
+              session,
+              createMessage(
+                {
+                  role: 'tool',
+                  toolCallId: toolCall.id,
+                  toolName: tool.name,
+                  content: preview,
+                },
+                this.now,
+              ),
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            toolExecutions.push(executionRecord(toolCall.id, tool.name, 'failed', startedAt, message));
+            appendMessage(
+              session,
+              createMessage(
+                {
+                  role: 'tool',
+                  toolCallId: toolCall.id,
+                  toolName: tool.name,
+                  content: JSON.stringify({ error: message }),
+                },
+                this.now,
+              ),
+            );
+          }
         }
       }
-    }
 
-    await this.usageTracker.recordLocalQuery();
-    return {
-      status: 'max_iterations_reached',
-      session,
-      finalText: 'Max iterations reached.',
-      iterations: maxIterations,
-      toolExecutions,
-    };
+      await closeRound('success');
+      return {
+        status: 'max_iterations_reached',
+        session,
+        finalText: 'Max iterations reached.',
+        iterations: maxIterations,
+        toolExecutions,
+      };
+    } catch (error) {
+      const status = options.signal?.aborted || session.aborted ? 'aborted' : 'failed';
+      const message = error instanceof Error ? error.message : String(error);
+      await closeRound(status, message);
+      throw error;
+    }
   }
 }
 

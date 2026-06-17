@@ -74,6 +74,74 @@ describe('UsageTracker', () => {
       byokTokenEstimate: 37,
     });
   });
+
+  it('tracks a successful Agent round with token usage and persistent round history', async () => {
+    const path = await historyPath();
+    const tracker = new UsageTracker(path, fixedUsageOptions());
+
+    const round = await tracker.startConversationRound('session_orders', 'byok');
+    await tracker.recordLlmCall(round, { promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+    await tracker.recordLlmCall(round, { promptTokens: 20, completionTokens: 8, totalTokens: 28 });
+    await expect(tracker.endConversationRound(round, 'success')).resolves.toMatchObject({
+      mode: 'byok',
+      usedRounds: 1,
+      byokTokenEstimate: 43,
+    });
+
+    await expect(tracker.roundHistory()).resolves.toMatchObject([
+      {
+        id: 'round_1',
+        sessionId: 'session_orders',
+        mode: 'byok',
+        status: 'success',
+        promptTokens: 30,
+        completionTokens: 13,
+        totalTokens: 43,
+      },
+    ]);
+  });
+
+  it('counts user-aborted rounds but does not count system-failed rounds', async () => {
+    const path = await historyPath();
+    const tracker = new UsageTracker(path, fixedUsageOptions());
+
+    const aborted = await tracker.startConversationRound('session_abort', 'byok');
+    await tracker.endConversationRound(aborted, 'aborted');
+    const failed = await tracker.startConversationRound('session_failed', 'byok');
+    await tracker.endConversationRound(failed, 'failed', 'provider timeout');
+
+    await expect(tracker.current()).resolves.toMatchObject({
+      usedRounds: 1,
+    });
+    await expect(tracker.roundHistory()).resolves.toMatchObject([
+      { sessionId: 'session_failed', status: 'failed', errorMessage: 'provider timeout' },
+      { sessionId: 'session_abort', status: 'aborted' },
+    ]);
+  });
+
+  it('reports subscription quota status from completed billable rounds', async () => {
+    const path = await historyPath();
+    const tracker = new UsageTracker(path, { ...fixedUsageOptions(), subscriptionRoundLimit: 1 });
+
+    await expect(tracker.getCurrentQuota('subscription')).resolves.toMatchObject({
+      mode: 'subscription',
+      roundsUsed: 0,
+      roundLimit: 1,
+      remainingRounds: 1,
+      exceeded: false,
+    });
+
+    const round = await tracker.startConversationRound('session_subscription', 'subscription');
+    await tracker.endConversationRound(round, 'success');
+
+    await expect(tracker.getCurrentQuota('subscription')).resolves.toMatchObject({
+      mode: 'subscription',
+      roundsUsed: 1,
+      roundLimit: 1,
+      remainingRounds: 0,
+      exceeded: true,
+    });
+  });
 });
 
 function snapshot(usedRounds: number): UsageSnapshot {
@@ -88,4 +156,12 @@ function snapshot(usedRounds: number): UsageSnapshot {
 async function saveHistory(path: string, history: UsageSnapshot[]): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(history, null, 2)}\n`, 'utf8');
+}
+
+function fixedUsageOptions() {
+  let nextId = 0;
+  return {
+    now: () => new Date('2026-06-17T00:00:00.000Z'),
+    createRoundId: () => `round_${++nextId}`,
+  };
 }

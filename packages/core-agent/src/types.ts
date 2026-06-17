@@ -1,4 +1,5 @@
 import type { LlmMessage, LlmTool, LlmToolCall, LlmUsage } from '@dbagent/core-llm';
+import type { UsageMode } from '@dbagent/shared';
 
 export type AgentMode = 'ask' | 'auto' | 'full-auto' | 'readonly';
 
@@ -31,7 +32,8 @@ export type AgentRunStatus =
   | 'aborted'
   | 'max_iterations_reached'
   | 'permission_denied'
-  | 'tool_failed';
+  | 'tool_failed'
+  | 'quota_exceeded';
 
 export type AgentRunResult = {
   status: AgentRunStatus;
@@ -46,6 +48,7 @@ export type AgentRunOptions = {
   model: string;
   userMessage: string;
   allowedTools?: string[];
+  usageMode?: UsageMode;
   mode?: AgentMode;
   maxIterations?: number;
   tokenBudget?: number;
