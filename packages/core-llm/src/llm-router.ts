@@ -1,5 +1,5 @@
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
-import type { LlmChatRequest, LlmChatResponse, LlmProvider } from './types.js';
+import type { LlmChatRequest, LlmChatResponse, LlmChatStreamEvent, LlmProvider } from './types.js';
 
 export type LlmRouteMode = 'byok' | 'subscription';
 
@@ -58,5 +58,39 @@ export class LlmRouter {
       await this.usageTracker.recordByokTokens(response.usage.totalTokens);
     }
     return response;
+  }
+
+  async *stream(
+    providerId: string,
+    request: LlmChatRequest,
+    options: LlmChatOptions = {},
+  ): AsyncIterable<LlmChatStreamEvent> {
+    const provider = this.providers.get(providerId);
+    if (!provider) {
+      throw new Error(`LLM provider is not registered: ${providerId}`);
+    }
+
+    if (!provider.stream) {
+      const response = await this.chat(providerId, request, options);
+      if (response.text) yield { type: 'text-delta', text: response.text };
+      for (const toolCall of response.toolCalls) {
+        yield { type: 'tool-call', toolCall };
+      }
+      if (response.usage) yield { type: 'usage', usage: response.usage };
+      yield { type: 'finish', response };
+      return;
+    }
+
+    let finalResponse: LlmChatResponse | undefined;
+    for await (const event of provider.stream(request)) {
+      if (event.type === 'finish') finalResponse = event.response;
+      yield event;
+    }
+
+    if (finalResponse?.usage && options.round) {
+      await this.usageTracker.recordLlmCall(options.round, finalResponse.usage);
+    } else if (finalResponse?.usage?.totalTokens) {
+      await this.usageTracker.recordByokTokens(finalResponse.usage.totalTokens);
+    }
   }
 }

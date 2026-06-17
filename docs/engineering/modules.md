@@ -165,13 +165,15 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 提供 LLM 路由边界。
 - 为 BYOK 和 DBAgent gateway 模式预留统一入口。
 - 提供 OpenAI-compatible provider 合约，支持 SiliconFlow 等兼容接口。
-- 解析文本、工具调用和 token usage。
+- 解析文本、工具调用、流式事件和 token usage。
 
 开发逻辑：
 
 - 使用 Node 内置 `fetch`，不引入额外模型 SDK，降低打包体积和供应链风险。
 - Provider 通过 `LlmRouter` 注册，Agent 不直接持有具体厂商 SDK。
 - BYOK provider 调用后将 token 估算写入 `core-usage`；如果调用属于某个 Agent round，则 token 先归属到该 round，round 结束后再汇总到快照。
+- `LlmProvider.stream` 是可选能力；`LlmRouter.stream()` 在 provider 不支持流式时会回退到非流式 `chat()`，并输出等价的 text/usage/finish 事件。
+- OpenAI-compatible 流式实现解析 SSE：文本 delta、工具调用参数分片、usage 事件和 finish 事件；工具调用会在 finish response 中重组成完整 JSON 参数。
 - API key 只从运行时配置或环境变量读取，不写入代码、文档或测试快照。
 - 真实 API 测试必须显式打开环境变量开关，默认测试不访问外网、不消耗额度。
 
@@ -179,6 +181,8 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 
 - OpenAI-compatible 请求格式。
 - 文本响应、工具调用响应和 usage 解析。
+- 流式文本、流式工具调用分片、usage 和 finish response。
+- Router 流式 fallback，以及有 Agent round 时的流式 token 归属。
 - 有 Agent round 时，provider token usage 归属到 round；provider 异常不制造已完成用量。
 - 认证失败、限流、5xx、超时和重试。
 - BYOK 不要求登录。

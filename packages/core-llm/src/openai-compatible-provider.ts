@@ -2,6 +2,7 @@ import {
   LlmProviderError,
   type LlmChatRequest,
   type LlmChatResponse,
+  type LlmChatStreamEvent,
   type LlmProvider,
   type LlmProviderAvailability,
   type LlmProviderMode,
@@ -10,6 +11,11 @@ import {
 } from './types.js';
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+type StreamResponse = {
+  body: ReadableStream<Uint8Array>;
+  cleanup: () => void;
+};
 
 type OpenAICompatibleProviderConfig = {
   id: string;
@@ -52,6 +58,21 @@ type OpenAIChatChoice = {
   message?: {
     content?: string | null;
     tool_calls?: OpenAIToolCall[];
+  };
+  delta?: {
+    content?: string | null;
+    tool_calls?: OpenAIStreamToolCallDelta[];
+  };
+  finish_reason?: string | null;
+};
+
+type OpenAIStreamToolCallDelta = {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
   };
 };
 
@@ -101,32 +122,69 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 
   async chat(request: LlmChatRequest): Promise<LlmChatResponse> {
-    const payload = {
-      model: request.model,
-      messages: request.messages.map<OpenAIChatMessage>((message) => ({
-        role: message.role,
-        content: message.content,
-        ...(message.name ? { name: message.name } : {}),
-        ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
-      })),
-      ...(request.tools?.length
-        ? {
-            tools: request.tools.map<OpenAIChatTool>((tool) => ({
-              type: 'function',
-              function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.inputSchema,
-              },
-            })),
-          }
-        : {}),
-      ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
-      ...(request.maxTokens === undefined ? {} : { max_tokens: request.maxTokens }),
-    };
+    const payload = buildChatPayload(request);
 
     const response = await this.requestJson('/chat/completions', payload, request.signal);
     return parseChatResponse(response);
+  }
+
+  async *stream(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent> {
+    const payload = { ...buildChatPayload(request), stream: true, stream_options: { include_usage: true } };
+    const stream = await this.requestStream('/chat/completions', payload, request.signal);
+    const state = createStreamState();
+
+    try {
+      for await (const event of readSseEvents(stream.body)) {
+        if (event === '[DONE]') {
+          const response = streamStateToResponse(state);
+          yield finishEvent(response, state.finishReason);
+          return;
+        }
+
+        const chunk = parseJson(event) as OpenAIChatResponse;
+        if (!chunk || typeof chunk !== 'object') {
+          throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM stream returned an invalid event.', true);
+        }
+
+        if (chunk.id) state.providerResponseId = chunk.id;
+        if (chunk.model) state.model = chunk.model;
+        const usage = parseUsage(chunk.usage);
+        if (usage) {
+          state.usage = usage;
+          yield { type: 'usage', usage };
+        }
+
+        for (const choice of chunk.choices ?? []) {
+          if (choice.finish_reason) state.finishReason = choice.finish_reason;
+          const text = choice.delta?.content ?? '';
+          if (text) {
+            state.text += text;
+            yield { type: 'text-delta', text };
+          }
+
+          for (const delta of choice.delta?.tool_calls ?? []) {
+            const index = delta.index ?? 0;
+            const current = state.toolCalls.get(index) ?? { arguments: '' };
+            if (delta.id) current.id = delta.id;
+            if (delta.function?.name) current.name = delta.function.name;
+            if (delta.function?.arguments) current.arguments += delta.function.arguments;
+            state.toolCalls.set(index, current);
+            yield {
+              type: 'tool-call-delta',
+              index,
+              ...(delta.id === undefined ? {} : { id: delta.id }),
+              ...(delta.function?.name === undefined ? {} : { name: delta.function.name }),
+              ...(delta.function?.arguments === undefined ? {} : { argumentsDelta: delta.function.arguments }),
+            };
+          }
+        }
+      }
+    } finally {
+      stream.cleanup();
+    }
+
+    const response = streamStateToResponse(state);
+    yield finishEvent(response, state.finishReason);
   }
 
   async isAvailable(): Promise<LlmProviderAvailability> {
@@ -217,6 +275,54 @@ export class OpenAICompatibleProvider implements LlmProvider {
       signal?.removeEventListener('abort', abort);
     }
   }
+
+  private async requestStream(
+    path: string,
+    payload: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<StreamResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const cleanup = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+    };
+
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${this.apiKey}`,
+          ...this.defaultHeaders,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw httpError(response.status, parseJson(text));
+      }
+      if (!response.body) {
+        throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM provider returned an empty stream.', true);
+      }
+      return { body: response.body, cleanup };
+    } catch (error) {
+      cleanup();
+      if (isAbortError(error)) {
+        throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
+      }
+      if (error instanceof LlmProviderError) throw error;
+      throw new LlmProviderError(
+        'LLM_NETWORK_ERROR',
+        error instanceof Error ? error.message : 'LLM stream request failed.',
+        true,
+      );
+    }
+  }
 }
 
 export function createSiliconFlowProvider(config: {
@@ -252,6 +358,121 @@ function parseChatResponse(response: OpenAIChatResponse): LlmChatResponse {
   if (response.id) parsed.providerResponseId = response.id;
   if (response.model) parsed.model = response.model;
   return parsed;
+}
+
+function buildChatPayload(request: LlmChatRequest): Record<string, unknown> {
+  return {
+    model: request.model,
+    messages: request.messages.map<OpenAIChatMessage>((message) => ({
+      role: message.role,
+      content: message.content,
+      ...(message.name ? { name: message.name } : {}),
+      ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+    })),
+    ...(request.tools?.length
+      ? {
+          tools: request.tools.map<OpenAIChatTool>((tool) => ({
+            type: 'function',
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.inputSchema,
+            },
+          })),
+        }
+      : {}),
+    ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+    ...(request.maxTokens === undefined ? {} : { max_tokens: request.maxTokens }),
+  };
+}
+
+type StreamToolCallState = {
+  id?: string;
+  name?: string;
+  arguments: string;
+};
+
+type StreamState = {
+  text: string;
+  toolCalls: Map<number, StreamToolCallState>;
+  usage?: LlmUsage;
+  providerResponseId?: string;
+  model?: string;
+  finishReason?: string;
+};
+
+function createStreamState(): StreamState {
+  return {
+    text: '',
+    toolCalls: new Map(),
+  };
+}
+
+function streamStateToResponse(state: StreamState): LlmChatResponse {
+  const response: LlmChatResponse = {
+    text: state.text,
+    toolCalls: [...state.toolCalls.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, call]) => ({
+        id: call.id ?? crypto.randomUUID(),
+        name: call.name ?? 'unknown_tool',
+        arguments: parseToolArguments(call.arguments || '{}'),
+      })),
+  };
+  if (state.usage) response.usage = state.usage;
+  if (state.providerResponseId) response.providerResponseId = state.providerResponseId;
+  if (state.model) response.model = state.model;
+  return response;
+}
+
+function finishEvent(response: LlmChatResponse, reason?: string): LlmChatStreamEvent {
+  return {
+    type: 'finish',
+    response,
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
+async function* readSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterable<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      yield* drainSseBuffer(buffer, (next) => {
+        buffer = next;
+      });
+    }
+    buffer += decoder.decode();
+    yield* drainSseBuffer(`${buffer}\n\n`, (next) => {
+      buffer = next;
+    });
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function* drainSseBuffer(buffer: string, setBuffer: (next: string) => void): Iterable<string> {
+  let rest = buffer;
+  while (true) {
+    const normalized = rest.replace(/\r\n/g, '\n');
+    const boundary = normalized.indexOf('\n\n');
+    if (boundary < 0) {
+      setBuffer(rest);
+      return;
+    }
+    const rawEvent = normalized.slice(0, boundary);
+    rest = normalized.slice(boundary + 2);
+    const dataLines = rawEvent
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart());
+    if (dataLines.length > 0) yield dataLines.join('\n');
+  }
 }
 
 function parseToolCall(call: OpenAIToolCall): LlmToolCall {

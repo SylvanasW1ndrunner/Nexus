@@ -108,6 +108,137 @@ describe('OpenAICompatibleProvider', () => {
     });
   });
 
+  it('streams text deltas, usage, and final response from OpenAI-compatible SSE', async () => {
+    const fetchMock = vi.fn(async () =>
+      streamResponse([
+        sse({ id: 'chatcmpl_stream', model: 'deepseek-ai/DeepSeek-V4-Pro', choices: [{ delta: { content: '查询' } }] }),
+        sse({ id: 'chatcmpl_stream', model: 'deepseek-ai/DeepSeek-V4-Pro', choices: [{ delta: { content: '正常' } }] }),
+        sse({
+          id: 'chatcmpl_stream',
+          model: 'deepseek-ai/DeepSeek-V4-Pro',
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        }),
+        'data: [DONE]\n\n',
+      ]),
+    );
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      fetch: fetchMock,
+    });
+
+    const events = await collect(
+      provider.stream({
+        model: 'deepseek-ai/DeepSeek-V4-Pro',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    );
+
+    expect(events).toMatchObject([
+      { type: 'text-delta', text: '查询' },
+      { type: 'text-delta', text: '正常' },
+      { type: 'usage', usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 } },
+      {
+        type: 'finish',
+        reason: 'stop',
+        response: {
+          text: '查询正常',
+          usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+          providerResponseId: 'chatcmpl_stream',
+          model: 'deepseek-ai/DeepSeek-V4-Pro',
+        },
+      },
+    ]);
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+  });
+
+  it('streams fragmented tool calls and reconstructs final JSON arguments', async () => {
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      fetch: async () =>
+        streamResponse([
+          sse({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_stream',
+                      type: 'function',
+                      function: { name: 'query_database', arguments: '{"sql":"select ' },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          sse({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [{ index: 0, function: { arguments: 'count(*) from orders"}' } }],
+                },
+              },
+            ],
+          }),
+          'data: [DONE]\n\n',
+        ]),
+    });
+
+    const events = await collect(
+      provider.stream({
+        model: 'deepseek-ai/DeepSeek-V4-Pro',
+        messages: [{ role: 'user', content: '查订单数' }],
+        tools: [
+          {
+            name: 'query_database',
+            description: 'Execute readonly SQL',
+            inputSchema: { type: 'object' },
+          },
+        ],
+      }),
+    );
+
+    expect(events).toMatchObject([
+      {
+        type: 'tool-call-delta',
+        index: 0,
+        id: 'call_stream',
+        name: 'query_database',
+        argumentsDelta: '{"sql":"select ',
+      },
+      {
+        type: 'tool-call-delta',
+        index: 0,
+        argumentsDelta: 'count(*) from orders"}',
+      },
+      {
+        type: 'finish',
+        response: {
+          text: '',
+          toolCalls: [
+            {
+              id: 'call_stream',
+              name: 'query_database',
+              arguments: { sql: 'select count(*) from orders' },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('classifies auth failures as non-retryable', async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse(401, { error: { message: 'invalid api key' } }),
@@ -203,6 +334,26 @@ describe('SiliconFlow live integration', () => {
     },
     90_000,
   );
+
+  it.skipIf(!runLive || !apiKey)(
+    'streams DeepSeek-V4-Pro through the configured SiliconFlow API key',
+    async () => {
+      const provider = createSiliconFlowProvider({ apiKey: apiKey!, timeoutMs: 60_000 });
+
+      const events = await collect(
+        provider.stream({
+          model: 'deepseek-ai/DeepSeek-V4-Pro',
+          messages: [{ role: 'user', content: '只回答四个字：流式正常' }],
+          maxTokens: 16,
+          temperature: 0,
+        }),
+      );
+
+      expect(events.some((event) => event.type === 'text-delta')).toBe(true);
+      expect(events.at(-1)).toMatchObject({ type: 'finish' });
+    },
+    90_000,
+  );
 });
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -210,4 +361,27 @@ function jsonResponse(status: number, body: unknown): Response {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function streamResponse(chunks: string[]): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    }),
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+}
+
+function sse(body: unknown): string {
+  return `data: ${JSON.stringify(body)}\n\n`;
+}
+
+async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
+  const events: T[] = [];
+  for await (const event of iterable) events.push(event);
+  return events;
 }

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { UsageTracker } from '@dbagent/core-usage';
-import { LlmRouter, type LlmProvider } from '../src/index.js';
+import { LlmRouter, type LlmChatStreamEvent, type LlmProvider } from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -106,6 +106,56 @@ describe('LlmRouter', () => {
     });
   });
 
+  it('streams through providers and records final usage on the active Agent round', async () => {
+    const tracker = new UsageTracker(await usagePath(), {
+      now: () => new Date('2026-06-17T00:00:00.000Z'),
+      createRoundId: () => 'round_stream_router',
+    });
+    const round = await tracker.startConversationRound('session_stream_router', 'byok');
+    const router = new LlmRouter(tracker, [streamingProvider()]);
+
+    const events = await collect(
+      router.stream(
+        'streaming',
+        {
+          model: 'fake-model',
+          messages: [{ role: 'user', content: 'ping' }],
+        },
+        { round },
+      ),
+    );
+    await tracker.endConversationRound(round, 'success');
+
+    expect(events).toMatchObject([
+      { type: 'text-delta', text: 'hello' },
+      { type: 'usage', usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 } },
+      { type: 'finish', response: { text: 'hello' } },
+    ]);
+    await expect(tracker.current()).resolves.toMatchObject({
+      usedRounds: 1,
+      byokTokenEstimate: 6,
+    });
+  });
+
+  it('falls back to non-streaming chat when a provider has no stream implementation', async () => {
+    const tracker = new UsageTracker(await usagePath());
+    const router = new LlmRouter(tracker, [fakeProvider(9)]);
+
+    const events = await collect(
+      router.stream('fake', {
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    );
+
+    expect(events).toMatchObject([
+      { type: 'text-delta', text: 'ok' },
+      { type: 'usage', usage: { totalTokens: 9 } },
+      { type: 'finish', response: { text: 'ok' } },
+    ]);
+    await expect(tracker.current()).resolves.toMatchObject({ byokTokenEstimate: 9 });
+  });
+
   it('fails clearly when provider is missing', async () => {
     const router = new LlmRouter(new UsageTracker(await usagePath()));
 
@@ -154,4 +204,36 @@ function failingProvider(): LlmProvider {
       return { available: true };
     },
   };
+}
+
+function streamingProvider(): LlmProvider {
+  return {
+    id: 'streaming',
+    name: 'Streaming Provider',
+    mode: 'byok',
+    async chat() {
+      throw new Error('chat fallback should not be used');
+    },
+    async *stream(): AsyncIterable<LlmChatStreamEvent> {
+      yield { type: 'text-delta', text: 'hello' };
+      yield { type: 'usage', usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 } };
+      yield {
+        type: 'finish',
+        response: {
+          text: 'hello',
+          toolCalls: [],
+          usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 },
+        },
+      };
+    },
+    async isAvailable() {
+      return { available: true };
+    },
+  };
+}
+
+async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
+  const events: T[] = [];
+  for await (const event of iterable) events.push(event);
+  return events;
 }

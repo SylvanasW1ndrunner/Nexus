@@ -44,6 +44,13 @@ export type LlmChatResponse = {
   model?: string;
 };
 
+export type LlmChatStreamEvent =
+  | { type: 'text-delta'; text: string }
+  | { type: 'tool-call-delta'; index: number; id?: string; name?: string; argumentsDelta?: string }
+  | { type: 'tool-call'; toolCall: LlmToolCall }
+  | { type: 'usage'; usage: LlmUsage }
+  | { type: 'finish'; response: LlmChatResponse; reason?: string };
+
 export type LlmProviderAvailability = {
   available: boolean;
   detail?: string;
@@ -55,6 +62,7 @@ export interface LlmProvider {
   readonly mode: LlmProviderMode;
 
   chat(request: LlmChatRequest): Promise<LlmChatResponse>;
+  stream?(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent>;
   isAvailable(): Promise<LlmProviderAvailability>;
 }
 
