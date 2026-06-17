@@ -11,3 +11,4 @@ export * from './table-designer.js';
 export * from './import-plan.js';
 export * from './sql-performance.js';
 export * from './postgres-errors.js';
+export * from './sql-object-preview.js';
