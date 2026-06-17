@@ -7,5 +7,6 @@ export * from './postgres-driver.js';
 export * from './database-driver-registry.js';
 export * from './sql-builder.js';
 export * from './table-edit.js';
+export * from './table-designer.js';
 export * from './sql-performance.js';
 export * from './postgres-errors.js';

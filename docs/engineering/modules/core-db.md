@@ -10,6 +10,7 @@
 - `packages/core-db/src/sql-performance.ts`：轻量性能提示。
 - `packages/core-db/src/sql-builder.ts`：Schema 预览 SQL、表数据浏览 SQL、identifier quote 和参数化筛选构建。
 - `packages/core-db/src/table-edit.ts`：表数据编辑的 SQL 预览、主键保护、批量确认和事务执行输入。
+- `packages/core-db/src/table-designer.ts`：表设计器 DDL 预览，覆盖新建表、添加字段、索引、外键和注释。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
 - `packages/core-db/src/query-snapshot.ts`：查询结果快照持久化，用于“钉住结果”和重启后复查。
@@ -40,6 +41,15 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 
 超过默认 50 条操作的批量编辑会标记 `requiresExtraConfirmation`，用于后续 UI 做二次确认。生成出的多语句 SQL 交给 `PostgresDriver.execute()` 后会被 `analyzeSqlSafety` 识别为多语句写操作，并在 driver 层进入事务；任何中间语句失败都会回滚，满足产品文档中“预览 SQL → 确认 → 事务执行 → 失败自动回滚”的表格编辑流程。
 
+表设计器使用 `buildCreateTablePreview()` 和 `buildAlterTablePreview()` 生成 DDL 预览。它的边界是“只生成可审查 SQL，不直接执行”，以满足产品文档中“所有变更不直接执行，先生成 DDL 让用户预览”的安全机制。当前支持：
+
+- 新建表：字段、主键、表注释、列注释、索引、外键。
+- 修改表：新增字段、新增索引、新增外键、更新表注释。
+- PostgreSQL 索引类型：btree、hash、gin、gist、brin。
+- 外键动作：no action、restrict、cascade、set null、set default。
+
+DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`，调用方必须让用户确认后才能交给 driver 执行。新建表没有主键时会返回 warning，因为后续表数据编辑无法安全按主键定位行。字段类型允许 `varchar(255)`、`numeric(10,2)` 等正常类型表达，但会拒绝包含 `;` 或 `--` 的明显危险 token；默认值和 check 表达式属于 SQL 片段，后续 UI/Agent 必须显示给用户审查。
+
 远程连接按真实桌面使用场景处理：默认连接超时、语句超时、TCP keepalive，并把认证失败、DNS 失败、端口关闭、超时和连接中断分类成产品错误码。这样 Windows 或 Linux 桌面连接服务器数据库时，用户能得到可操作提示，而不是只有“连接失败”。
 连接建立后的运行期错误也必须保持 `Result<T>` 契约。`PostgresDriver.execute`、`listTables` 和 `describeTable` 会把网络中断、端口拒绝和超时继续分类为可重试的远程连接错误；普通 SQL 语法错误、catalog 查询错误等则返回 `QUERY_FAILED`。这保证 Schema 树刷新或查询执行遇到远程数据库抖动时，不会把异常漏到 IPC 外层。
 
@@ -67,6 +77,7 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 - `sql-performance.test.ts`：复杂 SQL 性能提示。
 - `sql-builder.test.ts`：PostgreSQL identifier quote、预览 limit 上限、表数据浏览列选择/筛选/排序/分页、用户输入参数化、高级 WHERE warning。
 - `table-edit.test.ts`：表格编辑 SQL 预览、identifier quote、字符串/JSON/bytea 等字面量处理、无主键拒绝更新/删除、主键列不可编辑、批量二次确认。
+- `table-designer.test.ts`：表设计器 CREATE/ALTER DDL 预览、注释转义、索引、外键、无主键提示和非法定义拦截。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
 - `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，参数化查询会传给 PostgreSQL pool，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
