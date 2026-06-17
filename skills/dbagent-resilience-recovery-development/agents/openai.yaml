@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent Resilience Recovery Development"
+  short_description: "Build autosave, recovery, cancellation, and diagnostics."
+  default_prompt: "Use this skill to implement DBAgent resilience and recovery behavior."

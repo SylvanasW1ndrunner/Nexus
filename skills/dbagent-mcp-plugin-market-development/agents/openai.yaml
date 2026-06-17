@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent MCP Plugin Market Development"
+  short_description: "Build MCP, plugin, market, and extension contracts."
+  default_prompt: "Use this skill to implement DBAgent MCP and plugin-market capabilities."

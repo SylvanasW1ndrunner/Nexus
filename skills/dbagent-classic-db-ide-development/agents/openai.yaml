@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent Classic DB IDE Development"
+  short_description: "Build traditional database IDE backend capability."
+  default_prompt: "Use this skill to implement DBAgent classic database IDE service features."
