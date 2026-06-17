@@ -24,6 +24,11 @@
   - 只接受相对路径
   - 拒绝绝对路径
   - 拒绝 `..` 越界
+- `registerWorkspaceTools()`
+  - `list_workspace_dir`
+  - `read_workspace_file`
+  - `write_workspace_file`
+  - 复用 `core-workspace` 的读写和原子写入边界
 
 ## 权限策略调整
 
@@ -46,12 +51,15 @@
 - 用户在 readonly 模式要求删除数据时，`execute_sql` 在 driver 执行前被拒绝。
 - 当前连接不存在时，查询工具返回明确错误。
 - workspace 工具路径不能访问绝对路径，也不能通过 `..` 逃逸工作区。
+- Agent 能在真实 workspace 中写入分析报告、读回内容，并列出输出目录。
+- 未打开 workspace 时，workspace 工具返回明确错误，不触碰文件系统。
 
 ## 当前边界
 
 已实现：
 
 - DB/RAG 内置工具注册。
+- Workspace 文件内置工具注册。
 - Agent 权限联动。
 - 工具参数校验。
 - workspace 路径沙箱 helper。
@@ -60,7 +68,7 @@
 
 - Python script tool。
 - Shell tool。
-- Workspace file read/write/edit tool。
+- Workspace file edit/patch tool。
 - MCP tool adapter。
 - Tool execution audit store。
 

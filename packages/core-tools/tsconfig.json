@@ -11,7 +11,8 @@
     { "path": "../shared" },
     { "path": "../core-agent" },
     { "path": "../core-db" },
-    { "path": "../core-rag" }
+    { "path": "../core-rag" },
+    { "path": "../core-workspace" }
   ],
   "include": ["src/**/*.ts"]
 }
