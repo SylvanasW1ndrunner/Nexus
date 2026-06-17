@@ -261,10 +261,12 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - DB 工具直接复用 `core-db` driver，不绕开 SQL 安全、只读拦截、确认机制和错误分类。
 - RAG 工具直接复用 `core-rag`，当前提供 `search_schema` 和 `build_schema_context`。
 - 工作区文件工具复用 `core-workspace`，当前提供 `list_workspace_dir`、`read_workspace_file`、`write_workspace_file`。
+- 工作区脚本工具复用 `core-workspace.discoverScriptTools()`，当前通过 `registerWorkspaceScriptTools()` 将带 docstring 标记的 Python 脚本注册为 Agent 工具。
 - 工具定义包含 `dangerLevel` 和 `readonly`，由 `core-agent` 的 `PermissionManager` 统一决策。
 - `query_database` 是只读 medium 工具；在 readonly Agent 模式下允许执行 SELECT 类分析。
 - `execute_sql` 是 high 且非只读工具；readonly Agent 模式会在 driver 执行前拒绝。
 - `read_workspace_file` 和 `list_workspace_dir` 是 safe readonly 工具；`write_workspace_file` 是 medium 非只读工具，需要遵守 Agent 模式权限。
+- `workspace_script:*` 工具是 medium 非只读工具；执行器由调用方注入，core-tools 不直接依赖 Electron main 或某个 Python runtime。
 - workspace 路径解析只接受相对路径，并拒绝 `..` 越界。
 - 当前不把 Electron main 的 Python/Terminal 服务反向依赖到 core 包；后续应通过抽象接口接入。
 
@@ -277,6 +279,8 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - workspace 路径不能访问绝对路径或越过工作区根目录。
 - Agent 工具能在真实临时 workspace 中写入、读取和列出报告制品。
 - 未打开 workspace 时，workspace 工具不能触碰文件系统并返回明确错误。
+- Agent 能发现带 `DBAgent Tool:` docstring 的 Python 脚本，并通过注入 runner 真实执行。
+- 脚本参数会按 docstring 声明校验，类型错误时不会启动 runner。
 
 ## `packages/core-workspace`
 

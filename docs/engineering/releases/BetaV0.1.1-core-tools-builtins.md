@@ -29,6 +29,10 @@
   - `read_workspace_file`
   - `write_workspace_file`
   - 复用 `core-workspace` 的读写和原子写入边界
+- `registerWorkspaceScriptTools()`
+  - 发现 `scripts/` 下带 `DBAgent Tool:` 或 `@tool` docstring 的 Python 脚本
+  - 注册为 `workspace_script:*` Agent 工具
+  - 执行器由调用方注入，core-tools 不直接依赖 Electron main
 
 ## 权限策略调整
 
@@ -53,6 +57,8 @@
 - workspace 工具路径不能访问绝对路径，也不能通过 `..` 逃逸工作区。
 - Agent 能在真实 workspace 中写入分析报告、读回内容，并列出输出目录。
 - 未打开 workspace 时，workspace 工具返回明确错误，不触碰文件系统。
+- Agent 能发现并执行工作区 Python 脚本工具。
+- Python 脚本工具参数类型错误时，不启动执行器。
 
 ## 当前边界
 
@@ -60,13 +66,13 @@
 
 - DB/RAG 内置工具注册。
 - Workspace 文件内置工具注册。
+- Workspace Python script tool 注册。
 - Agent 权限联动。
 - 工具参数校验。
 - workspace 路径沙箱 helper。
 
 暂未实现：
 
-- Python script tool。
 - Shell tool。
 - Workspace file edit/patch tool。
 - MCP tool adapter。
