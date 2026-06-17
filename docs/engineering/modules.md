@@ -258,6 +258,35 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 缺失活动连接时返回明确错误。
 - workspace 路径不能访问绝对路径或越过工作区根目录。
 
+## `packages/core-workspace`
+
+职责：
+
+- 提供无 Electron 依赖的工作区核心能力。
+- 创建和打开 `.dbagent/workspace.json`。
+- 管理工作区目录结构、SQL 文件、脚本文件和文档产物。
+- 扫描 Python 脚本中的 DBAgent Tool docstring，把脚本声明为后续 Agent 可调用工具。
+
+开发逻辑：
+
+- 工作区是普通目录，配置文件固定为 `.dbagent/workspace.json`。
+- 默认目录包含 `queries`、`sql`、`scripts`、`skills`、`docs`、`outputs` 和 `notebooks`。
+- 文件写入使用临时文件 + rename 的原子写入策略，减少崩溃造成的半文件。
+- 文件路径只允许进入受管理目录，拒绝 `.dbagent`、绝对路径和 `..` 越界。
+- SQL 保存使用注释元数据：`@name`、`@description`、`@connection`、`@tags`。
+- Python 配置支持 system、venv、conda、embedded、docker 的合约层字段。
+- 脚本工具声明支持 `DBAgent Tool: name` 和 `@tool name` 两种 docstring 形式。
+
+测试重点：
+
+- 创建标准分析工作区并生成 requirements。
+- 保存带元数据的 SQL 文件。
+- 原子写入脚本文件。
+- 阻止路径越界和访问 `.dbagent`。
+- 发现 Python 脚本工具声明。
+- 文件列表不暴露 `.dbagent` 内部。
+- 普通目录没有有效配置时不能被打开为工作区。
+
 ## `scripts`
 
 职责：
