@@ -287,6 +287,33 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 文件列表不暴露 `.dbagent` 内部。
 - 普通目录没有有效配置时不能被打开为工作区。
 
+## `packages/core-skills`
+
+职责：
+
+- 提供 Skill 定义解析、校验、注册和加载顺序处理。
+- 支持内置、用户级、工作区级 Skill 的覆盖规则。
+- 为 Agent 执行 Skill 生成无 UI 的执行计划。
+
+开发逻辑：
+
+- Skill 是可复用任务流程，不是简单 prompt 模板。
+- 字段覆盖产品文档的核心约定：`name`、`title`、`description`、`system_addition`、`allowed_tools`、`defaults`、`steps`、`output_format`、`natural_language_keywords`、`auto_inject_when`。
+- 加载顺序是内置 → 用户级 → 工作区级；同名 Skill 后加载者覆盖前者。
+- `allowed_tools` 会和当前实际可用工具求交集，避免 Skill 请求未注册工具。
+- 默认参数可渲染进用户输入，例如 `{date}`。
+- 当前 YAML parser 只支持 Skill 所需安全子集，避免引入额外 YAML 依赖；复杂 YAML 结构后续再扩展。
+
+测试重点：
+
+- 解析产品文档风格 YAML。
+- 解析 Agent 生成的 JSON Skill。
+- 拒绝缺失必填字段和非法输出格式。
+- 正确处理注释、列表和多行 `system_addition`。
+- 内置、用户级、工作区级 Skill 覆盖顺序正确。
+- 坏 Skill 不阻止同目录其他 Skill 加载。
+- 执行计划会过滤不可用工具并渲染默认参数。
+
 ## `scripts`
 
 职责：
