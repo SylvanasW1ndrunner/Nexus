@@ -11,6 +11,7 @@
 - `packages/core-db/src/sql-builder.ts`：Schema 预览 SQL、表数据浏览 SQL、identifier quote 和参数化筛选构建。
 - `packages/core-db/src/table-edit.ts`：表数据编辑的 SQL 预览、主键保护、批量确认和事务执行输入。
 - `packages/core-db/src/table-designer.ts`：表设计器 DDL 预览，覆盖新建表、添加字段、索引、外键和注释。
+- `packages/core-db/src/import-plan.ts`：导入向导后端合同，覆盖 CSV/JSON 预览、字段映射和批量 INSERT/UPSERT 计划。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
 - `packages/core-db/src/query-snapshot.ts`：查询结果快照持久化，用于“钉住结果”和重启后复查。
@@ -65,6 +66,16 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 
 `QueryRequest` 已支持 `params`，`PostgresDriver.execute()` 会把参数传给 `pg` 的 query API。这样表数据浏览、筛选搜索和后续参数化 SQL 工具可以走同一条执行通路，避免“构建器安全、执行器不支持”的断层。
 
+导入向导使用 `parseCsvImportPreview()`、`parseJsonImportPreview()` 和 `buildImportExecutionPlan()` 拆成“预览”和“执行计划”两步。预览阶段只解析源数据前 N 行并给出列名、行号、总行数、是否截断和 warning；执行计划阶段根据字段映射生成参数化批量 SQL：
+
+- 当前源格式：CSV、JSON。Excel、SQL 文件后续通过 provider 扩展。
+- 执行模式：INSERT、UPSERT、TRUNCATE 后 INSERT。
+- 支持字段映射、默认值、空值跳过、批大小、单事务/分批事务、错误处理策略声明。
+- 批量 SQL 使用 `$1`、`$2` 参数占位，导入值不直接拼进 SQL 文本。
+- `truncate-insert` 会把 `TRUNCATE` 放入 `preludeSql`，由调用方在用户确认后按事务策略执行。
+
+该模块仍然不直接访问文件系统或数据库；主进程/CLI/测试读取文件内容后调用它生成计划，再交给 driver 执行。这样导入向导可以在没有最终 UI 的阶段做完整用户流程测试。
+
 连接元数据和查询历史使用 `json-file.ts` 做临时文件加 rename 的原子写入。读取时如果文件缺失或 JSON 损坏，会返回空列表，让应用继续启动和执行查询；这避免单个损坏的本地 JSON 文件把桌面应用整体拖垮。后续如果进入多用户或大历史量阶段，应迁移到 SQLite 并保留迁移备份。
 
 结果快照由 `QuerySnapshotStore` 管理，服务于产品文档中的“查询结果可钉住，重启后保留”。快照保存 SQL、连接、列信息、行数据、耗时、安全报告、标签、备注和来源历史 ID。列表接口默认只返回前 5 行 `previewRows`，完整内容通过 `get(id)` 获取，避免快照列表页或后续 IPC 一次性搬运大结果集。
@@ -78,6 +89,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `sql-builder.test.ts`：PostgreSQL identifier quote、预览 limit 上限、表数据浏览列选择/筛选/排序/分页、用户输入参数化、高级 WHERE warning。
 - `table-edit.test.ts`：表格编辑 SQL 预览、identifier quote、字符串/JSON/bytea 等字面量处理、无主键拒绝更新/删除、主键列不可编辑、批量二次确认。
 - `table-designer.test.ts`：表设计器 CREATE/ALTER DDL 预览、注释转义、索引、外键、无主键提示和非法定义拦截。
+- `import-plan.test.ts`：CSV/JSON 预览、字段映射、批量 INSERT、UPSERT、TRUNCATE prelude、跳过错误策略 warning 和非法源/计划拦截。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
 - `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，参数化查询会传给 PostgreSQL pool，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
