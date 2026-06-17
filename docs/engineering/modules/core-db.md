@@ -127,6 +127,13 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 
 连接元数据和查询历史使用 `json-file.ts` 做临时文件加 rename 的原子写入。读取时如果文件缺失或 JSON 损坏，会返回空列表，让应用继续启动和执行查询；这避免单个损坏的本地 JSON 文件把桌面应用整体拖垮。后续如果进入多用户或大历史量阶段，应迁移到 SQLite 并保留迁移备份。
 
+查询历史由 `QueryHistoryStore` 管理，当前支持两种读取合同：
+
+- `list(options)`：兼容旧调用方，返回历史数组，默认最新优先。
+- `search(options)`：面向后续历史面板、Agent 历史读取和事故审计，返回 `{ items, total, offset, limit }`。
+
+检索条件包括连接 ID、SQL / 错误 / 安全原因全文搜索、执行状态、风险级别、语句类型、创建时间范围、分页 offset 和 limit。`db:query-history` IPC 请求类型已同步扩展这些字段，但响应仍保持 `QueryHistoryItem[]`，避免破坏现有调用方。该模块只负责本地历史检索，不直接执行 SQL，也不读取数据库凭据。
+
 结果快照由 `QuerySnapshotStore` 管理，服务于产品文档中的“查询结果可钉住，重启后保留”。快照保存 SQL、连接、列信息、行数据、耗时、安全报告、标签、备注和来源历史 ID。列表接口默认只返回前 5 行 `previewRows`，完整内容通过 `get(id)` 获取，避免快照列表页或后续 IPC 一次性搬运大结果集。
 
 快照写入前会显式规范化数据库值：`bigint`、`Date`、`Buffer`、非有限数字、JSONB/数组会转换成稳定 JSON 结构，避免真实 PostgreSQL 结果因为 `bigint` 无法 `JSON.stringify` 而写入失败。快照文件损坏时按空列表降级，保证 IDE 仍可继续执行查询；默认最多保留 200 条，后续如果支持大规模审计或团队协作，应迁移到 SQLite 并增加分页索引。
@@ -148,7 +155,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
 - `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，参数化查询会传给 PostgreSQL pool，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
-- `query-history.test.ts`：查询历史写入、读取、审计上下文和损坏 JSON 降级。
+- `query-history.test.ts`：查询历史写入、读取、按 SQL / 错误 / 安全原因搜索、按连接 / 状态 / 风险 / 语句类型筛选、分页元数据、时间范围检索、审计上下文和损坏 JSON 降级。
 - `query-snapshot.test.ts`：结果快照钉住、特殊数据库值序列化、连接过滤、搜索、预览行、删除、容量上限和损坏 JSON 降级。
 - `postgres.integration.test.ts`：真实 PostgreSQL 连接、Schema 列表、表详情、join 查询、只读拦截、断连后失败、批量 SQL 事务回滚、表编辑 SQL 预览提交和失败回滚。
 

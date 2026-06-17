@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { QueryHistoryItem, QuerySafetyReport } from '@dbagent/shared';
+import type { QueryHistoryItem, QueryRiskLevel, QuerySafetyReport } from '@dbagent/shared';
 import { readJsonFile, writeJsonFileAtomic } from './json-file.js';
 
 export type AppendQueryHistoryInput = {
@@ -10,6 +10,25 @@ export type AppendQueryHistoryInput = {
   elapsedMs?: number;
   errorMessage?: string;
   safety: QuerySafetyReport;
+};
+
+export type QueryHistoryListOptions = {
+  connectionId?: string;
+  limit?: number;
+  offset?: number;
+  searchText?: string;
+  status?: QueryHistoryItem['status'] | QueryHistoryItem['status'][];
+  riskLevel?: QueryRiskLevel | QueryRiskLevel[];
+  statementKind?: string | string[];
+  createdFrom?: string | Date;
+  createdTo?: string | Date;
+};
+
+export type QueryHistorySearchResult = {
+  items: QueryHistoryItem[];
+  total: number;
+  offset: number;
+  limit: number;
 };
 
 export class QueryHistoryStore {
@@ -27,18 +46,80 @@ export class QueryHistoryStore {
     if (input.rowCount !== undefined) item.rowCount = input.rowCount;
     if (input.elapsedMs !== undefined) item.elapsedMs = input.elapsedMs;
     if (input.errorMessage !== undefined) item.errorMessage = input.errorMessage;
-    const history = await this.list({});
+    const history = await this.readAll();
     await this.save([item, ...history].slice(0, 500));
     return item;
   }
 
-  async list(options: { connectionId?: string; limit?: number }): Promise<QueryHistoryItem[]> {
-    const all = await readJsonFile<QueryHistoryItem[]>(this.filePath, []);
-    const filtered = options.connectionId ? all.filter((item) => item.connectionId === options.connectionId) : all;
-    return filtered.slice(0, options.limit ?? 100);
+  async list(options: QueryHistoryListOptions = {}): Promise<QueryHistoryItem[]> {
+    return (await this.search(options)).items;
+  }
+
+  async search(options: QueryHistoryListOptions = {}): Promise<QueryHistorySearchResult> {
+    const all = await this.readAll();
+    const filtered = filterHistoryItems(all, options);
+    const offset = normalizeNonNegativeInteger(options.offset, 0);
+    const limit = normalizeNonNegativeInteger(options.limit, 100);
+    return {
+      items: filtered.slice(offset, offset + limit),
+      total: filtered.length,
+      offset,
+      limit,
+    };
   }
 
   private async save(items: QueryHistoryItem[]): Promise<void> {
     await writeJsonFileAtomic(this.filePath, items);
   }
+
+  private async readAll(): Promise<QueryHistoryItem[]> {
+    return readJsonFile<QueryHistoryItem[]>(this.filePath, []);
+  }
+}
+
+function filterHistoryItems(items: QueryHistoryItem[], options: QueryHistoryListOptions): QueryHistoryItem[] {
+  const searchText = options.searchText?.trim().toLowerCase();
+  const statuses = normalizeSet(options.status);
+  const riskLevels = normalizeSet(options.riskLevel);
+  const statementKinds = normalizeSet(options.statementKind, (value) => value.toUpperCase());
+  const createdFrom = normalizeTimestamp(options.createdFrom);
+  const createdTo = normalizeTimestamp(options.createdTo);
+
+  return items.filter((item) => {
+    if (options.connectionId && item.connectionId !== options.connectionId) return false;
+    if (statuses && !statuses.has(item.status)) return false;
+    if (riskLevels && !riskLevels.has(item.safety.riskLevel)) return false;
+    if (statementKinds && !statementKinds.has(item.safety.statementKind.toUpperCase())) return false;
+    if (createdFrom !== undefined || createdTo !== undefined) {
+      const createdAt = Date.parse(item.createdAt);
+      if (!Number.isFinite(createdAt)) return false;
+      if (createdFrom !== undefined && createdAt < createdFrom) return false;
+      if (createdTo !== undefined && createdAt > createdTo) return false;
+    }
+    if (!searchText) return true;
+    return [item.sql, item.errorMessage ?? '', item.safety.statementKind, ...item.safety.reasons]
+      .join('\n')
+      .toLowerCase()
+      .includes(searchText);
+  });
+}
+
+function normalizeSet<T extends string>(
+  value: T | T[] | undefined,
+  map: (input: T) => string = (input) => input,
+): Set<string> | undefined {
+  const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  const normalized = values.map((item) => map(item)).filter((item) => item.length > 0);
+  return normalized.length > 0 ? new Set(normalized) : undefined;
+}
+
+function normalizeTimestamp(value: string | Date | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const time = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(time) ? time : undefined;
+}
+
+function normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
 }

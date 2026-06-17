@@ -169,6 +169,18 @@ export type QueryHistoryItem = {
   safety: QuerySafetyReport;
 };
 
+export type QueryHistoryRequest = {
+  connectionId?: ConnectionId;
+  limit?: number;
+  offset?: number;
+  searchText?: string;
+  status?: QueryHistoryItem['status'] | QueryHistoryItem['status'][];
+  riskLevel?: QueryRiskLevel | QueryRiskLevel[];
+  statementKind?: string | string[];
+  createdFrom?: string;
+  createdTo?: string;
+};
+
 export type AuthStatus = {
   authenticated: boolean;
   capabilities?: AuthCapabilities;
@@ -545,7 +557,7 @@ export type IpcRequestMap = {
   'connection:connect': { id: ConnectionId };
   'connection:disconnect': { id: ConnectionId };
   'db:execute-query': QueryRequest;
-  'db:query-history': { connectionId?: ConnectionId; limit?: number };
+  'db:query-history': QueryHistoryRequest;
   'db:explain-query': QueryRequest;
   'db:list-tables': { connectionId: ConnectionId };
   'db:describe-table': { connectionId: ConnectionId; schema: string; table: string };
