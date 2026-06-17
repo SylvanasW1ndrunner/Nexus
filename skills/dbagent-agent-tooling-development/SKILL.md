@@ -5,7 +5,7 @@ description: Use when implementing DBAgent/Nexus Agent runtime, tool registry, p
 
 # DBAgent Agent And Tooling Development
 
-Use this skill for Agent-side runtime and tool work.
+Use this skill for Agent-side runtime and tool work. During the current development mode, implement backend/service behavior first and do not rebuild renderer UI.
 
 ## Required Product Docs
 
@@ -30,6 +30,7 @@ Use this skill for Agent-side runtime and tool work.
 - Permission manager: ask, auto, full-auto, readonly modes.
 - Session manager: durable SQLite/local state for conversations and checkpoints.
 - Usage tracker: record every round and model/tool usage.
+- Skill execution policy: when a run is created from a Skill, enforce its `allowed_tools` as a runtime allowlist, not only as prompt guidance.
 
 ## Tooling Boundaries
 
@@ -37,6 +38,7 @@ Use this skill for Agent-side runtime and tool work.
 - Workspace/file tools must respect workspace boundaries.
 - Shell/Python tools need timeouts, output limits, cancellation, and permission gates.
 - MCP tools need health checks and explicit enable/disable state.
+- Agent must never execute a hidden tool call that was not exposed or allowed for the current run.
 
 ## Testing Requirements
 
@@ -44,3 +46,4 @@ Use this skill for Agent-side runtime and tool work.
 - Do not assert exact LLM prose except for stable contract snippets.
 - Include aborted rounds, failed tool calls, partial stream recovery, and retry behavior.
 - Use fake LLM providers for deterministic orchestration tests; use real provider tests only behind explicit env gates.
+- Include tests that assert disallowed tools are not exposed to the model and are denied if a provider still returns them.

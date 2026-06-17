@@ -5,7 +5,7 @@ description: Use when implementing DBAgent/Nexus workspace, Python runtime, scri
 
 # DBAgent Workspace, Python, Release Development
 
-Use this skill for workspace, Python execution, extension packaging, diagnostics, and release readiness.
+Use this skill for workspace, Python execution, extension packaging, diagnostics, and release readiness. During the current development mode, implement backend/process behavior first and leave renderer UI reconstruction deferred.
 
 ## Required Product Docs
 
@@ -31,12 +31,14 @@ Read plugin/Agent docs when scripts become tools:
 - Environment detection and explicit path selection must be separate concepts.
 - Script execution needs cwd, env, timeout, output capture, cancellation, and resource limits.
 - Python package/dependency handling must consider final app packaging and offline/enterprise users.
+- Do not assume Python is globally on PATH; support configured interpreter paths and bundled/runtime discovery.
 
 ## Terminal And Process Behavior
 
 - Treat terminal as a process/session service, not a renderer-only text box.
 - Support spawn, input, resize, output stream, exit, kill, and multiple sessions.
 - Tests should validate process IO without depending on final UI.
+- Terminal tests must prove interactive stdin/stdout behavior, not only process creation.
 
 ## Release Readiness
 

@@ -5,7 +5,7 @@ description: Use when implementing DBAgent/Nexus authentication, local PostgreSQ
 
 # DBAgent Auth, Config, Usage Development
 
-Use this skill for account, configuration, secrets, provider, and usage modules.
+Use this skill for account, configuration, secrets, provider, and usage modules. During the current development mode, implement service contracts and tests first; final renderer UI is deferred.
 
 ## Required Product Docs
 
@@ -22,6 +22,7 @@ Use this skill for account, configuration, secrets, provider, and usage modules.
 - Store passwords as hashes, never plaintext.
 - Support account-password login and verification-code login/reset at the service-contract level.
 - Email/SMS verification may use a local/dev provider until cloud services exist, but the provider boundary must be explicit.
+- Login/register/reset flows must be callable without the final UI through service tests or IPC tests.
 
 ## Configuration Boundaries
 
@@ -44,3 +45,4 @@ Use this skill for account, configuration, secrets, provider, and usage modules.
 - Verification-code issue/expire/retry/reset-password flows.
 - Settings read/write migration and corrupted config recovery.
 - Usage round creation, completion, failure, and offline persistence.
+- Local PostgreSQL auth schema migrations and seed behavior.

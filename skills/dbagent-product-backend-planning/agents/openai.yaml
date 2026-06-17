@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 后端开发规划"
+  short_description: "按产品文档拆分 DBAgent 后端开发任务"
+  default_prompt: "Use $dbagent-product-backend-planning to plan the next backend-only development slice from the DBAgent product docs."
