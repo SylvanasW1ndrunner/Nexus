@@ -45,6 +45,7 @@ export type AgentRunOptions = {
   providerId: string;
   model: string;
   userMessage: string;
+  allowedTools?: string[];
   mode?: AgentMode;
   maxIterations?: number;
   tokenBudget?: number;

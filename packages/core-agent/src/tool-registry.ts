@@ -1,3 +1,4 @@
+import type { LlmTool } from '@dbagent/core-llm';
 import type { AgentToolDefinition, AgentToolHandler, RegisteredAgentTool } from './types.js';
 
 export class ToolRegistry {
@@ -21,11 +22,18 @@ export class ToolRegistry {
     return [...this.tools.values()];
   }
 
-  llmTools() {
-    return this.list().map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      inputSchema: tool.inputSchema,
-    }));
+  has(name: string): boolean {
+    return this.tools.has(name);
+  }
+
+  llmTools(allowedTools?: string[]): LlmTool[] {
+    const allowed = allowedTools === undefined ? undefined : new Set(allowedTools);
+    return this.list()
+      .filter((tool) => allowed === undefined || allowed.has(tool.name))
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      }));
   }
 }

@@ -190,6 +190,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - Agent 只依赖 `core-llm` 的 provider/router 合约，不直接绑定任何模型厂商。
 - 工具定义使用结构化 schema，供模型 tool calling 和本地执行共享。
 - `readonly` 模式拒绝所有非只读工具；`ask` 模式在没有审批 provider 时不会执行有风险工具。
+- `AgentRunOptions.allowedTools` 是运行级工具白名单：LLM 请求只暴露白名单工具；如果模型返回未暴露但已注册的工具调用，运行时仍会拒绝且不会执行 handler。
 - 工具执行失败会作为 tool message 回写给 LLM，让下一轮有机会修复，例如 SQL 报错后重写查询。
 - 每个 Agent round 完成后写入 `core-usage`，provider token 用量由 `core-llm` 写入。
 - 当前只实现最小 ReAct 闭环，不包含 UI 面板、流式展示、持久化 SQLite、子 Agent 和 Plan&Execute。
@@ -200,6 +201,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 只读模式阻止写操作且不产生副作用。
 - 询问模式在无审批 provider 时不执行中风险工具。
 - 工具失败能够回传给模型并在下一轮恢复。
+- Skill 执行计划传入的工具白名单会限制 LLM 可见工具，并拒绝隐藏/越权工具调用。
 - 权限矩阵覆盖 safe、medium、high、critical。
 
 ## `packages/core-rag`
@@ -301,6 +303,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 字段覆盖产品文档的核心约定：`name`、`title`、`description`、`system_addition`、`allowed_tools`、`defaults`、`steps`、`output_format`、`natural_language_keywords`、`auto_inject_when`。
 - 加载顺序是内置 → 用户级 → 工作区级；同名 Skill 后加载者覆盖前者。
 - `allowed_tools` 会和当前实际可用工具求交集，避免 Skill 请求未注册工具。
+- `allowed_tools` 输出给 Agent 后必须作为运行级硬边界，而不是仅作为 prompt 约束；这保证第三方 Skill 或工作区 Skill 只能调用声明且已注册的工具集合。
 - 默认参数可渲染进用户输入，例如 `{date}`。
 - 当前 YAML parser 只支持 Skill 所需安全子集，避免引入额外 YAML 依赖；复杂 YAML 结构后续再扩展。
 

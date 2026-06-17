@@ -217,6 +217,99 @@ describe('ReactAgent', () => {
     ]);
     expect(result.finalText).toBe('已修正 SQL，订单总数是 42。');
   });
+
+  it('only exposes tools allowed by the current skill execution plan', async () => {
+    const registry = registryWithReadAndWriteTools();
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: 'Only query tools are available.',
+        toolCalls: [],
+      },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Run a readonly skill query.',
+      mode: 'readonly',
+      allowedTools: ['query_database'],
+    });
+
+    expect(result.status).toBe('done');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.tools?.map((tool) => tool.name)).toEqual(['query_database']);
+  });
+
+  it('denies tool calls that are registered but not allowed for the current run', async () => {
+    let writeExecuted = false;
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => ({ rows: [] }),
+    );
+    registry.register(
+      {
+        name: 'execute_sql',
+        description: 'Execute SQL with possible writes',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+        readonly: false,
+      },
+      () => {
+        writeExecuted = true;
+        return { ok: true };
+      },
+    );
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [{ id: 'hidden_write', name: 'execute_sql', arguments: { sql: 'drop table orders' } }],
+          },
+        ]),
+      ]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Run a skill that allows readonly query only.',
+      mode: 'full-auto',
+      allowedTools: ['query_database'],
+    });
+
+    expect(result.status).toBe('permission_denied');
+    expect(writeExecuted).toBe(false);
+    expect(result.finalText).toBe('Tool is not allowed for this run.');
+    expect(result.toolExecutions).toMatchObject([
+      {
+        toolCallId: 'hidden_write',
+        toolName: 'execute_sql',
+        status: 'denied',
+        resultPreview: 'Tool not allowed by run policy.',
+      },
+    ]);
+  });
 });
 
 function registryWithQueryTool(): ToolRegistry {
@@ -238,9 +331,32 @@ function registryWithQueryTool(): ToolRegistry {
   return registry;
 }
 
+function registryWithReadAndWriteTools(): ToolRegistry {
+  const registry = registryWithQueryTool();
+  registry.register(
+    {
+      name: 'execute_sql',
+      description: 'Execute SQL with possible writes',
+      inputSchema: {
+        type: 'object',
+        properties: { sql: { type: 'string' } },
+        required: ['sql'],
+      },
+      dangerLevel: 'high',
+      readonly: false,
+    },
+    () => ({ ok: true }),
+  );
+  return registry;
+}
+
 function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
+  return scriptedProviderWithCalls(script).provider;
+}
+
+function scriptedProviderWithCalls(script: LlmChatResponse[]): { provider: LlmProvider; calls: LlmChatRequest[] } {
   const calls: LlmChatRequest[] = [];
-  return {
+  const provider: LlmProvider = {
     id: 'fake',
     name: 'Fake Provider',
     mode: 'byok',
@@ -254,6 +370,7 @@ function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
       return { available: true };
     },
   };
+  return { provider, calls };
 }
 
 async function usagePath(): Promise<string> {

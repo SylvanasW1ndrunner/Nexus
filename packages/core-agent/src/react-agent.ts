@@ -39,6 +39,7 @@ export class ReactAgent {
 
     const toolExecutions: AgentToolExecutionRecord[] = [];
     const maxIterations = options.maxIterations ?? 25;
+    const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
     let finalText = '';
 
     for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
@@ -49,7 +50,7 @@ export class ReactAgent {
       const request = {
         model: options.model,
         messages: toLlmMessages(session),
-        tools: this.toolRegistry.llmTools(),
+        tools: this.toolRegistry.llmTools(options.allowedTools),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       };
       const response = await this.llmRouter.chat(options.providerId, request);
@@ -79,6 +80,37 @@ export class ReactAgent {
 
       for (const toolCall of response.toolCalls) {
         const startedAt = Date.now();
+        if (allowedToolSet !== undefined && !allowedToolSet.has(toolCall.name)) {
+          const record = executionRecord(
+            toolCall.id,
+            toolCall.name,
+            'denied',
+            startedAt,
+            'Tool not allowed by run policy.',
+          );
+          toolExecutions.push(record);
+          appendMessage(
+            session,
+            createMessage(
+              {
+                role: 'tool',
+                toolCallId: toolCall.id,
+                toolName: toolCall.name,
+                content: JSON.stringify({ error: 'Tool is not allowed for this run.' }),
+              },
+              this.now,
+            ),
+          );
+          await this.usageTracker.recordLocalQuery();
+          return {
+            status: 'permission_denied',
+            session,
+            finalText: 'Tool is not allowed for this run.',
+            iterations: iteration,
+            toolExecutions,
+          };
+        }
+
         const tool = this.toolRegistry.get(toolCall.name);
         if (!tool) {
           const record = executionRecord(toolCall.id, toolCall.name, 'failed', startedAt, 'Tool is not registered.');
