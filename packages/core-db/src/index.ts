@@ -15,3 +15,4 @@ export * from './sql-object-preview.js';
 export * from './index-preview.js';
 export * from './privilege-preview.js';
 export * from './explain-plan.js';
+export * from './privilege-snapshot.js';

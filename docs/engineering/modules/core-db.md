@@ -14,6 +14,7 @@
 - `packages/core-db/src/sql-object-preview.ts`：视图、函数、存储过程的 DDL 预览、删除预览和测试调用 SQL 生成。
 - `packages/core-db/src/index-preview.ts`：独立索引管理 DDL 预览，覆盖创建索引、部分索引、表达式索引、并发创建和删除索引。
 - `packages/core-db/src/privilege-preview.ts`：PostgreSQL 角色、角色成员关系和对象权限的 GRANT/REVOKE/ROLE DDL 预览。
+- `packages/core-db/src/privilege-snapshot.ts`：权限快照差异计划，把当前/目标角色和权限快照转换成最小 SQL 变更计划。
 - `packages/core-db/src/explain-plan.ts`：PostgreSQL `EXPLAIN (FORMAT JSON)` 结果分析，把原始计划转换为稳定树、扁平节点和性能 warning。
 - `packages/core-db/src/import-plan.ts`：导入向导后端合同，覆盖 CSV/JSON 预览、字段映射和批量 INSERT/UPSERT 计划。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
@@ -81,6 +82,15 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 
 所有权限变更均标记为 `dangerous` 并要求确认。`SUPERUSER`、`REPLICATION`、`BYPASSRLS`、`WITH ADMIN OPTION`、`WITH GRANT OPTION` 和 `DROP ROLE` 会标记 `requiresExtraConfirmation=true`。该模块不会把密码写入 SQL 预览；未来创建登录用户时，密码应由主进程通过安全输入和凭证边界单独处理，避免明文进入 renderer、日志、测试快照或提交记录。
 
+权限快照差异由 `privilege-snapshot.ts` 处理。它接收 `current` 和 `desired` 两份快照，输出：
+
+- `preChangeSnapshot`：执行前快照，调用方必须持久化后再执行变更。
+- `statements`：由 `privilege-preview.ts` 生成的可审查 SQL。
+- `changes`：结构化变更列表，说明是角色属性、角色成员关系还是对象权限变化。
+- `requiresConfirmation` / `requiresExtraConfirmation`：供后续 UI/Agent 做确认门控。
+
+该模块不负责从数据库采集权限；后续 PostgreSQL driver 应通过 `pg_roles`、`pg_auth_members`、`information_schema.role_table_grants`、`information_schema.routine_privileges` 等系统视图生成快照。当前切片先保证“当前权限备份 → 差异计划 → GRANT/REVOKE 预览”的核心业务逻辑可测。
+
 查询计划分析使用 `explain-plan.ts` 解析 PostgreSQL `EXPLAIN (FORMAT JSON)` 的原始 JSON。它不负责执行 EXPLAIN；执行入口仍由主进程 `explain-workflow.ts` 包装只读 SQL 后走正常查询 workflow。该模块负责：
 
 - 兼容 PostgreSQL FORMAT JSON 数组和查询结果中的 `QUERY PLAN` 单元格形态。
@@ -131,6 +141,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `sql-object-preview.test.ts`：视图、函数、过程的 DDL 预览、危险视图定义拦截、函数/过程片段校验、参数化测试调用、limit clamp 和删除预览。
 - `index-preview.test.ts`：索引管理 CREATE/DROP DDL 预览、并发索引 warning、唯一部分索引、表达式索引、危险 SQL 片段拦截和 PostgreSQL 非法组合拦截。
 - `privilege-preview.test.ts`：角色创建/修改/删除、角色成员授权/撤销、对象权限 GRANT/REVOKE、高危权限二次确认、明文密码不入 SQL 和非法权限组合拦截。
+- `privilege-snapshot.test.ts`：权限快照 diff、执行前快照保留、角色/成员/对象权限最小变更计划、无变化 plan 和非法权限传播。
 - `explain-plan.test.ts`：PostgreSQL JSON 计划树规范化、`QUERY PLAN` 单元格兼容、性能 warning 生成和非法 EXPLAIN payload 拦截。
 - `import-plan.test.ts`：CSV/JSON 预览、字段映射、批量 INSERT、UPSERT、TRUNCATE prelude、跳过错误策略 warning 和非法源/计划拦截。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
