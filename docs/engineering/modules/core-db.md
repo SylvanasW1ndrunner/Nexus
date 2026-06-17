@@ -14,6 +14,7 @@
 - `packages/core-db/src/sql-object-preview.ts`：视图、函数、存储过程的 DDL 预览、删除预览和测试调用 SQL 生成。
 - `packages/core-db/src/index-preview.ts`：独立索引管理 DDL 预览，覆盖创建索引、部分索引、表达式索引、并发创建和删除索引。
 - `packages/core-db/src/privilege-preview.ts`：PostgreSQL 角色、角色成员关系和对象权限的 GRANT/REVOKE/ROLE DDL 预览。
+- `packages/core-db/src/explain-plan.ts`：PostgreSQL `EXPLAIN (FORMAT JSON)` 结果分析，把原始计划转换为稳定树、扁平节点和性能 warning。
 - `packages/core-db/src/import-plan.ts`：导入向导后端合同，覆盖 CSV/JSON 预览、字段映射和批量 INSERT/UPSERT 计划。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
@@ -80,6 +81,15 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 
 所有权限变更均标记为 `dangerous` 并要求确认。`SUPERUSER`、`REPLICATION`、`BYPASSRLS`、`WITH ADMIN OPTION`、`WITH GRANT OPTION` 和 `DROP ROLE` 会标记 `requiresExtraConfirmation=true`。该模块不会把密码写入 SQL 预览；未来创建登录用户时，密码应由主进程通过安全输入和凭证边界单独处理，避免明文进入 renderer、日志、测试快照或提交记录。
 
+查询计划分析使用 `explain-plan.ts` 解析 PostgreSQL `EXPLAIN (FORMAT JSON)` 的原始 JSON。它不负责执行 EXPLAIN；执行入口仍由主进程 `explain-workflow.ts` 包装只读 SQL 后走正常查询 workflow。该模块负责：
+
+- 兼容 PostgreSQL FORMAT JSON 数组和查询结果中的 `QUERY PLAN` 单元格形态。
+- 生成稳定的树形节点 `ExplainPlanNode`，保留 node type、relation、index、filter、cost、actual time、rows 等核心指标。
+- 生成扁平节点列表，方便后续 UI 做树视图、节点搜索、火焰图或 Agent 逐节点引用。
+- 生成性能 warning：顺序扫描、高估算成本、高实际耗时、大量过滤、嵌套循环大输入、排序溢出风险。
+
+该模块的目标不是替代 PostgreSQL 优化器，而是把计划解释成产品可消费的结构。后续 AI 解读按钮可以把 `ExplainPlanAnalysis` 作为输入，而不是把原始 JSON 直接塞给模型。
+
 远程连接按真实桌面使用场景处理：默认连接超时、语句超时、TCP keepalive，并把认证失败、DNS 失败、端口关闭、超时和连接中断分类成产品错误码。这样 Windows 或 Linux 桌面连接服务器数据库时，用户能得到可操作提示，而不是只有“连接失败”。
 连接建立后的运行期错误也必须保持 `Result<T>` 契约。`PostgresDriver.execute`、`listTables` 和 `describeTable` 会把网络中断、端口拒绝和超时继续分类为可重试的远程连接错误；普通 SQL 语法错误、catalog 查询错误等则返回 `QUERY_FAILED`。这保证 Schema 树刷新或查询执行遇到远程数据库抖动时，不会把异常漏到 IPC 外层。
 
@@ -121,6 +131,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `sql-object-preview.test.ts`：视图、函数、过程的 DDL 预览、危险视图定义拦截、函数/过程片段校验、参数化测试调用、limit clamp 和删除预览。
 - `index-preview.test.ts`：索引管理 CREATE/DROP DDL 预览、并发索引 warning、唯一部分索引、表达式索引、危险 SQL 片段拦截和 PostgreSQL 非法组合拦截。
 - `privilege-preview.test.ts`：角色创建/修改/删除、角色成员授权/撤销、对象权限 GRANT/REVOKE、高危权限二次确认、明文密码不入 SQL 和非法权限组合拦截。
+- `explain-plan.test.ts`：PostgreSQL JSON 计划树规范化、`QUERY PLAN` 单元格兼容、性能 warning 生成和非法 EXPLAIN payload 拦截。
 - `import-plan.test.ts`：CSV/JSON 预览、字段映射、批量 INSERT、UPSERT、TRUNCATE prelude、跳过错误策略 warning 和非法源/计划拦截。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
