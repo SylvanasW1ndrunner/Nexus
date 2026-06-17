@@ -4,11 +4,15 @@
 
 ## 存放位置
 
-当前可自动发现的 skill 位于用户级目录：
+项目级 skill 位于仓库目录：
+
+`skills/`
+
+用户级自动发现副本位于：
 
 `C:\Users\cdnzx\.codex\skills`
 
-这些 skill 用于后续开发过程的自动触发和流程约束。项目内本文档只记录用途、边界和维护规则，不复制完整 skill 内容。
+后续以仓库内 `skills/` 为事实源，用户级目录只作为当前机器的自动发现副本。若两者不一致，先更新仓库，再同步用户级副本。
 
 ## Skill 列表
 
@@ -25,6 +29,34 @@
 - 不做 renderer UI 重建。
 - 每个切片必须包含业务场景、模块边界、公开契约、安全边界、测试和中文文档。
 
+### dbagent-feature-first-development
+
+用途：约束当前“先功能、后前端”的开发模式，确保每个开发切片从产品文档出发，落到核心包、测试、中文文档和提交纪律。
+
+触发场景：
+- 开始任何非纯 UI 的新功能开发。
+- 选择下一个后端能力切片。
+- 需要确认是否会误触旧前端或旧 UI 结构。
+
+核心约束：
+- Renderer UI 保持最小宿主，不恢复旧界面。
+- 功能必须能被服务、IPC、CLI 或测试入口调用。
+- 提交信息和文档不暴露 AI/Codex 作者身份。
+
+### dbagent-core-db-development
+
+用途：开发数据库核心能力，包括 PostgreSQL 驱动、连接池、SQL 执行、事务、回滚、schema 提取、EXPLAIN、导出和远程连接韧性。
+
+触发场景：
+- `packages/core-db` 或数据库驱动抽象变更。
+- PostgreSQL 连接、SQL 解析/执行、事务、取消、超时、重连、SSL/SSH 边界。
+- 需要为未来 MySQL/Oracle/ClickHouse 等数据库保留接口。
+
+核心约束：
+- PostgreSQL 是首个实现，但共享契约必须保留多数据库扩展边界。
+- 真实数据库语义必须用真实 PostgreSQL 集成测试覆盖。
+- 远程数据库网络波动、凭证错误、超时和断连必须作为常规场景处理。
+
 ### dbagent-db-sql-rag-development
 
 用途：开发数据库适配、PostgreSQL 连接、SQL 执行、SQL 审计、事务回滚、性能分析、Schema RAG。
@@ -37,6 +69,20 @@
 - PostgreSQL 优先，但接口必须为后续 MySQL/Oracle/ClickHouse 等扩展保留边界。
 - 数据库行为必须有真实 PostgreSQL 测试，不只依赖 mock。
 - RAG 按连接隔离，断开连接默认清理对应索引。
+
+### dbagent-schema-rag-development
+
+用途：专门开发 Schema RAG，包括元数据提取、Schema Document、FTS/向量索引、渐进索引、关系图扩展、混合检索和上下文构建。
+
+触发场景：
+- `packages/core-rag`、Schema 文档、索引、检索、上下文构建。
+- 需要从数据库注释、表列关系、外键链、业务词汇中构造 Agent 可用上下文。
+- 处理索引损坏、断开连接清理、embedding provider 缺失时的降级。
+
+核心约束：
+- DBAgent RAG 是结构化 Schema RAG，不是通用文档 RAG。
+- 显式 schema/table/column 匹配优先于 embedding。
+- 缺失 embedding 时必须降级到 exact/FTS 检索。
 
 ### dbagent-agent-tooling-development
 
@@ -147,7 +193,10 @@
 已使用官方 `quick_validate.py` 校验以下 skill，全部通过：
 
 - `dbagent-product-backend-planning`
+- `dbagent-feature-first-development`
+- `dbagent-core-db-development`
 - `dbagent-db-sql-rag-development`
+- `dbagent-schema-rag-development`
 - `dbagent-agent-tooling-development`
 - `dbagent-classic-db-ide-development`
 - `dbagent-auth-config-usage-development`

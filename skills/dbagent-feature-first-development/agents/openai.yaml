@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 功能优先开发"
+  short_description: "按功能优先路径推进 DBAgent 后端能力"
+  default_prompt: "Use $dbagent-feature-first-development to choose, implement, document, test, and commit the next DBAgent backend feature slice."
