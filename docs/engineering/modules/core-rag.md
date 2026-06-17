@@ -1,0 +1,52 @@
+# core-rag Schema RAG 与 ER 图模块
+
+## 代码入口
+
+- `packages/core-rag/src/schema-documents.ts`：将 `TableDetail[]` 转换为结构化 schema 文档。
+- `packages/core-rag/src/schema-rag-engine.ts`：内存索引、关键词检索、关系扩展和上下文构建。
+- `packages/core-rag/src/er-diagram.ts`：基于 schema 元数据生成 Mermaid ER 图文本。
+- `packages/core-rag/src/types.ts`：RAG 文档、索引、检索和上下文类型。
+
+## 开发逻辑
+
+`core-rag` 当前负责 schema 元数据的结构化使用，不直接连接数据库，也不依赖 renderer UI。它的输入来自 `core-db` 的 `TableDetail[]`，输出给 Agent、导出、ER 图和后续 UI 使用。
+
+Schema RAG 当前是 Stage 1：以表、字段和外键关系为基础做词法检索与关系扩展。它不是通用文档 RAG，不做任意文本切块；每个文档都有稳定 ID，例如 `table:public.orders`、`column:public.orders.user_id`。连接断开时调用 `clear(connectionId)` 清理索引，避免跨连接混用 schema。
+
+ER 图生成使用 `generateMermaidErDiagram()`。它从 `TableDetail[]` 中读取：
+
+- 表名和 schema。
+- 字段名、数据类型、nullable。
+- 主键标记。
+- 外键标记。
+- 外键关系。
+
+输出为 Mermaid `erDiagram` 文本，同时返回表数量、关系数量、字段截断列表和 warnings。默认每表最多显示 10 个字段，避免大表生成不可读图；超过 30 张表会提示调用方生成关系子图。`selectedTables` 可用于只生成部分表的子图。
+
+Mermaid 对标识符有限制，因此模块会把 `schema.table`、字段名和类型清洗为 Mermaid 可接受的 identifier。该行为只影响图中的显示 ID，不改变原始 schema 元数据。
+
+## 测试覆盖
+
+- `schema-rag-engine.test.ts`：
+  - 表和字段转文档。
+  - 外键关系互链。
+  - 显式表名检索。
+  - 中文业务注释检索。
+  - 跨表问题召回关系上下文。
+  - prompt 上下文预算和截断。
+  - 按连接清理索引。
+- `er-diagram.test.ts`：
+  - 从真实风格 `TableDetail[]` 生成 Mermaid。
+  - 主键、外键、nullable 标记。
+  - 外键关系线。
+  - 每表字段数截断和 warning。
+  - 选择部分表生成子图。
+  - Mermaid identifier 清洗。
+  - 大 schema warning。
+
+## 后续扩展
+
+- 加入 SQLite/sqlite-vec 持久化索引。
+- 增加 embedding、RRF、rerank 和 glossary。
+- ER 图可增加 schema 分组、关系深度筛选和导出元信息。
+- 和 Agent 工具打通 `search_schema`、`describe_table`、`get_relations`、`generate_er_diagram`。
