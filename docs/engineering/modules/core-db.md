@@ -9,6 +9,7 @@
 - `packages/core-db/src/sql-safety.ts`：SQL 安全判断。
 - `packages/core-db/src/sql-performance.ts`：轻量性能提示。
 - `packages/core-db/src/sql-builder.ts`：Schema 预览 SQL 和 identifier quote。
+- `packages/core-db/src/table-edit.ts`：表数据编辑的 SQL 预览、主键保护、批量确认和事务执行输入。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
 - `packages/core-db/src/json-file.ts`：JSON 文件原子读写 helper。
@@ -30,6 +31,14 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 - `analyzeSqlSafety` 在执行前识别只读违规、写操作、DDL 和多语句。
 - 对需要确认的 SQL，主进程必须完成确认握手后才调用 driver。driver 在可写连接中使用显式事务执行需要确认的 SQL，任意语句失败都 `ROLLBACK`，避免批量 SQL 留下半完成状态。
 
+表数据编辑使用独立的 `buildTableEditPreview()` 生成可审查 SQL，而不是让 UI 直接拼接语句。它覆盖三类操作：
+
+- `insert`：允许无主键表插入，但仍标记为需要确认的写操作。
+- `update`：必须提供完整主键，`WHERE` 只由主键生成，禁止通过单元格编辑修改主键列。
+- `delete`：必须提供完整主键，风险级别标记为 `dangerous`。
+
+超过默认 50 条操作的批量编辑会标记 `requiresExtraConfirmation`，用于后续 UI 做二次确认。生成出的多语句 SQL 交给 `PostgresDriver.execute()` 后会被 `analyzeSqlSafety` 识别为多语句写操作，并在 driver 层进入事务；任何中间语句失败都会回滚，满足产品文档中“预览 SQL → 确认 → 事务执行 → 失败自动回滚”的表格编辑流程。
+
 远程连接按真实桌面使用场景处理：默认连接超时、语句超时、TCP keepalive，并把认证失败、DNS 失败、端口关闭、超时和连接中断分类成产品错误码。这样 Windows 或 Linux 桌面连接服务器数据库时，用户能得到可操作提示，而不是只有“连接失败”。
 连接建立后的运行期错误也必须保持 `Result<T>` 契约。`PostgresDriver.execute`、`listTables` 和 `describeTable` 会把网络中断、端口拒绝和超时继续分类为可重试的远程连接错误；普通 SQL 语法错误、catalog 查询错误等则返回 `QUERY_FAILED`。这保证 Schema 树刷新或查询执行遇到远程数据库抖动时，不会把异常漏到 IPC 外层。
 
@@ -42,12 +51,13 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 - `sql-safety.test.ts`：只读拦截、写操作风险、多语句风险。
 - `sql-performance.test.ts`：复杂 SQL 性能提示。
 - `sql-builder.test.ts`：PostgreSQL identifier quote 和预览 limit 上限。
+- `table-edit.test.ts`：表格编辑 SQL 预览、identifier quote、字符串/JSON/bytea 等字面量处理、无主键拒绝更新/删除、主键列不可编辑、批量二次确认。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
 - `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
 - `query-history.test.ts`：查询历史写入、读取、审计上下文和损坏 JSON 降级。
-- `postgres.integration.test.ts`：真实 PostgreSQL 连接、Schema 列表、表详情、join 查询、只读拦截、断连后失败、批量 SQL 事务回滚。
+- `postgres.integration.test.ts`：真实 PostgreSQL 连接、Schema 列表、表详情、join 查询、只读拦截、断连后失败、批量 SQL 事务回滚、表编辑 SQL 预览提交和失败回滚。
 
 本地真实数据库验证入口是：
 
@@ -55,7 +65,8 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 pnpm test:postgres
 ```
 
-该命令需要可连接的 PostgreSQL，默认连接 `127.0.0.1:5432/dbagent_demo`，用户名和密码均为 `postgres`。本轮开发已在本机 PostgreSQL 16.14 上实际执行，不是 mock。
+该命令需要可连接的 PostgreSQL，默认连接 `127.0.0.1:5432/dbagent_demo`，用户名和密码均为 `postgres`。
+如果当前机器没有 Docker、本机 PostgreSQL 或可访问的远程测试库，该命令会在 TCP 探测阶段失败；这时默认 `vitest` 仍会运行单元测试，但真实数据库行为不能据此宣称已验证。
 
 ## 后续扩展
 
