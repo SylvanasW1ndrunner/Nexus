@@ -8,7 +8,7 @@
 - `packages/core-db/src/postgres-errors.ts`：PostgreSQL 连接错误分类。
 - `packages/core-db/src/sql-safety.ts`：SQL 安全判断。
 - `packages/core-db/src/sql-performance.ts`：轻量性能提示。
-- `packages/core-db/src/sql-builder.ts`：Schema 预览 SQL 和 identifier quote。
+- `packages/core-db/src/sql-builder.ts`：Schema 预览 SQL、表数据浏览 SQL、identifier quote 和参数化筛选构建。
 - `packages/core-db/src/table-edit.ts`：表数据编辑的 SQL 预览、主键保护、批量确认和事务执行输入。
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
@@ -45,6 +45,16 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 
 性能提示是轻量静态分析，不阻塞执行。当前覆盖 `SELECT *`、缺少 `LIMIT`、前置通配 `LIKE`、大 `OFFSET`、逗号连接和过滤列套函数。它不是优化器替代品，而是 M1.5 阶段给用户和后续 Agent 的结构化风险输入。
 
+表数据浏览使用 `buildTableDataQuery()` 生成后端合同，而不是让 UI 拼 SQL。它支持可见列、筛选、排序、分页和高级 WHERE：
+
+- 可见列、schema、table、排序列全部通过 PostgreSQL identifier quote。
+- 普通筛选值全部放入 `params`，生成 `$1`、`$2` 等占位符，避免把用户输入直接拼进 SQL。
+- 支持 `=`, `!=`, `>`, `>=`, `<`, `<=`, `LIKE`, `NOT LIKE`, `IN`, `NOT IN`, `BETWEEN`, `IS NULL`, `IS NOT NULL`。
+- 默认分页 100 行，最大 1000 行，offset 最大 1,000,000；超出范围会产生 warning 并 clamp。
+- 高级 WHERE 会原样追加，并返回 warning，后续 UI/Agent 必须把它视为需要审查的 SQL。
+
+`QueryRequest` 已支持 `params`，`PostgresDriver.execute()` 会把参数传给 `pg` 的 query API。这样表数据浏览、筛选搜索和后续参数化 SQL 工具可以走同一条执行通路，避免“构建器安全、执行器不支持”的断层。
+
 连接元数据和查询历史使用 `json-file.ts` 做临时文件加 rename 的原子写入。读取时如果文件缺失或 JSON 损坏，会返回空列表，让应用继续启动和执行查询；这避免单个损坏的本地 JSON 文件把桌面应用整体拖垮。后续如果进入多用户或大历史量阶段，应迁移到 SQLite 并保留迁移备份。
 
 结果快照由 `QuerySnapshotStore` 管理，服务于产品文档中的“查询结果可钉住，重启后保留”。快照保存 SQL、连接、列信息、行数据、耗时、安全报告、标签、备注和来源历史 ID。列表接口默认只返回前 5 行 `previewRows`，完整内容通过 `get(id)` 获取，避免快照列表页或后续 IPC 一次性搬运大结果集。
@@ -55,11 +65,11 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 
 - `sql-safety.test.ts`：只读拦截、写操作风险、多语句风险。
 - `sql-performance.test.ts`：复杂 SQL 性能提示。
-- `sql-builder.test.ts`：PostgreSQL identifier quote 和预览 limit 上限。
+- `sql-builder.test.ts`：PostgreSQL identifier quote、预览 limit 上限、表数据浏览列选择/筛选/排序/分页、用户输入参数化、高级 WHERE warning。
 - `table-edit.test.ts`：表格编辑 SQL 预览、identifier quote、字符串/JSON/bytea 等字面量处理、无主键拒绝更新/删除、主键列不可编辑、批量二次确认。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
-- `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
+- `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，参数化查询会传给 PostgreSQL pool，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
 - `query-history.test.ts`：查询历史写入、读取、审计上下文和损坏 JSON 降级。
 - `query-snapshot.test.ts`：结果快照钉住、特殊数据库值序列化、连接过滤、搜索、预览行、删除、容量上限和损坏 JSON 降级。

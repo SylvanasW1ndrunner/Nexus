@@ -121,6 +121,7 @@ export type ConnectionInput = {
 export type QueryRequest = {
   connectionId: ConnectionId;
   sql: string;
+  params?: unknown[];
   limit?: number;
   dryRun?: boolean;
   confirmed?: boolean;

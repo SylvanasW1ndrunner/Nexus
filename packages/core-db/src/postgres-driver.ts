@@ -97,8 +97,8 @@ export class PostgresDriver implements IDatabaseDriver {
     const started = performance.now();
     try {
       const result = safety.requiresConfirmation
-        ? await executeInTransaction(pool, request.sql)
-        : normalizePgResult(await pool.query<QueryResultRow>(request.sql));
+        ? await executeInTransaction(pool, request.sql, request.params)
+        : normalizePgResult(await pool.query<QueryResultRow>(request.sql, request.params));
       return ok(toQueryExecutionResult(result, safety, started));
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
@@ -264,11 +264,11 @@ export class PostgresDriver implements IDatabaseDriver {
   }
 }
 
-async function executeInTransaction(pool: PgPool, sql: string): Promise<SafePgQueryResult> {
+async function executeInTransaction(pool: PgPool, sql: string, params?: unknown[]): Promise<SafePgQueryResult> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const result = normalizePgResult(await client.query<QueryResultRow>(sql));
+    const result = normalizePgResult(await client.query<QueryResultRow>(sql, params));
     await client.query('COMMIT');
     return result;
   } catch (error) {

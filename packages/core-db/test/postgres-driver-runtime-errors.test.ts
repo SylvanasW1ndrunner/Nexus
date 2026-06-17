@@ -55,6 +55,36 @@ describe('PostgresDriver runtime errors', () => {
     });
   });
 
+  it('passes parameterized query values to the PostgreSQL pool', async () => {
+    const calls: unknown[][] = [];
+    const driver = new PostgresDriver();
+    const pool = {
+      query(...args: unknown[]) {
+        calls.push(args);
+        return Promise.resolve({
+          command: 'SELECT',
+          rowCount: 1,
+          oid: 0,
+          fields: [{ name: 'email', dataTypeID: 25 }],
+          rows: [{ email: 'alice@example.com' }],
+        });
+      },
+    };
+    (driver as unknown as { pools: Map<string, unknown> }).pools.set(connection.id, pool);
+
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: 'select email from users where email like $1 limit 10',
+        params: ["%' OR 1=1 --"],
+      },
+      connection,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([['select email from users where email like $1 limit 10', ["%' OR 1=1 --"]]]);
+  });
+
   it('classifies schema list timeouts without throwing outside Result', async () => {
     const driver = driverWithQueryError(pgError('ETIMEDOUT'));
 
