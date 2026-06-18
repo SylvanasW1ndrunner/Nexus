@@ -8,9 +8,10 @@
 2. [core-db 数据库核心模块](./core-db.md)
 3. [core-agent Agent 执行模块](./core-agent.md)
 4. [core-llm 大模型接入模块](./core-llm.md)
-5. [desktop 桌面应用模块](./desktop.md)
-6. [auth / usage / llm 支撑模块](./supporting-core.md)
-7. [scripts 工程脚本模块](./scripts.md)
+5. [core-tools 工具与诊断模块](./core-tools.md)
+6. [desktop 桌面应用模块](./desktop.md)
+7. [auth / usage / llm 支撑模块](./supporting-core.md)
+8. [scripts 工程脚本模块](./scripts.md)
 
 维护规则：
 
