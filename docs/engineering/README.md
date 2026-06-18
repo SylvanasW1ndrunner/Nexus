@@ -5,6 +5,7 @@
 - [接口文档](./interfaces.md)
 - [模块开发说明](./modules.md)
 - [分模块开发文档](./modules/README.md)
+- [开源优先开发规范](./open-source-first.md)
 - [测试策略](./test-strategy.md)
 - [打包策略](./packaging.md)
 - [发布流程](./release-process.md)
