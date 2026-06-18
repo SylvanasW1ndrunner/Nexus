@@ -7,6 +7,7 @@ export * from './sql-snippets.js';
 export * from './connection-store.js';
 export * from './query-history.js';
 export * from './query-snapshot.js';
+export * from './query-cancellation.js';
 export * from './postgres-driver.js';
 export * from './database-driver-registry.js';
 export * from './sql-builder.js';

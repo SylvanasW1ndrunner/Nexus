@@ -24,6 +24,7 @@
 - `packages/core-db/src/connection-store.ts`：连接元数据持久化。
 - `packages/core-db/src/query-history.ts`：查询历史持久化。
 - `packages/core-db/src/query-snapshot.ts`：查询结果快照持久化，用于“钉住结果”和重启后复查。
+- `packages/core-db/src/query-cancellation.ts`：长 SQL 取消注册表和取消决策合同。
 - `packages/core-db/src/json-file.ts`：JSON 文件原子读写 helper。
 
 ## 开发逻辑
@@ -34,6 +35,15 @@
 
 PostgreSQL 当前是第一个 driver。`PostgresDriver` 内部持有连接池，接收主进程提供的完整连接配置，执行后返回结构化列信息、行数据、耗时、行数和安全报告。Renderer 永远不接触 driver、pool、密码或原始数据库连接。
 多语句 SQL 会保留完整 `resultSets` 和 `messages`。为了兼容旧调用方，顶层 `columns`、`rows`、`rowCount` 仍指向第一个有结果行/列的结果集；如果整批语句只有 DML/DDL，则指向最后一个结果。未来结果面板可以直接使用 `resultSets` 展示“结果1/结果2/...”，消息面板可以用 `messages` 展示每条语句返回行数或影响行数。
+
+长 SQL 取消由 `QueryCancellationRegistry` 先形成后端合同。调用方在查询开始时注册 `queryId`、`connectionId`、SQL 和可选 PostgreSQL `backendPid`；用户或 Agent 请求取消时，注册表返回稳定决策：
+
+- 已知 `backendPid` 且未超过 fallback 窗口：返回 `cancel-backend`，后续 main/driver 应调用 PostgreSQL backend cancel。
+- 缺少 `backendPid` 或取消超时：返回 `disconnect-connection`，只断开当前查询所在连接。
+- 查询已完成、失败或取消：返回 `already-finished`。
+- 查询不存在：返回 `not-found`。
+
+该模块不直接访问数据库，也不持有凭据。它的职责是把产品文档中的“先 cancel，超时后断开当前连接”规则做成可测试合同；真实 `pg_cancel_backend` 和 IPC `db:cancel-query` 接线会在后续切片实现。
 
 多数据库扩展通过 `DatabaseDriverRegistry` 落地，而不是让 main 或 renderer 直接 new 具体 SDK。默认 registry 注册 PostgreSQL 的 factory 和 capability；`get(engine)` 会缓存并复用同一 engine 的 driver 实例，使连接池生命周期稳定。后续新增 MySQL、ClickHouse 或 SQL Server 时，只需要实现新的 `IDatabaseDriver` 并登记到 registry。这样查询 workflow、历史记录、安全报告、导出和 UI 可以继续依赖统一接口，同时保留各数据库的方言差异和能力声明。
 
@@ -191,6 +201,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
 - `query-history.test.ts`：查询历史写入、读取、按 SQL / 错误 / 安全原因搜索、按连接 / 状态 / 风险 / 语句类型筛选、分页元数据、时间范围检索、审计上下文和损坏 JSON 降级。
 - `query-snapshot.test.ts`：结果快照钉住、特殊数据库值序列化、连接过滤、搜索、预览行、删除、容量上限和损坏 JSON 降级。
+- `query-cancellation.test.ts`：运行中查询注册、取消决策、backend cancel 优先、超时后连接断开 fallback、已完成查询保护、失败/取消审计和过期记录清理。
 - `postgres.integration.test.ts`：真实 PostgreSQL 连接、Schema 列表、表详情、join 查询、只读拦截、断连后失败、批量 SQL 事务回滚、表编辑 SQL 预览提交和失败回滚。
 
 本地真实数据库验证入口是：
