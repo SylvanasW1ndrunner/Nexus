@@ -4,6 +4,7 @@
 
 - `packages/core-llm/src/types.ts`：LLM provider、消息、工具调用、流式事件、错误码和错误类型。
 - `packages/core-llm/src/openai-compatible-provider.ts`：OpenAI-compatible HTTP provider，实现普通 chat、SSE stream、错误分类、超时、取消和重试。
+- `packages/core-llm/src/provider-capability-probe.ts`：Provider 能力探针，验证可用性、普通对话、tool calling 和 streaming。
 - `packages/core-llm/src/llm-router.ts`：BYOK / subscription 路由决策，并把模型用量写入 `core-usage`。
 
 ## 开发逻辑
@@ -30,6 +31,17 @@
 
 普通 chat 和 stream 建连阶段都使用指数退避重试。退避等待本身会监听 `AbortSignal`，用户点击停止后不会继续等待下一次重试。stream 一旦连接成功并开始消费事件，不做中途重放；后续如果要恢复部分输出，应在 Agent/session checkpoint 层持久化已收到的 stream chunk。
 
+## Provider 能力探针
+
+`probeLlmProviderCapabilities()` 用于在最终 UI 尚未重建前，通过 core API 验证一个 provider/model 是否真正可用。它会按需执行：
+
+- `isAvailable()`：检查 provider 端点可用性。
+- 普通 chat：确认模型能返回非空文本。
+- tool calling：要求模型调用 `dbagent_probe_echo` 工具，确认 Agent 工具链基础能力。
+- streaming：确认 provider 能产生 `text-delta` 和 `finish` 事件。
+
+探针返回结构化结果，不直接抛出给调用方，便于后续设置页、诊断报告、CLI/test harness 展示具体失败原因。默认测试使用 fake provider；真实 SiliconFlow/DeepSeek 验证继续通过显式环境变量门控，避免默认测试依赖密钥或网络。
+
 ## SiliconFlow 预设
 
 `createSiliconFlowProvider()` 固定：
@@ -44,9 +56,11 @@
 
 - `openai-compatible-provider.test.ts`：请求体、响应解析、usage、工具调用、SSE 流式解析、认证失败不重试、provider 临时失败重试、用户取消不重试、退避期间取消、stream 建连失败重试、SiliconFlow 预设和真实集成门控。
 - `llm-router.test.ts`：BYOK / subscription 路由、普通 chat 用量记录、Agent round 用量归因、provider 失败不计为完成用量、流式 usage 记录和非流式 fallback。
+- `provider-capability-probe.test.ts`：provider 可用性、普通 chat、tool calling、streaming 的成功诊断，以及部分能力失败时的结构化错误。
 
 ## 已知边界
 
 - 当前不实现 subscription gateway 服务端，只保留路由合同。
 - 当前不在 provider 内持久化 stream chunk；恢复由后续 Agent checkpoint/session store 处理。
 - 当前不做 provider 自动选择；上层必须指定 provider id。
+- Provider 能力探针只能证明当前模型和端点在探针提示下可用，不能保证复杂业务任务的长期稳定性；复杂 Agent 质量仍需结合行为评估和真实场景测试。
