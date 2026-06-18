@@ -163,6 +163,17 @@ export class QueryCancellationRegistry {
     return ok(cloneRecord(this.records.get(queryId) ?? result.data));
   }
 
+  setBackendPid(queryId: string, backendPid: number): Result<RunningQueryRecord> {
+    if (!isPositiveInteger(backendPid)) return validationError('Backend pid must be a positive integer.');
+    const record = this.records.get(queryId);
+    if (!record) return err({ code: 'NOT_FOUND', message: `Query ${queryId} was not found.` });
+    if (!isActive(record.status)) {
+      return err({ code: 'VALIDATION_ERROR', message: `Query ${queryId} is not running.` });
+    }
+    record.backendPid = backendPid;
+    return ok(cloneRecord(record));
+  }
+
   pruneFinished(olderThanMs: number, now: string | Date = new Date()): number {
     const cutoff = Date.parse(toIso(now)) - Math.max(0, olderThanMs);
     let removed = 0;

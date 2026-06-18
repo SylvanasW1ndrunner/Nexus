@@ -83,7 +83,11 @@ const executeQuery = createQueryWorkflow({
   driverForEngine: (engine) => databaseDrivers.get(engine),
   cancellations: queryCancellations,
 });
-const cancelQuery = createQueryCancellationWorkflow(queryCancellations);
+const cancelQuery = createQueryCancellationWorkflow({
+  cancellations: queryCancellations,
+  connections: connectionStore,
+  driverForEngine: (engine) => databaseDrivers.get(engine),
+});
 const explainQuery = createExplainWorkflow({ executeQuery });
 const schemaWorkflow = createSchemaWorkflow({
   connections: connectionStore,

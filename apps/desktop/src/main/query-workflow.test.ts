@@ -149,6 +149,7 @@ describe('createQueryWorkflow', () => {
       queryId: 'query-user-visible-1',
       connectionId: baseConnection.id,
       status: 'completed',
+      backendPid: 1201,
     });
   });
 
@@ -159,7 +160,21 @@ describe('createQueryWorkflow', () => {
       connectionId: baseConnection.id,
       sql: 'select pg_sleep(30)',
     });
-    const cancelQuery = createQueryCancellationWorkflow(cancellations);
+    const cancelQuery = createQueryCancellationWorkflow({
+      cancellations,
+      connections: {
+        list() {
+          return Promise.resolve([baseConnection]);
+        },
+      },
+      driverForEngine() {
+        return {
+          disconnect() {
+            return Promise.resolve(ok(undefined));
+          },
+        };
+      },
+    });
 
     const result = await cancelQuery({ queryId: 'query-running-1' });
 
@@ -171,6 +186,47 @@ describe('createQueryWorkflow', () => {
         decision: 'disconnect-connection',
       },
     });
+  });
+
+  it('delegates backend cancellation to the database driver when backend pid is known', async () => {
+    const cancellations = new QueryCancellationRegistry();
+    cancellations.register({
+      queryId: 'query-running-2',
+      connectionId: baseConnection.id,
+      sql: 'select pg_sleep(30)',
+    });
+    cancellations.setBackendPid('query-running-2', 1201);
+    const cancelCalls: string[] = [];
+    const cancelQuery = createQueryCancellationWorkflow({
+      cancellations,
+      connections: {
+        list() {
+          return Promise.resolve([baseConnection]);
+        },
+      },
+      driverForEngine() {
+        return {
+          disconnect() {
+            return Promise.resolve(ok(undefined));
+          },
+          cancel(request) {
+            cancelCalls.push(`${request.decision}:${request.backendPid}`);
+            return Promise.resolve(ok(request));
+          },
+        };
+      },
+    });
+
+    const result = await cancelQuery({ queryId: 'query-running-2' });
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        decision: 'cancel-backend',
+        backendPid: 1201,
+      },
+    });
+    expect(cancelCalls).toEqual(['cancel-backend:1201']);
   });
 });
 
@@ -233,12 +289,22 @@ function createHarness(options: {
       driverForEngine(engine) {
         resolvedEngines.push(engine);
         return {
-          execute(request, connection) {
+          execute(request, connection, observer) {
             driverCalls.push({ queryId: request.queryId, sql: request.sql, connection });
+            if (request.queryId) {
+              observer?.onBackendPid?.({
+                queryId: request.queryId,
+                connectionId: connection.id,
+                backendPid: 1201,
+              });
+            }
             if (request.queryId && driverResult.ok) {
               return Promise.resolve(ok({ ...driverResult.data, queryId: request.queryId }));
             }
             return Promise.resolve(driverResult);
+          },
+          disconnect() {
+            return Promise.resolve(ok(undefined));
           },
         };
       },

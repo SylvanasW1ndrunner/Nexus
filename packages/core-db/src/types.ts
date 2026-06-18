@@ -1,6 +1,7 @@
 import type {
   ConnectionId,
   DatabaseEngine,
+  QueryCancelResponse,
   QueryExecutionResult,
   QueryRequest,
   SavedConnection,
@@ -38,12 +39,21 @@ export type TableSummary = {
   comment?: string;
 };
 
+export type QueryExecutionObserver = {
+  onBackendPid?(input: { queryId: string; connectionId: ConnectionId; backendPid: number }): void;
+};
+
 export interface IDatabaseDriver {
   readonly capabilities: DatabaseCapabilities;
   test(config: DatabaseConnectionConfig): Promise<Result<{ latencyMs: number }>>;
   connect(config: DatabaseConnectionConfig): Promise<Result<SavedConnection>>;
   disconnect(connectionId: ConnectionId): Promise<Result<void>>;
-  execute(request: QueryRequest, connection: SavedConnection): Promise<Result<QueryExecutionResult>>;
+  execute(
+    request: QueryRequest,
+    connection: SavedConnection,
+    observer?: QueryExecutionObserver,
+  ): Promise<Result<QueryExecutionResult>>;
+  cancel?(request: QueryCancelResponse, connection: SavedConnection): Promise<Result<QueryCancelResponse>>;
   listTables(connectionId: ConnectionId): Promise<Result<TableSummary[]>>;
   describeTable(connectionId: ConnectionId, schema: string, table: string): Promise<Result<TableDetail>>;
 }

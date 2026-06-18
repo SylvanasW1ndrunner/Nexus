@@ -43,7 +43,7 @@ PostgreSQL 当前是第一个 driver。`PostgresDriver` 内部持有连接池，
 - 查询已完成、失败或取消：返回 `already-finished`。
 - 查询不存在：返回 `not-found`。
 
-该模块不直接访问数据库，也不持有凭据。它的职责是把产品文档中的“先 cancel，超时后断开当前连接”规则做成可测试合同。`QueryRequest` 已支持调用方传入 `queryId`，`PostgresDriver.execute()` 会在结果中保留该 id；主进程 query workflow 会在执行前注册查询、执行后标记 completed/failed，并通过 `db:cancel-query` 暴露取消决策。真实 `pg_cancel_backend` 执行和 backend pid 捕获仍在后续切片实现。
+该模块不直接访问数据库凭据。它的职责是把产品文档中的“先 cancel，超时后断开当前连接”规则做成可测试合同。`QueryRequest` 已支持调用方传入 `queryId`，`PostgresDriver.execute()` 会在结果中保留该 id；主进程 query workflow 会在执行前注册查询、执行后标记 completed/failed，并通过 driver observer 写入 PostgreSQL `backendPid`。`db:cancel-query` 收到取消请求后，如果 backend pid 已知，会调用 `PostgresDriver.cancel()` 执行 `pg_cancel_backend($1)`；如果 pid 缺失或取消超时，则降级断开当前连接。
 
 多数据库扩展通过 `DatabaseDriverRegistry` 落地，而不是让 main 或 renderer 直接 new 具体 SDK。默认 registry 注册 PostgreSQL 的 factory 和 capability；`get(engine)` 会缓存并复用同一 engine 的 driver 实例，使连接池生命周期稳定。后续新增 MySQL、ClickHouse 或 SQL Server 时，只需要实现新的 `IDatabaseDriver` 并登记到 registry。这样查询 workflow、历史记录、安全报告、导出和 UI 可以继续依赖统一接口，同时保留各数据库的方言差异和能力声明。
 
@@ -197,7 +197,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
 - `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
 - `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，参数化查询会传给 PostgreSQL pool，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
-- `postgres-driver-runtime-errors.test.ts` 还覆盖多语句结果集归一化：保留每条语句的 `resultSets`，并生成用户可见的执行消息。
+- `postgres-driver-runtime-errors.test.ts` 还覆盖多语句结果集归一化：保留每条语句的 `resultSets`，并生成用户可见的执行消息；同时覆盖调用方 query id 透传和 `pg_cancel_backend` 调用。
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
 - `query-history.test.ts`：查询历史写入、读取、按 SQL / 错误 / 安全原因搜索、按连接 / 状态 / 风险 / 语句类型筛选、分页元数据、时间范围检索、审计上下文和损坏 JSON 降级。
 - `query-snapshot.test.ts`：结果快照钉住、特殊数据库值序列化、连接过滤、搜索、预览行、删除、容量上限和损坏 JSON 降级。

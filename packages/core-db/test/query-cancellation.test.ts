@@ -133,6 +133,33 @@ describe('QueryCancellationRegistry', () => {
     });
   });
 
+  it('records backend pid after query registration', () => {
+    const registry = new QueryCancellationRegistry();
+    registry.register({
+      queryId: 'q1',
+      connectionId: 'conn-a',
+      sql: 'select pg_sleep(30)',
+      startedAt,
+    });
+
+    const updated = registry.setBackendPid('q1', 1201);
+    const plan = registry.requestCancel('q1', '2026-06-18T08:00:01.000Z');
+
+    expect(updated).toMatchObject({
+      ok: true,
+      data: {
+        backendPid: 1201,
+      },
+    });
+    expect(plan).toMatchObject({
+      ok: true,
+      data: {
+        decision: 'cancel-backend',
+        backendPid: 1201,
+      },
+    });
+  });
+
   it('does not cancel queries that already finished', () => {
     const registry = new QueryCancellationRegistry();
     registry.register({

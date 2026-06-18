@@ -13,6 +13,7 @@
   - request：`{ queryId }`
   - response：`QueryCancelResponse`
 - `main.ts` 创建共享 `QueryCancellationRegistry`，并暴露取消 handler。
+- 后续运行时切片已把 backend pid 捕获和 PostgreSQL `pg_cancel_backend` 接入 driver。
 - `ipc-contract.test.ts` 固定新增 channel，防止 shared、preload、main 合同漂移。
 
 ## 开源评估
@@ -29,6 +30,6 @@
 
 ## 已知限制
 
-- 当前取消 IPC 返回取消决策，不直接执行 `pg_cancel_backend`。
+- 当前取消 IPC 已在 backend pid 已知时执行 `pg_cancel_backend`；但真实 PostgreSQL 集成取消测试仍待可用测试库补充。
 - 如果调用方没有在执行前生成并传入 `queryId`，它无法在查询未完成前知道自动生成的 id；未来 UI/Agent 调用执行接口时必须先生成 query id。
-- backend pid 捕获和真实连接级取消仍待后续切片实现。
+- PostgreSQL 取消后的数据库错误还未单独分类为 `QUERY_CANCELLED`。

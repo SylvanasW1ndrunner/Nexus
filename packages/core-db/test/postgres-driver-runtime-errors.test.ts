@@ -59,14 +59,20 @@ describe('PostgresDriver runtime errors', () => {
     const calls: unknown[][] = [];
     const driver = new PostgresDriver();
     const pool = {
-      query(...args: unknown[]) {
-        calls.push(args);
+      connect() {
         return Promise.resolve({
-          command: 'SELECT',
-          rowCount: 1,
-          oid: 0,
-          fields: [{ name: 'email', dataTypeID: 25 }],
-          rows: [{ email: 'alice@example.com' }],
+          processID: 1201,
+          query(...args: unknown[]) {
+            calls.push(args);
+            return Promise.resolve({
+              command: 'SELECT',
+              rowCount: 1,
+              oid: 0,
+              fields: [{ name: 'email', dataTypeID: 25 }],
+              rows: [{ email: 'alice@example.com' }],
+            });
+          },
+          release() {},
         });
       },
     };
@@ -90,13 +96,19 @@ describe('PostgresDriver runtime errors', () => {
   it('preserves caller-provided query id in execution result', async () => {
     const driver = new PostgresDriver();
     const pool = {
-      query() {
+      connect() {
         return Promise.resolve({
-          command: 'SELECT',
-          rowCount: 1,
-          oid: 0,
-          fields: [{ name: 'value', dataTypeID: 23 }],
-          rows: [{ value: 1 }],
+          processID: 1201,
+          query() {
+            return Promise.resolve({
+              command: 'SELECT',
+              rowCount: 1,
+              oid: 0,
+              fields: [{ name: 'value', dataTypeID: 23 }],
+              rows: [{ value: 1 }],
+            });
+          },
+          release() {},
         });
       },
     };
@@ -117,6 +129,44 @@ describe('PostgresDriver runtime errors', () => {
         queryId: 'query-caller-1',
       },
     });
+  });
+
+  it('calls PostgreSQL pg_cancel_backend for backend cancellation', async () => {
+    const calls: unknown[][] = [];
+    const driver = new PostgresDriver();
+    const pool = {
+      query(...args: unknown[]) {
+        calls.push(args);
+        return Promise.resolve({
+          command: 'SELECT',
+          rowCount: 1,
+          oid: 0,
+          fields: [{ name: 'cancelled', dataTypeID: 16 }],
+          rows: [{ cancelled: true }],
+        });
+      },
+    };
+    (driver as unknown as { pools: Map<string, unknown> }).pools.set(connection.id, pool);
+
+    const result = await driver.cancel(
+      {
+        queryId: 'query-cancel-1',
+        connectionId: connection.id,
+        decision: 'cancel-backend',
+        backendPid: 1201,
+        message: 'cancel',
+      },
+      connection,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        decision: 'cancel-backend',
+        backendPid: 1201,
+      },
+    });
+    expect(calls).toEqual([['select pg_cancel_backend($1) as cancelled', [1201]]]);
   });
 
   it('preserves multi-statement result sets and user-visible messages', async () => {
@@ -249,6 +299,15 @@ describe('PostgresDriver runtime errors', () => {
 function driverWithQueryError(error: Error & { code: string }): PostgresDriver {
   const driver = new PostgresDriver();
   const pool = {
+    connect() {
+      return Promise.resolve({
+        processID: 1201,
+        query() {
+          return Promise.reject(error);
+        },
+        release() {},
+      });
+    },
     query() {
       return Promise.reject(error);
     },

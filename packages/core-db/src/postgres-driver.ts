@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type {
   ColumnSummary,
+  QueryCancelResponse,
   QueryExecutionMessage,
   QueryExecutionResult,
   QueryRequest,
@@ -10,13 +11,13 @@ import type {
   TableDetail,
 } from '@dbagent/shared';
 import { err, ok, type Result } from '@dbagent/shared';
-import type { Pool as PgPool, QueryResult as PgQueryResult, QueryResultRow } from 'pg';
+import type { Pool as PgPool, PoolClient as PgPoolClient, QueryResult as PgQueryResult, QueryResultRow } from 'pg';
 import {
   classifyPostgresConnectionError,
   classifyPostgresRuntimeError,
 } from './postgres-errors.js';
 import { analyzeSqlSafety } from './sql-safety.js';
-import type { DatabaseConnectionConfig, IDatabaseDriver, TableSummary } from './types.js';
+import type { DatabaseConnectionConfig, IDatabaseDriver, QueryExecutionObserver, TableSummary } from './types.js';
 
 type SafePgQueryResult = PgQueryResult<QueryResultRow>;
 
@@ -85,6 +86,7 @@ export class PostgresDriver implements IDatabaseDriver {
   async execute(
     request: QueryRequest,
     connection: SavedConnection,
+    observer?: QueryExecutionObserver,
   ): Promise<Result<QueryExecutionResult>> {
     const safety = analyzeSqlSafety(request.sql, { readOnly: connection.readOnly });
     if (safety.statementKind === 'EMPTY') {
@@ -113,11 +115,62 @@ export class PostgresDriver implements IDatabaseDriver {
     }
 
     const started = performance.now();
+    const queryId = request.queryId ?? randomUUID();
+    let client: PgPoolClient | undefined;
     try {
+      client = await pool.connect();
+      const backendPid = (client as PgPoolClient & { processID?: number }).processID;
+      if (backendPid) {
+        observer?.onBackendPid?.({
+          queryId,
+          connectionId: connection.id,
+          backendPid,
+        });
+      }
       const result = safety.requiresConfirmation
-        ? await executeInTransaction(pool, request.sql, request.params)
-        : normalizePgResults(await pool.query<QueryResultRow>(request.sql, request.params));
-      return ok(toQueryExecutionResult(result, safety, started, request.queryId ?? randomUUID()));
+        ? await executeInTransaction(client, request.sql, request.params)
+        : normalizePgResults(await client.query<QueryResultRow>(request.sql, request.params));
+      return ok(toQueryExecutionResult(result, safety, started, queryId));
+    } catch (error) {
+      return err(classifyPostgresRuntimeError(error));
+    } finally {
+      client?.release();
+    }
+  }
+
+  async cancel(request: QueryCancelResponse, connection: SavedConnection): Promise<Result<QueryCancelResponse>> {
+    if (request.decision === 'disconnect-connection') {
+      const disconnected = await this.disconnect(connection.id);
+      if (!disconnected.ok) return disconnected;
+      return ok({ ...request, message: `${request.message} 已断开当前连接。` });
+    }
+
+    if (request.decision !== 'cancel-backend') return ok(request);
+    if (!request.backendPid) {
+      return err({ code: 'VALIDATION_ERROR', message: 'Backend pid is required to cancel PostgreSQL query.' });
+    }
+
+    const pool = this.pools.get(connection.id);
+    if (!pool) {
+      return err({
+        code: 'CONNECTION_FAILED',
+        message: 'Connection is not active.',
+        retryable: true,
+      });
+    }
+
+    try {
+      const result = await pool.query<{ cancelled: boolean }>('select pg_cancel_backend($1) as cancelled', [
+        request.backendPid,
+      ]);
+      if (!result.rows[0]?.cancelled) {
+        return err({
+          code: 'QUERY_FAILED',
+          message: `PostgreSQL backend ${request.backendPid} was not cancelled.`,
+          retryable: true,
+        });
+      }
+      return ok({ ...request, message: 'PostgreSQL 已接受查询取消请求。' });
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
     }
@@ -295,11 +348,10 @@ export class PostgresDriver implements IDatabaseDriver {
 }
 
 async function executeInTransaction(
-  pool: PgPool,
+  client: PgPoolClient,
   sql: string,
   params?: unknown[],
 ): Promise<SafePgQueryResult[]> {
-  const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const result = normalizePgResults(await client.query<QueryResultRow>(sql, params));
@@ -312,8 +364,6 @@ async function executeInTransaction(
       // Preserve the original database error; rollback failure is secondary.
     }
     throw error;
-  } finally {
-    client.release();
   }
 }
 

@@ -29,7 +29,7 @@
 
 SQL 执行路径由主进程强制执行确认握手。如果 SQL 需要确认且 request 没有 `confirmed: true`，main 返回 `CONFIRMATION_REQUIRED`，不调用 driver，也不写历史。用户确认后 renderer 用同一 SQL 重试。
 
-长 SQL 取消入口同样在主进程收口。`createQueryWorkflow()` 会把执行中的 query id 注册到 `QueryCancellationRegistry`，并在成功或失败后更新状态；`db:cancel-query` 目前返回取消决策，供未来 UI/Agent 执行真实 PostgreSQL backend cancel 或连接断开。调用方如果需要在查询未完成时取消，必须在发送 `db:execute-query` 前生成 `queryId`。
+长 SQL 取消入口同样在主进程收口。`createQueryWorkflow()` 会把执行中的 query id 注册到 `QueryCancellationRegistry`，并通过 driver observer 记录 PostgreSQL backend pid；`db:cancel-query` 会先生成取消决策，再调用对应 driver。PostgreSQL 已支持 `pg_cancel_backend`，缺少 backend pid 或取消超时时会降级断开当前连接。调用方如果需要在查询未完成时取消，必须在发送 `db:execute-query` 前生成 `queryId`。
 
 Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `describeTable`，查看列、类型、nullable、主键和外键；点击 `SQL` 才生成预览查询，避免用户只是查看结构时误触发数据扫描。
 
