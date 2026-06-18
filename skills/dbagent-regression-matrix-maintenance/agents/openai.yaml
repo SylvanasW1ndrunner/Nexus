@@ -1,0 +1,6 @@
+interface:
+  display_name: "DBAgent 回归矩阵维护"
+  short_description: "维护跨模块验收矩阵和回归测试清单"
+  default_prompt: "Use $dbagent-regression-matrix-maintenance to update the regression matrix for a DBAgent milestone or feature slice."
+policy:
+  allow_implicit_invocation: true

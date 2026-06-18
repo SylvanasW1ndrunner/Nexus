@@ -14,7 +14,54 @@
 
 后续以仓库内 `skills/` 为事实源，用户级目录只作为当前机器的自动发现副本。若两者不一致，先更新仓库，再同步用户级副本。
 
-## Skill 列表
+## 过程型 Skill
+
+### dbagent-development-skill-router
+
+用途：开发任务开始前，根据产品文档和任务类型选择应该加载的 DBAgent 专用 skill。
+
+触发场景：
+- 准备开始一个新功能切片。
+- 不确定应该读取哪份产品文档。
+- 不确定应该使用哪个模块开发 skill。
+- 需要确认“先功能、后前端”的当前约束。
+
+核心约束：
+- 只做路由和边界判断，不替代模块专项 skill。
+- 优先选择最少必要 skill，避免加载无关上下文。
+- 每个任务都要明确文档来源、开发切片、必须验证和不做范围。
+
+### dbagent-module-doc-authoring
+
+用途：撰写或更新模块级中文工程文档、接口说明、测试说明和 release note。
+
+触发场景：
+- 新增核心包、服务、IPC、持久化能力。
+- 修改模块行为或公共接口。
+- 用户需要理解模块开发逻辑。
+- release note 或测试说明需要和实现同步。
+
+核心约束：
+- 每个核心模块文档必须说明模块职责、来源文档、代码入口、对外合同、数据与安全边界、失败恢复、测试覆盖和当前限制。
+- 核心能力没有中文模块文档不能视为完成。
+- 不写真实密钥、连接串、用户数据或云端凭证。
+
+### dbagent-regression-matrix-maintenance
+
+用途：维护跨模块验收矩阵和回归测试清单，把产品场景转成可执行验收项。
+
+触发场景：
+- 完成一个功能切片后补验收矩阵。
+- 准备 beta 包、版本分支或 release 目录。
+- 修复验收反馈后补回归项。
+- 涉及 PostgreSQL、Python、终端、MCP、LLM、打包等真实依赖。
+
+核心约束：
+- 默认以真实业务路径组织，不按内部函数名组织。
+- 每条验收项必须包含成功断言、失败断言、真实依赖、自动化状态和证据。
+- 如果缺少自动化，必须写明环境门控或手动验证步骤。
+
+## 模块型 Skill
 
 ### dbagent-product-backend-planning
 
@@ -91,6 +138,7 @@
 新增约束：
 - Skill 触发的 Agent run 必须强制执行 `allowed_tools`，不能只写在 prompt 里。
 - 即使模型返回隐藏或未授权工具调用，也必须在 runtime 拒绝。
+- 已补齐 `agents/openai.yaml`。
 
 ### dbagent-classic-db-ide-development
 
@@ -113,6 +161,7 @@
 新增约束：
 - 当前 UI 延后，但登录、注册、验证码、忘记密码、测试账号、PostgreSQL 本地账号库必须通过服务或 IPC 测试可调用。
 - 密码只存 hash，不存明文。
+- 已补齐 `agents/openai.yaml`。
 
 ### dbagent-config-provider-secrets-development
 
@@ -163,6 +212,7 @@
 - 终端必须作为真实进程/session 服务实现，不是 renderer 文本框。
 - 测试必须证明交互式 stdin/stdout 可用。
 - Python 不假设全局 PATH 可用，必须支持显式解释器路径和运行时检测。
+- 已补齐 `agents/openai.yaml`。
 
 ### dbagent-quality-gate-testing
 
@@ -180,17 +230,27 @@
 - PostgreSQL、进程 IO、Python 执行、打包行为等风险点要有真实集成测试。
 - 发布前必须检查中文文档、类型检查、测试结果、依赖打包影响和密钥扫描。
 
-## 使用规则
+## 推荐使用顺序
 
-1. 做开发计划时先使用 `dbagent-product-backend-planning`。
-2. 进入具体模块后，叠加对应专项 skill。
-3. 提交或发布前使用 `dbagent-quality-gate-testing`。
-4. 产品文档是事实源，skill 只固化开发流程和工程边界。
-5. 若 `docs/product/` 发生变化，先改产品文档，再同步更新 skill。
+1. 开始任务时先用 `dbagent-development-skill-router` 判断任务类型和必读文档。
+2. 做开发计划时使用 `dbagent-product-backend-planning`。
+3. 编码前用 `dbagent-slice-design` 定义切片边界。
+4. 进入具体模块后，叠加对应专项 skill。
+5. 用 `dbagent-module-doc-authoring` 同步模块文档。
+6. 提交前使用 `dbagent-quality-gate-testing`、`dbagent-real-integration-testing` 和 `dbagent-headless-capability-validation`。
+7. 发布或大版本验收前使用 `dbagent-regression-matrix-maintenance`。
+8. 产品文档是事实源，skill 只固化开发流程和工程边界。
+9. 若 `docs/product/` 发生变化，先改产品文档，再同步更新 skill。
 
 ## 校验结果
 
-已使用官方 `quick_validate.py` 校验以下 skill，全部通过：
+已使用官方 `quick_validate.py` 校验新增 skill，全部通过：
+
+- `dbagent-development-skill-router`
+- `dbagent-module-doc-authoring`
+- `dbagent-regression-matrix-maintenance`
+
+此前已校验的基础 skill：
 
 - `dbagent-product-backend-planning`
 - `dbagent-feature-first-development`
@@ -205,3 +265,5 @@
 - `dbagent-resilience-recovery-development`
 - `dbagent-workspace-python-release-development`
 - `dbagent-quality-gate-testing`
+
+Windows 下校验中文 skill 文件需要使用 Python UTF-8 模式，例如 `python -X utf8 ...quick_validate.py`。

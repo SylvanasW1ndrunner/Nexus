@@ -1,0 +1,6 @@
+interface:
+  display_name: "DBAgent 开发 Skill 路由"
+  short_description: "按任务选择 DBAgent 开发流程与验证门槛"
+  default_prompt: "Use $dbagent-development-skill-router to choose the right DBAgent development skills for the next backend feature."
+policy:
+  allow_implicit_invocation: true

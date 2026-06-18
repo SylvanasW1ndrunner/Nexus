@@ -1,0 +1,6 @@
+interface:
+  display_name: "DBAgent 模块文档编写"
+  short_description: "为核心模块补齐中文工程文档和接口说明"
+  default_prompt: "Use $dbagent-module-doc-authoring to write or update module documentation for a DBAgent backend capability."
+policy:
+  allow_implicit_invocation: true
