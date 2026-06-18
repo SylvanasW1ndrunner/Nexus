@@ -55,3 +55,35 @@ export type SchemaRagIndexInput = {
   tables: TableDetail[];
   indexedAt?: string;
 };
+
+export type SchemaRagEvaluationCase = {
+  id: string;
+  query: string;
+  mustInclude: string[];
+  shouldInclude?: string[];
+  mustNotInclude?: string[];
+  limit?: number;
+  includeRelations?: boolean;
+};
+
+export type SchemaRagEvaluationCaseResult = {
+  id: string;
+  query: string;
+  retrievedIds: string[];
+  missingMustInclude: string[];
+  missingShouldInclude: string[];
+  unexpectedIds: string[];
+  mustHitRate: number;
+  shouldHitRate: number;
+  passed: boolean;
+};
+
+export type SchemaRagEvaluationSummary = {
+  totalCases: number;
+  passedCases: number;
+  failedCases: number;
+  passRate: number;
+  averageMustHitRate: number;
+  averageShouldHitRate: number;
+  results: SchemaRagEvaluationCaseResult[];
+};
