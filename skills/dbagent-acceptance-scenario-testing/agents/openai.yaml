@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 验收场景测试"
+  short_description: "把真实用户旅程转成可执行测试"
+  default_prompt: "Use $dbagent-acceptance-scenario-testing to design and implement realistic backend acceptance tests for a DBAgent feature."

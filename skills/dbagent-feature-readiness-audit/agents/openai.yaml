@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 功能就绪审计"
+  short_description: "提交或发版前审计功能完成度"
+  default_prompt: "Use $dbagent-feature-readiness-audit to decide whether a backend feature is ready to commit or release."
