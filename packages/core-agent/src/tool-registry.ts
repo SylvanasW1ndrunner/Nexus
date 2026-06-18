@@ -14,6 +14,10 @@ export class ToolRegistry {
     this.tools.set(definition.name, { ...definition, handler });
   }
 
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
   get(name: string): RegisteredAgentTool | undefined {
     return this.tools.get(name);
   }
