@@ -3,7 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ConnectionStore, QueryHistoryStore, createDefaultDatabaseDriverRegistry } from '@dbagent/core-db';
+import { ConnectionStore, QueryCancellationRegistry, QueryHistoryStore, createDefaultDatabaseDriverRegistry } from '@dbagent/core-db';
 import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, TestAuthRepository } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
@@ -20,7 +20,7 @@ import {
 import { createConnectionWorkflow } from './connection-workflow.js';
 import { CredentialVault } from './credential-vault.js';
 import { createExplainWorkflow } from './explain-workflow.js';
-import { createQueryWorkflow } from './query-workflow.js';
+import { createQueryCancellationWorkflow, createQueryWorkflow } from './query-workflow.js';
 import { createSchemaWorkflow } from './schema-workflow.js';
 import { IdeSettingsStore } from './ide-settings-store.js';
 import { PluginRegistry } from './plugin-registry.js';
@@ -70,6 +70,7 @@ const pythonEnvironmentService = new PythonEnvironmentService();
 const terminalService = new TerminalService();
 const pluginRegistry = new PluginRegistry(pluginStatePath);
 const databaseDrivers = createDefaultDatabaseDriverRegistry();
+const queryCancellations = new QueryCancellationRegistry();
 const connectionWorkflow = createConnectionWorkflow({
   connections: connectionStore,
   credentials: credentialVault,
@@ -80,7 +81,9 @@ const executeQuery = createQueryWorkflow({
   history: queryHistoryStore,
   usage: usageTracker,
   driverForEngine: (engine) => databaseDrivers.get(engine),
+  cancellations: queryCancellations,
 });
+const cancelQuery = createQueryCancellationWorkflow(queryCancellations);
 const explainQuery = createExplainWorkflow({ executeQuery });
 const schemaWorkflow = createSchemaWorkflow({
   connections: connectionStore,
@@ -242,6 +245,7 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.connection.disconnect, async ({ id }) => connectionWorkflow.disconnect(id));
 
   handle(ipcChannels.db.executeQuery, async (request) => executeQuery(request));
+  handle(ipcChannels.db.cancelQuery, async (request) => cancelQuery(request));
   handle(ipcChannels.db.explainQuery, async (request) => explainQuery(request));
   handle(ipcChannels.db.listTables, async ({ connectionId }) => schemaWorkflow.listTables(connectionId));
   handle(ipcChannels.db.describeTable, async ({ connectionId, schema, table }) =>

@@ -22,6 +22,7 @@ export const ipcChannels = {
   },
   db: {
     executeQuery: 'db:execute-query',
+    cancelQuery: 'db:cancel-query',
     queryHistory: 'db:query-history',
     explainQuery: 'db:explain-query',
     listTables: 'db:list-tables',
@@ -119,6 +120,7 @@ export type ConnectionInput = {
 };
 
 export type QueryRequest = {
+  queryId?: string;
   connectionId: ConnectionId;
   sql: string;
   params?: unknown[];
@@ -171,6 +173,25 @@ export type QueryExecutionMessage = {
   level: 'info' | 'warning';
   message: string;
   statementIndex?: number;
+};
+
+export type QueryCancelRequest = {
+  queryId: string;
+};
+
+export type QueryCancellationDecision =
+  | 'cancel-backend'
+  | 'disconnect-connection'
+  | 'already-finished'
+  | 'not-found';
+
+export type QueryCancelResponse = {
+  queryId: string;
+  connectionId?: ConnectionId;
+  decision: QueryCancellationDecision;
+  backendPid?: number;
+  retryAfterMs?: number;
+  message: string;
 };
 
 export type QueryHistoryItem = {
@@ -573,6 +594,7 @@ export type IpcRequestMap = {
   'connection:connect': { id: ConnectionId };
   'connection:disconnect': { id: ConnectionId };
   'db:execute-query': QueryRequest;
+  'db:cancel-query': QueryCancelRequest;
   'db:query-history': QueryHistoryRequest;
   'db:explain-query': QueryRequest;
   'db:list-tables': { connectionId: ConnectionId };
@@ -632,6 +654,7 @@ export type IpcResponseMap = {
   'connection:connect': Result<SavedConnection>;
   'connection:disconnect': Result<SavedConnection>;
   'db:execute-query': Result<QueryExecutionResult>;
+  'db:cancel-query': Result<QueryCancelResponse>;
   'db:query-history': Result<QueryHistoryItem[]>;
   'db:explain-query': Result<QueryExecutionResult>;
   'db:list-tables': Result<TableSummary[]>;

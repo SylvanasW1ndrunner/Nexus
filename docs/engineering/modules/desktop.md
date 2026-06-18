@@ -29,6 +29,8 @@
 
 SQL 执行路径由主进程强制执行确认握手。如果 SQL 需要确认且 request 没有 `confirmed: true`，main 返回 `CONFIRMATION_REQUIRED`，不调用 driver，也不写历史。用户确认后 renderer 用同一 SQL 重试。
 
+长 SQL 取消入口同样在主进程收口。`createQueryWorkflow()` 会把执行中的 query id 注册到 `QueryCancellationRegistry`，并在成功或失败后更新状态；`db:cancel-query` 目前返回取消决策，供未来 UI/Agent 执行真实 PostgreSQL backend cancel 或连接断开。调用方如果需要在查询未完成时取消，必须在发送 `db:execute-query` 前生成 `queryId`。
+
 Schema 区域将“看结构”和“查数据”拆开。点击表名加载 `describeTable`，查看列、类型、nullable、主键和外键；点击 `SQL` 才生成预览查询，避免用户只是查看结构时误触发数据扫描。
 
 结果区支持 CSV 和 JSON 导出。导出逻辑在 renderer 使用浏览器 `Blob` 下载，不引入桌面端额外运行时依赖。格式化逻辑来自 `@dbagent/shared`，保证 main、renderer 和测试使用同一结果结构。
@@ -53,7 +55,7 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 - `connection-workflow.test.ts`：连接生命周期，包括创建保存凭证、缺失连接不写孤立凭证、更新后断开旧连接池、连接失败标记 error、删除时清理凭证。
 - `credential-vault.test.ts`：凭证保存、读取、删除、`safeStorage` 可用和不可用 fallback。
 - `query-confirmation.test.ts`：危险 SQL 未确认时必须返回确认要求。
-- `query-workflow.test.ts`：主进程查询业务链路，包括成功执行、用量记录、历史写入、只读拦截、确认要求和失败历史。
+- `query-workflow.test.ts`：主进程查询业务链路，包括成功执行、用量记录、历史写入、只读拦截、确认要求、失败历史、query id 生命周期和取消决策入口。
 - `schema-workflow.test.ts`：Schema 主进程业务链路，包括连接缺失时的 `NOT_FOUND`、按 `engine` 路由 driver、表列表和表详情参数透传。
 - `workspace-project-store.test.ts`：真实项目目录创建、标准模板目录与 starter 文件、打开已有项目、最近项目置顶、普通目录拒绝打开、保存可复用 SQL、读取 SQL 文件、拦截非受管路径读取、修改 SQL 库配置后保存到新路径。
 - `workspace-state-store.test.ts`：SQL 草稿恢复、活动连接恢复、缺失状态、损坏 JSON 和结构不合法状态。

@@ -87,6 +87,38 @@ describe('PostgresDriver runtime errors', () => {
     ]);
   });
 
+  it('preserves caller-provided query id in execution result', async () => {
+    const driver = new PostgresDriver();
+    const pool = {
+      query() {
+        return Promise.resolve({
+          command: 'SELECT',
+          rowCount: 1,
+          oid: 0,
+          fields: [{ name: 'value', dataTypeID: 23 }],
+          rows: [{ value: 1 }],
+        });
+      },
+    };
+    (driver as unknown as { pools: Map<string, unknown> }).pools.set(connection.id, pool);
+
+    const result = await driver.execute(
+      {
+        queryId: 'query-caller-1',
+        connectionId: connection.id,
+        sql: 'select 1 as value',
+      },
+      connection,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        queryId: 'query-caller-1',
+      },
+    });
+  });
+
   it('preserves multi-statement result sets and user-visible messages', async () => {
     const driver = new PostgresDriver();
     const calls: string[] = [];

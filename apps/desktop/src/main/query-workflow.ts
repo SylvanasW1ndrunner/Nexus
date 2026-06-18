@@ -1,7 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { analyzeSqlSafety, type IDatabaseDriver } from '@dbagent/core-db';
 import {
   err,
+  ok,
   type DatabaseEngine,
+  type QueryCancelResponse,
   type QueryExecutionResult,
   type QueryHistoryItem,
   type QueryRequest,
@@ -30,11 +33,20 @@ type UsageRecorder = {
   recordLocalQuery(): Promise<unknown>;
 };
 
+type QueryCancellationStore = {
+  register(input: { queryId: string; connectionId: string; sql: string; startedAt?: string | Date }): Result<unknown>;
+  markCompleted(queryId: string, completedAt?: string | Date): Result<unknown>;
+  markFailed(queryId: string, errorMessage: string, failedAt?: string | Date): Result<unknown>;
+  requestCancel(queryId: string, now?: string | Date): Result<QueryCancelResponse>;
+};
+
 export type QueryWorkflowDependencies = {
   connections: ConnectionReader;
   history: QueryHistoryWriter;
   usage: UsageRecorder;
   driverForEngine: (engine: DatabaseEngine) => Pick<IDatabaseDriver, 'execute'>;
+  cancellations?: QueryCancellationStore;
+  queryIdFactory?: () => string;
 };
 
 export function createQueryWorkflow({
@@ -42,6 +54,8 @@ export function createQueryWorkflow({
   history,
   usage,
   driverForEngine,
+  cancellations,
+  queryIdFactory = randomUUID,
 }: QueryWorkflowDependencies): (request: QueryRequest) => Promise<Result<QueryExecutionResult>> {
   return async (request) => {
     const connection = (await connections.list()).find((item) => item.id === request.connectionId);
@@ -76,8 +90,18 @@ export function createQueryWorkflow({
       if (confirmationError) return err(confirmationError);
     }
 
-    const result = await driverForEngine(connection.engine).execute(request, connection);
+    const queryId = request.queryId?.trim() || queryIdFactory();
+    const executionRequest: QueryRequest = { ...request, queryId };
+    const registration = cancellations?.register({
+      queryId,
+      connectionId: request.connectionId,
+      sql: request.sql,
+    });
+    if (registration && !registration.ok) return registration;
+
+    const result = await driverForEngine(connection.engine).execute(executionRequest, connection);
     if (result.ok) {
+      cancellations?.markCompleted(queryId);
       await usage.recordLocalQuery();
       await history.append({
         connectionId: request.connectionId,
@@ -88,6 +112,7 @@ export function createQueryWorkflow({
         safety: result.data.safety,
       });
     } else {
+      cancellations?.markFailed(queryId, result.error.message);
       await history.append({
         connectionId: request.connectionId,
         sql: request.sql,
@@ -97,5 +122,15 @@ export function createQueryWorkflow({
       });
     }
     return result;
+  };
+}
+
+export function createQueryCancellationWorkflow(cancellations: QueryCancellationStore) {
+  return async (request: { queryId: string }): Promise<Result<QueryCancelResponse>> => {
+    const queryId = request.queryId.trim();
+    if (!queryId) return err({ code: 'VALIDATION_ERROR', message: 'Query id is required.' });
+    const plan = cancellations.requestCancel(queryId);
+    if (!plan.ok) return plan;
+    return ok(plan.data);
   };
 }

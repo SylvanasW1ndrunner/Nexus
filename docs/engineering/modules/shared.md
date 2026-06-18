@@ -17,6 +17,8 @@
 
 新增功能时先判断是否跨进程。如果功能只在 renderer 内使用，不应放进 IPC 契约；如果主进程需要返回给 UI，必须先在 `domain.ts` 或 `ipc.ts` 中定义稳定结构，再由具体模块实现。
 
+查询执行合同支持调用方传入 `queryId`。未来 UI、Agent 或命令入口如果需要取消长 SQL，必须在发送 `db:execute-query` 前生成 query id，并用同一个 id 调用 `db:cancel-query`。`db:cancel-query` 当前返回取消决策：优先 backend cancel、降级断开当前连接、查询已结束或未找到。真实 PostgreSQL backend cancel 由 main/driver 后续切片执行，shared 只暴露稳定跨进程结构。
+
 错误处理统一走 `Result<T>`。业务可恢复错误使用 `AppErrorCode`，例如远程连接失败、只读连接拦截、危险 SQL 需要确认。这样 renderer 可以写可测试的错误提示逻辑，而不是解析数据库驱动的原始异常文本。
 
 结果导出 helper 放在 `shared`，原因是导出格式依赖 `QueryExecutionResult` 的稳定结构，但不需要访问 DOM、文件系统或数据库连接。CSV 面向表格工具，JSON 面向审计、复现和后续 Agent 上下文复用。JSON 导出保留 `queryId`、`rowCount`、`elapsedMs`、`columns`、`rows` 和 `safety`，并把 `Date`、`bigint`、`Buffer` 和嵌套对象规范化为可序列化值。
@@ -31,7 +33,7 @@
 - `packages/shared/test/export.test.ts`：覆盖 JSON metadata、列顺序、`Date`、`bigint`、`Buffer` 和嵌套对象。
 - `packages/shared/test/query-result-view.test.ts`：覆盖可见列至少保留一列、列切换、仅在可见列内搜索、分页视图、Date/Buffer/JSON 单元格格式化。
 - `packages/shared/test/result-export.test.ts`：覆盖旧 CSV/JSON helper 兼容性、筛选视图导出、NDJSON、Excel 兼容 XML 工作簿、文件名清洗和元信息 worksheet。
-- `packages/shared/test/ipc-contract.test.ts` 覆盖 IPC 契约：运行时快照固定 M0-M1.5 channel 集合，编译期断言保证 `IpcRequestMap` 和 `IpcResponseMap` 键集合一致。新增 channel 时必须同步更新该测试，避免 renderer、preload 和 main 只改一侧。
+- `packages/shared/test/ipc-contract.test.ts` 覆盖 IPC 契约：运行时快照固定 M0-M1.5 channel 集合，编译期断言保证 `IpcRequestMap` 和 `IpcResponseMap` 键集合一致。新增 channel 时必须同步更新该测试，避免 renderer、preload 和 main 只改一侧；当前包含 `db:cancel-query`。
 
 ## 后续扩展
 

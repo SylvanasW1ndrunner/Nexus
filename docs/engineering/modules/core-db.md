@@ -43,7 +43,7 @@ PostgreSQL 当前是第一个 driver。`PostgresDriver` 内部持有连接池，
 - 查询已完成、失败或取消：返回 `already-finished`。
 - 查询不存在：返回 `not-found`。
 
-该模块不直接访问数据库，也不持有凭据。它的职责是把产品文档中的“先 cancel，超时后断开当前连接”规则做成可测试合同；真实 `pg_cancel_backend` 和 IPC `db:cancel-query` 接线会在后续切片实现。
+该模块不直接访问数据库，也不持有凭据。它的职责是把产品文档中的“先 cancel，超时后断开当前连接”规则做成可测试合同。`QueryRequest` 已支持调用方传入 `queryId`，`PostgresDriver.execute()` 会在结果中保留该 id；主进程 query workflow 会在执行前注册查询、执行后标记 completed/failed，并通过 `db:cancel-query` 暴露取消决策。真实 `pg_cancel_backend` 执行和 backend pid 捕获仍在后续切片实现。
 
 多数据库扩展通过 `DatabaseDriverRegistry` 落地，而不是让 main 或 renderer 直接 new 具体 SDK。默认 registry 注册 PostgreSQL 的 factory 和 capability；`get(engine)` 会缓存并复用同一 engine 的 driver 实例，使连接池生命周期稳定。后续新增 MySQL、ClickHouse 或 SQL Server 时，只需要实现新的 `IDatabaseDriver` 并登记到 registry。这样查询 workflow、历史记录、安全报告、导出和 UI 可以继续依赖统一接口，同时保留各数据库的方言差异和能力声明。
 

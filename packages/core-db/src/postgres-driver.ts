@@ -117,7 +117,7 @@ export class PostgresDriver implements IDatabaseDriver {
       const result = safety.requiresConfirmation
         ? await executeInTransaction(pool, request.sql, request.params)
         : normalizePgResults(await pool.query<QueryResultRow>(request.sql, request.params));
-      return ok(toQueryExecutionResult(result, safety, started));
+      return ok(toQueryExecutionResult(result, safety, started, request.queryId ?? randomUUID()));
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
     }
@@ -337,6 +337,7 @@ function toQueryExecutionResult(
   results: SafePgQueryResult[],
   safety: QueryExecutionResult['safety'],
   started: number,
+  queryId: string,
 ): QueryExecutionResult {
   const resultSets = results.map(toQueryResultSet);
   const primary =
@@ -345,7 +346,7 @@ function toQueryExecutionResult(
     toQueryResultSet(emptyPgResult(), 0);
   const messages = buildQueryMessages(resultSets);
   const result: QueryExecutionResult = {
-    queryId: randomUUID(),
+    queryId,
     columns: primary.columns,
     rows: primary.rows,
     rowCount: primary.rowCount,

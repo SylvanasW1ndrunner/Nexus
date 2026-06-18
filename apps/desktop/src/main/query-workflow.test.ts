@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { QueryCancellationRegistry } from '@dbagent/core-db';
 import {
   err,
   ok,
@@ -7,7 +8,7 @@ import {
   type Result,
   type SavedConnection,
 } from '@dbagent/shared';
-import { createQueryWorkflow } from './query-workflow.js';
+import { createQueryCancellationWorkflow, createQueryWorkflow } from './query-workflow.js';
 
 const baseConnection: SavedConnection = {
   id: 'conn-main-flow',
@@ -126,14 +127,60 @@ describe('createQueryWorkflow', () => {
       }),
     ]);
   });
+
+  it('registers a caller-provided query id and marks it completed after execution', async () => {
+    const cancellations = new QueryCancellationRegistry();
+    const harness = createHarness({ connection: baseConnection, cancellations });
+
+    const result = await harness.execute({
+      queryId: 'query-user-visible-1',
+      connectionId: baseConnection.id,
+      sql: 'select city from users order by city limit 10',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(harness.driverCalls).toEqual([
+      expect.objectContaining({
+        queryId: 'query-user-visible-1',
+        sql: 'select city from users order by city limit 10',
+      }),
+    ]);
+    expect(cancellations.get('query-user-visible-1')).toMatchObject({
+      queryId: 'query-user-visible-1',
+      connectionId: baseConnection.id,
+      status: 'completed',
+    });
+  });
+
+  it('returns a cancel decision for a running query id', async () => {
+    const cancellations = new QueryCancellationRegistry();
+    cancellations.register({
+      queryId: 'query-running-1',
+      connectionId: baseConnection.id,
+      sql: 'select pg_sleep(30)',
+    });
+    const cancelQuery = createQueryCancellationWorkflow(cancellations);
+
+    const result = await cancelQuery({ queryId: 'query-running-1' });
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        queryId: 'query-running-1',
+        connectionId: baseConnection.id,
+        decision: 'disconnect-connection',
+      },
+    });
+  });
 });
 
 function createHarness(options: {
   connection: SavedConnection;
   driverResult?: Result<QueryExecutionResult>;
+  cancellations?: QueryCancellationRegistry;
 }) {
   const history: QueryHistoryItem[] = [];
-  const driverCalls: Array<{ sql: string; connection: SavedConnection }> = [];
+  const driverCalls: Array<{ queryId: string | undefined; sql: string; connection: SavedConnection }> = [];
   const resolvedEngines: string[] = [];
   let usageCount = 0;
   const driverResult =
@@ -187,11 +234,15 @@ function createHarness(options: {
         resolvedEngines.push(engine);
         return {
           execute(request, connection) {
-            driverCalls.push({ sql: request.sql, connection });
+            driverCalls.push({ queryId: request.queryId, sql: request.sql, connection });
+            if (request.queryId && driverResult.ok) {
+              return Promise.resolve(ok({ ...driverResult.data, queryId: request.queryId }));
+            }
             return Promise.resolve(driverResult);
           },
         };
       },
+      ...(options.cancellations ? { cancellations: options.cancellations } : {}),
     }),
   };
 }

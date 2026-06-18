@@ -23,6 +23,7 @@ describe('ipc contract', () => {
       'connection:connect',
       'connection:disconnect',
       'db:execute-query',
+      'db:cancel-query',
       'db:query-history',
       'db:explain-query',
       'db:list-tables',
