@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 无界面能力验收"
+  short_description: "Validate backend capabilities without final UI"
+  default_prompt: "Use $dbagent-headless-capability-validation to verify a DBAgent capability through service, IPC, CLI, or tests without relying on the final UI."

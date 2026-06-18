@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 安全边界审查"
+  short_description: "Audit security boundaries for backend feature slices"
+  default_prompt: "Use $dbagent-security-boundary-review to audit a DBAgent backend slice for credential, SQL, filesystem, subprocess, network, and renderer exposure risks."

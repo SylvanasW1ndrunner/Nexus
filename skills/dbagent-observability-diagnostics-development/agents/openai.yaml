@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 可观测与诊断开发"
+  short_description: "Build logs, audit traces, and diagnostics"
+  default_prompt: "Use $dbagent-observability-diagnostics-development to add DBAgent logs, audit traces, diagnostics, redaction, and recovery observability to a backend feature."

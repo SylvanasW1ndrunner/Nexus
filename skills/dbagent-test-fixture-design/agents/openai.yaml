@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent 测试夹具设计"
+  short_description: "Design realistic fixtures and acceptance scenarios"
+  default_prompt: "Use $dbagent-test-fixture-design to design realistic DBAgent PostgreSQL, workspace, Python, MCP, and Agent test fixtures from product scenarios."
