@@ -1,5 +1,6 @@
 import type { QuerySafetyReport } from '@dbagent/shared';
 import { analyzeSqlPerformance } from './sql-performance.js';
+import { splitSqlStatements } from './sql-editor-statements.js';
 
 const dangerousKinds = new Set(['DROP', 'TRUNCATE', 'ALTER', 'CREATE']);
 const writeKinds = new Set(['INSERT', 'UPDATE', 'DELETE', 'MERGE', 'CALL']);
@@ -80,8 +81,7 @@ export function firstStatementKind(sql: string): string {
 }
 
 export function containsMultipleStatements(sql: string): boolean {
-  const withoutTrailing = sql.trim().replace(/;+\s*$/g, '');
-  return withoutTrailing.includes(';');
+  return splitSqlStatements(sql).length > 1;
 }
 
 function isUnboundedMutation(sql: string, statementKind: string): boolean {

@@ -7,6 +7,7 @@
 - `packages/core-db/src/database-driver-registry.ts`：多数据库 driver 注册表和默认 PostgreSQL 工厂。
 - `packages/core-db/src/postgres-errors.ts`：PostgreSQL 连接错误分类。
 - `packages/core-db/src/sql-safety.ts`：SQL 安全判断。
+- `packages/core-db/src/sql-editor-statements.ts`：SQL 编辑器语句拆分、当前语句定位和行列位置映射。
 - `packages/core-db/src/sql-execution-plan.ts`：执行前预审计划，整合安全、确认、事务、回滚和 EXPLAIN 建议。
 - `packages/core-db/src/sql-performance.ts`：轻量性能提示。
 - `packages/core-db/src/sql-builder.ts`：Schema 预览 SQL、表数据浏览 SQL、identifier quote 和参数化筛选构建。
@@ -49,6 +50,8 @@ Schema 能力分为轻重两层：`listTables` 只返回表/视图摘要，连�
 - `confirmationReasons` / `executionNotes`：给用户和 Agent 展示的审查理由。
 
 `UPDATE` / `DELETE` 没有 `WHERE` 会被标记为 `dangerous`，即使连接可写也必须确认，并在支持事务时要求事务执行。这样用户或 Agent 在误写“全表更新/删除”时，会先收到明确风险，而不是只看到普通写操作确认。
+
+SQL 编辑器语句边界由 `splitSqlStatements()` 负责。它不是完整 SQL AST parser，而是面向编辑器执行入口的小型 PostgreSQL 词法状态机，能识别单引号、双引号、行注释、块注释、嵌套块注释和 dollar-quoted 函数体中的分号，避免把字符串或函数体内部内容误拆成多条语句。`findSqlStatementAtPosition()` 和 `findSqlStatementAtLineColumn()` 供后续“运行当前语句”使用，返回稳定 offset、行列范围和语句类型。当前切片不新增 SQL parser 依赖；如果后续要做 AST 改写、血缘分析、跨方言格式化或深度危险 SQL 识别，需要按开源优先规则重新评估成熟 parser 的许可证、包体、离线和打包影响。
 
 表数据编辑使用独立的 `buildTableEditPreview()` 生成可审查 SQL，而不是让 UI 直接拼接语句。它覆盖三类操作：
 
@@ -152,6 +155,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 ## 测试覆盖
 
 - `sql-safety.test.ts`：只读拦截、写操作风险、多语句风险。
+- `sql-editor-statements.test.ts`：SQL 语句拆分、字符串/注释/dollar quote 内分号处理、当前语句 offset 与行列定位，以及字符串分号不触发多语句风险的回归。
 - `sql-execution-plan.test.ts`：执行前计划、确认要求、事务/回滚策略、只读阻断、无事务能力 warning 和 EXPLAIN 建议。
 - `sql-performance.test.ts`：复杂 SQL 性能提示。
 - `sql-builder.test.ts`：PostgreSQL identifier quote、预览 limit 上限、表数据浏览列选择/筛选/排序/分页、用户输入参数化、高级 WHERE warning。
