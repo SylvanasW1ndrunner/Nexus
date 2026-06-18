@@ -155,6 +155,22 @@ export type QueryExecutionResult = {
   rowCount: number;
   elapsedMs: number;
   safety: QuerySafetyReport;
+  resultSets?: QueryResultSet[];
+  messages?: QueryExecutionMessage[];
+};
+
+export type QueryResultSet = {
+  index: number;
+  command: string;
+  columns: Array<{ name: string; dataType?: string }>;
+  rows: QueryResultRow[];
+  rowCount: number;
+};
+
+export type QueryExecutionMessage = {
+  level: 'info' | 'warning';
+  message: string;
+  statementIndex?: number;
 };
 
 export type QueryHistoryItem = {

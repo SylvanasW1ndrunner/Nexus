@@ -82,7 +82,108 @@ describe('PostgresDriver runtime errors', () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(calls).toEqual([['select email from users where email like $1 limit 10', ["%' OR 1=1 --"]]]);
+    expect(calls).toEqual([
+      ['select email from users where email like $1 limit 10', ["%' OR 1=1 --"]],
+    ]);
+  });
+
+  it('preserves multi-statement result sets and user-visible messages', async () => {
+    const driver = new PostgresDriver();
+    const calls: string[] = [];
+    const multiResult = [
+      {
+        command: 'SELECT',
+        rowCount: 1,
+        oid: 0,
+        fields: [{ name: 'user_count', dataTypeID: 23 }],
+        rows: [{ user_count: 3 }],
+      },
+      {
+        command: 'UPDATE',
+        rowCount: 2,
+        oid: 0,
+        fields: [],
+        rows: [],
+      },
+      {
+        command: 'SELECT',
+        rowCount: 1,
+        oid: 0,
+        fields: [{ name: 'order_count', dataTypeID: 23 }],
+        rows: [{ order_count: 7 }],
+      },
+    ];
+    const pool = {
+      connect() {
+        return Promise.resolve({
+          query(sql: string) {
+            calls.push(sql);
+            if (sql === 'BEGIN' || sql === 'COMMIT') {
+              return Promise.resolve({
+                command: sql,
+                rowCount: null,
+                oid: 0,
+                fields: [],
+                rows: [],
+              });
+            }
+            return Promise.resolve(multiResult);
+          },
+          release() {
+            calls.push('release');
+          },
+        });
+      },
+    };
+    (driver as unknown as { pools: Map<string, unknown> }).pools.set(connection.id, pool);
+
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: 'select count(*) as user_count from users; update audit set touched = true; select count(*) as order_count from orders;',
+        confirmed: true,
+      },
+      { ...connection, readOnly: false },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(calls).toEqual([
+      'BEGIN',
+      'select count(*) as user_count from users; update audit set touched = true; select count(*) as order_count from orders;',
+      'COMMIT',
+      'release',
+    ]);
+    expect(result.data.columns.map((column) => column.name)).toEqual(['user_count']);
+    expect(result.data.rows).toEqual([{ user_count: 3 }]);
+    expect(result.data.resultSets).toEqual([
+      expect.objectContaining({
+        index: 0,
+        command: 'SELECT',
+        columns: [{ name: 'user_count', dataType: '23' }],
+        rows: [{ user_count: 3 }],
+        rowCount: 1,
+      }),
+      expect.objectContaining({
+        index: 1,
+        command: 'UPDATE',
+        columns: [],
+        rows: [],
+        rowCount: 2,
+      }),
+      expect.objectContaining({
+        index: 2,
+        command: 'SELECT',
+        columns: [{ name: 'order_count', dataType: '23' }],
+        rows: [{ order_count: 7 }],
+        rowCount: 1,
+      }),
+    ]);
+    expect(result.data.messages?.map((message) => message.message)).toEqual([
+      'Statement 1 returned 1 row(s).',
+      'Statement 2 completed with command UPDATE and affected 2 row(s).',
+      'Statement 3 returned 1 row(s).',
+    ]);
   });
 
   it('classifies schema list timeouts without throwing outside Result', async () => {

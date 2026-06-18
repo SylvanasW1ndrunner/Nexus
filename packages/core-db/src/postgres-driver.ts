@@ -1,9 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import type { ColumnSummary, QueryExecutionResult, QueryRequest, SavedConnection, TableDetail } from '@dbagent/shared';
+import type {
+  ColumnSummary,
+  QueryExecutionMessage,
+  QueryExecutionResult,
+  QueryRequest,
+  QueryResultSet,
+  SavedConnection,
+  TableDetail,
+} from '@dbagent/shared';
 import { err, ok, type Result } from '@dbagent/shared';
 import type { Pool as PgPool, QueryResult as PgQueryResult, QueryResultRow } from 'pg';
-import { classifyPostgresConnectionError, classifyPostgresRuntimeError } from './postgres-errors.js';
+import {
+  classifyPostgresConnectionError,
+  classifyPostgresRuntimeError,
+} from './postgres-errors.js';
 import { analyzeSqlSafety } from './sql-safety.js';
 import type { DatabaseConnectionConfig, IDatabaseDriver, TableSummary } from './types.js';
 
@@ -71,7 +82,10 @@ export class PostgresDriver implements IDatabaseDriver {
     return ok(undefined);
   }
 
-  async execute(request: QueryRequest, connection: SavedConnection): Promise<Result<QueryExecutionResult>> {
+  async execute(
+    request: QueryRequest,
+    connection: SavedConnection,
+  ): Promise<Result<QueryExecutionResult>> {
     const safety = analyzeSqlSafety(request.sql, { readOnly: connection.readOnly });
     if (safety.statementKind === 'EMPTY') {
       return err({
@@ -91,14 +105,18 @@ export class PostgresDriver implements IDatabaseDriver {
 
     const pool = this.pools.get(connection.id);
     if (!pool) {
-      return err({ code: 'CONNECTION_FAILED', message: 'Connection is not active.', retryable: true });
+      return err({
+        code: 'CONNECTION_FAILED',
+        message: 'Connection is not active.',
+        retryable: true,
+      });
     }
 
     const started = performance.now();
     try {
       const result = safety.requiresConfirmation
         ? await executeInTransaction(pool, request.sql, request.params)
-        : normalizePgResult(await pool.query<QueryResultRow>(request.sql, request.params));
+        : normalizePgResults(await pool.query<QueryResultRow>(request.sql, request.params));
       return ok(toQueryExecutionResult(result, safety, started));
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
@@ -108,7 +126,11 @@ export class PostgresDriver implements IDatabaseDriver {
   async listTables(connectionId: string): Promise<Result<TableSummary[]>> {
     const pool = this.pools.get(connectionId);
     if (!pool) {
-      return err({ code: 'CONNECTION_FAILED', message: 'Connection is not active.', retryable: true });
+      return err({
+        code: 'CONNECTION_FAILED',
+        message: 'Connection is not active.',
+        retryable: true,
+      });
     }
     try {
       const result = await pool.query<{
@@ -144,10 +166,18 @@ export class PostgresDriver implements IDatabaseDriver {
     }
   }
 
-  async describeTable(connectionId: string, schema: string, table: string): Promise<Result<TableDetail>> {
+  async describeTable(
+    connectionId: string,
+    schema: string,
+    table: string,
+  ): Promise<Result<TableDetail>> {
     const pool = this.pools.get(connectionId);
     if (!pool) {
-      return err({ code: 'CONNECTION_FAILED', message: 'Connection is not active.', retryable: true });
+      return err({
+        code: 'CONNECTION_FAILED',
+        message: 'Connection is not active.',
+        retryable: true,
+      });
     }
 
     try {
@@ -264,11 +294,15 @@ export class PostgresDriver implements IDatabaseDriver {
   }
 }
 
-async function executeInTransaction(pool: PgPool, sql: string, params?: unknown[]): Promise<SafePgQueryResult> {
+async function executeInTransaction(
+  pool: PgPool,
+  sql: string,
+  params?: unknown[],
+): Promise<SafePgQueryResult[]> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const result = normalizePgResult(await client.query<QueryResultRow>(sql, params));
+    const result = normalizePgResults(await client.query<QueryResultRow>(sql, params));
     await client.query('COMMIT');
     return result;
   } catch (error) {
@@ -283,10 +317,14 @@ async function executeInTransaction(pool: PgPool, sql: string, params?: unknown[
   }
 }
 
-function normalizePgResult(result: SafePgQueryResult | SafePgQueryResult[]): SafePgQueryResult {
-  if (!Array.isArray(result)) return result;
+function normalizePgResults(result: SafePgQueryResult | SafePgQueryResult[]): SafePgQueryResult[] {
+  if (Array.isArray(result)) return result;
+  return [result];
+}
+
+function emptyPgResult(): SafePgQueryResult {
   const emptyRows: QueryResultRow[] = [];
-  return result.at(-1) ?? {
+  return {
     command: '',
     rowCount: 0,
     oid: 0,
@@ -296,18 +334,52 @@ function normalizePgResult(result: SafePgQueryResult | SafePgQueryResult[]): Saf
 }
 
 function toQueryExecutionResult(
-  result: SafePgQueryResult,
+  results: SafePgQueryResult[],
   safety: QueryExecutionResult['safety'],
   started: number,
 ): QueryExecutionResult {
-  return {
+  const resultSets = results.map(toQueryResultSet);
+  const primary =
+    resultSets.find((set) => set.columns.length > 0) ??
+    resultSets.at(-1) ??
+    toQueryResultSet(emptyPgResult(), 0);
+  const messages = buildQueryMessages(resultSets);
+  const result: QueryExecutionResult = {
     queryId: randomUUID(),
-    columns: result.fields.map((field) => ({ name: field.name, dataType: String(field.dataTypeID) })),
-    rows: result.rows,
-    rowCount: result.rowCount ?? result.rows.length,
+    columns: primary.columns,
+    rows: primary.rows,
+    rowCount: primary.rowCount,
     elapsedMs: Math.round(performance.now() - started),
     safety,
   };
+  if (resultSets.length > 1) result.resultSets = resultSets;
+  if (messages.length > 0) result.messages = messages;
+  return result;
+}
+
+function toQueryResultSet(result: SafePgQueryResult, index: number): QueryResultSet {
+  return {
+    index,
+    command: result.command,
+    columns: result.fields.map((field) => ({
+      name: field.name,
+      dataType: String(field.dataTypeID),
+    })),
+    rows: result.rows,
+    rowCount: result.rowCount ?? result.rows.length,
+  };
+}
+
+function buildQueryMessages(resultSets: QueryResultSet[]): QueryExecutionMessage[] {
+  if (resultSets.length <= 1) return [];
+  return resultSets.map((set) => ({
+    level: 'info',
+    statementIndex: set.index,
+    message:
+      set.columns.length > 0
+        ? `Statement ${set.index + 1} returned ${set.rowCount} row(s).`
+        : `Statement ${set.index + 1} completed with command ${set.command || 'UNKNOWN'} and affected ${set.rowCount} row(s).`,
+  }));
 }
 
 function toPgConfig(config: DatabaseConnectionConfig) {
