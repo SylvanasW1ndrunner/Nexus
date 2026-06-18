@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './sql-safety.js';
 export * from './sql-editor-statements.js';
+export * from './sql-editor-execution-target.js';
 export * from './sql-execution-plan.js';
 export * from './connection-store.js';
 export * from './query-history.js';

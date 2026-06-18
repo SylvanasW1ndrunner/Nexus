@@ -68,11 +68,14 @@ describe('buildSqlExecutionPlan', () => {
   });
 
   it('warns when rollback protection is unavailable for multi-statement writes', () => {
-    const plan = buildSqlExecutionPlan("insert into audit_log(message) values ('a'); delete from audit_log;", {
-      readOnly: false,
-      supportsTransactions: false,
-      confirmed: true,
-    });
+    const plan = buildSqlExecutionPlan(
+      "insert into audit_log(message) values ('a'); delete from audit_log;",
+      {
+        readOnly: false,
+        supportsTransactions: false,
+        confirmed: true,
+      },
+    );
 
     expect(plan).toMatchObject({
       decision: 'execute',
@@ -80,6 +83,23 @@ describe('buildSqlExecutionPlan', () => {
       rollbackAvailable: false,
     });
     expect(plan.executionNotes.join(' ')).toContain('does not support rollback protection');
+  });
+
+  it('requires transaction protection for multi-statement files even when the first statement is a read', () => {
+    const plan = buildSqlExecutionPlan(
+      "select * from users limit 10; update users set status = 'active' where id = 1;",
+      {
+        readOnly: false,
+        supportsTransactions: true,
+        confirmed: true,
+      },
+    );
+
+    expect(plan).toMatchObject({
+      decision: 'execute',
+      transactionPolicy: 'required',
+      rollbackAvailable: true,
+    });
   });
 
   it('requests EXPLAIN before broad exploratory reads with performance warnings', () => {

@@ -178,6 +178,13 @@ export function getSqlOffsetFromLineColumn(sql: string, line: number, column: nu
   return getOffsetFromLineColumn(sql, line, column);
 }
 
+export function getSqlLineColumnFromOffset(
+  sql: string,
+  offset: number,
+): { line: number; column: number } {
+  return getLineColumn(sql, offset);
+}
+
 function readDollarQuoteTag(sql: string, start: number): string | undefined {
   const rest = sql.slice(start);
   return rest.match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/)?.[0];

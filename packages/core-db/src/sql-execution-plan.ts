@@ -1,5 +1,10 @@
 import type { QuerySafetyReport } from '@dbagent/shared';
-import { analyzeSqlSafety, containsMultipleStatements, firstStatementKind, stripSqlComments } from './sql-safety.js';
+import {
+  analyzeSqlSafety,
+  containsMultipleStatements,
+  firstStatementKind,
+  stripSqlComments,
+} from './sql-safety.js';
 
 export type SqlExecutionPlanOptions = {
   readOnly: boolean;
@@ -29,7 +34,10 @@ const writeKinds = new Set(['INSERT', 'UPDATE', 'DELETE', 'MERGE', 'CALL']);
 const ddlKinds = new Set(['CREATE', 'ALTER', 'DROP', 'TRUNCATE']);
 const readKinds = new Set(['SELECT', 'WITH', 'SHOW', 'VALUES']);
 
-export function buildSqlExecutionPlan(sql: string, options: SqlExecutionPlanOptions): SqlExecutionPlan {
+export function buildSqlExecutionPlan(
+  sql: string,
+  options: SqlExecutionPlanOptions,
+): SqlExecutionPlan {
   const safety = analyzeSqlSafety(sql, { readOnly: options.readOnly });
   const normalized = stripSqlComments(sql).trim();
   const statementKind = safety.statementKind || firstStatementKind(normalized);
@@ -41,7 +49,12 @@ export function buildSqlExecutionPlan(sql: string, options: SqlExecutionPlanOpti
     : confirmationRequired
       ? 'requires-confirmation'
       : 'execute';
-  const transactionPolicy = chooseTransactionPolicy(statementKind, normalized, safety, supportsTransactions);
+  const transactionPolicy = chooseTransactionPolicy(
+    statementKind,
+    normalized,
+    safety,
+    supportsTransactions,
+  );
   const rollbackAvailable = transactionPolicy === 'recommended' || transactionPolicy === 'required';
   const shouldExplainBeforeRun =
     supportsExplain &&
@@ -76,15 +89,17 @@ function chooseTransactionPolicy(
   safety: QuerySafetyReport,
   supportsTransactions: boolean,
 ): SqlTransactionPolicy {
-  if (safety.blocked || isReadStatement(statementKind)) return 'none';
+  if (safety.blocked) return 'none';
+  if (containsMultipleStatements(normalizedSql))
+    return supportsTransactions ? 'required' : 'unavailable';
+  if (isReadStatement(statementKind)) return 'none';
   const needsTransaction =
     writeKinds.has(statementKind) ||
     ddlKinds.has(statementKind) ||
-    containsMultipleStatements(normalizedSql) ||
     safety.riskLevel === 'dangerous';
   if (!needsTransaction) return 'none';
   if (!supportsTransactions) return 'unavailable';
-  if (containsMultipleStatements(normalizedSql) || safety.riskLevel === 'dangerous') return 'required';
+  if (safety.riskLevel === 'dangerous') return 'required';
   return 'recommended';
 }
 
@@ -101,14 +116,19 @@ function buildExecutionNotes(input: {
   supportsTransactions: boolean;
 }): string[] {
   const notes: string[] = [];
-  if (input.decision === 'blocked') notes.push('Execution is blocked before reaching the database.');
-  if (input.decision === 'requires-confirmation') notes.push('Explicit user confirmation is required before execution.');
-  if (input.transactionPolicy === 'required') notes.push('Execute inside a transaction and rollback on any failure.');
-  if (input.transactionPolicy === 'recommended') notes.push('Transaction execution is recommended for rollback protection.');
+  if (input.decision === 'blocked')
+    notes.push('Execution is blocked before reaching the database.');
+  if (input.decision === 'requires-confirmation')
+    notes.push('Explicit user confirmation is required before execution.');
+  if (input.transactionPolicy === 'required')
+    notes.push('Execute inside a transaction and rollback on any failure.');
+  if (input.transactionPolicy === 'recommended')
+    notes.push('Transaction execution is recommended for rollback protection.');
   if (input.transactionPolicy === 'unavailable' && !input.supportsTransactions) {
     notes.push('The database driver does not support rollback protection for this statement.');
   }
-  if (input.shouldExplainBeforeRun) notes.push('Run EXPLAIN before execution to inspect query cost and scan risk.');
+  if (input.shouldExplainBeforeRun)
+    notes.push('Run EXPLAIN before execution to inspect query cost and scan risk.');
   for (const warning of input.safety.performanceWarnings ?? []) {
     notes.push(`Performance warning ${warning.code}: ${warning.message}`);
   }
