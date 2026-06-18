@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LlmRouter, type LlmChatRequest, type LlmChatResponse, type LlmProvider } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
-import { ReactAgent, ToolRegistry } from '../src/index.js';
+import { AgentCheckpointStore, ReactAgent, ToolRegistry } from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -216,6 +216,80 @@ describe('ReactAgent', () => {
       { toolCallId: 'fixed_sql', status: 'success' },
     ]);
     expect(result.finalText).toBe('已修正 SQL，订单总数是 42。');
+  });
+
+  it('persists recoverable checkpoints across model and tool steps', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointPath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      (args) => {
+        if (String(args.sql).includes('bad_column')) throw new Error('column bad_column does not exist');
+        return { rows: [{ order_count: 42 }] };
+      },
+    );
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [{ id: 'bad_sql', name: 'query_database', arguments: { sql: 'select bad_column from orders' } }],
+          },
+          {
+            text: '',
+            toolCalls: [{ id: 'fixed_sql', name: 'query_database', arguments: { sql: 'select count(*) from orders' } }],
+          },
+          {
+            text: 'order count is 42',
+            toolCalls: [],
+          },
+        ]),
+      ]),
+      registry,
+      usage,
+      undefined,
+      { ...fixedDependencies(), checkpointStore },
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Analyze order count',
+      mode: 'readonly',
+      maxIterations: 3,
+    });
+
+    const checkpoints = await checkpointStore.listBySession(result.session.id);
+
+    expect(result.status).toBe('done');
+    expect(checkpoints).toMatchObject([
+      {
+        iteration: 1,
+        status: 'running',
+        toolExecutions: [{ toolCallId: 'bad_sql', status: 'failed' }],
+      },
+      {
+        iteration: 2,
+        status: 'running',
+        toolExecutions: [
+          { toolCallId: 'bad_sql', status: 'failed' },
+          { toolCallId: 'fixed_sql', status: 'success' },
+        ],
+      },
+      {
+        iteration: 3,
+        status: 'done',
+        finalText: 'order count is 42',
+      },
+    ]);
+    await expect(checkpointStore.listRecoverable()).resolves.toEqual([]);
   });
 
   it('only exposes tools allowed by the current skill execution plan', async () => {
@@ -476,6 +550,12 @@ async function usagePath(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-'));
   tempDirs.push(dir);
   return join(dir, 'usage-history.json');
+}
+
+async function checkpointPath(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-checkpoint-run-'));
+  tempDirs.push(dir);
+  return join(dir, 'agent-checkpoints.json');
 }
 
 function fixedDependencies() {

@@ -1,5 +1,6 @@
 import type { LlmRouter } from '@dbagent/core-llm';
 import type { UsageTracker } from '@dbagent/core-usage';
+import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import { PermissionManager } from './permission-manager.js';
 import { addUsage, appendMessage, createAgentSession, createMessage, toLlmMessages } from './session.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -15,6 +16,7 @@ export class ReactAgent {
   private readonly permissionManager: PermissionManager;
   private readonly now: () => string;
   private readonly createSessionId: () => string;
+  private readonly checkpointStore: AgentCheckpointWriter | undefined;
 
   constructor(
     private readonly llmRouter: LlmRouter,
@@ -26,6 +28,7 @@ export class ReactAgent {
     this.permissionManager = new PermissionManager(approvalProvider);
     this.now = dependencies.now ?? (() => new Date().toISOString());
     this.createSessionId = dependencies.createSessionId ?? (() => crypto.randomUUID());
+    this.checkpointStore = dependencies.checkpointStore;
   }
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
@@ -63,14 +66,33 @@ export class ReactAgent {
     const maxIterations = options.maxIterations ?? 25;
     const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
     let finalText = '';
+    let currentIteration = 0;
+    const saveCheckpoint = async (
+      iteration: number,
+      status: 'running' | 'done' | 'aborted' | 'failed',
+      errorMessage?: string,
+    ) => {
+      await this.checkpointStore?.save({
+        session,
+        iteration,
+        status,
+        toolExecutions,
+        finalText,
+        ...(errorMessage === undefined ? {} : { errorMessage }),
+        now: this.now(),
+      });
+    };
 
     try {
       for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+        currentIteration = iteration;
         if (options.signal?.aborted || session.aborted) {
+          await saveCheckpoint(iteration - 1, 'aborted');
           await closeRound('aborted');
           return { status: 'aborted', session, finalText, iterations: iteration - 1, toolExecutions };
         }
 
+        await saveCheckpoint(iteration, 'running');
         const request = {
           model: options.model,
           messages: toLlmMessages(session),
@@ -84,13 +106,16 @@ export class ReactAgent {
           session,
           createMessage({ role: 'assistant', content: response.text, toolCalls: response.toolCalls }, this.now),
         );
+        await saveCheckpoint(iteration, 'running');
 
         if (response.usage?.totalTokens && options.tokenBudget && session.tokenUsage.totalTokens > options.tokenBudget) {
+          finalText = 'Token budget exceeded.';
+          await saveCheckpoint(iteration, 'done');
           await closeRound('success');
           return {
             status: 'max_iterations_reached',
             session,
-            finalText: 'Token budget exceeded.',
+            finalText,
             iterations: iteration,
             toolExecutions,
           };
@@ -98,6 +123,7 @@ export class ReactAgent {
 
         if (response.toolCalls.length === 0) {
           finalText = response.text;
+          await saveCheckpoint(iteration, 'done');
           await closeRound('success');
           return { status: 'done', session, finalText, iterations: iteration, toolExecutions };
         }
@@ -113,6 +139,7 @@ export class ReactAgent {
               'Tool not allowed by run policy.',
             );
             toolExecutions.push(record);
+            await saveCheckpoint(iteration, 'running');
             appendMessage(
               session,
               createMessage(
@@ -125,11 +152,13 @@ export class ReactAgent {
                 this.now,
               ),
             );
+            finalText = 'Tool is not allowed for this run.';
+            await saveCheckpoint(iteration, 'done');
             await closeRound('success');
             return {
               status: 'permission_denied',
               session,
-              finalText: 'Tool is not allowed for this run.',
+              finalText,
               iterations: iteration,
               toolExecutions,
             };
@@ -139,6 +168,7 @@ export class ReactAgent {
           if (!tool) {
             const record = executionRecord(toolCall.id, toolCall.name, 'failed', startedAt, 'Tool is not registered.');
             toolExecutions.push(record);
+            await saveCheckpoint(iteration, 'running');
             appendMessage(
               session,
               createMessage(
@@ -151,6 +181,7 @@ export class ReactAgent {
                 this.now,
               ),
             );
+            await saveCheckpoint(iteration, 'running');
             continue;
           }
 
@@ -163,6 +194,7 @@ export class ReactAgent {
           if (permission !== 'allow') {
             const record = executionRecord(toolCall.id, tool.name, 'denied', startedAt, `Permission: ${permission}`);
             toolExecutions.push(record);
+            await saveCheckpoint(iteration, 'running');
             appendMessage(
               session,
               createMessage(
@@ -175,12 +207,15 @@ export class ReactAgent {
                 this.now,
               ),
             );
+            await saveCheckpoint(iteration, 'running');
             if (permission === 'deny') {
+              finalText = 'Permission denied.';
+              await saveCheckpoint(iteration, 'done');
               await closeRound('success');
               return {
                 status: 'permission_denied',
                 session,
-                finalText: 'Permission denied.',
+                finalText,
                 iterations: iteration,
                 toolExecutions,
               };
@@ -208,6 +243,7 @@ export class ReactAgent {
                 this.now,
               ),
             );
+            await saveCheckpoint(iteration, 'running');
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             toolExecutions.push(executionRecord(toolCall.id, tool.name, 'failed', startedAt, message));
@@ -223,21 +259,25 @@ export class ReactAgent {
                 this.now,
               ),
             );
+            await saveCheckpoint(iteration, 'running');
           }
         }
       }
 
+      finalText = 'Max iterations reached.';
+      await saveCheckpoint(maxIterations, 'done');
       await closeRound('success');
       return {
         status: 'max_iterations_reached',
         session,
-        finalText: 'Max iterations reached.',
+        finalText,
         iterations: maxIterations,
         toolExecutions,
       };
     } catch (error) {
       const status = options.signal?.aborted || session.aborted ? 'aborted' : 'failed';
       const message = error instanceof Error ? error.message : String(error);
+      await saveCheckpoint(currentIteration, status, message);
       await closeRound(status, message);
       throw error;
     }
