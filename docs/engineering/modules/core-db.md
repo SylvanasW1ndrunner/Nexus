@@ -10,6 +10,7 @@
 - `packages/core-db/src/sql-editor-statements.ts`：SQL 编辑器语句拆分、当前语句定位和行列位置映射。
 - `packages/core-db/src/sql-editor-execution-target.ts`：SQL 编辑器执行目标解析，把运行选中、运行当前语句、运行整文件和 EXPLAIN 当前语句转换为稳定 `QueryRequest` 与执行前计划。
 - `packages/core-db/src/sql-execution-plan.ts`：执行前预审计划，整合安全、确认、事务、回滚和 EXPLAIN 建议。
+- `packages/core-db/src/sql-snippets.ts`：SQL 片段管理，包含内置片段、用户片段持久化、搜索和模板变量展开。
 - `packages/core-db/src/sql-performance.ts`：轻量性能提示。
 - `packages/core-db/src/sql-builder.ts`：Schema 预览 SQL、表数据浏览 SQL、identifier quote 和参数化筛选构建。
 - `packages/core-db/src/table-edit.ts`：表数据编辑的 SQL 预览、主键保护、批量确认和事务执行输入。
@@ -63,6 +64,8 @@ SQL 编辑器执行入口由 `resolveSqlEditorExecutionTarget()` 收口。调用
 - `range`：源 SQL 在编辑器中的 offset 与行列范围，供后续历史记录、错误定位和 Agent 引用。
 
 EXPLAIN 快捷入口默认只允许读语句。原因是 PostgreSQL `EXPLAIN ANALYZE` 会真实执行被解释的语句；如果允许对 `UPDATE` / `DELETE` / DDL 直接运行，用户可能以为只是查看计划却实际修改数据。写语句的 EXPLAIN 支持后续必须通过更强的确认和事务沙箱单独设计。
+
+SQL 片段由 `SqlSnippetStore` 管理。内置片段覆盖 `sel`、`ins`、`upd`、`del`、`cre-table`、`cre-idx`，用户片段保存为本地 JSON 文件并使用原子写入。片段 body 使用 `{{variable}}` 变量占位，`expandSqlSnippet()` 会用用户传入值或默认值展开，并返回缺失变量和审查 warning。变量只是文本替换，不负责 SQL 转义；展开后的 SQL 仍必须走编辑器执行目标解析、安全判断和确认流程。
 
 表数据编辑使用独立的 `buildTableEditPreview()` 生成可审查 SQL，而不是让 UI 直接拼接语句。它覆盖三类操作：
 
@@ -169,6 +172,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `sql-editor-statements.test.ts`：SQL 语句拆分、字符串/注释/dollar quote 内分号处理、当前语句 offset 与行列定位，以及字符串分号不触发多语句风险的回归。
 - `sql-editor-execution-target.test.ts`：运行选中、运行当前语句、整文件执行、EXPLAIN 当前读语句、非 analyze EXPLAIN、拒绝写语句 EXPLAIN、空选择和光标位于语句间隙的用户级错误。
 - `sql-execution-plan.test.ts`：执行前计划、确认要求、事务/回滚策略、只读阻断、无事务能力 warning 和 EXPLAIN 建议。
+- `sql-snippets.test.ts`：内置 SQL 片段、变量展开、自定义片段创建/更新/搜索/删除、禁止覆盖内置触发词、缺失变量提示和损坏 JSON 降级。
 - `sql-performance.test.ts`：复杂 SQL 性能提示。
 - `sql-builder.test.ts`：PostgreSQL identifier quote、预览 limit 上限、表数据浏览列选择/筛选/排序/分页、用户输入参数化、高级 WHERE warning。
 - `table-edit.test.ts`：表格编辑 SQL 预览、identifier quote、字符串/JSON/bytea 等字面量处理、无主键拒绝更新/删除、主键列不可编辑、批量二次确认。
