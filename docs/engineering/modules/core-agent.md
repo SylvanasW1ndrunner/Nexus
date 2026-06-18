@@ -3,6 +3,7 @@
 ## 代码入口
 
 - `packages/core-agent/src/react-agent.ts`：ReAct Agent 主循环，负责模型调用、工具调用、权限检查、用量归因和终止状态。
+- `packages/core-agent/src/behavior-evaluation.ts`：从用户任务角度评估 Agent run 结果是否符合预期。
 - `packages/core-agent/src/checkpoint-store.ts`：Agent iteration checkpoint 持久化，用于崩溃后识别可恢复任务。
 - `packages/core-agent/src/session.ts`：会话、消息和 usage 累加工具。
 - `packages/core-agent/src/tool-registry.ts`：Agent 工具注册表，暴露 LLM tool schema。
@@ -50,14 +51,22 @@
 - allowedTools 是技能/工作流的硬白名单，即使工具已注册也不能越权调用。
 - 工具失败会作为 tool message 回传给模型，允许下一轮自我修正。
 
+## 行为评估
+
+`evaluateAgentBehavior()` 用于把 Agent 测试从内部路径推进到用户效果验收。调用方为每个真实用户任务提供期望状态、必须调用工具、禁止调用工具、工具执行状态、最终回答关键内容和迭代数范围；评估器返回每条 case 的失败原因和汇总通过率。
+
+当前评估器不直接调用 LLM，也不引入第三方 Agent eval 依赖。它用于默认测试中的确定性质量基线；后续接入真实 SiliconFlow/DeepSeek、LLM judge 或开源 eval 框架时，必须按开源优先规则记录许可证、打包、离线、安全和成本影响。
+
 ## 测试覆盖
 
 - `permission-manager.test.ts`：不同模式和工具危险级别下的权限决策。
 - `checkpoint-store.test.ts`：checkpoint 原子持久化、同一 iteration 更新、可恢复任务列表、running 标记中断、损坏 JSON 降级。
 - `react-agent.test.ts`：只读数据库工具调用、只读模式写操作拦截、ask 模式未授权拦截、工具失败后模型恢复、allowedTools 白名单、subscription quota 拦截、用户中止、provider 失败不计费、checkpoint 与 Agent 主循环集成。
+- `behavior-evaluation.test.ts`：按用户任务评估 Agent 状态、工具调用、工具状态、最终回答和迭代范围。
 
 ## 已知边界
 
 - 当前 checkpoint 使用 JSON 文件，适合本地 beta 阶段；大量会话和并发写入场景应迁移到 SQLite WAL。
 - 当前只实现任务恢复所需的状态识别，不自动续跑中断任务；续跑策略需要后续 session manager 和 UI 恢复入口配合。
 - 当前不实现多 Agent 协作调度。
+- 当前行为评估器只评估 Agent run 的结构化结果，不评估自然语言答案的事实充分性；真实 LLM 效果评估后续通过环境门控测试补充。

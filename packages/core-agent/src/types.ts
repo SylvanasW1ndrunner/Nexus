@@ -105,3 +105,37 @@ export type AgentContextBuildResult = {
   messages: LlmMessage[];
   tools: LlmTool[];
 };
+
+export type AgentBehaviorEvaluationCase = {
+  id: string;
+  userTask: string;
+  expectedStatus?: AgentRunStatus;
+  requiredToolCalls?: string[];
+  forbiddenToolCalls?: string[];
+  requiredToolStatuses?: Array<{
+    toolName: string;
+    status: AgentToolExecutionRecord['status'];
+  }>;
+  finalTextIncludes?: string[];
+  minIterations?: number;
+  maxIterations?: number;
+};
+
+export type AgentBehaviorEvaluationResult = {
+  id: string;
+  userTask: string;
+  passed: boolean;
+  failures: string[];
+  observedStatus: AgentRunStatus;
+  observedToolCalls: string[];
+  observedFinalText: string;
+  observedIterations: number;
+};
+
+export type AgentBehaviorEvaluationSummary = {
+  totalCases: number;
+  passedCases: number;
+  failedCases: number;
+  passRate: number;
+  results: AgentBehaviorEvaluationResult[];
+};
