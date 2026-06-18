@@ -25,6 +25,7 @@ type OpenAICompatibleProviderConfig = {
   mode?: LlmProviderMode;
   timeoutMs?: number;
   maxRetries?: number;
+  retryDelayBaseMs?: number;
   defaultHeaders?: Record<string, string>;
   fetch?: FetchLike;
 };
@@ -103,6 +104,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
+  private readonly retryDelayBaseMs: number;
   private readonly defaultHeaders: Record<string, string>;
   private readonly fetchImpl: FetchLike;
 
@@ -117,6 +119,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     this.baseUrl = normalizeBaseUrl(config.baseUrl);
     this.timeoutMs = config.timeoutMs ?? 60_000;
     this.maxRetries = config.maxRetries ?? 2;
+    this.retryDelayBaseMs = config.retryDelayBaseMs ?? 100;
     this.defaultHeaders = config.defaultHeaders ?? {};
     this.fetchImpl = config.fetch ?? fetch;
   }
@@ -221,7 +224,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       } catch (error) {
         lastError = error;
         if (!isRetryable(error) || attempt === maxRetries) throw error;
-        await sleep(100 * 2 ** attempt);
+        await sleep(this.retryDelayBaseMs * 2 ** attempt, signal);
       }
     }
 
@@ -234,9 +237,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
     signal?: AbortSignal,
   ): Promise<OpenAIChatResponse> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeoutMs);
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
 
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -262,6 +270,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
       return json as OpenAIChatResponse;
     } catch (error) {
       if (isAbortError(error)) {
+        if (!timedOut && signal?.aborted) {
+          throw new LlmProviderError('LLM_ABORTED', 'LLM request was aborted by the user.', false);
+        }
         throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
       }
       if (error instanceof LlmProviderError) throw error;
@@ -281,10 +292,33 @@ export class OpenAICompatibleProvider implements LlmProvider {
     payload: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<StreamResponse> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+      try {
+        return await this.requestStreamOnce(path, payload, signal);
+      } catch (error) {
+        lastError = error;
+        if (!isRetryable(error) || attempt === this.maxRetries) throw error;
+        await sleep(this.retryDelayBaseMs * 2 ** attempt, signal);
+      }
+    }
+    throw lastError;
+  }
+
+  private async requestStreamOnce(
+    path: string,
+    payload: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<StreamResponse> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeoutMs);
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
     const cleanup = () => {
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
@@ -313,6 +347,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
     } catch (error) {
       cleanup();
       if (isAbortError(error)) {
+        if (!timedOut && signal?.aborted) {
+          throw new LlmProviderError('LLM_ABORTED', 'LLM stream request was aborted by the user.', false);
+        }
         throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
       }
       if (error instanceof LlmProviderError) throw error;
@@ -329,6 +366,7 @@ export function createSiliconFlowProvider(config: {
   apiKey: string;
   timeoutMs?: number;
   maxRetries?: number;
+  retryDelayBaseMs?: number;
   fetch?: FetchLike;
 }): OpenAICompatibleProvider {
   return new OpenAICompatibleProvider({
@@ -338,6 +376,7 @@ export function createSiliconFlowProvider(config: {
     baseUrl: 'https://api.siliconflow.cn/v1',
     ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
     ...(config.maxRetries === undefined ? {} : { maxRetries: config.maxRetries }),
+    ...(config.retryDelayBaseMs === undefined ? {} : { retryDelayBaseMs: config.retryDelayBaseMs }),
     ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
   });
 }
@@ -540,6 +579,19 @@ function isRetryable(error: unknown): boolean {
   return error instanceof LlmProviderError && error.retryable;
 }
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new LlmProviderError('LLM_ABORTED', 'LLM retry wait was aborted by the user.', false);
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timeout);
+      cleanup();
+      reject(new LlmProviderError('LLM_ABORTED', 'LLM retry wait was aborted by the user.', false));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }

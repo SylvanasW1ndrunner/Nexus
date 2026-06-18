@@ -6,9 +6,10 @@
 
 1. [shared 契约与导出模块](./shared.md)
 2. [core-db 数据库核心模块](./core-db.md)
-3. [desktop 桌面应用模块](./desktop.md)
-4. [auth / usage / llm 支撑模块](./supporting-core.md)
-5. [scripts 工程脚本模块](./scripts.md)
+3. [core-llm 大模型接入模块](./core-llm.md)
+4. [desktop 桌面应用模块](./desktop.md)
+5. [auth / usage / llm 支撑模块](./supporting-core.md)
+6. [scripts 工程脚本模块](./scripts.md)
 
 维护规则：
 

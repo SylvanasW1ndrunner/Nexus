@@ -70,6 +70,7 @@ export type LlmErrorCode =
   | 'LLM_AUTH_FAILED'
   | 'LLM_RATE_LIMITED'
   | 'LLM_TIMEOUT'
+  | 'LLM_ABORTED'
   | 'LLM_NETWORK_ERROR'
   | 'LLM_BAD_RESPONSE'
   | 'LLM_PROVIDER_ERROR';

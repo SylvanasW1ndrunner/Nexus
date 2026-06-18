@@ -280,6 +280,7 @@ describe('OpenAICompatibleProvider', () => {
       apiKey: 'test-key',
       baseUrl: 'https://example.test/v1',
       maxRetries: 1,
+      retryDelayBaseMs: 1,
       fetch: fetchMock,
     });
 
@@ -290,6 +291,96 @@ describe('OpenAICompatibleProvider', () => {
       }),
     ).resolves.toMatchObject({ text: 'ok' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry user-aborted chat requests or report them as timeouts', async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+    const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      if (init?.signal instanceof AbortSignal && init.signal.aborted) {
+        throw new DOMException('aborted', 'AbortError');
+      }
+      return jsonResponse(200, { choices: [{ message: { content: 'should not happen' } }] });
+    });
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      maxRetries: 2,
+      retryDelayBaseMs: 1,
+      fetch: fetchMock,
+    });
+
+    await expect(
+      provider.chat({
+        model: 'deepseek-ai/DeepSeek-V4-Pro',
+        messages: [{ role: 'user', content: 'ping' }],
+        signal: abortController.signal,
+      }),
+    ).rejects.toMatchObject({
+      code: 'LLM_ABORTED',
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops retry backoff immediately when the user aborts', async () => {
+    const abortController = new AbortController();
+    const fetchMock = vi.fn(async () => jsonResponse(503, { error: { message: 'busy' } }));
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      maxRetries: 2,
+      retryDelayBaseMs: 10_000,
+      fetch: fetchMock,
+    });
+
+    const promise = provider.chat({
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      messages: [{ role: 'user', content: 'ping' }],
+      signal: abortController.signal,
+    });
+    setTimeout(() => abortController.abort(), 5);
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'LLM_ABORTED',
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries initial stream connection failures before yielding events', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(429, { error: { message: 'rate limit' } }))
+      .mockResolvedValueOnce(
+        streamResponse([sse({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }), 'data: [DONE]\n\n']),
+      );
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      maxRetries: 1,
+      retryDelayBaseMs: 1,
+      fetch: fetchMock,
+    });
+
+    const events = await collect(
+      provider.stream({
+        model: 'deepseek-ai/DeepSeek-V4-Pro',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(events).toMatchObject([
+      { type: 'text-delta', text: 'ok' },
+      { type: 'finish', reason: 'stop', response: { text: 'ok' } },
+    ]);
   });
 
   it('exposes a SiliconFlow OpenAI-compatible provider preset', () => {
