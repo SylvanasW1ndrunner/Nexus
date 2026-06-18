@@ -31,6 +31,19 @@ describe('analyzeSqlSafety', () => {
     });
   });
 
+  it('marks UPDATE and DELETE without WHERE as dangerous full-table mutations', () => {
+    expect(analyzeSqlSafety("update users set status = 'inactive'", { readOnly: false })).toMatchObject({
+      statementKind: 'UPDATE',
+      riskLevel: 'dangerous',
+      requiresConfirmation: true,
+    });
+    expect(analyzeSqlSafety('delete from users', { readOnly: false })).toMatchObject({
+      statementKind: 'DELETE',
+      riskLevel: 'dangerous',
+      requiresConfirmation: true,
+    });
+  });
+
   it('marks DDL as dangerous', () => {
     expect(analyzeSqlSafety('drop table customers', { readOnly: false })).toMatchObject({
       statementKind: 'DROP',

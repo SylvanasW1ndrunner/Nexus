@@ -36,6 +36,11 @@ export function analyzeSqlSafety(sql: string, options: AnalyzeSqlOptions): Query
     reasons.push(`${statementKind} writes data and requires explicit confirmation.`);
   }
 
+  const unboundedMutation = isUnboundedMutation(normalized, statementKind);
+  if (unboundedMutation) {
+    reasons.push(`${statementKind} without WHERE may affect every row in the target table.`);
+  }
+
   if (options.readOnly && !safeKinds.has(statementKind)) {
     reasons.push('Connection is read-only, so write or DDL statements are blocked.');
   }
@@ -51,7 +56,7 @@ export function analyzeSqlSafety(sql: string, options: AnalyzeSqlOptions): Query
     statementKind,
     riskLevel: blocked
       ? 'blocked'
-      : dangerousKinds.has(statementKind)
+      : dangerousKinds.has(statementKind) || unboundedMutation
         ? 'dangerous'
         : requiresConfirmation
           ? 'caution'
@@ -77,4 +82,9 @@ export function firstStatementKind(sql: string): string {
 export function containsMultipleStatements(sql: string): boolean {
   const withoutTrailing = sql.trim().replace(/;+\s*$/g, '');
   return withoutTrailing.includes(';');
+}
+
+function isUnboundedMutation(sql: string, statementKind: string): boolean {
+  if (statementKind !== 'UPDATE' && statementKind !== 'DELETE') return false;
+  return !/\bWHERE\b/i.test(sql);
 }
