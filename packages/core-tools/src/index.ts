@@ -3,6 +3,7 @@ export * from './diagnostic-report.js';
 export * from './mcp-config-store.js';
 export * from './mcp-health.js';
 export * from './mcp-runtime-manager.js';
+export * from './mcp-stdio-launcher.js';
 export * from './mcp-tool-adapter.js';
 export * from './mcp-tool-registration-manager.js';
 export * from './validation.js';
