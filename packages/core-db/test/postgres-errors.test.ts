@@ -59,4 +59,12 @@ describe('classifyPostgresRuntimeError', () => {
       retryable: false,
     });
   });
+
+  it('classifies user-cancelled PostgreSQL queries separately from failures', () => {
+    expect(classifyPostgresRuntimeError(pgError('57014', 'canceling statement due to user request'))).toMatchObject({
+      code: 'QUERY_CANCELLED',
+      detail: 'canceling statement due to user request',
+      retryable: false,
+    });
+  });
 });

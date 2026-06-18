@@ -13,6 +13,7 @@
   - `cancel-backend`：执行 `select pg_cancel_backend($1) as cancelled`。
   - `disconnect-connection`：调用当前连接的 `disconnect()` 作为 fallback。
 - `createQueryCancellationWorkflow()` 在 cancel 决策后调用对应 driver，而不是只返回计划。
+- PostgreSQL `57014 / canceling statement due to user request` 会被分类为 `QUERY_CANCELLED`，不再混同普通 SQL 失败。
 
 ## 开源评估
 
@@ -24,9 +25,10 @@
 - query workflow 接收 driver backend pid 回调并写入 registry。
 - cancel workflow 在 backend pid 已知时调用 driver cancel。
 - PostgresDriver 调用 `pg_cancel_backend($1)` 并返回结构化结果。
+- PostgreSQL 用户取消错误分类为 `QUERY_CANCELLED`。
 - core-db 全量测试通过，desktop main 全量测试通过。
 
 ## 已知限制
 
 - 当前未新增真实 PostgreSQL 集成取消测试；原因是本机门控 PostgreSQL 集成测试仍跳过。后续在可用测试库上应补 `pg_sleep` + `db:cancel-query` 的端到端验证。
-- PostgreSQL 取消成功后，正在执行的查询通常会以数据库错误返回；后续可把 PostgreSQL cancel 错误进一步分类成 `QUERY_CANCELLED`。
+- 后续可以继续把 `QUERY_CANCELLED` 接入查询历史状态枚举，目前历史仍按 failed 保存并保留错误码上下文。

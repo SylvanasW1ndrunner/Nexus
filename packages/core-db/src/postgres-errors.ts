@@ -80,6 +80,15 @@ export function classifyPostgresRuntimeError(error: unknown): AppError {
     return classifyPostgresConnectionError(error);
   }
 
+  if (code === '57014' || /canceling statement due to user request/i.test(message)) {
+    return {
+      code: 'QUERY_CANCELLED',
+      message: 'PostgreSQL query was cancelled.',
+      detail: message,
+      retryable: false,
+    };
+  }
+
   return {
     code: 'QUERY_FAILED',
     message: 'PostgreSQL query failed.',

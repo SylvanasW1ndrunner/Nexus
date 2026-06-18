@@ -141,6 +141,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 
 远程连接按真实桌面使用场景处理：默认连接超时、语句超时、TCP keepalive，并把认证失败、DNS 失败、端口关闭、超时和连接中断分类成产品错误码。这样 Windows 或 Linux 桌面连接服务器数据库时，用户能得到可操作提示，而不是只有“连接失败”。
 连接建立后的运行期错误也必须保持 `Result<T>` 契约。`PostgresDriver.execute`、`listTables` 和 `describeTable` 会把网络中断、端口拒绝和超时继续分类为可重试的远程连接错误；普通 SQL 语法错误、catalog 查询错误等则返回 `QUERY_FAILED`。这保证 Schema 树刷新或查询执行遇到远程数据库抖动时，不会把异常漏到 IPC 外层。
+用户取消 PostgreSQL 查询时，driver 会把 `57014 / canceling statement due to user request` 分类为 `QUERY_CANCELLED`，区别于普通 SQL 失败。这样未来 UI 和 Agent 可以把它呈现为“用户已取消”，而不是误判为 SQL 错误。
 
 性能提示是轻量静态分析，不阻塞执行。当前覆盖 `SELECT *`、缺少 `LIMIT`、前置通配 `LIKE`、大 `OFFSET`、逗号连接和过滤列套函数。它不是优化器替代品，而是 M1.5 阶段给用户和后续 Agent 的结构化风险输入。
 
@@ -195,7 +196,7 @@ DDL 预览默认 `riskLevel` 为 `dangerous`，`requiresConfirmation` 为 `true`
 - `explain-plan.test.ts`：PostgreSQL JSON 计划树规范化、`QUERY PLAN` 单元格兼容、性能 warning 生成和非法 EXPLAIN payload 拦截。
 - `import-plan.test.ts`：CSV/JSON 预览、字段映射、批量 INSERT、UPSERT、TRUNCATE prelude、跳过错误策略 warning 和非法源/计划拦截。
 - `database-driver-registry.test.ts`：driver 注册、能力声明、默认 PostgreSQL 工厂、driver 复用和未注册 engine 错误。
-- `postgres-errors.test.ts`：远程连接常见失败和连接后运行期失败分类。
+- `postgres-errors.test.ts`：远程连接常见失败、连接后运行期失败和用户取消查询分类。
 - `postgres-driver-runtime-errors.test.ts`：验证空 SQL 返回输入校验错误，参数化查询会传给 PostgreSQL pool，并验证 `execute`、`listTables` 和 `describeTable` 遇到远程中断或查询错误时仍返回 `Result`，不向上抛出异常。
 - `postgres-driver-runtime-errors.test.ts` 还覆盖多语句结果集归一化：保留每条语句的 `resultSets`，并生成用户可见的执行消息；同时覆盖调用方 query id 透传和 `pg_cancel_backend` 调用。
 - `connection-store.test.ts`：连接元数据持久化、状态更新和损坏 JSON 降级。
