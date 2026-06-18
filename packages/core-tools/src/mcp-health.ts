@@ -108,6 +108,17 @@ export class McpHealthManager {
     }));
   }
 
+  markStopped(serverId: string): McpServerHealthState {
+    this.cpuOverLimitSince.delete(serverId);
+    return this.update(serverId, (state) => ({
+      ...state,
+      status: 'stopped',
+      healthy: false,
+      lastError: undefined,
+      nextRestartAt: undefined,
+    }));
+  }
+
   markUnhealthy(serverId: string, errorMessage: string): McpServerHealthState {
     return this.update(serverId, (state) => ({
       ...state,
