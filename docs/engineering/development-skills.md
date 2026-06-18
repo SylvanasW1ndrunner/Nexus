@@ -130,6 +130,7 @@
 - DBAgent RAG 是结构化 Schema RAG，不是通用文档 RAG。
 - 显式 schema/table/column 匹配优先于 embedding。
 - 缺失 embedding 时必须降级到 exact/FTS 检索。
+- 索引、检索、rerank、embedding、向量存储、SQL 解析、图扩展和评测能力先评估优秀开源组件或成熟设计，再决定复用、适配、fork 或自研。
 
 ### dbagent-agent-tooling-development
 
@@ -138,6 +139,7 @@
 新增约束：
 - Skill 触发的 Agent run 必须强制执行 `allowed_tools`，不能只写在 prompt 里。
 - 即使模型返回隐藏或未授权工具调用，也必须在 runtime 拒绝。
+- 复杂 Agent 能力先评估成熟开源实现、SDK 或架构模式，记录许可证、打包、离线、安全和合同适配后再决定复用或自研。
 - 已补齐 `agents/openai.yaml`。
 
 ### dbagent-classic-db-ide-development
@@ -236,11 +238,12 @@
 2. 做开发计划时使用 `dbagent-product-backend-planning`。
 3. 编码前用 `dbagent-slice-design` 定义切片边界。
 4. 进入具体模块后，叠加对应专项 skill。
-5. 用 `dbagent-module-doc-authoring` 同步模块文档。
-6. 提交前使用 `dbagent-quality-gate-testing`、`dbagent-real-integration-testing` 和 `dbagent-headless-capability-validation`。
-7. 发布或大版本验收前使用 `dbagent-regression-matrix-maintenance`。
-8. 产品文档是事实源，skill 只固化开发流程和工程边界。
-9. 若 `docs/product/` 发生变化，先改产品文档，再同步更新 skill。
+5. 对 Agent、RAG、MCP、SQL、Python、终端等复杂能力，先使用 `dbagent-dependency-packaging-review` 做开源组件和打包影响评估。
+6. 用 `dbagent-module-doc-authoring` 同步模块文档。
+7. 提交前使用 `dbagent-quality-gate-testing`、`dbagent-real-integration-testing` 和 `dbagent-headless-capability-validation`。
+8. 发布或大版本验收前使用 `dbagent-regression-matrix-maintenance`。
+9. 产品文档是事实源，skill 只固化开发流程和工程边界。
+10. 若 `docs/product/` 发生变化，先改产品文档，再同步更新 skill。
 
 ## 校验结果
 

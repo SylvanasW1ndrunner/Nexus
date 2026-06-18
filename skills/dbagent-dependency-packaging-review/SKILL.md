@@ -29,10 +29,12 @@ Use this skill before introducing or changing a dependency that affects build si
 ## Decision Rules
 
 - Prefer mature open-source libraries for commodity capabilities.
+- For Agent, RAG, MCP, SQL parsing, embeddings, evaluation, terminal/process, and Python environment features, actively look for excellent open-source components or proven architectural patterns before self-building.
 - Reject dependencies that make packaging brittle unless the feature cannot be delivered otherwise.
 - Do not add UI libraries during the backend-first phase unless they are needed by retained non-UI utilities or future packaging tests.
 - For native modules, require a packaging smoke test plan.
 - For downloads at runtime, document cache, mirror, timeout, and offline failure behavior.
+- If choosing self-build over a known mature project, document the reason: license, package size, native packaging risk, offline constraints, security boundary, API mismatch, or product differentiation.
 
 ## Documentation
 
@@ -41,5 +43,6 @@ Record the decision in the relevant Chinese module doc or release note:
 - Dependency name and version.
 - License.
 - Why it is used.
+- Alternatives considered and why they were accepted or rejected.
 - Packaging and offline considerations.
 - Known fallback or replacement path.

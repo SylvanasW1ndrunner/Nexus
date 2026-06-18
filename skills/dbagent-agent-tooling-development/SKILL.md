@@ -20,6 +20,8 @@ Use this skill for Agent-side runtime and tool work. During the current developm
 - DBAgent Agent is an engineer assistant, not a simple Text2SQL bot.
 - The Agent should plan, inspect schema/context, use tools, produce artifacts, and explain risk.
 - Agent functionality must be backend-testable before final UI exists.
+- Before self-building complex Agent runtime pieces, evaluate mature open-source implementations, SDKs, and patterns such as tool calling frameworks, checkpoint/session stores, streaming parsers, schema validators, tracing, and eval harnesses.
+- Reuse excellent open-source components when they reduce risk and fit DBAgent packaging, licensing, offline, security, and Windows/Linux requirements.
 
 ## Runtime Components
 
@@ -31,6 +33,19 @@ Use this skill for Agent-side runtime and tool work. During the current developm
 - Session manager: durable SQLite/local state for conversations and checkpoints.
 - Usage tracker: record every round and model/tool usage.
 - Skill execution policy: when a run is created from a Skill, enforce its `allowed_tools` as a runtime allowlist, not only as prompt guidance.
+
+## Open-Source Evaluation
+
+For non-trivial Agent capabilities, record the evaluation before implementation:
+
+- Candidate projects or libraries considered.
+- License and commercial distribution compatibility.
+- Bundle size, native dependency, offline install, and release packaging impact.
+- Security boundary: secrets, tool execution, sandbox escape, prompt/tool injection behavior.
+- Fit with DBAgent contracts: Tool Registry, Permission Manager, Session, Usage, MCP, and typed IPC.
+- Decision: reuse, wrap behind an adapter, fork, or self-build, with the reason.
+
+Do not copy large code from open-source projects into the repository. Prefer dependencies, adapters, or documented design influence with proper license review.
 
 ## Tooling Boundaries
 

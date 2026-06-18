@@ -20,6 +20,20 @@ Use this skill for schema-aware retrieval and context generation.
 - Keep RAG storage per connection, for example `{appData}/rag/{connectionId}.db`.
 - Disconnecting an active connection should clear in-memory active RAG state unless the workflow explicitly keeps it.
 - Retrieval must support explicit references like schema/table/column names before relying on embeddings.
+- For indexing, retrieval, reranking, embeddings, vector storage, SQL parsing, graph traversal, and evaluation, evaluate mature open-source libraries or proven designs before self-building.
+- Reuse open-source components when they improve retrieval quality, robustness, or delivery speed without breaking packaging, offline operation, licensing, or data-security boundaries.
+
+## Open-Source Evaluation
+
+Before implementing a major RAG subsystem, record:
+
+- Candidate libraries or projects, including exact capability reviewed.
+- License and commercial redistribution compatibility.
+- Native module, model download, bundle size, CPU/memory, and offline behavior.
+- Windows/Linux/macOS compatibility and packaged Electron behavior.
+- How the dependency maps to DBAgent contracts: extractor, indexer, retriever, context builder, per-connection storage, and provider abstraction.
+- Fallback when embedding/model/vector dependency is unavailable.
+- Decision: reuse, adapter, fork, design reference, or self-build.
 
 ## Pipeline
 
