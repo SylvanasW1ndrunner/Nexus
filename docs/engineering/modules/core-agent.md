@@ -82,6 +82,20 @@ checkpoint 写入和读取都会做敏感信息脱敏，避免恢复文件、诊
 
 当前恢复服务不直接自动续跑工具。原因是真正继续执行还需要 LLM provider、工具注册表、权限 provider、活动数据库连接、工作区和 UI 确认状态全部就绪；本切片先保证启动扫描、恢复决策和放弃操作的后端合同稳定。后续主进程接线时应先调用 `listRecoverablePlans()`，由用户选择继续、重跑或放弃。
 
+## Stream 持久化
+
+`packages/core-agent/src/stream-store.ts` 提供 Agent/LLM 流式响应的本地持久化合同：
+
+- `AgentStreamStore.start()`：创建一个 stream record，记录 session、round、provider 和 model。
+- `appendEvent()`：保存 `text-delta`、`tool-call-delta`、`tool-call`、`usage`、`finish` 等 LLM stream event，并累计当前文本、工具调用、usage 和最终响应。
+- `markIncomplete()`：网络中断或 provider stream 异常时保留已收到文本，并让 `listRecoverable()` 返回该 stream。
+- `markAborted()`：用户主动停止时保留部分文本，但不进入可恢复列表。
+- `persistAgentStreamEvents()`：包装 `LlmRouter.stream()` / provider stream，边转发事件边落盘；异常时自动标记 `incomplete` 或 `aborted`。
+
+stream store 与 checkpoint store 复用同一套 `redaction.ts` 脱敏规则，防止 tool call 参数、错误信息、final response 中的 API key、Bearer token、数据库连接串密码等进入本地恢复文件。
+
+当前 stream store 是服务级合同，尚未接入 `ReactAgent.run()` 的默认路径。后续接入流式 Agent 时，应在启动 round 后创建 stream record，并通过 `persistAgentStreamEvents()` 包裹 `llmRouter.stream()`，从而保证 UI 看到的事件和本地恢复文件一致。
+
 ## 权限边界
 
 - readonly 模式下，非 readonly 工具在执行前被拒绝。
@@ -107,6 +121,7 @@ checkpoint 写入和读取都会做敏感信息脱敏，避免恢复文件、诊
 
 - 当前 checkpoint 使用 JSON 文件，适合本地 beta 阶段；大量会话和并发写入场景应迁移到 SQLite WAL。
 - 当前只实现任务恢复计划、续跑提示词和放弃任务，不自动续跑中断任务；真正续跑需要后续主进程恢复入口接入 provider、tool registry、permission 和活动连接状态。
+- 当前 stream store 尚未接入 `ReactAgent.run()` 默认非流式路径；它先作为后续 `agent:run` 流式 IPC 和 UI 事件面板的后端持久化合同。
 - 当前不实现多 Agent 协作调度。
 - 当前行为评估器只评估 Agent run 的结构化结果，不评估自然语言答案的事实充分性；真实 LLM 效果评估后续通过环境门控测试补充。
 - 当前上下文 token 估算是近似值，真实模型窗口仍需要 provider 层或 tokenizer 层二次校验。
