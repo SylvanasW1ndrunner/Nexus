@@ -36,15 +36,39 @@
 
 - `diagnostic-report.test.ts`：报告 manifest、配置/日志/崩溃快照收集、敏感字段脱敏、SQL 内容脱敏、旧日志忽略、未知时间日志保留、大日志截尾、路径清理。
 - `workspace-tools.test.ts`：工作空间工具的真实文件读写和越界路径拦截。
-- `workspace-script-tools.test.ts`：脚本声明发现和真实子进程 runner 注入。
+- `workspace-script-tools.test.ts`：脚本声明发现、真实 Python runner、参数校验、非零退出、超时 kill、AbortSignal 取消、stdout/stderr 截断。
 - `workspace-sandbox.test.ts`：路径白名单和逃逸判断。
 - `db-tools.test.ts`：数据库工具注册和安全边界。
+
+## Workspace Python Runner
+
+`workspace-script-tools.ts` 现在提供 `runWorkspacePythonScript()`，作为无 UI 的真实脚本执行合同。它使用 Node 原生 `child_process.spawn` 启动 Python，不新增打包依赖。
+
+运行请求包含：
+
+- `rootPath` 与 `relativePath`：脚本必须通过 `resolveInsideWorkspace()` 落在工作空间托管目录内，并且当前只接受 `.py` 文件。
+- `args`：序列化为 JSON，作为脚本第一个参数传入，供工作空间脚本 tool 读取。
+- `pythonPath`：可选解释器路径；未配置时使用 `python`，后续主进程应从工作空间 Python 配置传入。
+- `env`：可选环境变量覆盖；凭证只能由主进程运行时注入，不进入脚本文件或 workspace 配置。
+- `timeoutMs`：超时后先发终止信号，2 秒后仍未退出则强制 kill。
+- `signal`：Agent 或上层服务取消时终止子进程。
+- `outputLimitBytes`：stdout/stderr 只保留尾部，避免大输出污染 Agent 上下文。
+
+失败语义：
+
+- 退出码为 0：返回 `WorkspaceScriptRunResult`。
+- 非零退出、超时或取消：抛出 `WorkspaceScriptExecutionError`，错误对象携带结构化 `result`，包含 stdout、stderr、退出码、耗时、截断标记、`timedOut` 或 `aborted`。
+- 错误 message 使用中文，并保留 stderr 尾部，便于 Agent 或调用方根据错误继续修复脚本。
+
+当前 runner 是进程级隔离与输出控制，不是完整系统沙箱。网络禁用、内存限制、依赖安装策略和数据库连接注入仍由后续 Python runtime / 主进程能力补齐。
 
 ## 已知边界
 
 - 当前诊断报告返回内存中的文件列表，后续主进程需要接入 zip 写入和日志目录扫描。
 - SQL 脱敏使用保守文本规则，会牺牲部分 SQL 上下文；这是诊断报告的刻意选择，优先保护用户数据。
 - 二进制 crash dump 当前按文本处理；真正接入系统 dump 时需要在主进程层做大小限制和二进制附件策略。
+- Python runner 当前只负责进程启动、取消、超时和输出限制；还未实现 conda/venv 自动创建、依赖安装、资源配额或系统级网络隔离。
+
 ## Schema RAG 工具组合
 
 `registerDatabaseTools()` 在传入 `rag` 时会复用 `core-agent` 的 `registerSchemaRagTools()` 注册 RAG 工具，并启用 `skipExistingTools`，避免与数据库工具包已有的 `list_tables`、`describe_table` 重名。

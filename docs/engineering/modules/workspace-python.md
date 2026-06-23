@@ -42,3 +42,15 @@ Nexus 面向数据工程师和分析师，项目不仅保存 SQL，也要保存 
 ## 后续开发约束
 
 后续脚本执行器应基于 `WorkspaceProject.python` 决定解释器、依赖文件和运行目录，不能让 renderer 拼接 shell 命令。执行器还需要单独处理 Windows 与 Linux 路径差异、运行超时、stdout/stderr 日志、依赖安装失败、输出文件登记和取消运行。
+
+## 后端脚本执行器进展
+
+`packages/core-tools/src/workspace-script-tools.ts` 已新增 `runWorkspacePythonScript()`，作为当前无 UI 阶段的真实 Python 子进程执行器：
+
+- 支持显式 `pythonPath`，后续主进程可从 Workspace Python 配置传入 system / venv / conda 解释器路径。
+- 脚本路径通过 workspace 路径规则校验，当前只允许执行工作空间内的 `.py` 文件。
+- 运行时把 tool 参数以 JSON 传给脚本，避免拼接 shell 命令。
+- 支持超时、取消、stdout/stderr 尾部截断和结构化失败结果。
+- 非零退出、超时和取消都会抛出携带 `WorkspaceScriptRunResult` 的错误，便于 Agent 读取 stderr 后修复脚本。
+
+这一步没有引入第三方 Python runner 或进程管理依赖，原因是当前能力可以用 Node 原生 `child_process.spawn` 稳定实现，新增依赖会增加 Electron 打包、离线安装和跨平台兼容风险。后续如果要支持伪终端、交互式 REPL 或更强资源限制，再单独评估成熟开源方案。
