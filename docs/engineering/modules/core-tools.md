@@ -56,3 +56,23 @@
 - 兼容工具：`build_schema_context`，保留给已有测试和后续 IPC/Agent 调试入口。
 
 因此 Agent 的默认 schema 浏览仍可以使用产品文档中的 `list_tables` / `describe_table` 名称；当需要模糊检索、业务术语或关系扩展时使用 `search_schema` / `get_relations`。这避免了同一 registry 中出现重复 tool name，也让 live DB introspection 与本地 RAG 各自承担清晰职责。
+
+## Agent/RAG 业务验收测试
+
+`packages/core-tools/test/agent-rag-business-scenario.test.ts` 是当前 Agent + Schema RAG 的无 UI 验收入口。它构造真实风格业务域：
+
+- 电商：`customers`、`products`、`orders`、`order_items`、`refunds`。
+- 流量分析：`analytics.traffic_sessions`、`analytics.page_views`、`analytics.campaign_spend`。
+- 脏数据结构：`analytics.raw_evt`，无主键且字段缩写。
+
+测试覆盖：
+
+- RAG 按“GMV / 退款率 / ROI / 转化漏斗 / 加密手机号”等真实分析问题召回正确表和字段。
+- Agent 在 readonly 模式下先调用 `search_schema`，再调用 `query_database`，最终回答渠道 GMV、退款率和 ROI。
+- Agent 收到 destructive SQL 工具调用时，在 driver 执行前被权限系统拒绝。
+- `DBAGENT_RUN_POSTGRES_TESTS=1` 时会在真实 PostgreSQL 中创建业务表、写入样例数据、读取真实 catalog metadata，再运行 Agent 工具链。
+- `DBAGENT_RUN_AGENT_RAG_LIVE=1` 且提供 `TEST_SILICONFLOW_API_KEY` 或 `DBAGENT_LLM_API_KEY` 时，会使用 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` 真实模型验证 tool calling 行为。
+
+默认测试不依赖真实密钥或本机 PostgreSQL。真实依赖测试只通过环境变量显式开启，避免把 API key、数据库密码或用户数据写入代码、日志和提交。
+
+2026-06-23 验证记录：`pnpm test:postgres` 已在本机真实 PostgreSQL 16 上通过；`pnpm test:agent-rag-live` 已在 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` 上通过，live case 确认模型真实调用 `search_schema` 和 `query_database`。

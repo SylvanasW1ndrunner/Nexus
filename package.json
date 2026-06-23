@@ -15,6 +15,7 @@
     "lint": "turbo lint",
     "test": "turbo test",
     "test:postgres": "node scripts/run-postgres-tests.mjs",
+    "test:agent-rag-live": "node scripts/run-agent-rag-live-tests.mjs",
     "smoke": "node scripts/smoke.mjs",
     "ci": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke",
     "package": "pnpm build && pnpm --filter @dbagent/desktop package",

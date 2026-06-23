@@ -1,0 +1,43 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+const localVitest = join(root, 'node_modules', 'vitest', 'vitest.mjs');
+const hasLocalVitest = existsSync(localVitest);
+const command = hasLocalVitest ? process.execPath : process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+const args = hasLocalVitest
+  ? [localVitest, 'run', 'packages/core-tools/test/agent-rag-business-scenario.test.ts']
+  : ['exec', 'vitest', 'run', 'packages/core-tools/test/agent-rag-business-scenario.test.ts'];
+
+const hasApiKey = Boolean(process.env.TEST_SILICONFLOW_API_KEY || process.env.DBAGENT_LLM_API_KEY);
+if (!hasApiKey) {
+  console.error(
+    [
+      'SiliconFlow live Agent/RAG tests require TEST_SILICONFLOW_API_KEY or DBAGENT_LLM_API_KEY.',
+      'Set the key in your shell environment; do not commit it to files.',
+      'Example: $env:TEST_SILICONFLOW_API_KEY=<本机临时密钥>',
+    ].join('\n'),
+  );
+  process.exit(1);
+}
+
+const child = spawn(command, args, {
+  cwd: root,
+  env: {
+    ...process.env,
+    DBAGENT_RUN_AGENT_RAG_LIVE: '1',
+    TEST_SILICONFLOW_MODEL: process.env.TEST_SILICONFLOW_MODEL ?? 'deepseek-ai/DeepSeek-V4-Pro',
+  },
+  shell: !hasLocalVitest && process.platform === 'win32',
+  stdio: 'inherit',
+});
+
+child.on('exit', (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code ?? 1);
+});

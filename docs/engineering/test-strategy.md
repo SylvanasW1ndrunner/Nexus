@@ -3,7 +3,7 @@
 ## 测试分层
 
 - 单元测试覆盖纯业务规则，例如 SQL 安全判断、PostgreSQL identifier quote、预览 SQL limit、连接校验、查询历史、CSV/JSON 导出、用量窗口、认证与会话持久化。
-- 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts` 和 `packages/core-auth/test/postgres.integration.test.ts`。
+- 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts`、`packages/core-auth/test/postgres.integration.test.ts` 和 `packages/core-tools/test/agent-rag-business-scenario.test.ts`。
 - 远程连接风险以可复现单测覆盖连接建立失败和连接后运行期中断分类，以真实 PostgreSQL 集成测试覆盖成功连接、查询、断连和事务回滚。弱网、VPN、云安全组和跨系统防火墙场景后续进入发布前手工 QA 矩阵。
 - E2E 测试覆盖桌面端用户路径：打开应用、创建连接、执行 SQL、查看结果表、查看查询历史、验证只读拦截、导出 CSV、重启后恢复 SQL 草稿。
 - Smoke 测试是零外部依赖的仓库健康检查，入口为 `pnpm smoke`，实现文件为 `scripts/smoke.mjs`。它检查关键文件存在、SQL 安全关键字和 IPC 契约片段。
@@ -94,6 +94,7 @@ pnpm db:down
 - `packages/shared/test/export.test.ts` 覆盖 JSON 结果导出边界。
 - `packages/core-auth/test/auth-service.test.ts` 覆盖认证状态和会话持久化。
 - `packages/core-usage/test/usage-tracker.test.ts` 覆盖本地用量记录。
+- `packages/core-tools/test/agent-rag-business-scenario.test.ts` 覆盖真实风格电商和流量分析 schema 上的 RAG 召回、Agent 调用 `search_schema` + `query_database` 的业务闭环、readonly 模式 destructive SQL 拦截，以及真实 PostgreSQL / SiliconFlow 门控测试。
 
 ## PostgreSQL 集成验证
 
@@ -124,6 +125,18 @@ pnpm db:up
 - 可写连接中批量 SQL 先插入数据、再执行错误语句时必须失败，并且前序插入后的计数仍为 `0`，证明事务已回滚。
 
 环境变量 `DBAGENT_TEST_PG_HOST`、`DBAGENT_TEST_PG_PORT`、`DBAGENT_TEST_PG_DATABASE`、`DBAGENT_TEST_PG_USER` 和 `DBAGENT_TEST_PG_PASSWORD` 可覆盖默认连接。认证模块也可单独使用 `DBAGENT_TEST_AUTH_DATABASE_URL` 指向账号测试库。CI 已把 `pnpm test:postgres` 作为独立真实数据库门禁；候选发布仍建议在目标操作系统上额外跑一次本地或远程 PostgreSQL 验证。
+
+## Agent/RAG 真实模型验证
+
+默认 `pnpm test` 不调用真实 LLM。需要验证 SiliconFlow + DeepSeek-V4-Pro 的 Agent tool calling 时，使用：
+
+```powershell
+$env:TEST_SILICONFLOW_API_KEY='<本机临时密钥>'
+$env:TEST_SILICONFLOW_MODEL='deepseek-ai/DeepSeek-V4-Pro'
+pnpm test:agent-rag-live
+```
+
+该入口由 `scripts/run-agent-rag-live-tests.mjs` 启用 `DBAGENT_RUN_AGENT_RAG_LIVE=1`，只运行 Agent/RAG 业务测试文件中的 live case。测试要求模型真实调用 `search_schema` 和 `query_database`，不只验证普通文本回答。密钥只允许通过环境变量注入，不写入仓库文件、日志或快照。
 
 ## M0-M1.5 发布风险
 
@@ -157,3 +170,12 @@ pnpm db:down
 - 被拒绝的 SQL 不会调用 driver，不会消耗用量，也不会写查询历史。
 
 该测试补齐了 M1.5 SQL 执行链中的一个边界：普通执行走 `query-workflow.test.ts`，解释计划走 `explain-workflow.test.ts`，二者共同保证只读连接、危险 SQL 确认和性能分析入口的行为一致。
+## 2026-06-23 增量：Agent/RAG 真实业务验收
+
+`pnpm test:postgres` 现在会自动准备三个隔离数据库：
+
+- `dbagent_core_db_test`：导入 `scripts/dev-db/init.sql`，验证 PostgreSQL driver 的连接、schema、join、只读拦截、事务回滚和表格编辑事务。
+- `dbagent_core_auth_test`：验证 PostgreSQL 账号、验证码登录和重置密码，不污染 core-db fixture。
+- `dbagent_core_tools_test`：创建电商和流量分析业务表，写入样例数据，抽取真实 catalog metadata，索引 Schema RAG，并运行 Agent `search_schema` + `query_database` 工具链。
+
+真实模型测试仍通过 `pnpm test:agent-rag-live` 显式启用。该入口要求 `TEST_SILICONFLOW_API_KEY` 或 `DBAGENT_LLM_API_KEY` 已存在于本机环境变量中；密钥不得提交到仓库，也不得写入文档、日志或测试快照。本轮已使用 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` 跑通 live case，验证模型真实调用 `search_schema` 和 `query_database`。
