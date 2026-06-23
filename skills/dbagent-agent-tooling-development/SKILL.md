@@ -39,13 +39,17 @@ Use this skill for Agent-side runtime and tool work. During the current developm
 For non-trivial Agent capabilities, record the evaluation before implementation:
 
 - Candidate projects or libraries considered.
+- Official source checked: upstream repository, official documentation, license, release/build notes, and issue activity when relevant.
 - License and commercial distribution compatibility.
 - Bundle size, native dependency, offline install, and release packaging impact.
 - Security boundary: secrets, tool execution, sandbox escape, prompt/tool injection behavior.
 - Fit with DBAgent contracts: Tool Registry, Permission Manager, Session, Usage, MCP, and typed IPC.
+- Adapter strategy: how external runtime types are isolated from DBAgent public contracts.
+- Test strategy: deterministic fake-provider tests plus gated real-provider tests where the risk depends on real LLM behavior.
 - Decision: reuse, wrap behind an adapter, fork, or self-build, with the reason.
 
 Do not copy large code from open-source projects into the repository. Prefer dependencies, adapters, or documented design influence with proper license review.
+If the decision is self-build, explain why mature options such as workflow/tool-calling frameworks, tracing/eval harnesses, checkpoint stores, or schema validators do not fit the current slice.
 
 ## Tooling Boundaries
 

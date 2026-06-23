@@ -18,6 +18,20 @@ Schema RAG 当前是 Stage 1：以表、字段和外键关系为基础做词法�
 
 检索质量评估使用 `evaluateSchemaRagRetrieval()`。调用方提供一组真实业务问题和必须召回的 schema 文档 ID，评估器返回每个 case 的召回 ID、缺失必选项、缺失建议项、误召回禁止项、命中率和通过状态。这个评估器不依赖 LLM，也不引入第三方 RAG eval 依赖；它先作为 schema 检索质量基线，后续接入向量、rerank 或 LLM judge 时，需要按开源优先规则评估成熟组件并记录许可证、打包、离线和安全影响。
 
+## 开源借鉴与复用边界
+
+Schema RAG 开发默认先调研成熟开源实现和设计，再决定复用、adapter、fork、借鉴设计或自研。重点包括：
+
+- metadata parser、SQL parser、schema document 建模。
+- SQLite FTS、sqlite-vec、pgvector、嵌入式向量索引或外部向量库。
+- hybrid retrieval、RRF、reranker、embedding provider、context builder。
+- RAG eval、LLM judge、检索数据集和指标计算。
+- 图关系扩展、业务术语抽取、同义词/别名维护。
+
+第三方 RAG 框架或向量库不能直接决定 DBAgent 的稳定合同。`core-rag` 对外仍暴露连接级 schema 文档、检索结果、关系上下文和 token-budgeted context；外部库只能通过 adapter 接入 extractor、indexer、retriever、provider 或 storage 层。
+
+选择暂不引入开源组件时，release note 必须写明原因，例如当前切片只需要结构化 metadata 的轻量能力、通用文档 RAG 不匹配、native module 打包风险、默认联网下载模型、离线不可用、许可证不清晰或安全边界不满足。
+
 ER 图生成使用 `generateMermaidErDiagram()`。它从 `TableDetail[]` 中读取：
 
 - 表名和 schema。

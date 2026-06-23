@@ -18,13 +18,15 @@ Use this skill before introducing or changing a dependency that affects build si
 
 1. Purpose: what product capability the dependency enables.
 2. Alternative: existing repo code, platform API, or smaller library.
-3. License: compatible with closed-source commercial distribution.
-4. Package impact: install size, bundled size, native binaries, optional dependencies.
-5. Runtime impact: startup time, memory, CPU, background processes.
-6. Cross-platform: Windows, Linux, macOS assumptions; path and shell behavior.
-7. Offline behavior: can the packaged app work without network after install.
-8. Security: credential handling, sandbox escape risk, supply-chain posture.
-9. Test plan: integration tests proving the product path, not only library import.
+3. Upstream evidence: official repository, official documentation, license file, release/build notes, and current maintenance signal.
+4. License: compatible with closed-source commercial distribution.
+5. Package impact: install size, bundled size, native binaries, optional dependencies.
+6. Runtime impact: startup time, memory, CPU, background processes.
+7. Cross-platform: Windows, Linux, macOS assumptions; path and shell behavior.
+8. Offline behavior: can the packaged app work without network after install.
+9. Security: credential handling, sandbox escape risk, supply-chain posture.
+10. Adapter boundary: how external types are hidden behind DBAgent contracts.
+11. Test plan: integration tests proving the product path, not only library import.
 
 ## Decision Rules
 
@@ -35,6 +37,7 @@ Use this skill before introducing or changing a dependency that affects build si
 - For native modules, require a packaging smoke test plan.
 - For downloads at runtime, document cache, mirror, timeout, and offline failure behavior.
 - If choosing self-build over a known mature project, document the reason: license, package size, native packaging risk, offline constraints, security boundary, API mismatch, or product differentiation.
+- Do not import third-party framework object models into `packages/shared` IPC contracts or stable public package interfaces.
 
 ## Documentation
 

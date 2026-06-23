@@ -34,11 +34,12 @@ Read only the documents needed for the requested feature:
 
 1. Check branch and worktree with `git status --short --branch`.
 2. Identify the relevant product docs and existing package boundaries.
-3. Implement in core packages first; expose through typed IPC only when desktop integration is required.
-4. Add or update Chinese module docs before or with the code change.
-5. Write tests that reflect real user workflows, including failure and recovery paths.
-6. Run narrow tests first, then package/app-level verification.
-7. Commit meaningful slices with author `Chandler Niu`.
+3. For Agent, RAG, MCP, SQL parser, embedding, terminal/process, Python runtime, plugin, or packaging-sensitive work, run an open-source-first review before coding and record the result in Chinese docs.
+4. Implement in core packages first; expose through typed IPC only when desktop integration is required.
+5. Add or update Chinese module docs before or with the code change.
+6. Write tests that reflect real user workflows, including failure and recovery paths.
+7. Run narrow tests first, then package/app-level verification.
+8. Commit meaningful slices with author `Chandler Niu`.
 
 ## Quality Gates
 
@@ -47,6 +48,7 @@ Read only the documents needed for the requested feature:
 - Feature behavior must be accessible without relying on final UI.
 - Tests must cover error paths, cancellation or timeout, persistence, and recovery where relevant.
 - Packaging implications must be considered before adding dependencies.
+- Self-building complex Agent/RAG behavior is acceptable only after documenting why mature open-source options were not reused.
 
 ## Commit Discipline
 

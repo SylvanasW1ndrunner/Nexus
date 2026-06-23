@@ -33,6 +33,8 @@
 
 用于评审新增或升级依赖，重点覆盖许可证、闭源商业分发兼容、包体积、原生模块、离线安装、Windows/Linux/macOS 兼容和替代方案。
 
+在 Agent、Schema RAG、MCP、SQL parser、embedding、向量存储、终端进程、Python runtime、插件市场和打包链路中，它不是可选补充，而是编码前的准入步骤。即使最终选择自研，也要记录评估过哪些成熟开源方案、为什么没有复用，以及后续是否保留 adapter 接入空间。
+
 ### `dbagent-release-version-discipline`
 
 用于版本级提交、版本分支、release 文件夹、打包产物和验收记录。它固化了“先 main 提交，再按版本名建分支”的发布规则。

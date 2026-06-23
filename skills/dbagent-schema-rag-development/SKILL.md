@@ -28,12 +28,16 @@ Use this skill for schema-aware retrieval and context generation.
 Before implementing a major RAG subsystem, record:
 
 - Candidate libraries or projects, including exact capability reviewed.
+- Official source checked: upstream repository, official documentation, license, release/build notes, and maintenance status when relevant.
 - License and commercial redistribution compatibility.
 - Native module, model download, bundle size, CPU/memory, and offline behavior.
 - Windows/Linux/macOS compatibility and packaged Electron behavior.
 - How the dependency maps to DBAgent contracts: extractor, indexer, retriever, context builder, per-connection storage, and provider abstraction.
 - Fallback when embedding/model/vector dependency is unavailable.
+- Adapter boundary: third-party document, vector, or retriever types must not become public DBAgent contracts.
+- Evaluation plan: deterministic schema-ID tests first, then gated embedding/rerank/LLM-judge tests only when explicitly enabled.
 - Decision: reuse, adapter, fork, design reference, or self-build.
+If self-building, document why mature options such as vector stores, RAG frameworks, SQL parsers, rerankers, or eval tools do not fit the current slice.
 
 ## Pipeline
 

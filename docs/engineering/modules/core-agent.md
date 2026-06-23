@@ -33,6 +33,19 @@
 
 当前不引入 tokenizer 或 memory 框架。后续接入 `tiktoken` / `js-tiktoken`、LLM 摘要或第三方 memory 方案前，必须按开源优先规范评估许可证、打包、离线和安全边界。
 
+## 开源借鉴与复用边界
+
+Agent 能力开发默认先调研成熟开源项目、SDK 或架构模式，再决定复用、adapter、fork、借鉴设计或自研。重点包括：
+
+- workflow / tool calling / ReAct / Plan-Execute / 多 Agent 调度。
+- checkpoint、session store、memory、tracing、eval、guardrail。
+- streaming parser、schema validator、工具参数校验、运行日志和观测。
+- MCP 或插件工具适配。
+
+无论最终是否引入依赖，都必须在对应 release note 或模块文档记录官方来源、许可证、打包/离线影响、安全边界、DBAgent 合同适配和测试计划。第三方框架类型不能进入 `packages/shared` IPC 合同或 `ToolRegistry` 的稳定公开模型；必须通过 adapter 转成 DBAgent 自有的工具、权限、会话、用量和诊断结构。
+
+选择自研时必须说明拒绝成熟方案的原因，例如 Electron 打包不稳定、离线不可用、许可证不兼容、权限边界不足、API 与 DBAgent typed tool 合同不匹配，或该能力属于产品差异化核心。
+
 ## Checkpoint 策略
 
 `AgentCheckpointStore` 使用 JSON 文件原子写入保存 checkpoint。每条 checkpoint 包含：
