@@ -62,3 +62,16 @@ Mermaid 对标识符有限制，因此模块会把 `schema.table`、字段名和
 - 对接开源 RAG eval、reranker 或 vector store 前先完成依赖与打包评估。
 - ER 图可增加 schema 分组、关系深度筛选和导出元信息。
 - 和 Agent 工具打通 `search_schema`、`describe_table`、`get_relations`、`generate_er_diagram`。
+
+## Agent 工具调用接口
+
+本轮新增 `SchemaRagEngine` 的后端工具级接口，供 Agent、命令面板、后续 IPC 和测试入口复用：
+
+- `hasIndex(connectionId)`：判断连接是否已有可用索引。
+- `listTables({ connectionId, schema, limit })`：列出已索引表，返回稳定表 ID、schema、表名、类型和字段数量。
+- `describeTable({ connectionId, table, schema, maxChars })`：返回单表、字段、直接关联表和可注入模型的结构化文本。
+- `getRelations({ connectionId, table, schema })`：返回单表的一跳关系文档和相关表。
+
+表引用支持 `schema.table` 或 `table + schema` 两种形式；裸表名在多个 schema 中命中时会抛出歧义错误，要求上层让 Agent 或用户补充 schema，而不是猜测。该行为用于避免 Agent 在生产库多 schema 场景下查询错表。
+
+本切片未引入新的第三方 RAG 框架或向量库。原因是当前能力是结构化 metadata 的轻量工具接口，直接复用现有内存索引即可；后续接入 sqlite-vec、FTS5、RRF、reranker 或 LlamaIndex/Haystack 等方案时，需要按 `docs/engineering/open-source-first.md` 重新记录许可证、Electron 打包、离线、模型下载和安全边界。

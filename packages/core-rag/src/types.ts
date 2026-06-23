@@ -51,6 +51,42 @@ export type SchemaRagContext = {
   truncated: boolean;
 };
 
+export type SchemaRagTableRef = {
+  connectionId: string;
+  table: string;
+  schema?: string;
+  maxChars?: number;
+};
+
+export type SchemaRagTableSummary = {
+  id: string;
+  schema: string;
+  table: string;
+  title: string;
+  type?: string;
+  columnCount?: number;
+};
+
+export type SchemaRagListTablesRequest = {
+  connectionId: string;
+  schema?: string;
+  limit?: number;
+};
+
+export type SchemaRagTableDescription = {
+  table: SchemaRagDocument;
+  columns: SchemaRagDocument[];
+  relatedTables: SchemaRagDocument[];
+  text: string;
+  truncated: boolean;
+};
+
+export type SchemaRagRelationsResult = {
+  table: SchemaRagDocument;
+  relatedTables: SchemaRagDocument[];
+  relationDocuments: SchemaRagDocument[];
+};
+
 export type SchemaRagIndexInput = {
   connectionId: string;
   tables: TableDetail[];

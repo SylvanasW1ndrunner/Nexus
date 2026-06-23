@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@dbagent/core-llm": "workspace:*",
+    "@dbagent/core-rag": "workspace:*",
     "@dbagent/core-usage": "workspace:*",
     "@dbagent/shared": "workspace:*"
   },

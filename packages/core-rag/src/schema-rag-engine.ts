@@ -6,8 +6,13 @@ import type {
   SchemaRagGlossaryEntry,
   SchemaRagIndex,
   SchemaRagIndexInput,
+  SchemaRagListTablesRequest,
+  SchemaRagRelationsResult,
   SchemaRagSearchRequest,
   SchemaRagSearchResult,
+  SchemaRagTableDescription,
+  SchemaRagTableRef,
+  SchemaRagTableSummary,
 } from './types.js';
 
 export class SchemaRagEngine {
@@ -35,6 +40,65 @@ export class SchemaRagEngine {
 
   clear(connectionId: string): void {
     this.indexes.delete(connectionId);
+  }
+
+  hasIndex(connectionId: string): boolean {
+    return this.indexes.has(connectionId);
+  }
+
+  listTables(request: SchemaRagListTablesRequest): SchemaRagTableSummary[] {
+    const index = this.requireIndex(request.connectionId);
+    const limit = request.limit ?? 200;
+    return index.documents
+      .filter((document) => document.kind === 'table')
+      .filter((document) => request.schema === undefined || document.schema === request.schema)
+      .sort((left, right) => left.title.localeCompare(right.title))
+      .slice(0, limit)
+      .map((document) => ({
+        id: document.id,
+        schema: document.schema,
+        table: document.table,
+        title: document.title,
+        ...(typeof document.metadata.type === 'string' ? { type: document.metadata.type } : {}),
+        ...(typeof document.metadata.columnCount === 'number' ? { columnCount: document.metadata.columnCount } : {}),
+      }));
+  }
+
+  describeTable(request: SchemaRagTableRef): SchemaRagTableDescription {
+    const index = this.requireIndex(request.connectionId);
+    const table = resolveTable(index, request);
+    const columns = index.documents
+      .filter((document) => document.kind === 'column' && document.schema === table.schema && document.table === table.table)
+      .sort((left, right) => left.title.localeCompare(right.title));
+    const relatedTables = relatedTableDocuments(index, table);
+    const sections = [
+      `## ${table.title}`,
+      table.text,
+      columns.length
+        ? `\n### Columns\n${columns.map((column) => `- ${column.title}: ${column.text.replace(/\n/g, '; ')}`).join('\n')}`
+        : '',
+      relatedTables.length
+        ? `\n### Related tables\n${relatedTables.map((related) => `- ${related.title}`).join('\n')}`
+        : '',
+    ].filter(Boolean);
+    const clipped = clipText(sections.join('\n'), request.maxChars ?? 4_000);
+    return {
+      table,
+      columns,
+      relatedTables,
+      text: clipped.text,
+      truncated: clipped.truncated,
+    };
+  }
+
+  getRelations(request: SchemaRagTableRef): SchemaRagRelationsResult {
+    const index = this.requireIndex(request.connectionId);
+    const table = resolveTable(index, request);
+    const relatedTables = relatedTableDocuments(index, table);
+    const relationDocuments = (index.graph.get(table.id) ? [...(index.graph.get(table.id) ?? [])] : [])
+      .map((id) => index.documents.find((document) => document.id === id))
+      .filter((document): document is SchemaRagDocument => document !== undefined);
+    return { table, relatedTables, relationDocuments };
   }
 
   search(request: SchemaRagSearchRequest): SchemaRagSearchResult[] {
@@ -196,4 +260,48 @@ function findGlossaryMatch(
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function resolveTable(index: SchemaRagIndex, request: SchemaRagTableRef): SchemaRagDocument {
+  const parsed = parseTableRef(request.table);
+  const schema = request.schema ?? parsed.schema;
+  const table = parsed.table;
+  const matches = index.documents.filter(
+    (document) =>
+      document.kind === 'table' &&
+      document.table === table &&
+      (schema === undefined || document.schema === schema),
+  );
+  if (matches.length === 0) {
+    throw new Error(`Schema RAG table is not indexed: ${schema ? `${schema}.` : ''}${table}`);
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `Schema RAG table reference is ambiguous: ${table}. Candidates: ${matches
+        .map((document) => document.title)
+        .join(', ')}`,
+    );
+  }
+  return matches[0]!;
+}
+
+function parseTableRef(tableRef: string): { schema?: string; table: string } {
+  const trimmed = tableRef.trim();
+  if (!trimmed) throw new Error('Table name is required.');
+  const parts = trimmed.split('.').filter(Boolean);
+  if (parts.length === 1) return { table: parts[0]! };
+  if (parts.length === 2) return { schema: parts[0]!, table: parts[1]! };
+  throw new Error(`Invalid table reference: ${tableRef}`);
+}
+
+function relatedTableDocuments(index: SchemaRagIndex, table: SchemaRagDocument): SchemaRagDocument[] {
+  return [...(index.graph.get(table.id) ?? [])]
+    .map((id) => index.documents.find((document) => document.id === id))
+    .filter((document): document is SchemaRagDocument => document?.kind === 'table' && document.id !== table.id)
+    .sort((left, right) => left.title.localeCompare(right.title));
+}
+
+function clipText(text: string, maxChars: number): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
+  return { text: `${text.slice(0, Math.max(0, maxChars - 15))}\n...[truncated]`, truncated: true };
 }

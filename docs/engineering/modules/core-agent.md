@@ -81,3 +81,23 @@
 - 当前不实现多 Agent 协作调度。
 - 当前行为评估器只评估 Agent run 的结构化结果，不评估自然语言答案的事实充分性；真实 LLM 效果评估后续通过环境门控测试补充。
 - 当前上下文 token 估算是近似值，真实模型窗口仍需要 provider 层或 tokenizer 层二次校验。
+
+## Schema RAG 工具适配
+
+`packages/core-agent/src/schema-rag-tools.ts` 提供 Agent 与 `core-rag` 的只读工具适配层。当前注册四个内置工具：
+
+- `search_schema`：按业务问题、表名、字段名或 glossary 术语检索 schema，并返回紧凑 context。
+- `describe_table`：描述单表字段和直接关联表，表名歧义时要求补充 schema。
+- `list_tables`：列出已索引表，供 Agent 做轻量 schema 浏览。
+- `get_relations`：返回单表的一跳关系上下文。
+
+这些工具全部标记为 `dangerLevel: safe` 和 `readonly: true`，因此可在 readonly 模式下执行；同时仍受 `allowedTools` 限制，Skill 或运行计划没有显式允许时不会暴露给模型，模型强行返回隐藏工具调用也会被拒绝。工具参数允许显式传 `connectionId`，也允许由运行环境提供 `defaultConnectionId`，后续桌面端激活连接后可以把当前连接注入工具注册过程。
+
+测试覆盖见 `packages/core-agent/test/schema-rag-tools.test.ts`：
+
+- 工具注册后的模型可见 schema、危险等级和只读属性。
+- GMV 等业务术语通过 RAG glossary 命中真实字段，并返回可进入下一轮 Agent 上下文的结构化结果。
+- 未配置活动连接时拒绝调用，避免 Agent 在无连接状态下伪造结果。
+- `ReactAgent` 集成场景验证：模型先调用 `search_schema`，工具结果进入 tool message，下一轮回答基于 `public.orders.total_amount`。
+
+本切片没有引入 LangChain、LlamaIndex、Haystack 或其它 Agent/RAG 框架。原因是当前目标是 typed tool adapter 和权限接线，直接适配现有 `ToolRegistry` 更稳定；未来若引入外部 Agent workflow 或 RAG tool adapter，应按开源优先规范记录依赖、许可证、Electron 打包、离线运行和安全边界。

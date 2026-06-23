@@ -126,6 +126,60 @@ describe('SchemaRagEngine', () => {
     expect(context.truncated).toBe(true);
   });
 
+  it('lists indexed tables for lightweight Agent schema browsing', () => {
+    const engine = indexedEngine();
+
+    const tables = engine.listTables({ connectionId: 'conn_1', schema: 'public', limit: 2 });
+
+    expect(tables).toEqual([
+      { id: 'table:public.order_items', schema: 'public', table: 'order_items', title: 'public.order_items', type: 'table', columnCount: 4 },
+      { id: 'table:public.orders', schema: 'public', table: 'orders', title: 'public.orders', type: 'table', columnCount: 4 },
+    ]);
+  });
+
+  it('describes a table with columns and related tables for Agent tools', () => {
+    const engine = indexedEngine();
+
+    const description = engine.describeTable({ connectionId: 'conn_1', table: 'public.orders', maxChars: 800 });
+
+    expect(description.table.id).toBe('table:public.orders');
+    expect(description.columns.map((column) => column.id)).toContain('column:public.orders.total_amount');
+    expect(description.relatedTables.map((table) => table.id)).toEqual(['table:public.order_items', 'table:public.users']);
+    expect(description.text).toContain('## public.orders');
+    expect(description.truncated).toBe(false);
+  });
+
+  it('returns direct relation documents for a table', () => {
+    const engine = indexedEngine();
+
+    const relations = engine.getRelations({ connectionId: 'conn_1', table: 'orders', schema: 'public' });
+
+    expect(relations.table.id).toBe('table:public.orders');
+    expect(relations.relatedTables.map((table) => table.id)).toEqual(['table:public.order_items', 'table:public.users']);
+    expect(relations.relationDocuments.map((document) => document.id)).toContain('column:public.orders.user_id');
+  });
+
+  it('rejects ambiguous bare table references so Agent asks for schema instead of guessing', () => {
+    const engine = new SchemaRagEngine();
+    engine.index({
+      connectionId: 'conn_1',
+      tables: [
+        ...fixtureTables(),
+        {
+          schema: 'reporting',
+          name: 'orders',
+          type: 'table',
+          primaryKey: ['id'],
+          columns: [column('id', 1, 'uuid', false, 'report order id', true)],
+        },
+      ],
+    });
+
+    expect(() => engine.describeTable({ connectionId: 'conn_1', table: 'orders' })).toThrow(
+      'Schema RAG table reference is ambiguous: orders',
+    );
+  });
+
   it('clears per-connection indexes on disconnect', () => {
     const engine = indexedEngine();
 
