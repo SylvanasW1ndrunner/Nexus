@@ -51,6 +51,7 @@ Nexus 面向数据工程师和分析师，项目不仅保存 SQL，也要保存 
 - 脚本路径通过 workspace 路径规则校验，当前只允许执行工作空间内的 `.py` 文件。
 - 运行时把 tool 参数以 JSON 传给脚本，避免拼接 shell 命令。
 - 支持超时、取消、stdout/stderr 尾部截断和结构化失败结果。
+- 支持运行归档：`scripts/_runs/<runId>/stdout.log`、`stderr.log`、`result.json`，并写入 `.dbagent/history.jsonl`。
 - 非零退出、超时和取消都会抛出携带 `WorkspaceScriptRunResult` 的错误，便于 Agent 读取 stderr 后修复脚本。
 
 这一步没有引入第三方 Python runner 或进程管理依赖，原因是当前能力可以用 Node 原生 `child_process.spawn` 稳定实现，新增依赖会增加 Electron 打包、离线安装和跨平台兼容风险。后续如果要支持伪终端、交互式 REPL 或更强资源限制，再单独评估成熟开源方案。

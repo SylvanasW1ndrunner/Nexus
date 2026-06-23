@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -116,6 +116,99 @@ describe('workspace Python script Agent tools', () => {
         stderr: expect.stringContaining('字段 amount_missing 不存在'),
       },
     });
+  });
+
+  it('archives successful Python script stdout, stderr, manifest, and workspace history', async () => {
+    const python = await availablePython();
+    if (!python) return;
+    const { rootPath } = await scriptWorkspace();
+    const workspace = new WorkspaceCore();
+    await workspace.writeFile(
+      rootPath,
+      'scripts/archive_success.py',
+      [
+        'import json',
+        'import sys',
+        'payload = json.loads(sys.argv[1])',
+        'print(f"region={payload[\'region\']}")',
+        'print("warning: sampled result", file=sys.stderr)',
+        '',
+      ].join('\n'),
+    );
+
+    const result = await runWorkspacePythonScript({
+      rootPath,
+      relativePath: 'scripts/archive_success.py',
+      args: { region: '华东', secret: 'do-not-log' },
+      pythonPath: python,
+      runId: 'run_success',
+      now: () => '2026-06-23T12:00:00.000Z',
+    });
+
+    expect(result).toMatchObject({
+      exitCode: 0,
+      runId: 'run_success',
+      stdoutRelativePath: 'scripts/_runs/run_success/stdout.log',
+      stderrRelativePath: 'scripts/_runs/run_success/stderr.log',
+      resultRelativePath: 'scripts/_runs/run_success/result.json',
+      historyRelativePath: '.dbagent/history.jsonl',
+    });
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_success/stdout.log'), 'utf8')).resolves.toBe('region=华东\n');
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_success/stderr.log'), 'utf8')).resolves.toBe(
+      'warning: sampled result\n',
+    );
+    const manifest = JSON.parse(await readFile(join(rootPath, 'scripts/_runs/run_success/result.json'), 'utf8')) as {
+      script: string;
+      stdoutPath: string;
+      stderrPath: string;
+    };
+    expect(manifest).toMatchObject({
+      script: 'scripts/archive_success.py',
+      stdoutPath: 'scripts/_runs/run_success/stdout.log',
+      stderrPath: 'scripts/_runs/run_success/stderr.log',
+    });
+    const history = await readFile(join(rootPath, '.dbagent/history.jsonl'), 'utf8');
+    expect(history).toContain('"action":"run_script"');
+    expect(history).toContain('"path":"scripts/archive_success.py"');
+    expect(history).toContain('"exit_code":0');
+    expect(history).not.toContain('do-not-log');
+  });
+
+  it('archives failed Python script output before returning the execution error', async () => {
+    const python = await availablePython();
+    if (!python) return;
+    const { rootPath } = await scriptWorkspace();
+    const workspace = new WorkspaceCore();
+    await workspace.writeFile(
+      rootPath,
+      'scripts/archive_failure.py',
+      ['import sys', 'print("partial stdout")', 'print("failure detail", file=sys.stderr)', 'raise SystemExit(7)', ''].join('\n'),
+    );
+
+    await expect(
+      runWorkspacePythonScript({
+        rootPath,
+        relativePath: 'scripts/archive_failure.py',
+        args: {},
+        pythonPath: python,
+        runId: 'run_failure',
+      }),
+    ).rejects.toMatchObject({
+      result: {
+        exitCode: 7,
+        runId: 'run_failure',
+        stdoutRelativePath: 'scripts/_runs/run_failure/stdout.log',
+        stderrRelativePath: 'scripts/_runs/run_failure/stderr.log',
+      },
+    });
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_failure/stdout.log'), 'utf8')).resolves.toBe(
+      'partial stdout\n',
+    );
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_failure/stderr.log'), 'utf8')).resolves.toBe(
+      'failure detail\n',
+    );
+    const history = await readFile(join(rootPath, '.dbagent/history.jsonl'), 'utf8');
+    expect(history).toContain('"exit_code":7');
   });
 
   it('kills a Python script that exceeds its timeout', async () => {

@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { resolveInsideWorkspace } from '@dbagent/core-workspace';
 import type { ToolRegistry } from '@dbagent/core-agent';
 import type { WorkspaceCore, WorkspaceScriptTool } from '@dbagent/core-workspace';
@@ -13,6 +15,9 @@ export type WorkspaceScriptRunRequest = {
   outputLimitBytes?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
+  archive?: boolean;
+  runId?: string;
+  now?: () => string;
 };
 
 export type WorkspaceScriptRunResult = {
@@ -28,6 +33,12 @@ export type WorkspaceScriptRunResult = {
   aborted?: boolean;
   stdoutTruncated?: boolean;
   stderrTruncated?: boolean;
+  runId?: string;
+  archiveRelativePath?: string;
+  stdoutRelativePath?: string;
+  stderrRelativePath?: string;
+  resultRelativePath?: string;
+  historyRelativePath?: string;
 };
 
 export type WorkspaceScriptRunner = (request: WorkspaceScriptRunRequest) => Promise<WorkspaceScriptRunResult>;
@@ -149,11 +160,7 @@ export async function runWorkspacePythonScript(request: WorkspaceScriptRunReques
         ...(output.stderrTruncated() ? { stderrTruncated: true } : {}),
       };
 
-      if (exitCode === 0 && !timedOut && !aborted) {
-        resolve(result);
-        return;
-      }
-      reject(new WorkspaceScriptExecutionError(scriptRunFailureMessage(result), result));
+      void archiveAndSettle(request, result, resolve, reject);
     });
 
     request.signal?.addEventListener('abort', abortFromSignal, { once: true });
@@ -241,6 +248,113 @@ function buildProcessEnv(extraEnv?: Record<string, string | undefined>): NodeJS.
     }
   }
   return env;
+}
+
+async function archiveAndSettle(
+  request: WorkspaceScriptRunRequest,
+  result: WorkspaceScriptRunResult,
+  resolve: (value: WorkspaceScriptRunResult) => void,
+  reject: (reason?: unknown) => void,
+): Promise<void> {
+  try {
+    const archived = await maybeArchiveWorkspaceScriptRun(request, result);
+    if (archived.exitCode === 0 && !archived.timedOut && !archived.aborted) {
+      resolve(archived);
+      return;
+    }
+    reject(new WorkspaceScriptExecutionError(scriptRunFailureMessage(archived), archived));
+  } catch (error) {
+    reject(error);
+  }
+}
+
+async function maybeArchiveWorkspaceScriptRun(
+  request: WorkspaceScriptRunRequest,
+  result: WorkspaceScriptRunResult,
+): Promise<WorkspaceScriptRunResult> {
+  if (request.archive === false) return result;
+
+  const runId = request.runId ?? createRunId(request.relativePath, request.now?.() ?? new Date().toISOString());
+  const archiveRelativePath = `scripts/_runs/${runId}`;
+  const stdoutRelativePath = `${archiveRelativePath}/stdout.log`;
+  const stderrRelativePath = `${archiveRelativePath}/stderr.log`;
+  const resultRelativePath = `${archiveRelativePath}/result.json`;
+  const historyRelativePath = '.dbagent/history.jsonl';
+  const archived: WorkspaceScriptRunResult = {
+    ...result,
+    runId,
+    archiveRelativePath,
+    stdoutRelativePath,
+    stderrRelativePath,
+    resultRelativePath,
+    historyRelativePath,
+  };
+
+  await atomicWriteText(join(request.rootPath, stdoutRelativePath), result.stdout);
+  await atomicWriteText(join(request.rootPath, stderrRelativePath), result.stderr);
+  await atomicWriteText(join(request.rootPath, resultRelativePath), `${JSON.stringify(resultManifest(request, archived), null, 2)}\n`);
+  await appendHistoryLine(request.rootPath, {
+    ts: request.now?.() ?? new Date().toISOString(),
+    action: 'run_script',
+    path: request.relativePath,
+    runId,
+    archivePath: archiveRelativePath,
+    duration_ms: result.elapsedMs,
+    exit_code: result.exitCode,
+    timed_out: result.timedOut === true,
+    aborted: result.aborted === true,
+    stdout_truncated: result.stdoutTruncated === true,
+    stderr_truncated: result.stderrTruncated === true,
+  });
+
+  return archived;
+}
+
+function resultManifest(request: WorkspaceScriptRunRequest, result: WorkspaceScriptRunResult): Record<string, unknown> {
+  return {
+    version: 1,
+    runId: result.runId,
+    script: request.relativePath,
+    command: result.command,
+    cwd: result.cwd,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    elapsedMs: result.elapsedMs,
+    timedOut: result.timedOut === true,
+    timeoutMs: result.timeoutMs,
+    aborted: result.aborted === true,
+    stdoutTruncated: result.stdoutTruncated === true,
+    stderrTruncated: result.stderrTruncated === true,
+    stdoutPath: result.stdoutRelativePath,
+    stderrPath: result.stderrRelativePath,
+  };
+}
+
+async function appendHistoryLine(rootPath: string, event: Record<string, unknown>): Promise<void> {
+  const historyPath = join(rootPath, '.dbagent', 'history.jsonl');
+  let existing = '';
+  try {
+    existing = await readFile(historyPath, 'utf8');
+  } catch {
+    // missing history file is normal for new workspaces
+  }
+  await atomicWriteText(historyPath, `${existing}${JSON.stringify(event)}\n`);
+}
+
+async function atomicWriteText(path: string, content: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tempPath, content, 'utf8');
+  await rename(tempPath, path);
+}
+
+function createRunId(relativePath: string, timestamp: string): string {
+  const safeTime = timestamp.replace(/[:.]/g, '-');
+  const scriptName = basename(relativePath, '.py')
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return `${safeTime}-${scriptName || 'script'}`;
 }
 
 function createOutputCapture(limitBytes: number) {
