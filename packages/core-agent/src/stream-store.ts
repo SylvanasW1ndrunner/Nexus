@@ -90,6 +90,12 @@ export class AgentStreamStore {
     return (await this.readAll()).find((item) => item.id === streamId);
   }
 
+  async listBySession(sessionId: string): Promise<AgentStreamRecord[]> {
+    return (await this.readAll())
+      .filter((item) => item.sessionId === sessionId)
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+  }
+
   async listRecoverable(): Promise<AgentStreamRecord[]> {
     return (await this.readAll())
       .filter((item) => item.status === 'streaming' || item.status === 'incomplete')

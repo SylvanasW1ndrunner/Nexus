@@ -91,10 +91,11 @@ checkpoint 写入和读取都会做敏感信息脱敏，避免恢复文件、诊
 - `markIncomplete()`：网络中断或 provider stream 异常时保留已收到文本，并让 `listRecoverable()` 返回该 stream。
 - `markAborted()`：用户主动停止时保留部分文本，但不进入可恢复列表。
 - `persistAgentStreamEvents()`：包装 `LlmRouter.stream()` / provider stream，边转发事件边落盘；异常时自动标记 `incomplete` 或 `aborted`。
+- `ReactAgent`：调用方传入 `streamStore` 后，模型调用路径会使用 `LlmRouter.stream()`，并把每轮模型响应写入 stream store；未传入时仍保持原有非流式 `chat()` 路径。
 
 stream store 与 checkpoint store 复用同一套 `redaction.ts` 脱敏规则，防止 tool call 参数、错误信息、final response 中的 API key、Bearer token、数据库连接串密码等进入本地恢复文件。
 
-当前 stream store 是服务级合同，尚未接入 `ReactAgent.run()` 的默认路径。后续接入流式 Agent 时，应在启动 round 后创建 stream record，并通过 `persistAgentStreamEvents()` 包裹 `llmRouter.stream()`，从而保证 UI 看到的事件和本地恢复文件一致。
+当前 stream 持久化是可选依赖，便于主进程后续按设置或 UI 能力逐步打开。它已经保证 stream store 中的事件与 Agent 实际使用的模型响应一致，避免 UI 看到的流式内容和恢复文件不一致。
 
 ## 权限边界
 
@@ -121,7 +122,7 @@ stream store 与 checkpoint store 复用同一套 `redaction.ts` 脱敏规则，
 
 - 当前 checkpoint 使用 JSON 文件，适合本地 beta 阶段；大量会话和并发写入场景应迁移到 SQLite WAL。
 - 当前只实现任务恢复计划、续跑提示词和放弃任务，不自动续跑中断任务；真正续跑需要后续主进程恢复入口接入 provider、tool registry、permission 和活动连接状态。
-- 当前 stream store 尚未接入 `ReactAgent.run()` 默认非流式路径；它先作为后续 `agent:run` 流式 IPC 和 UI 事件面板的后端持久化合同。
+- 当前 stream store 通过可选依赖接入 `ReactAgent.run()`；默认路径仍是非流式 `chat()`。后续 `agent:run` 流式 IPC 可基于同一 store 发事件给 UI。
 - 当前不实现多 Agent 协作调度。
 - 当前行为评估器只评估 Agent run 的结构化结果，不评估自然语言答案的事实充分性；真实 LLM 效果评估后续通过环境门控测试补充。
 - 当前上下文 token 估算是近似值，真实模型窗口仍需要 provider 层或 tokenizer 层二次校验。

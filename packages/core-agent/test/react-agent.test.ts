@@ -2,9 +2,15 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LlmRouter, type LlmChatRequest, type LlmChatResponse, type LlmProvider } from '@dbagent/core-llm';
+import {
+  LlmRouter,
+  type LlmChatRequest,
+  type LlmChatResponse,
+  type LlmChatStreamEvent,
+  type LlmProvider,
+} from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
-import { AgentCheckpointStore, ReactAgent, ToolRegistry } from '../src/index.js';
+import { AgentCheckpointStore, AgentStreamStore, ReactAgent, ToolRegistry } from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -290,6 +296,84 @@ describe('ReactAgent', () => {
       },
     ]);
     await expect(checkpointStore.listRecoverable()).resolves.toEqual([]);
+  });
+
+  it('persists model stream events during an Agent run', async () => {
+    const usage = new UsageTracker(await usagePath(), { createRoundId: () => 'round_test' });
+    const streamStore = new AgentStreamStore(await streamPath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        streamingProvider([
+          { type: 'text-delta', text: '订单' },
+          { type: 'text-delta', text: '总数是 42。' },
+          {
+            type: 'finish',
+            response: {
+              text: '订单总数是 42。',
+              toolCalls: [],
+              usage: { promptTokens: 10, completionTokens: 6, totalTokens: 16 },
+            },
+          },
+        ]),
+      ]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      { ...fixedDependencies(), streamStore },
+    );
+
+    const result = await agent.run({
+      providerId: 'streaming',
+      model: 'fake-stream-model',
+      userMessage: '帮我看一下订单总数',
+      mode: 'readonly',
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.finalText).toBe('订单总数是 42。');
+    await expect(streamStore.listRecoverable()).resolves.toEqual([]);
+    await expect(streamStore.listBySession('session_test')).resolves.toMatchObject([{
+      status: 'complete',
+      sessionId: 'session_test',
+      roundId: 'round_test',
+      providerId: 'streaming',
+      model: 'fake-stream-model',
+      text: '订单总数是 42。',
+      chunks: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }],
+    }]);
+    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 1, byokTokenEstimate: 16 });
+  });
+
+  it('keeps partial model stream output recoverable when an Agent run fails mid-stream', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const streamStore = new AgentStreamStore(await streamPath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [interruptingStreamingProvider()]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      { ...fixedDependencies(), streamStore },
+    );
+
+    await expect(
+      agent.run({
+        providerId: 'streaming',
+        model: 'fake-stream-model',
+        userMessage: '分析订单后继续分析退款',
+        mode: 'readonly',
+      }),
+    ).rejects.toThrow('stream network reset');
+
+    await expect(streamStore.listRecoverable()).resolves.toMatchObject([
+      {
+        status: 'incomplete',
+        sessionId: 'session_test',
+        text: '已查到订单，',
+        errorMessage: 'stream network reset',
+      },
+    ]);
+    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
+    await expect(usage.roundHistory()).resolves.toMatchObject([{ status: 'failed' }]);
   });
 
   it('only exposes tools allowed by the current skill execution plan', async () => {
@@ -586,6 +670,41 @@ function throwingProvider(message: string): LlmProvider {
   };
 }
 
+function streamingProvider(events: LlmChatStreamEvent[]): LlmProvider {
+  return {
+    id: 'streaming',
+    name: 'Streaming Provider',
+    mode: 'byok',
+    async chat() {
+      throw new Error('chat should not be called when stream store is configured');
+    },
+    async *stream() {
+      for (const event of events) yield event;
+    },
+    async isAvailable() {
+      return { available: true };
+    },
+  };
+}
+
+function interruptingStreamingProvider(): LlmProvider {
+  return {
+    id: 'streaming',
+    name: 'Interrupting Streaming Provider',
+    mode: 'byok',
+    async chat() {
+      throw new Error('chat should not be called when stream store is configured');
+    },
+    async *stream() {
+      yield { type: 'text-delta', text: '已查到订单，' };
+      throw new Error('stream network reset');
+    },
+    async isAvailable() {
+      return { available: true };
+    },
+  };
+}
+
 async function usagePath(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-'));
   tempDirs.push(dir);
@@ -596,6 +715,12 @@ async function checkpointPath(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-checkpoint-run-'));
   tempDirs.push(dir);
   return join(dir, 'agent-checkpoints.json');
+}
+
+async function streamPath(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-stream-run-'));
+  tempDirs.push(dir);
+  return join(dir, 'agent-streams.json');
 }
 
 function fixedDependencies() {

@@ -1,10 +1,11 @@
-import type { LlmRouter } from '@dbagent/core-llm';
-import type { UsageTracker } from '@dbagent/core-usage';
+import type { LlmChatRequest, LlmChatResponse, LlmRouter } from '@dbagent/core-llm';
+import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import { buildAgentContext } from './context-manager.js';
 import { PermissionManager } from './permission-manager.js';
 import { addUsage, appendMessage, createAgentSession, createMessage } from './session.js';
 import type { AgentSessionWriter } from './session-store.js';
+import { AgentStreamStore, persistAgentStreamEvents } from './stream-store.js';
 import { ToolRegistry } from './tool-registry.js';
 import type {
   AgentRunDependencies,
@@ -20,6 +21,7 @@ export class ReactAgent {
   private readonly createSessionId: () => string;
   private readonly checkpointStore: AgentCheckpointWriter | undefined;
   private readonly sessionStore: AgentSessionWriter | undefined;
+  private readonly streamStore: AgentStreamStore | undefined;
 
   constructor(
     private readonly llmRouter: LlmRouter,
@@ -33,6 +35,7 @@ export class ReactAgent {
     this.createSessionId = dependencies.createSessionId ?? (() => crypto.randomUUID());
     this.checkpointStore = dependencies.checkpointStore;
     this.sessionStore = dependencies.sessionStore;
+    this.streamStore = dependencies.streamStore;
   }
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
@@ -110,7 +113,13 @@ export class ReactAgent {
           tools: context.tools,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
         };
-        const response = await this.llmRouter.chat(options.providerId, request, { round });
+        const response = await this.callModel({
+          providerId: options.providerId,
+          model: options.model,
+          request,
+          round,
+          sessionId: session.id,
+        });
         addUsage(session, response.usage);
 
         appendMessage(
@@ -307,6 +316,37 @@ export class ReactAgent {
 
   private async saveSession(session: Parameters<AgentSessionWriter['save']>[0]['session']): Promise<void> {
     await this.sessionStore?.save({ session, now: this.now() });
+  }
+
+  private async callModel(input: {
+    providerId: string;
+    model: string;
+    request: LlmChatRequest;
+    round: RoundContext;
+    sessionId: string;
+  }): Promise<LlmChatResponse> {
+    if (!this.streamStore) {
+      return this.llmRouter.chat(input.providerId, input.request, { round: input.round });
+    }
+
+    const stream = await this.streamStore.start({
+      sessionId: input.sessionId,
+      roundId: input.round.id,
+      providerId: input.providerId,
+      model: input.model,
+      now: this.now(),
+    });
+
+    let response: LlmChatResponse | undefined;
+    const events = this.llmRouter.stream(input.providerId, input.request, { round: input.round });
+    for await (const event of persistAgentStreamEvents(this.streamStore, stream.id, events, this.now)) {
+      if (event.type === 'finish') response = event.response;
+    }
+
+    if (!response) {
+      throw new Error('LLM stream ended without a finish event.');
+    }
+    return response;
   }
 }
 
