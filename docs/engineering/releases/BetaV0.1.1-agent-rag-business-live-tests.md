@@ -61,6 +61,8 @@ node scripts\run-agent-rag-live-tests.mjs
 
 结果：真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` 上通过。测试验证模型真实调用 `search_schema` 和 `query_database`，不是只返回普通文本回答；耗时约 114 秒。
 
+2026-06-24 复验：通过本机 `.env` 注入测试专用 SiliconFlow 变量后再次运行 `scripts/run-agent-rag-live-tests.mjs`，结果为 1 个测试文件通过，5 passed、1 skipped；live case 耗时约 72 秒，继续验证模型真实调用 `search_schema` 和 `query_database`。
+
 ```powershell
 node .\node_modules\typescript\bin\tsc -p packages\core-tools\test\tsconfig.json --noEmit
 node .\node_modules\typescript\bin\tsc -p packages\core-tools\tsconfig.json --noEmit

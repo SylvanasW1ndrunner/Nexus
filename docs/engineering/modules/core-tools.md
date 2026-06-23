@@ -111,3 +111,5 @@
 默认测试不依赖真实密钥或本机 PostgreSQL。真实依赖测试只通过环境变量显式开启，避免把 API key、数据库密码或用户数据写入代码、日志和提交。
 
 2026-06-23 验证记录：`pnpm test:postgres` 已在本机真实 PostgreSQL 16 上通过；`pnpm test:agent-rag-live` 已在 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` 上通过，live case 确认模型真实调用 `search_schema` 和 `query_database`。
+
+2026-06-24 复验记录：使用本机 `.env` 中的测试专用 SiliconFlow 环境变量运行 `scripts/run-agent-rag-live-tests.mjs`，结果为 5 passed、1 skipped；live case 再次确认模型真实调用 `search_schema` 和 `query_database`，不是普通文本回答。

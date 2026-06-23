@@ -179,3 +179,5 @@ pnpm db:down
 - `dbagent_core_tools_test`：创建电商和流量分析业务表，写入样例数据，抽取真实 catalog metadata，索引 Schema RAG，并运行 Agent `search_schema` + `query_database` 工具链。
 
 真实模型测试仍通过 `pnpm test:agent-rag-live` 显式启用。该入口要求 `TEST_SILICONFLOW_API_KEY` 或 `DBAGENT_LLM_API_KEY` 已存在于本机环境变量中；密钥不得提交到仓库，也不得写入文档、日志或测试快照。本轮已使用 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` 跑通 live case，验证模型真实调用 `search_schema` 和 `query_database`。
+
+2026-06-24 复验记录：本机 `.env` 已保存测试专用 SiliconFlow 变量且未纳入 Git；通过 `scripts/run-agent-rag-live-tests.mjs` 运行 live case，结果为 1 个测试文件通过，5 个测试通过、1 个未启用项跳过，真实模型调用耗时约 72 秒。
