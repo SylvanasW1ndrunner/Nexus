@@ -42,6 +42,44 @@ describe('evaluateSchemaRagRetrieval', () => {
     });
   });
 
+  it('evaluates glossary-assisted business metrics from user wording', () => {
+    const engine = new SchemaRagEngine();
+    engine.index({
+      connectionId: 'conn_eval',
+      tables: fixtureTables(),
+      indexedAt: '2026-06-18T00:00:00.000Z',
+      glossary: [
+        {
+          term: '客单价',
+          aliases: ['AOV', '平均订单金额'],
+          description: '订单金额除以下单用户或订单数，使用 orders.total_amount',
+          documentIds: ['table:public.orders', 'column:public.orders.total_amount', 'column:public.orders.user_id'],
+        },
+      ],
+    });
+
+    const summary = evaluateSchemaRagRetrieval({
+      connectionId: 'conn_eval',
+      search: (request) => engine.search(request),
+      cases: [
+        {
+          id: 'RAG-GLOSSARY-001',
+          query: '最近 30 天客单价',
+          mustInclude: ['table:public.orders', 'column:public.orders.total_amount'],
+          shouldInclude: ['column:public.orders.user_id'],
+          limit: 5,
+        },
+      ],
+    });
+
+    expect(summary).toMatchObject({
+      totalCases: 1,
+      passedCases: 1,
+      failedCases: 0,
+      passRate: 1,
+    });
+  });
+
   it('reports missing required documents without hiding partial recall', () => {
     const engine = indexedEngine();
 

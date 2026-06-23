@@ -20,6 +20,7 @@ export type SchemaRagIndex = {
   connectionId: string;
   documents: SchemaRagDocument[];
   graph: Map<string, Set<string>>;
+  glossary: SchemaRagGlossaryEntry[];
   indexedAt: string;
 };
 
@@ -53,7 +54,16 @@ export type SchemaRagContext = {
 export type SchemaRagIndexInput = {
   connectionId: string;
   tables: TableDetail[];
+  glossary?: SchemaRagGlossaryEntry[];
   indexedAt?: string;
+};
+
+export type SchemaRagGlossaryEntry = {
+  term: string;
+  aliases?: string[];
+  description?: string;
+  documentIds: string[];
+  weight?: number;
 };
 
 export type SchemaRagEvaluationCase = {

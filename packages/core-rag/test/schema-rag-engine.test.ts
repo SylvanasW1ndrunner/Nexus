@@ -53,6 +53,64 @@ describe('SchemaRagEngine', () => {
     expect(results.map((result) => result.document.id)).toContain('table:public.orders');
   });
 
+  it('uses business glossary terms to retrieve schema that does not share literal tokens', () => {
+    const engine = new SchemaRagEngine();
+    engine.index({
+      connectionId: 'conn_1',
+      tables: fixtureTables(),
+      indexedAt: '2026-06-17T00:00:00.000Z',
+      glossary: [
+        {
+          term: 'GMV',
+          aliases: ['成交额', '销售额'],
+          description: '订单总金额，通常按 orders.total_amount 汇总',
+          documentIds: ['table:public.orders', 'column:public.orders.total_amount'],
+          weight: 60,
+        },
+      ],
+    });
+
+    const results = engine.search({ connectionId: 'conn_1', query: '按月统计 GMV', limit: 4 });
+
+    expect(results.map((result) => result.document.id)).toContain('column:public.orders.total_amount');
+    expect(results.map((result) => result.document.id)).toContain('table:public.orders');
+    expect(results.find((result) => result.document.id === 'column:public.orders.total_amount')?.reasons).toContain(
+      'glossary:GMV',
+    );
+  });
+
+  it('ignores glossary entries that point to missing schema documents', () => {
+    const engine = new SchemaRagEngine();
+    const index = engine.index({
+      connectionId: 'conn_1',
+      tables: fixtureTables(),
+      glossary: [
+        {
+          term: '不存在指标',
+          documentIds: ['table:public.missing_table'],
+        },
+      ],
+    });
+
+    expect(index.glossary).toEqual([]);
+    expect(engine.search({ connectionId: 'conn_1', query: '不存在指标', limit: 3 })).toEqual([]);
+  });
+
+  it('keeps glossary isolated per connection', () => {
+    const engine = new SchemaRagEngine();
+    engine.index({
+      connectionId: 'conn_1',
+      tables: fixtureTables(),
+      glossary: [{ term: 'GMV', documentIds: ['column:public.orders.total_amount'] }],
+    });
+    engine.index({ connectionId: 'conn_2', tables: fixtureTables() });
+
+    expect(engine.search({ connectionId: 'conn_1', query: 'GMV', limit: 3 }).map((result) => result.document.id)).toContain(
+      'column:public.orders.total_amount',
+    );
+    expect(engine.search({ connectionId: 'conn_2', query: 'GMV', limit: 3 })).toEqual([]);
+  });
+
   it('builds a token-budgeted context for agent prompts', () => {
     const engine = indexedEngine();
 

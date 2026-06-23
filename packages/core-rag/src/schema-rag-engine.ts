@@ -3,6 +3,7 @@ import type {
   SchemaRagDocument,
   SchemaRagContext,
   SchemaRagContextRequest,
+  SchemaRagGlossaryEntry,
   SchemaRagIndex,
   SchemaRagIndexInput,
   SchemaRagSearchRequest,
@@ -25,6 +26,7 @@ export class SchemaRagEngine {
       connectionId: input.connectionId,
       documents,
       graph,
+      glossary: normalizeGlossary(input.glossary ?? [], documents),
       indexedAt: input.indexedAt ?? new Date().toISOString(),
     };
     this.indexes.set(input.connectionId, index);
@@ -42,7 +44,7 @@ export class SchemaRagEngine {
     const includeRelations = request.includeRelations ?? true;
 
     const scored = index.documents
-      .map((document) => scoreDocument(document, request.query, queryTokens))
+      .map((document) => scoreDocument(document, request.query, queryTokens, index.glossary))
       .filter((result) => result.score > 0)
       .sort((left, right) => right.score - left.score || left.document.id.localeCompare(right.document.id));
 
@@ -116,6 +118,7 @@ function scoreDocument(
   document: SchemaRagDocument,
   query: string,
   queryTokens: string[],
+  glossary: SchemaRagGlossaryEntry[],
 ): SchemaRagSearchResult {
   const reasons: string[] = [];
   let score = 0;
@@ -141,10 +144,56 @@ function scoreDocument(
     }
   }
 
+  for (const entry of glossary) {
+    if (!entry.documentIds.includes(document.id)) continue;
+    const matchedTerm = findGlossaryMatch(entry, normalizedQuery, queryTokens);
+    if (!matchedTerm) continue;
+    const weight = entry.weight ?? 30;
+    score += weight;
+    reasons.push(`glossary:${matchedTerm}`);
+    if (entry.description) {
+      for (const token of tokenize([entry.description])) {
+        if (queryTokens.includes(token)) score += 2;
+      }
+    }
+  }
+
   if (document.kind === 'table' && score > 0) {
     score += 5;
     reasons.push('table-priority');
   }
 
   return { document, score, reasons };
+}
+
+function normalizeGlossary(entries: SchemaRagGlossaryEntry[], documents: SchemaRagDocument[]): SchemaRagGlossaryEntry[] {
+  const documentIds = new Set(documents.map((document) => document.id));
+  return entries
+    .map((entry) => ({
+      term: entry.term.trim(),
+      aliases: unique((entry.aliases ?? []).map((alias) => alias.trim()).filter(Boolean)),
+      ...(entry.description?.trim() ? { description: entry.description.trim() } : {}),
+      documentIds: unique(entry.documentIds.filter((id) => documentIds.has(id))),
+      ...(entry.weight === undefined ? {} : { weight: Math.max(1, entry.weight) }),
+    }))
+    .filter((entry) => entry.term.length > 0 && entry.documentIds.length > 0);
+}
+
+function findGlossaryMatch(
+  entry: SchemaRagGlossaryEntry,
+  normalizedQuery: string,
+  queryTokens: string[],
+): string | undefined {
+  const candidates = [entry.term, ...(entry.aliases ?? [])];
+  for (const candidate of candidates) {
+    const normalized = candidate.toLowerCase();
+    if (normalizedQuery.includes(normalized)) return candidate;
+    const tokens = tokenize([candidate]);
+    if (tokens.some((token) => queryTokens.includes(token))) return candidate;
+  }
+  return undefined;
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
 }
