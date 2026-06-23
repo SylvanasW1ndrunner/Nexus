@@ -1,6 +1,7 @@
 import type { LlmMessage, LlmTool, LlmToolCall, LlmUsage } from '@dbagent/core-llm';
 import type { UsageMode } from '@dbagent/shared';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
+import type { AgentSessionWriter } from './session-store.js';
 
 export type AgentMode = 'ask' | 'auto' | 'full-auto' | 'readonly';
 
@@ -102,6 +103,7 @@ export type AgentRunDependencies = {
   now?: () => string;
   createSessionId?: () => string;
   checkpointStore?: AgentCheckpointWriter;
+  sessionStore?: AgentSessionWriter;
 };
 
 export type AgentContextBuildResult = {

@@ -5,5 +5,6 @@ export * from './permission-manager.js';
 export * from './react-agent.js';
 export * from './schema-rag-tools.js';
 export * from './session.js';
+export * from './session-store.js';
 export * from './tool-registry.js';
 export * from './types.js';

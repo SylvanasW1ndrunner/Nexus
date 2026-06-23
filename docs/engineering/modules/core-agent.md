@@ -101,3 +101,19 @@
 - `ReactAgent` 集成场景验证：模型先调用 `search_schema`，工具结果进入 tool message，下一轮回答基于 `public.orders.total_amount`。
 
 本切片没有引入 LangChain、LlamaIndex、Haystack 或其它 Agent/RAG 框架。原因是当前目标是 typed tool adapter 和权限接线，直接适配现有 `ToolRegistry` 更稳定；未来若引入外部 Agent workflow 或 RAG tool adapter，应按开源优先规范记录依赖、许可证、Electron 打包、离线运行和安全边界。
+
+## Session Store
+
+`packages/core-agent/src/session-store.ts` 提供 Agent 会话历史持久化。当前使用 JSON 原子写入实现本地 beta 阶段合同，后续可迁移到 SQLite WAL，但对上层暴露的行为保持稳定：
+
+- `save()`：保存或更新完整 `AgentSession`，保留首次创建时间并刷新更新时间。
+- `load()`：按 session id 加载完整消息历史。
+- `list()`：按归档状态、关键词、分页返回摘要，默认隐藏已归档会话。
+- `update()`：修改标题、模式或中止状态。
+- `archive()` / `delete()`：归档、恢复或删除会话。
+- `fork()`：从指定消息位置创建新分支会话。
+- `export()`：导出 JSON 或 Markdown，方便用户回看、审计或提交问题。
+
+`ReactAgent` 现在支持可选 `sessionStore` 依赖。传入后会在用户消息写入、assistant 回复、tool result、权限拒绝、完成、中止和异常路径保存会话。这样即使最终 UI 尚未重建，Agent 运行结果也已经具备可恢复和可导出的后端基础。
+
+当前不新增 SQLite、ORM 或数据库依赖。原因是 `core-agent` 需要保持轻量、可在测试中独立运行；本阶段 JSON 原子写入足以验证会话合同和用户场景。后续如果会话数量、并发写入或跨模块查询要求提高，应迁移到 SQLite，并补充 WAL、迁移、损坏恢复和大历史性能测试。
