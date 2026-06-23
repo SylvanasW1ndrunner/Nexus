@@ -59,6 +59,7 @@ export type AgentRunOptions = {
   keepRecentMessages?: number;
   maxToolResultChars?: number;
   maxConsecutiveToolFailures?: number;
+  maxToolExecutionMs?: number;
   signal?: AbortSignal;
 };
 

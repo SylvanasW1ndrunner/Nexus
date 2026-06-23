@@ -11,7 +11,9 @@ import type {
   AgentRunDependencies,
   AgentRunOptions,
   AgentRunResult,
+  AgentToolContext,
   AgentToolExecutionRecord,
+  AgentToolHandler,
   ApprovalProvider,
 } from './types.js';
 
@@ -73,6 +75,7 @@ export class ReactAgent {
     const toolExecutions: AgentToolExecutionRecord[] = [];
     const maxIterations = options.maxIterations ?? 25;
     const maxConsecutiveToolFailures = options.maxConsecutiveToolFailures ?? 3;
+    const maxToolExecutionMs = options.maxToolExecutionMs ?? 60_000;
     const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
     let finalText = '';
     let currentIteration = 0;
@@ -270,7 +273,13 @@ export class ReactAgent {
               session,
               ...(options.signal === undefined ? {} : { signal: options.signal }),
             };
-            const result = await tool.handler(toolCall.arguments, context);
+            const result = await executeToolWithTimeout(
+              tool.name,
+              tool.handler,
+              toolCall.arguments,
+              context,
+              maxToolExecutionMs,
+            );
             const preview = serializeToolResult(result);
             toolExecutions.push(executionRecord(toolCall.id, tool.name, 'success', startedAt, preview));
             consecutiveToolFailures = 0;
@@ -409,4 +418,54 @@ function executionRecord(
 
 function failureStopText(failureCount: number, lastError: string): string {
   return `连续 ${failureCount} 次工具执行失败，已停止 Agent 任务。最后一次错误：${lastError}`;
+}
+
+async function executeToolWithTimeout(
+  toolName: string,
+  handler: AgentToolHandler,
+  args: Record<string, unknown>,
+  context: AgentToolContext,
+  timeoutMs: number,
+): Promise<unknown> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return handler(args, context);
+  }
+
+  const controller = new AbortController();
+  const parentSignal = context.signal;
+  if (parentSignal?.aborted) {
+    throw new Error('Agent run was aborted before tool execution.');
+  }
+
+  let timedOut = false;
+  const abortFromParent = () => controller.abort(parentSignal?.reason);
+  parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    const rejectOnAbort = () => {
+      reject(
+        new Error(timedOut ? toolTimeoutMessage(toolName, timeoutMs) : 'Agent run was aborted during tool execution.'),
+      );
+    };
+    controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+    timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error(toolTimeoutMessage(toolName, timeoutMs)));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      Promise.resolve(handler(args, { ...context, signal: controller.signal })),
+      timeoutPromise,
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    parentSignal?.removeEventListener('abort', abortFromParent);
+  }
+}
+
+function toolTimeoutMessage(toolName: string, timeoutMs: number): string {
+  return `工具 ${toolName} 执行超时（${timeoutMs}ms）。`;
 }

@@ -224,6 +224,131 @@ describe('ReactAgent', () => {
     expect(result.finalText).toBe('已修正 SQL，订单总数是 42。');
   });
 
+  it('times out a hanging tool, aborts its signal, and lets the model recover', async () => {
+    let toolSignalAborted = false;
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      (_args, context) => {
+        context.signal?.addEventListener('abort', () => {
+          toolSignalAborted = true;
+        });
+        return new Promise<never>(() => undefined);
+      },
+    );
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [
+              { id: 'slow_query', name: 'query_database', arguments: { sql: 'select pg_sleep(60)' } },
+            ],
+          },
+          {
+            text: '原查询超时，已建议缩小时间范围后重试。',
+            toolCalls: [],
+          },
+        ]),
+      ]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '查询最近一年的明细',
+      mode: 'readonly',
+      maxIterations: 2,
+      maxToolExecutionMs: 5,
+    });
+
+    expect(result.status).toBe('done');
+    expect(toolSignalAborted).toBe(true);
+    expect(result.toolExecutions).toMatchObject([
+      {
+        toolCallId: 'slow_query',
+        toolName: 'query_database',
+        status: 'failed',
+        resultPreview: '工具 query_database 执行超时（5ms）。',
+      },
+    ]);
+    expect(result.finalText).toBe('原查询超时，已建议缩小时间范围后重试。');
+    expect(result.session.messages.at(2)).toMatchObject({
+      role: 'tool',
+      content: JSON.stringify({ error: '工具 query_database 执行超时（5ms）。' }),
+    });
+  });
+
+  it('counts tool timeouts toward the consecutive failure circuit breaker', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointPath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => new Promise<never>(() => undefined),
+    );
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [
+              { id: 'slow_query', name: 'query_database', arguments: { sql: 'select pg_sleep(60)' } },
+            ],
+          },
+          {
+            text: 'should not be called',
+            toolCalls: [],
+          },
+        ]),
+      ]),
+      registry,
+      usage,
+      undefined,
+      { ...fixedDependencies(), checkpointStore },
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '跑一个长查询',
+      mode: 'readonly',
+      maxIterations: 10,
+      maxConsecutiveToolFailures: 1,
+      maxToolExecutionMs: 5,
+    });
+
+    expect(result.status).toBe('tool_failed');
+    expect(result.iterations).toBe(1);
+    expect(result.finalText).toContain('连续 1 次工具执行失败');
+    expect(result.finalText).toContain('工具 query_database 执行超时（5ms）。');
+    await expect(checkpointStore.listBySession('session_test')).resolves.toMatchObject([
+      {
+        iteration: 1,
+        status: 'failed',
+        errorMessage: expect.stringContaining('工具 query_database 执行超时'),
+      },
+    ]);
+    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
+  });
+
   it('stops after repeated tool failures instead of wasting the full iteration budget', async () => {
     const checkpointStore = new AgentCheckpointStore(await checkpointPath());
     const registry = new ToolRegistry();
