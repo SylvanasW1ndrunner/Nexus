@@ -4,6 +4,7 @@
 
 - `packages/core-agent/src/react-agent.ts`：ReAct Agent 主循环，负责模型调用、工具调用、权限检查、用量归因和终止状态。
 - `packages/core-agent/src/behavior-evaluation.ts`：从用户任务角度评估 Agent run 结果是否符合预期。
+- `packages/core-agent/src/context-manager.ts`：Agent 上下文预算、token 估算、本地工具结果摘要和早期消息归档。
 - `packages/core-agent/src/checkpoint-store.ts`：Agent iteration checkpoint 持久化，用于崩溃后识别可恢复任务。
 - `packages/core-agent/src/session.ts`：会话、消息和 usage 累加工具。
 - `packages/core-agent/src/tool-registry.ts`：Agent 工具注册表，暴露 LLM tool schema。
@@ -23,6 +24,14 @@
 5. 对每个 tool call 做 allowedTools、权限和注册状态检查。
 6. 执行工具，把 tool result 写回 session。
 7. 继续下一轮，直到模型无 tool call、达到迭代上限、用户中止、权限拒绝或配额耗尽。
+
+每轮调用模型前，`ReactAgent` 会通过 `buildAgentContext()` 构造上下文。默认预算足够大，不影响短会话；调用方可以通过 `contextWindowTokens`、`keepRecentMessages` 和 `maxToolResultChars` 控制压缩强度。当前压缩策略是本地确定性实现：
+
+- 大型 tool result 摘要化，保留原始长度、开头和结尾。
+- 如果仍超出预算，归档早期非 system 消息，保留最近消息。
+- 返回压缩报告，包含压缩等级、原始/最终 token 估算和 warning。
+
+当前不引入 tokenizer 或 memory 框架。后续接入 `tiktoken` / `js-tiktoken`、LLM 摘要或第三方 memory 方案前，必须按开源优先规范评估许可证、打包、离线和安全边界。
 
 ## Checkpoint 策略
 
@@ -62,6 +71,7 @@
 - `permission-manager.test.ts`：不同模式和工具危险级别下的权限决策。
 - `checkpoint-store.test.ts`：checkpoint 原子持久化、同一 iteration 更新、可恢复任务列表、running 标记中断、损坏 JSON 降级。
 - `react-agent.test.ts`：只读数据库工具调用、只读模式写操作拦截、ask 模式未授权拦截、工具失败后模型恢复、allowedTools 白名单、subscription quota 拦截、用户中止、provider 失败不计费、checkpoint 与 Agent 主循环集成。
+- `context-manager.test.ts`：小会话不压缩、大型工具结果摘要、长会话早期消息归档、超小预算 warning 和 token 估算。
 - `behavior-evaluation.test.ts`：按用户任务评估 Agent 状态、工具调用、工具状态、最终回答和迭代范围。
 
 ## 已知边界
@@ -70,3 +80,4 @@
 - 当前只实现任务恢复所需的状态识别，不自动续跑中断任务；续跑策略需要后续 session manager 和 UI 恢复入口配合。
 - 当前不实现多 Agent 协作调度。
 - 当前行为评估器只评估 Agent run 的结构化结果，不评估自然语言答案的事实充分性；真实 LLM 效果评估后续通过环境门控测试补充。
+- 当前上下文 token 估算是近似值，真实模型窗口仍需要 provider 层或 tokenizer 层二次校验。

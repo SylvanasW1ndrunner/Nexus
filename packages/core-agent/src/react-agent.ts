@@ -1,8 +1,9 @@
 import type { LlmRouter } from '@dbagent/core-llm';
 import type { UsageTracker } from '@dbagent/core-usage';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
+import { buildAgentContext } from './context-manager.js';
 import { PermissionManager } from './permission-manager.js';
-import { addUsage, appendMessage, createAgentSession, createMessage, toLlmMessages } from './session.js';
+import { addUsage, appendMessage, createAgentSession, createMessage } from './session.js';
 import { ToolRegistry } from './tool-registry.js';
 import type {
   AgentRunDependencies,
@@ -93,10 +94,15 @@ export class ReactAgent {
         }
 
         await saveCheckpoint(iteration, 'running');
+        const context = buildAgentContext(session, this.toolRegistry.llmTools(options.allowedTools), {
+          ...(options.contextWindowTokens === undefined ? {} : { maxPromptTokens: options.contextWindowTokens }),
+          ...(options.keepRecentMessages === undefined ? {} : { keepRecentMessages: options.keepRecentMessages }),
+          ...(options.maxToolResultChars === undefined ? {} : { maxToolResultChars: options.maxToolResultChars }),
+        });
         const request = {
           model: options.model,
-          messages: toLlmMessages(session),
-          tools: this.toolRegistry.llmTools(options.allowedTools),
+          messages: context.messages,
+          tools: context.tools,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
         };
         const response = await this.llmRouter.chat(options.providerId, request, { round });

@@ -322,6 +322,46 @@ describe('ReactAgent', () => {
     expect(calls[0]?.tools?.map((tool) => tool.name)).toEqual(['query_database']);
   });
 
+  it('compresses long conversation context before model calls', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: '',
+        toolCalls: [{ id: 'large_result', name: 'query_database', arguments: { sql: 'select * from orders' } }],
+      },
+      {
+        text: '已基于摘要继续分析。',
+        toolCalls: [],
+      },
+    ]);
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => ({ rows: Array.from({ length: 200 }, (_, index) => ({ id: index, amount: index * 10 })) }),
+    );
+    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registry, usage, undefined, fixedDependencies());
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '分析所有订单明细',
+      mode: 'readonly',
+      maxIterations: 2,
+      contextWindowTokens: 120,
+      maxToolResultChars: 240,
+    });
+
+    expect(result.status).toBe('done');
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.messages.some((message) => message.content.includes('工具结果已在本地摘要'))).toBe(true);
+  });
+
   it('denies tool calls that are registered but not allowed for the current run', async () => {
     let writeExecuted = false;
     const registry = new ToolRegistry();

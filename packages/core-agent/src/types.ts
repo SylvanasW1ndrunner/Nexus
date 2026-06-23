@@ -53,6 +53,9 @@ export type AgentRunOptions = {
   mode?: AgentMode;
   maxIterations?: number;
   tokenBudget?: number;
+  contextWindowTokens?: number;
+  keepRecentMessages?: number;
+  maxToolResultChars?: number;
   signal?: AbortSignal;
 };
 
