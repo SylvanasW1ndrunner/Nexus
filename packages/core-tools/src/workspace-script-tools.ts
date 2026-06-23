@@ -8,6 +8,7 @@ export type WorkspaceScriptRunRequest = {
   relativePath: string;
   args: Record<string, unknown>;
   pythonPath?: string;
+  pythonArgs?: string[];
   env?: Record<string, string | undefined>;
   outputLimitBytes?: number;
   timeoutMs?: number;
@@ -88,6 +89,7 @@ export async function runWorkspacePythonScript(request: WorkspaceScriptRunReques
   }
 
   const pythonPath = request.pythonPath ?? 'python';
+  const pythonArgs = request.pythonArgs ?? [];
   const scriptPath = resolveInsideWorkspace(request.rootPath, request.relativePath);
   const startedAt = Date.now();
   const outputLimitBytes = request.outputLimitBytes ?? 100 * 1024;
@@ -96,7 +98,7 @@ export async function runWorkspacePythonScript(request: WorkspaceScriptRunReques
   let aborted = false;
 
   return new Promise<WorkspaceScriptRunResult>((resolve, reject) => {
-    const child = spawn(pythonPath, [scriptPath, JSON.stringify(request.args)], {
+    const child = spawn(pythonPath, [...pythonArgs, scriptPath, JSON.stringify(request.args)], {
       cwd: request.rootPath,
       env: buildProcessEnv(request.env),
       windowsHide: true,
@@ -133,7 +135,7 @@ export async function runWorkspacePythonScript(request: WorkspaceScriptRunReques
     child.once('close', (exitCode, exitSignal) => {
       cleanup();
       const result: WorkspaceScriptRunResult = {
-        command: `${pythonPath} ${request.relativePath}`,
+        command: [pythonPath, ...pythonArgs, request.relativePath].join(' '),
         cwd: request.rootPath,
         exitCode,
         signal: exitSignal,

@@ -49,6 +49,7 @@
 - `rootPath` 与 `relativePath`：脚本必须通过 `resolveInsideWorkspace()` 落在工作空间托管目录内，并且当前只接受 `.py` 文件。
 - `args`：序列化为 JSON，作为脚本第一个参数传入，供工作空间脚本 tool 读取。
 - `pythonPath`：可选解释器路径；未配置时使用 `python`，后续主进程应从工作空间 Python 配置传入。
+- `pythonArgs`：可选解释器前置参数，例如 conda env name 会解析为 `conda run -n <env> python`。
 - `env`：可选环境变量覆盖；凭证只能由主进程运行时注入，不进入脚本文件或 workspace 配置。
 - `timeoutMs`：超时后先发终止信号，2 秒后仍未退出则强制 kill。
 - `signal`：Agent 或上层服务取消时终止子进程。

@@ -54,3 +54,20 @@ Nexus 面向数据工程师和分析师，项目不仅保存 SQL，也要保存 
 - 非零退出、超时和取消都会抛出携带 `WorkspaceScriptRunResult` 的错误，便于 Agent 读取 stderr 后修复脚本。
 
 这一步没有引入第三方 Python runner 或进程管理依赖，原因是当前能力可以用 Node 原生 `child_process.spawn` 稳定实现，新增依赖会增加 Electron 打包、离线安装和跨平台兼容风险。后续如果要支持伪终端、交互式 REPL 或更强资源限制，再单独评估成熟开源方案。
+
+## Python Runtime 解析与检测
+
+`packages/core-workspace/src/python-runtime.ts` 提供 Workspace Python 配置到实际执行命令的后端合同：
+
+- `resolveWorkspacePythonRuntime(workspace)`：把 `WorkspacePythonConfig` 转成可执行命令、前置参数、requirements 路径、超时和网络策略。
+- `detectWorkspacePythonRuntime(workspace)`：真实执行 `--version` 检测解释器是否可用，不可用时返回结构化错误而不是抛出到上层。
+
+解析规则：
+
+- `system`：优先使用显式 `pythonPath`，否则使用 `python`。
+- `venv`：如果没有显式 `pythonPath`，根据 `venvPath` 拼出解释器路径；Windows 为 `Scripts/python.exe`，Linux/macOS 为 `bin/python`。
+- `condaPrefix`：按 prefix 拼出环境内 Python；Windows 为 `python.exe`，Linux/macOS 为 `bin/python`。
+- `condaEnvName`：解析为 `conda run -n <env> python`，因此脚本 runner 支持 `pythonArgs` 前置参数。
+- `embedded` / `docker`：当前只保留合同，检测结果明确返回 unavailable 和未实现说明。
+
+测试覆盖见 `packages/core-workspace/test/python-runtime.test.ts`：真实系统 Python 检测、坏解释器不可用、venv 跨平台路径、conda env name 解析、embedded/docker 未实现合同。
