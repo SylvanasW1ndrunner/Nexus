@@ -55,6 +55,14 @@ Agent 能力开发默认先调研成熟开源项目、SDK 或架构模式，再�
 - 已执行工具记录。
 - finalText、错误信息、startedAt、updatedAt、finishedAt。
 
+checkpoint 写入和读取都会做敏感信息脱敏，避免恢复文件、诊断流程或测试快照泄露凭证。当前脱敏覆盖：
+
+- 对象字段：`apiKey`、`authorization`、`connectionString`、`databaseUrl`、`dsn`、`password`、`secret`、`token`、`accessToken`、`refreshToken` 等精确敏感键。
+- 字符串内容：`Bearer ...`、常见 `sk-...` API key 形态、PostgreSQL/MySQL URL 中的密码段，以及 JSON/文本里的 `password: ...`、`apiKey: ...` 等片段。
+- 历史 checkpoint 文件读取时也会脱敏，避免旧版本已经写入的敏感内容通过 `listBySession()` 或 `listRecoverable()` 重新暴露。
+
+本轮没有引入 `fast-redact`、`pino` redaction 或其它第三方脱敏库。原因是 checkpoint 合同当前是本地 JSON 快照，敏感字段集合可控，使用确定性本地规则可以减少打包依赖和 Electron 分发风险。后续如果日志、诊断报告、session store、SQLite checkpoint 统一进入同一条链路，应把脱敏规则抽到 shared/core 级公共模块，并补充更系统的模式测试。
+
 `ReactAgent` 的 checkpoint store 是可选依赖。传入后会在以下节点保存：
 
 - 每轮模型调用前：`running`。

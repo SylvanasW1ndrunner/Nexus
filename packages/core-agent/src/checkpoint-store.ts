@@ -48,13 +48,13 @@ export class AgentCheckpointStore implements AgentCheckpointWriter {
       sessionId: input.session.id,
       iteration: input.iteration,
       status: input.status,
-      session: cloneJson(input.session),
-      toolExecutions: cloneJson(input.toolExecutions),
-      finalText: input.finalText ?? '',
+      session: redactCheckpointValue(input.session) as AgentSession,
+      toolExecutions: redactCheckpointValue(input.toolExecutions) as AgentToolExecutionRecord[],
+      finalText: redactCheckpointString(input.finalText ?? ''),
       startedAt: existing?.startedAt ?? now,
       updatedAt: now,
       ...(input.status === 'running' ? {} : { finishedAt: now }),
-      ...(input.errorMessage === undefined ? {} : { errorMessage: input.errorMessage }),
+      ...(input.errorMessage === undefined ? {} : { errorMessage: redactCheckpointString(input.errorMessage) }),
     };
 
     const next =
@@ -89,7 +89,7 @@ export class AgentCheckpointStore implements AgentCheckpointWriter {
       return {
         ...checkpoint,
         status: 'failed' as const,
-        errorMessage,
+        errorMessage: redactCheckpointString(errorMessage),
         updatedAt: now,
         finishedAt: now,
       };
@@ -99,7 +99,8 @@ export class AgentCheckpointStore implements AgentCheckpointWriter {
   }
 
   private async readAll(): Promise<AgentIterationCheckpoint[]> {
-    return readJsonFile<AgentIterationCheckpoint[]>(this.filePath, []);
+    const checkpoints = await readJsonFile<AgentIterationCheckpoint[]>(this.filePath, []);
+    return redactCheckpointValue(checkpoints) as AgentIterationCheckpoint[];
   }
 }
 
@@ -130,6 +131,39 @@ async function writeJsonFileAtomic(filePath: string, value: unknown): Promise<vo
   await rename(tempPath, filePath);
 }
 
-function cloneJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+const REDACTED = '[REDACTED]';
+const SENSITIVE_KEY_PATTERN =
+  /^(?:access[_-]?token|api[_-]?key|authorization|bearer|connection[_-]?string|credential|credentials|database[_-]?url|db[_-]?url|dsn|password|passwd|pwd|refresh[_-]?token|secret|session[_-]?token|token)$/i;
+
+type StringReplacement = string | ((match: string, ...groups: string[]) => string);
+
+const STRING_REDACTIONS: Array<[RegExp, StringReplacement]> = [
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, `Bearer ${REDACTED}`],
+  [/\bsk-[A-Za-z0-9_-]{8,}/gi, `sk-${REDACTED}`],
+  [
+    /\b(postgres(?:ql)?|mysql|mariadb):\/\/([^:\s/@]+):([^@\s]+)@/gi,
+    (_match, protocol: string, user: string) => `${protocol}://${user}:${REDACTED}@`,
+  ],
+  [
+    /(["']?(?:api[_-]?key|authorization|connection[_-]?string|credential|database[_-]?url|db[_-]?url|dsn|password|passwd|pwd|secret|session[_-]?token|token)["']?\s*[:=]\s*["'])([^"',}\s]+)(["']?)/gi,
+    `$1${REDACTED}$3`,
+  ],
+];
+
+function redactCheckpointValue(value: unknown): unknown {
+  if (typeof value === 'string') return redactCheckpointString(value);
+  if (Array.isArray(value)) return value.map((item) => redactCheckpointValue(item));
+  if (!value || typeof value !== 'object') return value;
+
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    output[key] = SENSITIVE_KEY_PATTERN.test(key) ? REDACTED : redactCheckpointValue(child);
+  }
+  return output;
+}
+
+function redactCheckpointString(value: string): string {
+  return STRING_REDACTIONS.reduce((text, [pattern, replacement]) => {
+    return typeof replacement === 'string' ? text.replace(pattern, replacement) : text.replace(pattern, replacement);
+  }, value);
 }

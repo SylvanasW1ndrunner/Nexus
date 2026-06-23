@@ -118,6 +118,92 @@ describe('AgentCheckpointStore', () => {
 
     await expect(store.listRecoverable()).resolves.toEqual([]);
   });
+
+  it('redacts secrets from checkpoint snapshots and tool execution previews', async () => {
+    const store = new AgentCheckpointStore(await checkpointPath());
+    const apiKey = ['sk', 'checkpoint-secret-123456'].join('-');
+    const bearerToken = 'token-checkpoint-secret-123456';
+    const connectionString = 'postgresql://tester:localpass@127.0.0.1/app';
+    const session = testSession('session_redacted');
+    session.messages.push({
+      role: 'assistant',
+      content: '准备调用远程 provider',
+      toolCalls: [
+        {
+          id: 'call_secret',
+          name: 'configure_provider',
+          arguments: {
+            apiKey,
+            password: 'db-pass',
+            headers: { authorization: `Bearer ${bearerToken}` },
+            connectionString,
+          },
+        },
+      ],
+      createdAt: '2026-06-18T01:00:01.000Z',
+    });
+
+    await store.save({
+      session,
+      iteration: 1,
+      status: 'failed',
+      toolExecutions: [
+        {
+          toolCallId: 'call_secret',
+          toolName: 'configure_provider',
+          status: 'failed',
+          durationMs: 3,
+          resultPreview: JSON.stringify({
+            apiKey,
+            password: 'db-pass',
+            dsn: connectionString,
+            header: `Bearer ${bearerToken}`,
+          }),
+        },
+      ],
+      finalText: `Provider ${apiKey} failed.`,
+      errorMessage: `Authorization failed: Bearer ${bearerToken}`,
+      now: '2026-06-18T01:00:02.000Z',
+    });
+
+    const serialized = JSON.stringify(await store.listBySession('session_redacted'));
+
+    expect(serialized).not.toContain(apiKey);
+    expect(serialized).not.toContain(bearerToken);
+    expect(serialized).not.toContain('localpass');
+    expect(serialized).not.toContain('db-pass');
+    expect(serialized).toContain('[REDACTED]');
+    expect(serialized).toContain('"tokenUsage":{"promptTokens":0,"completionTokens":0,"totalTokens":0}');
+  });
+
+  it('redacts legacy raw checkpoint files when reading them', async () => {
+    const filePath = await checkpointPath();
+    const apiKey = ['sk', 'legacy-secret-123456'].join('-');
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(
+      filePath,
+      JSON.stringify([
+        {
+          id: 'checkpoint_legacy',
+          sessionId: 'session_legacy',
+          iteration: 1,
+          status: 'running',
+          session: testSession('session_legacy'),
+          toolExecutions: [],
+          finalText: `raw ${apiKey}`,
+          startedAt: '2026-06-18T01:00:00.000Z',
+          updatedAt: '2026-06-18T01:00:00.000Z',
+        },
+      ]),
+      'utf8',
+    );
+    const store = new AgentCheckpointStore(filePath);
+
+    const serialized = JSON.stringify(await store.listRecoverable());
+
+    expect(serialized).not.toContain(apiKey);
+    expect(serialized).toContain('sk-[REDACTED]');
+  });
 });
 
 async function checkpointPath(): Promise<string> {
