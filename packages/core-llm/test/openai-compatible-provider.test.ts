@@ -406,7 +406,8 @@ describe('OpenAICompatibleProvider', () => {
 
 describe('SiliconFlow live integration', () => {
   const runLive = process.env.DBAGENT_RUN_LLM_INTEGRATION === '1';
-  const apiKey = process.env.DBAGENT_LLM_API_KEY;
+  const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
+  const model = process.env.TEST_SILICONFLOW_MODEL ?? 'deepseek-ai/DeepSeek-V4-Pro';
 
   it.skipIf(!runLive || !apiKey)(
     'calls DeepSeek-V4-Pro through the configured SiliconFlow API key',
@@ -414,7 +415,7 @@ describe('SiliconFlow live integration', () => {
       const provider = createSiliconFlowProvider({ apiKey: apiKey!, timeoutMs: 60_000 });
 
       const response = await provider.chat({
-        model: 'deepseek-ai/DeepSeek-V4-Pro',
+        model,
         messages: [{ role: 'user', content: '只回答四个字：连接正常' }],
         maxTokens: 16,
         temperature: 0,
@@ -433,7 +434,7 @@ describe('SiliconFlow live integration', () => {
 
       const events = await collect(
         provider.stream({
-          model: 'deepseek-ai/DeepSeek-V4-Pro',
+          model,
           messages: [{ role: 'user', content: '只回答四个字：流式正常' }],
           maxTokens: 16,
           temperature: 0,

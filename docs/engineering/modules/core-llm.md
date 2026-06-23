@@ -52,6 +52,17 @@
 
 测试阶段真实调用通过环境变量门控，不把 API key 写入代码、文档、测试快照或提交记录。默认单元测试只使用 fake fetch。
 
+真实 SiliconFlow 验证入口：
+
+```powershell
+$env:DBAGENT_RUN_LLM_INTEGRATION='1'
+$env:TEST_SILICONFLOW_API_KEY='<本机临时密钥>'
+$env:TEST_SILICONFLOW_MODEL='deepseek-ai/DeepSeek-V4-Pro'
+node .\node_modules\vitest\vitest.mjs run packages\core-llm\test\openai-compatible-provider.test.ts
+```
+
+`TEST_SILICONFLOW_API_KEY` 只允许作为本机临时环境变量存在，不写入 `.env`、配置文件、测试快照或 release 文档。未设置 `TEST_SILICONFLOW_MODEL` 时默认使用 `deepseek-ai/DeepSeek-V4-Pro`。
+
 ## 测试覆盖
 
 - `openai-compatible-provider.test.ts`：请求体、响应解析、usage、工具调用、SSE 流式解析、认证失败不重试、provider 临时失败重试、用户取消不重试、退避期间取消、stream 建连失败重试、SiliconFlow 预设和真实集成门控。
