@@ -58,6 +58,7 @@ export type AgentRunOptions = {
   contextWindowTokens?: number;
   keepRecentMessages?: number;
   maxToolResultChars?: number;
+  maxConsecutiveToolFailures?: number;
   signal?: AbortSignal;
 };
 

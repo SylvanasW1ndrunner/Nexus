@@ -224,6 +224,77 @@ describe('ReactAgent', () => {
     expect(result.finalText).toBe('已修正 SQL，订单总数是 42。');
   });
 
+  it('stops after repeated tool failures instead of wasting the full iteration budget', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointPath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => {
+        throw new Error('database connection reset');
+      },
+    );
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [{ id: 'fail_1', name: 'query_database', arguments: { sql: 'select count(*) from orders' } }],
+          },
+          {
+            text: '',
+            toolCalls: [{ id: 'fail_2', name: 'query_database', arguments: { sql: 'select count(*) from orders' } }],
+          },
+          {
+            text: '',
+            toolCalls: [{ id: 'fail_3', name: 'query_database', arguments: { sql: 'select count(*) from orders' } }],
+          },
+          {
+            text: 'should not be called',
+            toolCalls: [],
+          },
+        ]),
+      ]),
+      registry,
+      usage,
+      undefined,
+      { ...fixedDependencies(), checkpointStore },
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '连续查询直到成功',
+      mode: 'readonly',
+      maxIterations: 10,
+    });
+
+    expect(result.status).toBe('tool_failed');
+    expect(result.iterations).toBe(3);
+    expect(result.finalText).toContain('连续 3 次工具执行失败');
+    expect(result.toolExecutions).toMatchObject([
+      { toolCallId: 'fail_1', status: 'failed' },
+      { toolCallId: 'fail_2', status: 'failed' },
+      { toolCallId: 'fail_3', status: 'failed' },
+    ]);
+    await expect(checkpointStore.listBySession('session_test')).resolves.toMatchObject([
+      { iteration: 1, status: 'running' },
+      { iteration: 2, status: 'running' },
+      { iteration: 3, status: 'failed', errorMessage: expect.stringContaining('连续 3 次工具执行失败') },
+    ]);
+    await expect(checkpointStore.listRecoverable()).resolves.toEqual([]);
+    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
+    await expect(usage.roundHistory()).resolves.toMatchObject([
+      { sessionId: 'session_test', status: 'failed', errorMessage: expect.stringContaining('连续 3 次工具执行失败') },
+    ]);
+  });
+
   it('persists recoverable checkpoints across model and tool steps', async () => {
     const checkpointStore = new AgentCheckpointStore(await checkpointPath());
     const registry = new ToolRegistry();

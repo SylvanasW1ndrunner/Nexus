@@ -25,6 +25,8 @@
 6. 执行工具，把 tool result 写回 session。
 7. 继续下一轮，直到模型无 tool call、达到迭代上限、用户中止、权限拒绝或配额耗尽。
 
+工具失败路径有连续失败熔断：默认连续 3 次工具执行失败后，`ReactAgent` 返回 `tool_failed`，保存 failed checkpoint，并把 usage round 关闭为 `failed`。调用方可以通过 `maxConsecutiveToolFailures` 调整阈值。单次 SQL 错误、工具异常或未注册工具仍会先作为 tool message 回传给模型，让下一轮有机会自我修复；只有连续失败达到阈值时才停止，避免长任务在明显不可恢复状态下持续消耗模型调用。
+
 每轮调用模型前，`ReactAgent` 会通过 `buildAgentContext()` 构造上下文。默认预算足够大，不影响短会话；调用方可以通过 `contextWindowTokens`、`keepRecentMessages` 和 `maxToolResultChars` 控制压缩强度。当前压缩策略是本地确定性实现：
 
 - 大型 tool result 摘要化，保留原始长度、开头和结尾。
@@ -103,6 +105,7 @@ stream store 与 checkpoint store 复用同一套 `redaction.ts` 脱敏规则，
 - ask 模式下，中高危工具需要 approval provider；没有 approval provider 时不会执行。
 - allowedTools 是技能/工作流的硬白名单，即使工具已注册也不能越权调用。
 - 工具失败会作为 tool message 回传给模型，允许下一轮自我修正。
+- 连续工具失败达到阈值后会停止 Agent run，返回 `tool_failed`，不会按成功轮次计费。
 
 ## 行为评估
 
@@ -123,6 +126,7 @@ stream store 与 checkpoint store 复用同一套 `redaction.ts` 脱敏规则，
 - 当前 checkpoint 使用 JSON 文件，适合本地 beta 阶段；大量会话和并发写入场景应迁移到 SQLite WAL。
 - 当前只实现任务恢复计划、续跑提示词和放弃任务，不自动续跑中断任务；真正续跑需要后续主进程恢复入口接入 provider、tool registry、permission 和活动连接状态。
 - 当前 stream store 通过可选依赖接入 `ReactAgent.run()`；默认路径仍是非流式 `chat()`。后续 `agent:run` 流式 IPC 可基于同一 store 发事件给 UI。
+- 当前连续失败熔断只统计工具执行失败和未注册工具，不把用户拒绝权限计入失败；后续可以按工具类型区分 SQL 语法错误、网络错误和 MCP 不可用，做更细粒度的重试策略。
 - 当前不实现多 Agent 协作调度。
 - 当前行为评估器只评估 Agent run 的结构化结果，不评估自然语言答案的事实充分性；真实 LLM 效果评估后续通过环境门控测试补充。
 - 当前上下文 token 估算是近似值，真实模型窗口仍需要 provider 层或 tokenizer 层二次校验。

@@ -72,9 +72,11 @@ export class ReactAgent {
 
     const toolExecutions: AgentToolExecutionRecord[] = [];
     const maxIterations = options.maxIterations ?? 25;
+    const maxConsecutiveToolFailures = options.maxConsecutiveToolFailures ?? 3;
     const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
     let finalText = '';
     let currentIteration = 0;
+    let consecutiveToolFailures = 0;
     const saveCheckpoint = async (
       iteration: number,
       status: 'running' | 'done' | 'aborted' | 'failed',
@@ -192,6 +194,7 @@ export class ReactAgent {
           if (!tool) {
             const record = executionRecord(toolCall.id, toolCall.name, 'failed', startedAt, 'Tool is not registered.');
             toolExecutions.push(record);
+            consecutiveToolFailures += 1;
             await saveCheckpoint(iteration, 'running');
             appendMessage(
               session,
@@ -207,6 +210,18 @@ export class ReactAgent {
             );
             await this.saveSession(session);
             await saveCheckpoint(iteration, 'running');
+            if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
+              finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
+              await saveCheckpoint(iteration, 'failed', finalText);
+              await closeRound('failed', finalText);
+              return {
+                status: 'tool_failed',
+                session,
+                finalText,
+                iterations: iteration,
+                toolExecutions,
+              };
+            }
             continue;
           }
 
@@ -258,6 +273,7 @@ export class ReactAgent {
             const result = await tool.handler(toolCall.arguments, context);
             const preview = serializeToolResult(result);
             toolExecutions.push(executionRecord(toolCall.id, tool.name, 'success', startedAt, preview));
+            consecutiveToolFailures = 0;
             appendMessage(
               session,
               createMessage(
@@ -274,7 +290,9 @@ export class ReactAgent {
             await saveCheckpoint(iteration, 'running');
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            toolExecutions.push(executionRecord(toolCall.id, tool.name, 'failed', startedAt, message));
+            const record = executionRecord(toolCall.id, tool.name, 'failed', startedAt, message);
+            toolExecutions.push(record);
+            consecutiveToolFailures += 1;
             appendMessage(
               session,
               createMessage(
@@ -289,6 +307,19 @@ export class ReactAgent {
             );
             await this.saveSession(session);
             await saveCheckpoint(iteration, 'running');
+            if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
+              finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
+              await saveCheckpoint(iteration, 'failed', finalText);
+              await this.saveSession(session);
+              await closeRound('failed', finalText);
+              return {
+                status: 'tool_failed',
+                session,
+                finalText,
+                iterations: iteration,
+                toolExecutions,
+              };
+            }
           }
         }
       }
@@ -374,4 +405,8 @@ function executionRecord(
     durationMs: Math.max(0, Date.now() - startedAt),
     resultPreview,
   };
+}
+
+function failureStopText(failureCount: number, lastError: string): string {
+  return `连续 ${failureCount} 次工具执行失败，已停止 Agent 任务。最后一次错误：${lastError}`;
 }
