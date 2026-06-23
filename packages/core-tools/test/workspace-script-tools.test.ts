@@ -211,6 +211,51 @@ describe('workspace Python script Agent tools', () => {
     expect(history).toContain('"exit_code":7');
   });
 
+  it('prunes old Python run archives while keeping history records', async () => {
+    const python = await availablePython();
+    if (!python) return;
+    const { rootPath } = await scriptWorkspace();
+    const workspace = new WorkspaceCore();
+    await workspace.writeFile(
+      rootPath,
+      'scripts/archive_retention.py',
+      ['import json', 'import sys', 'payload = json.loads(sys.argv[1])', 'print(payload["run"])', ''].join('\n'),
+    );
+
+    for (const run of ['run_1', 'run_2', 'run_3']) {
+      await runWorkspacePythonScript({
+        rootPath,
+        relativePath: 'scripts/archive_retention.py',
+        args: { run },
+        pythonPath: python,
+        runId: run,
+        archiveRetention: 2,
+      });
+    }
+
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_1/result.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_2/stdout.log'), 'utf8')).resolves.toBe('run_2\n');
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_3/stdout.log'), 'utf8')).resolves.toBe('run_3\n');
+
+    const finalResult = await runWorkspacePythonScript({
+      rootPath,
+      relativePath: 'scripts/archive_retention.py',
+      args: { run: 'run_4' },
+      pythonPath: python,
+      runId: 'run_4',
+      archiveRetention: 2,
+    });
+
+    expect(finalResult.prunedArchiveRelativePaths).toEqual(['scripts/_runs/run_2']);
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_2/result.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_3/stdout.log'), 'utf8')).resolves.toBe('run_3\n');
+    await expect(readFile(join(rootPath, 'scripts/_runs/run_4/stdout.log'), 'utf8')).resolves.toBe('run_4\n');
+
+    const history = await readFile(join(rootPath, '.dbagent/history.jsonl'), 'utf8');
+    expect(history).toContain('"runId":"run_1"');
+    expect(history).toContain('"runId":"run_4"');
+  });
+
   it('kills a Python script that exceeds its timeout', async () => {
     const python = await availablePython();
     if (!python) return;

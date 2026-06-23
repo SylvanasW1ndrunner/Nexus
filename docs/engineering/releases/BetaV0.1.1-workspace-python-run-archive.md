@@ -32,6 +32,7 @@
   - `historyRelativePath`
 - `result.json` 记录命令摘要、退出码、signal、耗时、超时/取消状态、截断标记和输出文件路径。
 - `history.jsonl` 记录脚本路径、run id、归档路径、耗时、退出码和状态标记。
+- `_runs` 默认保留最近 50 次运行目录，超过后删除最旧 run 目录。
 
 ## 隐私边界
 
@@ -63,7 +64,6 @@ stdout/stderr 本身可能由脚本打印业务数据，因此默认已经受 `o
 
 ## 已知边界
 
-- 还未实现 `_runs` 保留最近 50 次的自动清理。
 - 还未扫描脚本生成的图片、CSV 等产物并登记到 manifest。
 - 还未实现运行历史查询 API。
 - stdout/stderr 不做语义脱敏，只做大小限制。

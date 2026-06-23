@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { resolveInsideWorkspace } from '@dbagent/core-workspace';
 import type { ToolRegistry } from '@dbagent/core-agent';
@@ -16,6 +16,7 @@ export type WorkspaceScriptRunRequest = {
   timeoutMs?: number;
   signal?: AbortSignal;
   archive?: boolean;
+  archiveRetention?: number;
   runId?: string;
   now?: () => string;
 };
@@ -39,6 +40,7 @@ export type WorkspaceScriptRunResult = {
   stderrRelativePath?: string;
   resultRelativePath?: string;
   historyRelativePath?: string;
+  prunedArchiveRelativePaths?: string[];
 };
 
 export type WorkspaceScriptRunner = (request: WorkspaceScriptRunRequest) => Promise<WorkspaceScriptRunResult>;
@@ -306,6 +308,17 @@ async function maybeArchiveWorkspaceScriptRun(
     stdout_truncated: result.stdoutTruncated === true,
     stderr_truncated: result.stderrTruncated === true,
   });
+  const prunedArchiveRelativePaths = await pruneArchivedRuns(
+    request.rootPath,
+    Math.floor(request.archiveRetention ?? 50),
+  );
+
+  if (prunedArchiveRelativePaths.length > 0) {
+    return {
+      ...archived,
+      prunedArchiveRelativePaths,
+    };
+  }
 
   return archived;
 }
@@ -339,6 +352,44 @@ async function appendHistoryLine(rootPath: string, event: Record<string, unknown
     // missing history file is normal for new workspaces
   }
   await atomicWriteText(historyPath, `${existing}${JSON.stringify(event)}\n`);
+}
+
+async function pruneArchivedRuns(rootPath: string, retention: number): Promise<string[]> {
+  if (!Number.isFinite(retention) || retention <= 0) return [];
+  const runsPath = join(rootPath, 'scripts', '_runs');
+  let entries: Array<{ name: string; mtimeMs: number }> = [];
+  try {
+    const children = await readdir(runsPath, { withFileTypes: true });
+    entries = (
+      await Promise.all(
+        children
+          .filter((entry) => entry.isDirectory())
+          .map(async (entry) => ({
+            name: entry.name,
+            mtimeMs: await archivedRunModifiedAt(join(runsPath, entry.name)),
+          })),
+      )
+    ).sort((left, right) => right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name));
+  } catch {
+    return [];
+  }
+
+  const stale = entries.slice(retention);
+  const pruned: string[] = [];
+  for (const entry of stale) {
+    const relativePath = `scripts/_runs/${entry.name}`;
+    await rm(join(rootPath, relativePath), { recursive: true, force: true });
+    pruned.push(relativePath);
+  }
+  return pruned;
+}
+
+async function archivedRunModifiedAt(path: string): Promise<number> {
+  try {
+    return (await stat(join(path, 'result.json'))).mtimeMs;
+  } catch {
+    return (await stat(path)).mtimeMs;
+  }
 }
 
 async function atomicWriteText(path: string, content: string): Promise<void> {

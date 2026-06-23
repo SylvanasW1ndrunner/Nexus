@@ -36,7 +36,7 @@
 
 - `diagnostic-report.test.ts`：报告 manifest、配置/日志/崩溃快照收集、敏感字段脱敏、SQL 内容脱敏、旧日志忽略、未知时间日志保留、大日志截尾、路径清理。
 - `workspace-tools.test.ts`：工作空间工具的真实文件读写和越界路径拦截。
-- `workspace-script-tools.test.ts`：脚本声明发现、真实 Python runner、参数校验、非零退出、超时 kill、AbortSignal 取消、stdout/stderr 截断、成功/失败运行归档和 history 审计。
+- `workspace-script-tools.test.ts`：脚本声明发现、真实 Python runner、参数校验、非零退出、超时 kill、AbortSignal 取消、stdout/stderr 截断、成功/失败运行归档、旧归档清理和 history 审计。
 - `workspace-sandbox.test.ts`：路径白名单和逃逸判断。
 - `db-tools.test.ts`：数据库工具注册和安全边界。
 
@@ -55,6 +55,7 @@
 - `signal`：Agent 或上层服务取消时终止子进程。
 - `outputLimitBytes`：stdout/stderr 只保留尾部，避免大输出污染 Agent 上下文。
 - `archive`：默认开启。运行结束后写入 `scripts/_runs/<runId>/stdout.log`、`stderr.log`、`result.json`，并把摘要追加到 `.dbagent/history.jsonl`。
+- `archiveRetention`：归档保留数量，默认 50。超过数量后按 `result.json` 修改时间清理最旧 run 目录。
 
 失败语义：
 
@@ -70,13 +71,14 @@
 - `result.json` 保存命令摘要、退出码、耗时、截断标记、超时/取消状态和输出文件路径。
 - `.dbagent/history.jsonl` 只记录脚本路径、run id、归档目录、耗时、退出码和状态标记，不记录 `args` 或 `env`，避免把业务参数、数据库凭证或 API key 写入审计日志。
 - 成功、失败、超时和取消都会尽量归档；如果归档本身失败，会把错误返回给调用方，避免用户误以为运行结果已经保存。
+- `_runs` 默认保留最近 50 次运行目录。清理只删除 `scripts/_runs` 下的旧 run 目录，不删除 `.dbagent/history.jsonl`，因此审计记录仍保留。
 
 ## 已知边界
 
 - 当前诊断报告返回内存中的文件列表，后续主进程需要接入 zip 写入和日志目录扫描。
 - SQL 脱敏使用保守文本规则，会牺牲部分 SQL 上下文；这是诊断报告的刻意选择，优先保护用户数据。
 - 二进制 crash dump 当前按文本处理；真正接入系统 dump 时需要在主进程层做大小限制和二进制附件策略。
-- Python runner 当前只负责进程启动、取消、超时、输出限制和运行归档；还未实现 conda/venv 自动创建、依赖安装、资源配额、系统级网络隔离或运行归档保留数量清理。
+- Python runner 当前只负责进程启动、取消、超时、输出限制、运行归档和旧归档数量清理；还未实现 conda/venv 自动创建、依赖安装、资源配额或系统级网络隔离。
 
 ## Schema RAG 工具组合
 
