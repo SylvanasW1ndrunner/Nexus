@@ -3,6 +3,7 @@ export * from './checkpoint-store.js';
 export * from './context-manager.js';
 export * from './permission-manager.js';
 export * from './react-agent.js';
+export * from './recovery.js';
 export * from './schema-rag-tools.js';
 export * from './session.js';
 export * from './session-store.js';

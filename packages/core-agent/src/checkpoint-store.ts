@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { AgentSession, AgentToolExecutionRecord } from './types.js';
 
-export type AgentCheckpointStatus = 'running' | 'done' | 'aborted' | 'failed';
+export type AgentCheckpointStatus = 'running' | 'done' | 'aborted' | 'abandoned' | 'failed';
 
 export type AgentIterationCheckpoint = {
   id: string;
@@ -90,6 +90,24 @@ export class AgentCheckpointStore implements AgentCheckpointWriter {
         ...checkpoint,
         status: 'failed' as const,
         errorMessage: redactCheckpointString(errorMessage),
+        updatedAt: now,
+        finishedAt: now,
+      };
+    });
+    if (changed > 0) await writeJsonFileAtomic(this.filePath, next);
+    return changed;
+  }
+
+  async markAbandoned(sessionId: string, reason: string, now = new Date().toISOString()): Promise<number> {
+    const checkpoints = await this.readAll();
+    let changed = 0;
+    const next = checkpoints.map((checkpoint) => {
+      if (checkpoint.sessionId !== sessionId || checkpoint.status !== 'running') return checkpoint;
+      changed += 1;
+      return {
+        ...checkpoint,
+        status: 'abandoned' as const,
+        errorMessage: redactCheckpointString(reason),
         updatedAt: now,
         finishedAt: now,
       };

@@ -74,6 +74,14 @@ checkpoint 写入和读取都会做敏感信息脱敏，避免恢复文件、诊
 
 `listRecoverable()` 只返回每个 session 最新 checkpoint 为 `running` 的任务。已完成、已失败或已中止的 session 不会出现在可恢复列表里，避免应用重启后错误提示用户恢复已结束任务。`markInterrupted()` 用于启动扫描时把上次异常退出遗留的 running checkpoint 标记为 failed。
 
+`packages/core-agent/src/recovery.ts` 在原始 checkpoint 之上提供服务级恢复合同：
+
+- `AgentRecoveryService.listRecoverablePlans()`：把 running checkpoint 转成面向用户/主进程的恢复计划，包含原始任务、停在哪个 iteration、成功/失败/拒绝的工具数量、最近 assistant 文本、最近工具错误、可选动作和续跑提示词。
+- `AgentRecoveryService.abandon()`：把用户放弃恢复的 running checkpoint 标记为 `abandoned`，后续启动扫描不再提示。
+- `resumePrompt` 是确定性文本，供后续“继续执行”入口创建新的 Agent run 或恢复 run 时使用。它会摘要已完成工具，要求 Agent 不要无理由重复已成功工具调用。
+
+当前恢复服务不直接自动续跑工具。原因是真正继续执行还需要 LLM provider、工具注册表、权限 provider、活动数据库连接、工作区和 UI 确认状态全部就绪；本切片先保证启动扫描、恢复决策和放弃操作的后端合同稳定。后续主进程接线时应先调用 `listRecoverablePlans()`，由用户选择继续、重跑或放弃。
+
 ## 权限边界
 
 - readonly 模式下，非 readonly 工具在执行前被拒绝。
@@ -98,7 +106,7 @@ checkpoint 写入和读取都会做敏感信息脱敏，避免恢复文件、诊
 ## 已知边界
 
 - 当前 checkpoint 使用 JSON 文件，适合本地 beta 阶段；大量会话和并发写入场景应迁移到 SQLite WAL。
-- 当前只实现任务恢复所需的状态识别，不自动续跑中断任务；续跑策略需要后续 session manager 和 UI 恢复入口配合。
+- 当前只实现任务恢复计划、续跑提示词和放弃任务，不自动续跑中断任务；真正续跑需要后续主进程恢复入口接入 provider、tool registry、permission 和活动连接状态。
 - 当前不实现多 Agent 协作调度。
 - 当前行为评估器只评估 Agent run 的结构化结果，不评估自然语言答案的事实充分性；真实 LLM 效果评估后续通过环境门控测试补充。
 - 当前上下文 token 估算是近似值，真实模型窗口仍需要 provider 层或 tokenizer 层二次校验。
