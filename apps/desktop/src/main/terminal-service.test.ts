@@ -147,6 +147,35 @@ describe('TerminalService', () => {
     }
   });
 
+  it('bounds terminal output while keeping read cursors monotonic', async () => {
+    const service = new TerminalService({ maxOutputChars: 120 });
+    const terminal = service.create({ name: 'Bounded Shell' });
+
+    try {
+      service.write({
+        terminalId: terminal.id,
+        data: `echo dbagent-old-${'x'.repeat(400)}\r`,
+      });
+      await waitForSettledOutput(service, terminal.id);
+
+      const trimmed = service.read({ terminalId: terminal.id, cursor: 0 });
+      expect(trimmed.chunk.length).toBeLessThanOrEqual(120);
+      expect(trimmed.cursor).toBeGreaterThanOrEqual(trimmed.chunk.length);
+      expect(trimmed.chunk).not.toContain('dbagent-old-');
+
+      service.write({
+        terminalId: terminal.id,
+        data: 'echo dbagent-new-tail\r',
+      });
+      const nextOutput = await waitForOutputFromCursor(service, terminal.id, trimmed.cursor, 'dbagent-new-tail');
+
+      expect(nextOutput).toContain('dbagent-new-tail');
+      expect(nextOutput).not.toContain('dbagent-old-');
+    } finally {
+      service.close(terminal.id);
+    }
+  });
+
   it('resizes an interactive PTY session', () => {
     const service = new TerminalService();
     const terminal = service.create({ name: 'Resizable Shell' });
@@ -174,6 +203,36 @@ async function waitForOutput(service: TerminalService, terminalId: string, expec
     if (output.includes(expected)) return output;
   }
   return output;
+}
+
+async function waitForOutputFromCursor(
+  service: TerminalService,
+  terminalId: string,
+  initialCursor: number,
+  expected: string,
+): Promise<string> {
+  let cursor = initialCursor;
+  let output = '';
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const result = service.read({ terminalId, cursor });
+    cursor = result.cursor;
+    output += result.chunk;
+    if (output.includes(expected)) return output;
+  }
+  return output;
+}
+
+async function waitForSettledOutput(service: TerminalService, terminalId: string): Promise<void> {
+  let cursor = 0;
+  let stableReads = 0;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const result = service.read({ terminalId, cursor });
+    stableReads = result.cursor === cursor ? stableReads + 1 : 0;
+    cursor = result.cursor;
+    if (stableReads >= 2) return;
+  }
 }
 
 async function removeWhenUnlocked(path: string): Promise<void> {

@@ -309,12 +309,18 @@ function registerIpcHandlers(): void {
   });
   handle(ipcChannels.app.loadIdeSettings, async () => {
     const settings = await ideSettingsStore.load();
-    terminalService.configure({ defaultShell: settings.terminal.defaultShell });
+    terminalService.configure({
+      defaultShell: settings.terminal.defaultShell,
+      maxOutputChars: terminalScrollbackToChars(settings.terminal.scrollback),
+    });
     return ok(settings);
   });
   handle(ipcChannels.app.saveIdeSettings, async (patch) => {
     const settings = await ideSettingsStore.save(patch);
-    terminalService.configure({ defaultShell: settings.terminal.defaultShell });
+    terminalService.configure({
+      defaultShell: settings.terminal.defaultShell,
+      maxOutputChars: terminalScrollbackToChars(settings.terminal.scrollback),
+    });
     return ok(settings);
   });
 
@@ -450,6 +456,10 @@ function registerIpcHandlers(): void {
       });
     }
   });
+}
+
+function terminalScrollbackToChars(scrollback: number): number {
+  return Math.max(1, Math.floor(scrollback)) * 200;
 }
 
 void app.whenReady().then(() => {

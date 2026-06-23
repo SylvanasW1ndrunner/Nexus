@@ -47,6 +47,10 @@ Workspace 文件树当前列出 `sql/`、`queries/`、`scripts/`、`docs/` 和 `
 
 工作区状态保存活动连接 id 和 SQL 草稿，写入 Electron `userData/data/workspace-state.json`，采用临时文件加 rename 的原子写入方式，避免异常退出留下半截 JSON。启动恢复时如果状态文件缺失、JSON 损坏或结构不合法，应用会忽略该恢复状态并继续启动，避免一个损坏草稿拖垮整个桌面应用。
 
+`apps/desktop/src/main/terminal-service.ts` 是真实终端后端服务，不依赖 renderer 文本框模拟。它通过 `node-pty` 启动系统 shell，支持多 session、逐字符输入、按 cursor 增量读取输出、resize、clear、close，以及坏 shell 配置 fallback 到系统 shell。
+
+终端输出缓冲现在有后端上限。`TerminalService` 默认最多保留约 1MB 输出；主进程读取 IDE 设置时，会把 `terminal.scrollback` 转换成近似字符上限并传入服务。超出上限后会裁剪旧输出，同时维护绝对 cursor，保证 renderer 继续用旧 cursor 读取时不会拿到重复内容。这避免长时间运行命令把主进程内存无限撑大。
+
 Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目文件树、最近项目、连接和 Schema；中间是 Monaco 编辑器和结果区；右侧是对话窗口与查询历史。顶部提供文件、运行、设置下拉菜单和语言切换入口。Monaco 当前至少支持 SQL 与 Python 高亮，语言由打开的文件类型决定。语言选择写入 `localStorage`，当前支持中文与英文，默认中文。
 
 ## 测试覆盖
@@ -57,6 +61,7 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 - `query-confirmation.test.ts`：危险 SQL 未确认时必须返回确认要求。
 - `query-workflow.test.ts`：主进程查询业务链路，包括成功执行、用量记录、历史写入、只读拦截、确认要求、失败历史、query id 生命周期和取消决策入口。
 - `schema-workflow.test.ts`：Schema 主进程业务链路，包括连接缺失时的 `NOT_FOUND`、按 `engine` 路由 driver、表列表和表详情参数透传。
+- `terminal-service.test.ts`：真实 PTY 终端创建、fallback shell、逐字符输入、工作目录、clear、resize、输出缓冲上限和 cursor 单调读取。
 - `workspace-project-store.test.ts`：真实项目目录创建、标准模板目录与 starter 文件、打开已有项目、最近项目置顶、普通目录拒绝打开、保存可复用 SQL、读取 SQL 文件、拦截非受管路径读取、修改 SQL 库配置后保存到新路径。
 - `workspace-state-store.test.ts`：SQL 草稿恢复、活动连接恢复、缺失状态、损坏 JSON 和结构不合法状态。
 - `connection-draft.test.ts`：编辑连接不回填密码，并保留远程连接配置。

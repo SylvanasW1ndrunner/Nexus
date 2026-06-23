@@ -17,6 +17,7 @@ const execAsync = promisify(exec);
 type TerminalRuntime = {
   process: pty.IPty;
   output: string;
+  outputBaseCursor: number;
   status: 'running' | 'exited';
   exitCode?: number | null;
 };
@@ -25,9 +26,9 @@ export class TerminalService {
   private readonly sessions = new Map<string, TerminalSession>();
   private readonly runtimes = new Map<string, TerminalRuntime>();
 
-  constructor(private options: { defaultShell?: string } = {}) {}
+  constructor(private options: { defaultShell?: string; maxOutputChars?: number } = {}) {}
 
-  configure(options: { defaultShell?: string }): void {
+  configure(options: { defaultShell?: string; maxOutputChars?: number }): void {
     this.options = { ...this.options, ...options };
   }
 
@@ -52,10 +53,11 @@ export class TerminalService {
     const runtime: TerminalRuntime = {
       process: child,
       output: '',
+      outputBaseCursor: 0,
       status: 'running',
     };
     child.onData((data) => {
-      runtime.output += data;
+      appendTerminalOutput(runtime, data, this.options.maxOutputChars);
     });
     child.onExit(({ exitCode }) => {
       runtime.status = 'exited';
@@ -80,6 +82,7 @@ export class TerminalService {
     const runtime = this.runtimes.get(id);
     if (!runtime) throw new Error('Terminal session does not exist.');
     runtime.output = '';
+    runtime.outputBaseCursor = 0;
     return { id };
   }
 
@@ -107,11 +110,12 @@ export class TerminalService {
   read(request: TerminalReadRequest): TerminalReadResult {
     const runtime = this.runtimes.get(request.terminalId);
     if (!runtime) throw new Error('Terminal session does not exist.');
-    const cursor = Math.max(0, request.cursor);
-    const nextCursor = runtime.output.length;
+    const cursor = Math.max(runtime.outputBaseCursor, request.cursor);
+    const start = cursor - runtime.outputBaseCursor;
+    const nextCursor = runtime.outputBaseCursor + runtime.output.length;
     return {
       terminalId: request.terminalId,
-      chunk: runtime.output.slice(cursor),
+      chunk: runtime.output.slice(start),
       cursor: nextCursor,
       status: runtime.status,
       ...(runtime.exitCode !== undefined ? { exitCode: runtime.exitCode } : {}),
@@ -204,4 +208,14 @@ function spawnFirstAvailableShell(shells: ShellCandidate[], cwd: string): { chil
     }
   }
   throw lastError instanceof Error ? lastError : new Error('Unable to start terminal shell.');
+}
+
+function appendTerminalOutput(runtime: TerminalRuntime, data: string, maxOutputChars?: number): void {
+  runtime.output += data;
+  const limit = Math.max(1, Math.floor(maxOutputChars ?? 1024 * 1024));
+  if (runtime.output.length <= limit) return;
+
+  const overflow = runtime.output.length - limit;
+  runtime.output = runtime.output.slice(overflow);
+  runtime.outputBaseCursor += overflow;
 }
