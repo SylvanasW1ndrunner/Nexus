@@ -45,3 +45,14 @@
 - 当前诊断报告返回内存中的文件列表，后续主进程需要接入 zip 写入和日志目录扫描。
 - SQL 脱敏使用保守文本规则，会牺牲部分 SQL 上下文；这是诊断报告的刻意选择，优先保护用户数据。
 - 二进制 crash dump 当前按文本处理；真正接入系统 dump 时需要在主进程层做大小限制和二进制附件策略。
+## Schema RAG 工具组合
+
+`registerDatabaseTools()` 在传入 `rag` 时会复用 `core-agent` 的 `registerSchemaRagTools()` 注册 RAG 工具，并启用 `skipExistingTools`，避免与数据库工具包已有的 `list_tables`、`describe_table` 重名。
+
+组合后的默认工具集合为：
+
+- 数据库实时工具：`list_schemas`、`list_tables`、`describe_table`、`query_database`、`execute_sql`。
+- RAG 工具：`search_schema`、`get_relations`。
+- 兼容工具：`build_schema_context`，保留给已有测试和后续 IPC/Agent 调试入口。
+
+因此 Agent 的默认 schema 浏览仍可以使用产品文档中的 `list_tables` / `describe_table` 名称；当需要模糊检索、业务术语或关系扩展时使用 `search_schema` / `get_relations`。这避免了同一 registry 中出现重复 tool name，也让 live DB introspection 与本地 RAG 各自承担清晰职责。

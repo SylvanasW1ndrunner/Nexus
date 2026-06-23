@@ -1,4 +1,4 @@
-import type { ToolRegistry } from '@dbagent/core-agent';
+import { registerSchemaRagTools, type ToolRegistry } from '@dbagent/core-agent';
 import type { IDatabaseDriver, TableSummary } from '@dbagent/core-db';
 import type { SchemaRagEngine } from '@dbagent/core-rag';
 import type { SavedConnection } from '@dbagent/shared';
@@ -131,31 +131,7 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
   );
 
   if (rag) {
-    registry.register(
-      {
-        name: 'search_schema',
-        description: 'Search schema context by table name, column name, or business description.',
-        inputSchema: objectSchema({
-          connectionId: { type: 'string' },
-          query: { type: 'string' },
-          limit: { type: 'number' },
-        }),
-        dangerLevel: 'safe',
-        readonly: true,
-      },
-      (args) => {
-        const connectionId = requireString(args, 'connectionId');
-        const query = requireString(args, 'query');
-        const limit = optionalPositiveInteger(args, 'limit', 8);
-        return {
-          results: rag.search({
-            connectionId,
-            query,
-            ...(limit === undefined ? {} : { limit }),
-          }),
-        };
-      },
-    );
+    registerSchemaRagTools(registry, rag, { skipExistingTools: true });
 
     registry.register(
       {

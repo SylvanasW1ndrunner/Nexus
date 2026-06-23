@@ -60,6 +60,29 @@ describe('schema RAG Agent tools', () => {
     ).rejects.toThrow('connectionId is required.');
   });
 
+  it('can skip tools already registered by a broader database tool pack', () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: SCHEMA_RAG_TOOL_NAMES.describeTable,
+        description: 'Live database describe table',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => ({ source: 'driver' }),
+    );
+
+    registerSchemaRagTools(registry, indexedRag(), {
+      defaultConnectionId: 'conn_1',
+      skipExistingTools: true,
+    });
+
+    expect(registry.get(SCHEMA_RAG_TOOL_NAMES.describeTable)?.description).toBe('Live database describe table');
+    expect(registry.has(SCHEMA_RAG_TOOL_NAMES.searchSchema)).toBe(true);
+    expect(registry.has(SCHEMA_RAG_TOOL_NAMES.getRelations)).toBe(true);
+  });
+
   it('lets the Agent inspect schema before answering a user data question', async () => {
     const registry = new ToolRegistry();
     registerSchemaRagTools(registry, indexedRag(), { defaultConnectionId: 'conn_1' });

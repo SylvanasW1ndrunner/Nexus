@@ -19,6 +19,8 @@
   - `list_tables`
   - `get_relations`
 - RAG 工具全部标记为 `safe + readonly`，并继续受 `allowedTools` 运行白名单约束。
+- `registerSchemaRagTools()` 支持 `skipExistingTools`，供组合工具包跳过已有同名工具。
+- `core-tools/registerDatabaseTools()` 复用 RAG 工具适配层，避免与实时数据库工具 `list_tables`、`describe_table` 发生重复注册；组合后新增 `get_relations`，并保留兼容的 `build_schema_context`。
 
 ## 开源依赖决策
 
@@ -37,7 +39,11 @@
   - RAG 工具注册为稳定、只读、安全的模型可见合同。
   - GMV glossary 场景能召回 `public.orders.total_amount`。
   - 无活动连接时拒绝调用。
+  - broader database tool pack 已有同名工具时可跳过重复注册。
   - `ReactAgent` 通过 `search_schema` 检索 schema 后再给出业务答案。
+- `packages/core-tools/test/db-tools.test.ts`
+  - 数据库工具与 RAG 工具组合注册时没有重复 tool name。
+  - `get_relations` 和 `build_schema_context` 在组合工具包内保持可用。
 
 ## 验证命令
 
@@ -45,8 +51,11 @@
 node .\node_modules\typescript\bin\tsc -p packages\core-rag\tsconfig.json --noEmit
 node .\node_modules\typescript\bin\tsc -p packages\core-rag\tsconfig.json
 node .\node_modules\typescript\bin\tsc -p packages\core-agent\tsconfig.json --noEmit
+node .\node_modules\typescript\bin\tsc -p packages\core-agent\tsconfig.json
+node .\node_modules\typescript\bin\tsc -p packages\core-tools\tsconfig.json --noEmit
 node .\node_modules\vitest\vitest.mjs run packages\core-rag\test\schema-rag-engine.test.ts
 node .\node_modules\vitest\vitest.mjs run packages\core-agent\test\schema-rag-tools.test.ts
+node .\node_modules\vitest\vitest.mjs run packages\core-tools\test\db-tools.test.ts
 ```
 
 ## 已知边界

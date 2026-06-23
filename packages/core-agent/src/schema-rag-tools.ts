@@ -22,6 +22,7 @@ export type RegisterSchemaRagToolsOptions = {
   defaultConnectionId?: string;
   defaultLimit?: number;
   maxContextChars?: number;
+  skipExistingTools?: boolean;
 };
 
 export const SCHEMA_RAG_TOOL_NAMES = {
@@ -36,7 +37,9 @@ export function registerSchemaRagTools(
   rag: AgentSchemaRagService,
   options: RegisterSchemaRagToolsOptions = {},
 ): void {
-  registry.register(
+  registerRagTool(
+    registry,
+    options,
     {
       name: SCHEMA_RAG_TOOL_NAMES.searchSchema,
       description: 'Search indexed database schema by business question, table name, column name, or glossary term.',
@@ -80,7 +83,9 @@ export function registerSchemaRagTools(
     },
   );
 
-  registry.register(
+  registerRagTool(
+    registry,
+    options,
     {
       name: SCHEMA_RAG_TOOL_NAMES.describeTable,
       description: 'Describe one indexed table with columns and related tables. Use schema.table when table names are ambiguous.',
@@ -114,7 +119,9 @@ export function registerSchemaRagTools(
     },
   );
 
-  registry.register(
+  registerRagTool(
+    registry,
+    options,
     {
       name: SCHEMA_RAG_TOOL_NAMES.listTables,
       description: 'List indexed tables in a connection, optionally limited to one schema.',
@@ -139,7 +146,9 @@ export function registerSchemaRagTools(
     }),
   );
 
-  registry.register(
+  registerRagTool(
+    registry,
+    options,
     {
       name: SCHEMA_RAG_TOOL_NAMES.getRelations,
       description: 'Return direct relation context for one indexed table.',
@@ -168,6 +177,16 @@ export function registerSchemaRagTools(
       };
     },
   );
+}
+
+function registerRagTool(
+  registry: ToolRegistry,
+  options: RegisterSchemaRagToolsOptions,
+  definition: Parameters<ToolRegistry['register']>[0],
+  handler: Parameters<ToolRegistry['register']>[1],
+): void {
+  if (options.skipExistingTools && registry.has(definition.name)) return;
+  registry.register(definition, handler);
 }
 
 function resolveConnectionId(args: Record<string, unknown>, options: RegisterSchemaRagToolsOptions): string {

@@ -102,6 +102,45 @@ describe('registerDatabaseTools', () => {
     });
   });
 
+  it('composes database and RAG tools without duplicate tool names', async () => {
+    const registry = new ToolRegistry();
+    registerDatabaseTools({
+      registry,
+      driver: fakeDriver(),
+      rag: indexedRag(),
+      getConnection: () => savedConnection(),
+    });
+
+    const names = registry.llmTools().map((tool) => tool.name);
+    expect(names).toEqual([...new Set(names)]);
+    expect(names).toEqual([
+      'list_schemas',
+      'list_tables',
+      'describe_table',
+      'query_database',
+      'execute_sql',
+      'search_schema',
+      'get_relations',
+      'build_schema_context',
+    ]);
+    await expect(
+      Promise.resolve().then(() =>
+        registry
+          .get('get_relations')
+          ?.handler({ connectionId: 'conn_1', schema: 'public', table: 'orders' }, toolContext()),
+      ),
+    ).resolves.toMatchObject({
+      table: { id: 'table:public.orders' },
+    });
+    await expect(
+      Promise.resolve().then(() =>
+        registry.get('build_schema_context')?.handler({ connectionId: 'conn_1', query: 'orders' }, toolContext()),
+      ),
+    ).resolves.toMatchObject({
+      query: 'orders',
+    });
+  });
+
   it('blocks write SQL in readonly agent mode before the driver executes it', async () => {
     const registry = new ToolRegistry();
     const driver = fakeDriver();
