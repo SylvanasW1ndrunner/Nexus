@@ -24,6 +24,38 @@ export type SchemaRagIndex = {
   indexedAt: string;
 };
 
+export type SchemaRagIndexStage = 'idle' | 'skeleton' | 'hot_tables' | 'long_tail' | 'ready' | 'failed';
+
+export type SchemaRagIndexStageState = 'pending' | 'running' | 'completed' | 'failed';
+
+export type SchemaRagIndexStageStatus = {
+  stage: SchemaRagIndexStage;
+  state: SchemaRagIndexStageState;
+  done: number;
+  total: number;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+};
+
+export type SchemaRagIndexStatus = {
+  connectionId: string;
+  stage: SchemaRagIndexStage;
+  ready: boolean;
+  documentCount: number;
+  tableCount: number;
+  columnCount: number;
+  relationCount: number;
+  glossaryCount: number;
+  indexedAt?: string;
+  updatedAt: string;
+  stages: SchemaRagIndexStageStatus[];
+};
+
+export type SchemaRagProgressiveIndexOptions = {
+  hotTableLimit?: number;
+};
+
 export type SchemaRagSearchRequest = {
   connectionId: string;
   query: string;

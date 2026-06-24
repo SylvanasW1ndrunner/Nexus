@@ -89,3 +89,24 @@ Mermaid 对标识符有限制，因此模块会把 `schema.table`、字段名和
 表引用支持 `schema.table` 或 `table + schema` 两种形式；裸表名在多个 schema 中命中时会抛出歧义错误，要求上层让 Agent 或用户补充 schema，而不是猜测。该行为用于避免 Agent 在生产库多 schema 场景下查询错表。
 
 本切片未引入新的第三方 RAG 框架或向量库。原因是当前能力是结构化 metadata 的轻量工具接口，直接复用现有内存索引即可；后续接入 sqlite-vec、FTS5、RRF、reranker 或 LlamaIndex/Haystack 等方案时，需要按 `docs/engineering/open-source-first.md` 重新记录许可证、Electron 打包、离线、模型下载和安全边界。
+## 连接级持久化快照与渐进索引状态
+
+本轮新增 `SchemaRagSnapshotStore` 和 `ProgressiveSchemaRagIndexer`，目标是先解决 Schema RAG 在应用重启后的可恢复性，以及后续大 schema 渐进索引所需的状态合同。
+
+- `SchemaRagSnapshotStore` 位于 `packages/core-rag/src/schema-rag-snapshot-store.ts`，只负责连接级快照文件读写。快照采用 JSON v1 格式，保存 `connectionId`、`indexedAt`、documents、glossary 和 graph edge records；读取时重建 `Map<string, Set<string>>` 运行态 graph。
+- 快照写入使用临时文件加 rename 的原子替换策略，避免半写入文件覆盖上一份完整快照。损坏、缺失或旧版本快照会返回 `undefined`，不阻断数据库连接、SQL 执行或后续重新索引。
+- `SchemaRagEngine.loadIndex()` 用于应用重启后 hydrate 内存索引；`getIndexStatus()` 用于让 Agent/UI 判断当前连接是 `idle` 还是 `ready`，不改变现有同步 `search()`、`buildContext()`、`describeTable()` 合同。
+- `ProgressiveSchemaRagIndexer` 位于 `packages/core-rag/src/progressive-schema-rag-indexer.ts`，当前先提供 `skeleton -> hot_tables -> long_tail -> ready` 的状态模型。第一版仍一次性构建完整内存索引，后续可以把每个阶段替换为真实分批 catalog 抽取和 on-demand 单表索引。
+
+本能力不作为官方插件候选。它属于 `core-rag` 与连接生命周期绑定的基础设施；适合插件化的是外围能力，例如 embedding provider、reranker、RAG eval、ER 图导出、业务术语维护工具等。
+
+开源借鉴记录：
+
+- LlamaIndex.TS 的 StorageContext/持久化层说明了索引、文档存储和向量存储应当隔离在 storage adapter 后面，本轮采用同样的分层思想，但不引入框架依赖。
+- SQLite FTS5 是后续本地全文检索的优先候选，适合替换当前轻量 token 检索；本轮暂不引入，是因为还没有 SQLite 存储 adapter 和 Electron native 打包评估。
+- sqlite-vec 是后续本地向量检索候选，Node.js 可接入，但其文档仍提示 pre-v1 可能有破坏性变化；因此当前只保留 adapter 边界，不进入发布依赖。
+
+新增测试：
+
+- `schema-rag-snapshot-store.test.ts`：真实临时目录读写，覆盖保存、读取、恢复后检索、损坏快照、旧版本快照、按连接删除。
+- `progressive-schema-rag-indexer.test.ts`：覆盖渐进阶段状态、快照落盘、模拟进程重启后的恢复和空连接 idle 状态。

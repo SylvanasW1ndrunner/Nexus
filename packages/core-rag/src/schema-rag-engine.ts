@@ -6,6 +6,7 @@ import type {
   SchemaRagGlossaryEntry,
   SchemaRagIndex,
   SchemaRagIndexInput,
+  SchemaRagIndexStatus,
   SchemaRagListTablesRequest,
   SchemaRagRelationsResult,
   SchemaRagSearchRequest,
@@ -38,12 +39,47 @@ export class SchemaRagEngine {
     return index;
   }
 
+  loadIndex(index: SchemaRagIndex): SchemaRagIndex {
+    assertRestoredIndex(index);
+    this.indexes.set(index.connectionId, index);
+    return index;
+  }
+
   clear(connectionId: string): void {
     this.indexes.delete(connectionId);
   }
 
   hasIndex(connectionId: string): boolean {
     return this.indexes.has(connectionId);
+  }
+
+  getIndexStatus(connectionId: string): SchemaRagIndexStatus {
+    const index = this.indexes.get(connectionId);
+    const updatedAt = new Date().toISOString();
+    if (!index) {
+      return {
+        connectionId,
+        stage: 'idle',
+        ready: false,
+        documentCount: 0,
+        tableCount: 0,
+        columnCount: 0,
+        relationCount: 0,
+        glossaryCount: 0,
+        updatedAt,
+        stages: [
+          {
+            stage: 'idle',
+            state: 'completed',
+            done: 0,
+            total: 0,
+            completedAt: updatedAt,
+          },
+        ],
+      };
+    }
+
+    return buildReadyStatus(index, updatedAt);
   }
 
   listTables(request: SchemaRagListTablesRequest): SchemaRagTableSummary[] {
@@ -176,6 +212,45 @@ export class SchemaRagEngine {
     }
     return index;
   }
+}
+
+function assertRestoredIndex(index: SchemaRagIndex): void {
+  if (!index.connectionId.trim()) {
+    throw new Error('Schema RAG restored index requires a connection id.');
+  }
+  for (const document of index.documents) {
+    if (document.connectionId !== index.connectionId) {
+      throw new Error(`Schema RAG document ${document.id} belongs to a different connection.`);
+    }
+  }
+}
+
+function buildReadyStatus(index: SchemaRagIndex, updatedAt: string): SchemaRagIndexStatus {
+  const tableCount = index.documents.filter((document) => document.kind === 'table').length;
+  const columnCount = index.documents.filter((document) => document.kind === 'column').length;
+  const relationCount = index.documents.filter((document) => document.kind === 'relation').length;
+  return {
+    connectionId: index.connectionId,
+    stage: 'ready',
+    ready: true,
+    documentCount: index.documents.length,
+    tableCount,
+    columnCount,
+    relationCount,
+    glossaryCount: index.glossary.length,
+    indexedAt: index.indexedAt,
+    updatedAt,
+    stages: [
+      {
+        stage: 'ready',
+        state: 'completed',
+        done: index.documents.length,
+        total: index.documents.length,
+        startedAt: index.indexedAt,
+        completedAt: updatedAt,
+      },
+    ],
+  };
 }
 
 function scoreDocument(
