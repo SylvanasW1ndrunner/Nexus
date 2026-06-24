@@ -95,3 +95,30 @@ Agent 和 RAG 是 DBAgent 的技术核心，也是最容易重复造轮子的部
 - Agent/RAG/MCP 设计借鉴：写入 `docs/engineering/modules/core-agent.md`、`core-rag.md`、`core-tools.md` 或 release note。
 - 打包影响：写入 `docs/engineering/packaging.md` 或对应 release note。
 - 测试影响：写入 `docs/engineering/test-strategy.md` 或模块测试说明。
+
+## 优秀开源项目基准
+
+后续复杂能力开发不能只寻找“能用”的库，而要以该领域优秀、维护活跃、设计成熟的开源项目为基准。每次评估必须说明：
+
+- 该项目为什么代表当前领域较优实践。
+- DBAgent 可以借鉴的架构、接口、测试、生命周期或安全设计。
+- 该项目不能直接复用的原因，例如许可证、Electron 打包、离线行为、native module、API 不匹配、安全边界或产品差异化。
+- DBAgent 在借鉴基础上做出的优化和扩展。
+
+## 官方插件候选评估
+
+涉及以下能力时必须判断是否应进入官方插件：
+
+- SQL 优化、SQL formatter/linter、Explain 分析、慢查询诊断。
+- Schema 文档、ER 图、Schema RAG eval、检索质量评估。
+- Python 数据分析脚本、报告生成、结果导出、数据清洗。
+- MCP server 适配、外部工具连接、workspace script tool。
+- 数据库专项诊断，例如 PostgreSQL 权限、连接、索引、VACUUM、锁等待。
+
+如果判断为官方插件候选，文档必须记录：
+
+- 插件 id、能力边界、权限 manifest 和危险等级。
+- 是否走 Tool Registry、Skill Registry、MCP adapter 或 Plugin Registry。
+- 安装、启用、禁用、健康检查、卸载生命周期。
+- 官方插件与第三方插件共用的公开合约。
+- 不插件化的原因和未来迁移条件。

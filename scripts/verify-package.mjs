@@ -1,22 +1,22 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, sep } from 'node:path';
 
 const root = process.cwd();
 const skipLaunch = process.argv.includes('--skip-launch');
 const appOutDir = packageOutputDir();
-const resourcesDir = join(appOutDir, 'resources');
+const resourcesDir = packageResourcesDir(appOutDir);
 const asarPath = join(resourcesDir, 'app.asar');
 const desktopRequire = createRequire(new URL('../apps/desktop/package.json', import.meta.url));
 const asar = desktopRequire('@electron/asar');
 
 assert.ok(existsSync(appOutDir), `missing packaged app directory: ${appOutDir}`);
-assert.ok(existsSync(asarPath), `missing ASAR package: ${asarPath}`);
-const asarStats = statSync(asarPath);
+assert.ok(existsSync(resourcesDir), `missing packaged resources directory: ${resourcesDir}`);
 
-const files = asar.listPackage(asarPath).map((file) => file.replaceAll('\\', '/'));
+const packageLayout = resolvePackagedAppLayout();
+const files = packageLayout.files;
 const requiredFiles = [
   '/dist/main/main.cjs',
   '/dist/preload/preload.cjs',
@@ -25,10 +25,10 @@ const requiredFiles = [
 ];
 
 for (const file of requiredFiles) {
-  assert.ok(files.includes(file), `ASAR missing required file: ${file}`);
+  assert.ok(files.includes(file), `packaged application payload missing required file: ${file}`);
 }
 
-const rendererHtml = asar.extractFile(asarPath, ['dist', 'renderer', 'index.html'].join(sep)).toString('utf8');
+const rendererHtml = packageLayout.readFile(['dist', 'renderer', 'index.html']).toString('utf8');
 assert.ok(
   !/(?:src|href)="\/assets\//.test(rendererHtml),
   'Renderer HTML uses absolute /assets paths, which fail under file:// packaged loading.',
@@ -49,8 +49,8 @@ assert.ok(statSync(executablePath).size > 0, `packaged executable is empty: ${ex
 
 const latestInput = latestPackageInputMtime();
 assert.ok(
-  asarStats.mtimeMs + 2000 >= latestInput.mtimeMs,
-  `ASAR is older than package input: ${latestInput.path}. Run pnpm package:dir before verification.`,
+  packageLayout.mtimeMs + 2000 >= latestInput.mtimeMs,
+  `Packaged app is older than package input: ${latestInput.path}. Run pnpm package:dir before verification.`,
 );
 
 if (!skipLaunch) {
@@ -59,7 +59,8 @@ if (!skipLaunch) {
 
 console.log('Packaged app verification passed.');
 console.log(`- appOutDir: ${appOutDir}`);
-console.log(`- asarFiles: ${files.length}`);
+console.log(`- packageType: ${packageLayout.type}`);
+console.log(`- packagedFiles: ${files.length}`);
 console.log(`- executable: ${executablePath}`);
 console.log(`- latestPackageInput: ${latestInput.path}`);
 
@@ -69,10 +70,56 @@ function packageOutputDir() {
   return join(root, 'apps', 'desktop', 'release', 'linux-unpacked');
 }
 
+function packageResourcesDir(outputDir) {
+  if (process.platform === 'darwin') return join(outputDir, 'Contents', 'Resources');
+  return join(outputDir, 'resources');
+}
+
 function packagedExecutablePath(outputDir) {
   if (process.platform === 'win32') return join(outputDir, 'DBAgent.exe');
   if (process.platform === 'darwin') return join(outputDir, 'Contents', 'MacOS', 'DBAgent');
   return join(outputDir, 'DBAgent');
+}
+
+function resolvePackagedAppLayout() {
+  if (existsSync(asarPath)) {
+    return {
+      type: 'asar',
+      files: asar.listPackage(asarPath).map((file) => file.replaceAll('\\', '/')),
+      mtimeMs: statSync(asarPath).mtimeMs,
+      readFile(relativeParts) {
+        return asar.extractFile(asarPath, relativeParts.join(sep));
+      },
+    };
+  }
+
+  const appDir = join(resourcesDir, 'app');
+  assert.ok(
+    existsSync(appDir),
+    `missing packaged application payload. Expected either ${asarPath} or ${appDir}`,
+  );
+  const latestPackagedFile = latestMtime(appDir);
+  return {
+    type: 'directory',
+    files: listFiles(appDir).map((file) => `/${file.replaceAll('\\', '/')}`),
+    mtimeMs: latestPackagedFile.mtimeMs,
+    readFile(relativeParts) {
+      return readFileSync(join(appDir, ...relativeParts));
+    },
+  };
+}
+
+function listFiles(dir, base = dir) {
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const child = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listFiles(child, base));
+    } else {
+      files.push(child.slice(base.length + 1));
+    }
+  }
+  return files;
 }
 
 function latestPackageInputMtime() {
