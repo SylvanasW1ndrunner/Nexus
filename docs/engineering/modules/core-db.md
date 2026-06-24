@@ -220,3 +220,23 @@ pnpm test:postgres
 - 在 `DatabaseDriverRegistry` 中登记新 driver 的工厂和 capability；上层只按 `engine` 选择并复用 driver，不直接依赖数据库 SDK。
 - 每个 driver 独立处理系统表查询、表结构详情、错误分类、`EXPLAIN` 语法、SSL 和连接参数。
 - 通用 SQL 安全与性能规则保留在 `core-db` 公共层；数据库方言差异通过 driver capability 暴露。
+## SQL 预审与 Agent 权限边界
+
+本轮把 SQL 预审明确为 `core-db` 的基础安全合同，而不是 Agent 私有逻辑。所有入口，包括 SQL 编辑器、IPC workflow、Agent 工具和具体 driver，都应复用同一套 `QuerySafetyReport` / `buildSqlExecutionPlan()` 语义。
+
+当前规则：
+
+- `analyzeSqlSafety()` 识别只读查询、写操作、DDL、多语句、`UPDATE/DELETE` 无 `WHERE`、宽查询性能 warning。
+- `WITH` 不再一律视为安全读；如果 CTE 内包含 `INSERT/UPDATE/DELETE/MERGE/CALL/CREATE/ALTER/DROP/TRUNCATE`，会标记为危险。
+- `EXPLAIN ANALYZE` 不再一律视为安全读；如果它包裹写操作或 DDL，会标记为危险，因为 PostgreSQL 会真实执行被分析语句。
+- `COPY/DO/GRANT/REVOKE/VACUUM/LOCK/REFRESH/REINDEX/COMMENT/SET/RESET/ANALYZE/CLUSTER` 等管理或会话状态语句至少需要 review。
+- 未知语句不会默认 safe，而是进入确认路径；在只读连接上未知/管理/写操作会被 blocked。
+- `PostgresDriver.execute()` 现在是最后一道硬门禁：只读连接阻断写操作；任何 `requiresConfirmation` 的 SQL 如果没有 `request.confirmed === true`，直接返回 `CONFIRMATION_REQUIRED`，不会触达 PostgreSQL pool。
+
+开源评估：
+
+- `node-sql-parser`：Apache-2.0，能生成 AST、tableList、columnList，适合后续轻量 AST 风险识别。
+- `SQLGlot`：MIT，Python 生态成熟，跨方言能力强，但会引入跨语言运行和打包问题，不适合作为当前 TypeScript core 的直接依赖。
+- `libpg_query` / `pgsql-parser`：复用真实 PostgreSQL parser，准确性最好，但涉及 native/parser 依赖和 Electron 打包评估，适合未来 AST 级 PostgreSQL 深度能力。
+
+本切片暂不引入 parser 依赖。边界是：当前规则用于执行前安全门禁，不承诺完整 AST、affected tables、列级权限、血缘分析或 SQL 改写。后续一旦实现 affectedTables、estimatedRows、函数副作用判断、跨数据库 SQL parser 或自动改写，必须重新按开源优先规则评估并隔离在 adapter 后面。

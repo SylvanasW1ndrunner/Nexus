@@ -105,6 +105,14 @@ export class PostgresDriver implements IDatabaseDriver {
       });
     }
 
+    if (safety.requiresConfirmation && request.confirmed !== true) {
+      return err({
+        code: 'CONFIRMATION_REQUIRED',
+        message: 'This query requires explicit confirmation before execution.',
+        detail: safety.reasons.join(' '),
+      });
+    }
+
     const pool = this.pools.get(connection.id);
     if (!pool) {
       return err({

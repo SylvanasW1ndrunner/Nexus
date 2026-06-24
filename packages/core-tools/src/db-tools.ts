@@ -1,5 +1,5 @@
 import { registerSchemaRagTools, type ToolRegistry } from '@dbagent/core-agent';
-import type { IDatabaseDriver, TableSummary } from '@dbagent/core-db';
+import { analyzeSqlSafety, type IDatabaseDriver, type TableSummary } from '@dbagent/core-db';
 import type { SchemaRagEngine } from '@dbagent/core-rag';
 import type { SavedConnection } from '@dbagent/shared';
 import { optionalPositiveInteger, optionalString, requireString } from './validation.js';
@@ -80,6 +80,25 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
 
   registry.register(
     {
+      name: 'audit_sql',
+      description: 'Audit SQL safety before execution. Use this before write, DDL, or uncertain SQL.',
+      inputSchema: objectSchema({
+        connectionId: { type: 'string' },
+        sql: { type: 'string' },
+      }),
+      dangerLevel: 'safe',
+      readonly: true,
+    },
+    (args) => {
+      const connectionId = requireString(args, 'connectionId');
+      const sql = requireString(args, 'sql');
+      const connection = requireConnection(getConnection, connectionId);
+      return analyzeSqlSafety(sql, { readOnly: connection.readOnly });
+    },
+  );
+
+  registry.register(
+    {
       name: 'query_database',
       description: 'Execute readonly SQL and return result rows. Use for SELECT-style analysis.',
       inputSchema: objectSchema({
@@ -95,6 +114,13 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
       const sql = requireString(args, 'sql');
       const limit = optionalPositiveInteger(args, 'limit', 100);
       const connection = requireConnection(getConnection, connectionId);
+      const safety = analyzeSqlSafety(sql, { readOnly: true });
+      if (safety.statementKind === 'EMPTY') {
+        throw new Error('SQL is empty.');
+      }
+      if (safety.blocked || safety.requiresConfirmation) {
+        throw new Error(`query_database only accepts readonly single-statement SQL. ${safety.reasons.join(' ')}`);
+      }
       const result = await driver.execute(
         {
           connectionId,
@@ -124,6 +150,13 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
       const connectionId = requireString(args, 'connectionId');
       const sql = requireString(args, 'sql');
       const connection = requireConnection(getConnection, connectionId);
+      const safety = analyzeSqlSafety(sql, { readOnly: connection.readOnly });
+      if (safety.blocked) {
+        throw new Error(`SQL is blocked by connection policy. ${safety.reasons.join(' ')}`);
+      }
+      if (safety.requiresConfirmation && args.confirmed !== true) {
+        throw new Error(`SQL requires explicit confirmation. ${safety.reasons.join(' ')}`);
+      }
       const result = await driver.execute({ connectionId, sql, confirmed: args.confirmed === true }, connection);
       if (!result.ok) throw new Error(result.error.message);
       return result.data;

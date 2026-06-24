@@ -110,6 +110,20 @@ stream store 与 checkpoint store 复用同一套 `redaction.ts` 脱敏规则，
 - 连续工具失败达到阈值后会停止 Agent run，返回 `tool_failed`，不会按成功轮次计费。
 - 单次工具调用默认 60 秒超时，超时会向工具传播 abort signal，并进入同一套失败恢复/熔断路径。
 
+### SQL 工具权限策略
+
+Agent 不直接解析 SQL，也不直接访问数据库 driver。SQL 风险判断归属 `core-db`，数据库工具适配归属 `core-tools`，`core-agent` 只负责工具可见性、执行模式、用户确认和拒绝后的可恢复对话。
+
+当前策略：
+
+- readonly Agent 模式下，`execute_sql` 因 `readonly: false` 会在工具 handler 前被拒绝；`audit_sql` 和 `query_database` 可以执行，但仍受 `allowedTools` 限制。
+- `query_database` 是面向分析任务的只读工具；模型即使在可写连接上请求写 SQL，也会被 `core-tools` 二次拦截。
+- `execute_sql` 是 high 风险工具。在 ask / auto 模式下需要 approval provider；没有批准时不会触达 handler。在 full-auto 模式下仍受工具风险等级、连接只读状态和 `core-db` driver 硬门禁约束。
+- 模型返回隐藏工具或未在 `allowedTools` 中声明的 `execute_sql` 时，`ReactAgent` 会拒绝该 tool call，并把拒绝结果写入工具执行记录。
+- Driver 层的 `CONFIRMATION_REQUIRED` 是最后兜底：即使上层误放行，未带确认标记的写 SQL 仍不会触达 PostgreSQL pool。
+
+后续必须补齐“确认来源”合同：`execute_sql.confirmed` 不能长期只依赖模型参数，应该由 permission manager 或主进程生成一次性 approval context，工具层校验后再传给 driver。该改动会作为安全增强切片单独实现，避免把用户确认和模型生成参数混在同一个信任域里。
+
 ## 行为评估
 
 `evaluateAgentBehavior()` 用于把 Agent 测试从内部路径推进到用户效果验收。调用方为每个真实用户任务提供期望状态、必须调用工具、禁止调用工具、工具执行状态、最终回答关键内容和迭代数范围；评估器返回每条 case 的失败原因和汇总通过率。

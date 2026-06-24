@@ -52,6 +52,82 @@ describe('analyzeSqlSafety', () => {
     });
   });
 
+  it('marks writable CTEs as dangerous instead of treating every WITH as readonly', () => {
+    const report = analyzeSqlSafety(
+      `
+        with deleted_orders as (
+          delete from orders where status = 'cancelled'
+          returning id
+        )
+        select count(*) from deleted_orders
+      `,
+      { readOnly: false },
+    );
+
+    expect(report).toMatchObject({
+      statementKind: 'WITH',
+      riskLevel: 'dangerous',
+      requiresConfirmation: true,
+    });
+    expect(report.reasons.join(' ')).toContain('contains DELETE');
+  });
+
+  it('blocks writable CTEs on read-only connections', () => {
+    const report = analyzeSqlSafety(
+      `
+        with deleted_orders as (
+          delete from orders where status = 'cancelled'
+          returning id
+        )
+        select count(*) from deleted_orders
+      `,
+      { readOnly: true },
+    );
+
+    expect(report).toMatchObject({
+      statementKind: 'WITH',
+      riskLevel: 'blocked',
+      blocked: true,
+      requiresConfirmation: false,
+    });
+  });
+
+  it('marks EXPLAIN ANALYZE around writes as dangerous because it executes the statement', () => {
+    const report = analyzeSqlSafety("explain analyze update orders set status = 'paid' where id = 1", {
+      readOnly: false,
+    });
+
+    expect(report).toMatchObject({
+      statementKind: 'EXPLAIN',
+      riskLevel: 'dangerous',
+      requiresConfirmation: true,
+    });
+    expect(report.reasons.join(' ')).toContain('contains UPDATE');
+  });
+
+  it('requires review for administrative and unknown SQL instead of marking them safe', () => {
+    expect(analyzeSqlSafety("copy orders from '/tmp/orders.csv' csv", { readOnly: false })).toMatchObject({
+      statementKind: 'COPY',
+      riskLevel: 'caution',
+      requiresConfirmation: true,
+    });
+    expect(analyzeSqlSafety('grant select on orders to analyst', { readOnly: false })).toMatchObject({
+      statementKind: 'GRANT',
+      riskLevel: 'caution',
+      requiresConfirmation: true,
+    });
+    expect(analyzeSqlSafety('do $$ begin raise notice $$', { readOnly: false })).toMatchObject({
+      statementKind: 'DO',
+      riskLevel: 'caution',
+      requiresConfirmation: true,
+    });
+    expect(analyzeSqlSafety('??', { readOnly: false })).toMatchObject({
+      statementKind: 'UNKNOWN',
+      riskLevel: 'caution',
+      requiresConfirmation: true,
+    });
+  });
+
   it('flags multiple statements for review', () => {
     const report = analyzeSqlSafety('select 1; select 2;', { readOnly: false });
 

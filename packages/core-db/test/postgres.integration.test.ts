@@ -125,6 +125,7 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
       {
         connectionId: writableConfig.id,
         sql: `create table ${tableName} (id integer primary key, label text not null);`,
+        confirmed: true,
       },
       connectResult.data,
     );
@@ -138,6 +139,7 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
             insert into ${tableName} (id, label) values (1, 'should_rollback');
             insert into missing_table_for_rollback_probe (id) values (1);
           `,
+          confirmed: true,
         },
         connectResult.data,
       );
@@ -158,6 +160,7 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
         {
           connectionId: writableConfig.id,
           sql: `drop table if exists ${tableName};`,
+          confirmed: true,
         },
         connectResult.data,
       );
@@ -182,6 +185,7 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
       {
         connectionId: writableConfig.id,
         sql: `create table ${tableName} (id integer primary key, label text not null, payload jsonb, active boolean not null default true);`,
+        confirmed: true,
       },
       connectResult.data,
     );
@@ -206,6 +210,7 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
         {
           connectionId: writableConfig.id,
           sql: preview.data.sql,
+          confirmed: true,
         },
         connectResult.data,
       );
@@ -245,6 +250,7 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
         {
           connectionId: writableConfig.id,
           sql: failedPreview.data.sql,
+          confirmed: true,
         },
         connectResult.data,
       );
@@ -265,6 +271,7 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
         {
           connectionId: writableConfig.id,
           sql: `drop table if exists ${tableName};`,
+          confirmed: true,
         },
         connectResult.data,
       );

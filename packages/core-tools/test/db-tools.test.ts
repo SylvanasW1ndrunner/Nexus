@@ -117,6 +117,7 @@ describe('registerDatabaseTools', () => {
       'list_schemas',
       'list_tables',
       'describe_table',
+      'audit_sql',
       'query_database',
       'execute_sql',
       'search_schema',
@@ -174,6 +175,72 @@ describe('registerDatabaseTools', () => {
     });
 
     expect(result.status).toBe('permission_denied');
+    expect(driver.executedSql).toEqual([]);
+  });
+
+  it('lets the agent audit SQL before execution', () => {
+    const registry = new ToolRegistry();
+    registerDatabaseTools({
+      registry,
+      driver: fakeDriver(),
+      getConnection: () => writableConnection(),
+    });
+
+    expect(
+      registry.get('audit_sql')?.handler(
+        {
+          connectionId: 'conn_1',
+          sql: 'delete from orders',
+        },
+        toolContext(),
+      ),
+    ).toMatchObject({
+      statementKind: 'DELETE',
+      riskLevel: 'dangerous',
+      requiresConfirmation: true,
+    });
+  });
+
+  it('rejects write SQL passed through the readonly query tool even on writable connections', async () => {
+    const registry = new ToolRegistry();
+    const driver = fakeDriver();
+    registerDatabaseTools({
+      registry,
+      driver,
+      getConnection: () => writableConnection(),
+    });
+
+    await expect(
+      registry.get('query_database')?.handler(
+        {
+          connectionId: 'conn_1',
+          sql: 'delete from orders where id = 1',
+        },
+        toolContext(),
+      ),
+    ).rejects.toThrow('query_database only accepts readonly single-statement SQL');
+    expect(driver.executedSql).toEqual([]);
+  });
+
+  it('requires explicit confirmation before execute_sql reaches the driver', async () => {
+    const registry = new ToolRegistry();
+    const driver = fakeDriver();
+    registerDatabaseTools({
+      registry,
+      driver,
+      getConnection: () => writableConnection(),
+    });
+
+    await expect(
+      registry.get('execute_sql')?.handler(
+        {
+          connectionId: 'conn_1',
+          sql: "update orders set status = 'paid'",
+          confirmed: false,
+        },
+        toolContext(),
+      ),
+    ).rejects.toThrow('SQL requires explicit confirmation');
     expect(driver.executedSql).toEqual([]);
   });
 
@@ -291,6 +358,13 @@ function savedConnection(): SavedConnection {
     status: 'connected',
     createdAt: '2026-06-17T00:00:00.000Z',
     updatedAt: '2026-06-17T00:00:00.000Z',
+  };
+}
+
+function writableConnection(): SavedConnection {
+  return {
+    ...savedConnection(),
+    readOnly: false,
   };
 }
 

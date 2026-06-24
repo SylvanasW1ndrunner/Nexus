@@ -55,6 +55,24 @@ describe('PostgresDriver runtime errors', () => {
     });
   });
 
+  it('requires confirmation for write SQL before hitting the PostgreSQL pool', async () => {
+    const driver = driverWithQueryError(pgError('ECONNRESET'));
+
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: "update users set status = 'inactive' where id = 1",
+      },
+      { ...connection, readOnly: false },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatchObject({
+      code: 'CONFIRMATION_REQUIRED',
+    });
+  });
+
   it('passes parameterized query values to the PostgreSQL pool', async () => {
     const calls: unknown[][] = [];
     const driver = new PostgresDriver();

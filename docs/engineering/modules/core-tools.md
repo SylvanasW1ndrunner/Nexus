@@ -113,3 +113,15 @@
 2026-06-23 验证记录：`pnpm test:postgres` 已在本机真实 PostgreSQL 16 上通过；`pnpm test:agent-rag-live` 已在 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` 上通过，live case 确认模型真实调用 `search_schema` 和 `query_database`。
 
 2026-06-24 复验记录：使用本机 `.env` 中的测试专用 SiliconFlow 环境变量运行 `scripts/run-agent-rag-live-tests.mjs`，结果为 5 passed、1 skipped；live case 再次确认模型真实调用 `search_schema` 和 `query_database`，不是普通文本回答。
+
+## Agent 数据库工具安全合同
+
+数据库工具现在按“先预审、再只读查询、最后确认执行”的顺序暴露给 Agent：
+
+- `audit_sql`：只读安全工具，接收 `connectionId` 和 `sql`，返回 `core-db` 的 `QuerySafetyReport`。它不连接执行 SQL，不改变数据库状态，供 Agent 在生成执行计划或向用户解释风险时使用。
+- `query_database`：只读查询工具。即使当前连接本身是可写连接，该工具也会以 `readOnly: true` 重新调用 `analyzeSqlSafety()`，只允许单条只读查询；写入、DDL、多语句、未知语句、`WITH` 包裹写操作和 `EXPLAIN ANALYZE` 包裹写操作都会在触达 driver 前拒绝。
+- `execute_sql`：写入/DDL 执行工具，`dangerLevel` 为 `high` 且 `readonly: false`。工具 handler 会先调用 `analyzeSqlSafety()`，只读连接阻断写操作；需要确认的 SQL 如果没有 `confirmed: true`，不会调用 driver。
+
+需要注意：`execute_sql.confirmed` 是执行层的技术门禁，不等同于“模型自己声称已经获得用户确认”。真正的用户确认来源仍应由 `core-agent` 的 permission / approval provider 或后续主进程确认流程提供；本模块只保证没有确认标记时不会误执行，并把 driver 作为最后一道兜底。后续如果加入更严格的 approval token，应在 `core-tools` 中校验确认来源，而不是只信任模型传入的布尔值。
+
+当前工具层不引入第三方 SQL parser。原因是本轮目标是执行安全边界和 Agent 工具合同闭环；AST 级 affected table、列级权限、函数副作用识别、SQL 改写和跨方言语义分析应作为后续 parser adapter 单独切片处理，并先完成开源方案评估与打包验证。
