@@ -192,3 +192,21 @@ Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manife
 - `blockedBySkillToolNames` 表示插件允许但当前 Skill 未声明的工具。
 
 上层 Agent runner 应把 `agentAllowedToolNames` 传入 `ReactAgent.run({ allowedTools })`。Skill 不能扩大工具权限；它只能在官方插件和运行时策略允许的范围内进一步收窄工具集合。
+
+## Skill Agent Runner
+
+`skill-agent-runner.ts` 提供无 UI 的 Skill Agent 执行 adapter：
+
+- `renderSkillAgentUserMessage(plan, prefix?)`：把 Skill 名称、说明、系统补充、步骤、输出格式和用户任务渲染成稳定中文任务输入。
+- `runSkillAgent(agent, options)`：
+  - 调用 `resolveOfficialPluginAgentTools()` 生成最终 `agentAllowedToolNames`。
+  - 调用传入的 `agent.run()`，并把最终 allowed tools 传入 `ReactAgent.run({ allowedTools })`。
+  - 返回 Agent 结果、工具策略诊断和实际渲染后的用户消息。
+
+该 adapter 的 `SkillAgentPlan` 与 `core-skills` 的执行计划结构兼容，但 `core-tools` 不直接依赖 `core-skills` 包，避免形成不必要的模块耦合。上层主进程可以把 `SkillRegistry.createExecutionPlan()` 的结果传给 runner。
+
+安全边界：
+
+- Skill plan 不能直接获得工具执行权。
+- runner 不捕获 provider / tool / quota 错误，不隐藏失败原因。
+- 真实执行仍由 `ReactAgent`、permission manager、approval provider 和各 tool handler 兜底。
