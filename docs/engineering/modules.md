@@ -300,6 +300,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - SQL 保存使用注释元数据：`@name`、`@description`、`@connection`、`@tags`。
 - Python 配置支持 system、venv、conda、embedded、docker 的合约层字段。
 - 脚本工具声明支持 `DBAgent Tool: name` 和 `@tool name` 两种 docstring 形式。
+- `WorkspaceAutosaveStore` 提供 SQL、Python、Markdown 和文本草稿的自动保存合同。调用方可以 schedule debounce 写入，也可以在退出前调用 `flushAll()` 强制落盘。草稿以 hash 文件名和原子 JSON 写入保存，启动恢复时按最新保存时间列出；损坏草稿会被跳过，不影响其他草稿恢复。
 
 测试重点：
 
@@ -310,6 +311,10 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 发现 Python 脚本工具声明。
 - 文件列表不暴露 `.dbagent` 内部。
 - 普通目录没有有效配置时不能被打开为工作区。
+- autosave debounce 只保存最新编辑内容。
+- SQL/Python 多草稿在退出前可以 `flushAll()` 同时落盘。
+- 启动恢复可以按类型和工作区过滤草稿。
+- 损坏 autosave 文件不阻塞恢复扫描。
 
 ## `packages/core-skills`
 
