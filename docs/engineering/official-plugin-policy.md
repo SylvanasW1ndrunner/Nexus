@@ -77,3 +77,14 @@ DBAgent 的长期架构目标不是把所有能力堆进主程序，而是形成
 - 生成的 `allowedTools` 只是 Agent 第一层白名单，不能替代 permission manager、approval provider、tool handler 和底层服务的安全检查。
 
 这样做的目的，是让官方内置能力和未来第三方插件共用同一套发现、权限、审计和测试路径，避免主程序内部出现绕过插件合约的“特权工具”。
+
+### 与 Skill 的关系
+
+Skill 的 `allowedTools` 是任务级收窄条件，不是放权条件。最终 Agent 工具列表必须由以下交集得出：
+
+1. 当前真实 `ToolRegistry` 中存在的工具。
+2. 官方插件或第三方插件策略允许的工具。
+3. 当前 Agent mode / readonly / danger level 允许的工具。
+4. 当前 Skill 声明允许的工具。
+
+如果 Skill 声明了某个工具，但对应插件被禁用、runtime 中不存在、风险等级超出当前模式，或缺少动态来源元数据，该工具不得进入 Agent `allowedTools`。

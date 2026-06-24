@@ -176,3 +176,19 @@ Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manife
 - 未声明来源的动态工具不会被官方插件动态贡献自动放行。
 
 后续 Agent / Skill 策略层应先从 `ToolRegistry.list()` 读取真实工具，再调用 `resolveRuntimeTools()` 生成 `allowedTools`，最后仍由 `core-agent` 的 permission manager、approval provider 和具体 handler 负责执行前兜底。
+
+## Agent / Skill 工具白名单策略
+
+`official-plugin-tool-policy.ts` 提供上层策略函数，用于把官方插件策略接到真实 Agent run：
+
+- `runtimeToolsFromToolRegistry(registry)`：从 `ToolRegistry.list()` 提取工具名、风险等级、只读标记和来源元数据。
+- `resolveOfficialPluginAgentTools(options)`：合并官方插件启用状态、runtime tools、只读/风险过滤和可选 Skill `allowedTools`。
+
+调用语义：
+
+- 未选择 Skill 时，`agentAllowedToolNames` 等于官方插件策略允许的运行时工具。
+- 选择 Skill 时，`agentAllowedToolNames` 按 Skill `allowedTools` 原始顺序输出，但只保留插件策略允许且 runtime 中真实存在的工具。
+- `blockedByPluginToolNames` 表示 Skill 想用但插件策略、运行时缺失、禁用状态或风险过滤导致不可用的工具。
+- `blockedBySkillToolNames` 表示插件允许但当前 Skill 未声明的工具。
+
+上层 Agent runner 应把 `agentAllowedToolNames` 传入 `ReactAgent.run({ allowedTools })`。Skill 不能扩大工具权限；它只能在官方插件和运行时策略允许的范围内进一步收窄工具集合。

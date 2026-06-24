@@ -7,6 +7,7 @@ export * from './mcp-stdio-launcher.js';
 export * from './mcp-tool-adapter.js';
 export * from './mcp-tool-registration-manager.js';
 export * from './official-plugin-registry.js';
+export * from './official-plugin-tool-policy.js';
 export * from './validation.js';
 export * from './workspace-sandbox.js';
 export * from './workspace-script-tools.js';
