@@ -60,6 +60,65 @@ describe('OfficialPluginRegistry', () => {
     expect(registry.resolveToolContributions({ maxDangerLevel: 'medium' }).toolNames).not.toContain('execute_sql');
   });
 
+  it('resolves allowed runtime tools from static official tools and dynamic tool sources', () => {
+    const registry = createDefaultOfficialPluginRegistry();
+    const runtimeTools = [
+      runtimeTool('query_database', 'medium', true),
+      runtimeTool('execute_sql', 'high', false),
+      runtimeTool('read_workspace_file', 'safe', true),
+      runtimeTool('orders_server__list_orders', 'safe', true, 'user-mcp', 'orders_server', 'list_orders'),
+      runtimeTool('analytics_server__drop_table', 'high', false, 'market-mcp', 'analytics_server', 'drop_table'),
+      runtimeTool('workspace_script:summarize_orders', 'medium', false, 'workspace-script', 'scripts/summarize_orders.py'),
+      runtimeTool('unregistered_custom_tool', 'safe', true, 'skill'),
+    ];
+
+    const resolved = registry.resolveRuntimeTools({ runtimeTools });
+
+    expect(resolved.allowedToolNames).toEqual([
+      'query_database',
+      'execute_sql',
+      'read_workspace_file',
+      'orders_server__list_orders',
+      'analytics_server__drop_table',
+      'workspace_script:summarize_orders',
+    ]);
+    expect(resolved.blockedToolNames).toEqual(['unregistered_custom_tool']);
+    expect(resolved.staticToolNames).toEqual(['query_database', 'execute_sql', 'read_workspace_file']);
+    expect(resolved.dynamicToolNames).toEqual([
+      'orders_server__list_orders',
+      'analytics_server__drop_table',
+      'workspace_script:summarize_orders',
+    ]);
+    expect(resolved.missingStaticToolNames).toContain('list_schemas');
+    expect(resolved.missingStaticToolNames).not.toContain('query_database');
+  });
+
+  it('applies plugin, readonly, and danger filters to runtime tool allow lists', () => {
+    const registry = createDefaultOfficialPluginRegistry();
+    const runtimeTools = [
+      runtimeTool('query_database', 'medium', true),
+      runtimeTool('execute_sql', 'high', false),
+      runtimeTool('orders_server__list_orders', 'safe', true, 'user-mcp', 'orders_server', 'list_orders'),
+      runtimeTool('workspace_script:summarize_orders', 'medium', false, 'workspace-script', 'scripts/summarize_orders.py'),
+    ];
+
+    expect(
+      registry.resolveRuntimeTools({
+        runtimeTools,
+        disabledPluginIds: ['official.mcp-client'],
+      }).allowedToolNames,
+    ).toEqual(['query_database', 'execute_sql', 'workspace_script:summarize_orders']);
+
+    expect(registry.resolveRuntimeTools({ runtimeTools, readonlyOnly: true }).allowedToolNames).toEqual([
+      'query_database',
+    ]);
+
+    expect(registry.resolveRuntimeTools({ runtimeTools, maxDangerLevel: 'medium' }).allowedToolNames).toEqual([
+      'query_database',
+      'workspace_script:summarize_orders',
+    ]);
+  });
+
   it('enables an official plugin that is disabled by default only when explicitly requested', () => {
     const disabledByDefault = {
       ...minimalManifest('official.experimental-skill'),
@@ -122,6 +181,29 @@ describe('OfficialPluginRegistry', () => {
           },
         ]),
     ).toThrow('Tool test_tool references unknown permission missing.permission.');
+
+    expect(
+      () =>
+        new OfficialPluginRegistry([
+          {
+            ...minimalManifest('official.dynamic-without-pattern'),
+            tools: [
+              {
+                ...minimalManifest('x').tools[0]!,
+                name: 'dynamic:*',
+                dynamic: true,
+                namePattern: '',
+              },
+            ],
+          },
+        ]),
+    ).toThrow('Dynamic tool dynamic:* must declare namePattern.');
+
+    expect(() =>
+      registry.resolveRuntimeTools({
+        runtimeTools: [runtimeTool('query_database', 'medium', true), runtimeTool('query_database', 'medium', true)],
+      }),
+    ).toThrow('Duplicate runtime tool descriptor: query_database');
   });
 
   it('returns cloned manifests so callers cannot mutate the registry', () => {
@@ -171,5 +253,23 @@ function minimalManifest(id: string): OfficialPluginManifest {
         permissions: ['test.permission'],
       },
     ],
+  };
+}
+
+function runtimeTool(
+  name: string,
+  dangerLevel: 'safe' | 'medium' | 'high' | 'critical',
+  readonly: boolean,
+  source?: string,
+  sourceId?: string,
+  originalName?: string,
+) {
+  return {
+    name,
+    dangerLevel,
+    readonly,
+    ...(source === undefined ? {} : { source }),
+    ...(sourceId === undefined ? {} : { sourceId }),
+    ...(originalName === undefined ? {} : { originalName }),
   };
 }

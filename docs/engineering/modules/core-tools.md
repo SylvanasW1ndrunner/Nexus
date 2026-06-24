@@ -155,3 +155,24 @@ Manifest 稳定字段包括 `id`、`name`、`version`、`publisher`、`category`
 Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manifest 的静态 tool 重名和未知 permission 引用。动态工具必须通过 `dynamic: true` 和 `namePattern` 表示来源，不能提前伪装成真实工具。官方插件不会获得特殊放权；真实执行仍必须经过 `ToolRegistry`、`allowedTools`、`dangerLevel`、`readonly`、approval provenance 和具体工具 handler 的边界。
 
 本轮参考了 VS Code Extension Manifest 的声明式元信息/contribution points 模式，以及 MCP Tools 规范中“工具有唯一 name、schema、annotations，敏感操作需要用户确认、超时和审计”的安全原则；但没有引入新依赖，也没有接入网络市场。
+
+## 官方插件运行时工具策略
+
+`OfficialPluginRegistry.resolveRuntimeTools()` 将官方插件 manifest 和当前真实 runtime tools 连接起来，用于生成 Agent / Skill 可用的 `allowedToolNames`。该函数仍然是纯后端合同，不注册 handler，不启动插件，不访问网络，也不替代 Agent 权限系统。
+
+匹配规则：
+
+- 静态工具按 tool name 匹配，例如 `query_database`、`execute_sql`、`read_workspace_file`。
+- 动态工具按 runtime source 匹配，而不是只靠名称前缀。当前官方动态来源为：
+  - `workspace_script:*` 匹配 `source: "workspace-script"`。
+  - `mcp:*` 匹配 `source: "user-mcp"` 和 `source: "market-mcp"`。
+- `readonlyOnly` 和 `maxDangerLevel` 同时作用于 manifest 贡献和真实 runtime tool，避免真实工具风险高于声明时被放行。
+- 重复 runtime tool name 会直接报错，避免上层 Agent 得到不确定白名单。
+
+当前工具来源元数据：
+
+- MCP adapter 已在 `AdaptedMcpToolDefinition` 中写入 `source`、`sourceId`、`originalName`。
+- Workspace script tools 现在写入 `source: "workspace-script"`、脚本相对路径和原始工具名。
+- 未声明来源的动态工具不会被官方插件动态贡献自动放行。
+
+后续 Agent / Skill 策略层应先从 `ToolRegistry.list()` 读取真实工具，再调用 `resolveRuntimeTools()` 生成 `allowedTools`，最后仍由 `core-agent` 的 permission manager、approval provider 和具体 handler 负责执行前兜底。

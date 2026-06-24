@@ -46,6 +46,9 @@ describe('workspace Python script Agent tools', () => {
     expect(tool).toMatchObject({
       dangerLevel: 'medium',
       readonly: false,
+      source: 'workspace-script',
+      sourceId: 'scripts/summarize_orders.py',
+      originalName: 'workspace_script:summarize_orders',
     });
 
     await expect(tool?.handler({ count: 42, region: '华东' }, context())).resolves.toMatchObject({
@@ -61,9 +64,9 @@ describe('workspace Python script Agent tools', () => {
       registry,
       workspace: new WorkspaceCore(),
       getWorkspaceRoot: () => rootPath,
-      runner: async () => {
+      runner: () => {
         launched = true;
-        return { exitCode: 0, stdout: '', stderr: '', elapsedMs: 0 };
+        return Promise.resolve({ exitCode: 0, stdout: '', stderr: '', elapsedMs: 0 });
       },
     });
 
@@ -79,7 +82,7 @@ describe('workspace Python script Agent tools', () => {
         registry: new ToolRegistry(),
         workspace: new WorkspaceCore(),
         getWorkspaceRoot: () => undefined,
-        runner: async () => ({ exitCode: 0, stdout: '', stderr: '', elapsedMs: 0 }),
+        runner: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '', elapsedMs: 0 }),
       }),
     ).rejects.toThrow('No active workspace.');
   });
@@ -109,11 +112,11 @@ describe('workspace Python script Agent tools', () => {
         pythonPath: python,
       }),
     ).rejects.toMatchObject({
-      message: expect.stringContaining('Python 脚本执行失败，退出码 2'),
+      message: stringContaining('Python 脚本执行失败，退出码 2'),
       result: {
         exitCode: 2,
         stdout: '准备处理订单\n',
-        stderr: expect.stringContaining('字段 amount_missing 不存在'),
+        stderr: stringContaining('字段 amount_missing 不存在'),
       },
     });
   });
@@ -337,7 +340,7 @@ describe('workspace Python script Agent tools', () => {
     ).resolves.toMatchObject({
       exitCode: 0,
       stdoutTruncated: true,
-      stdout: expect.stringContaining('[output truncated to last 20 bytes]'),
+      stdout: stringContaining('[output truncated to last 20 bytes]'),
     });
   });
 });
@@ -397,4 +400,8 @@ function context() {
       aborted: false,
     },
   };
+}
+
+function stringContaining(value: string): unknown {
+  return expect.stringContaining(value) as unknown;
 }

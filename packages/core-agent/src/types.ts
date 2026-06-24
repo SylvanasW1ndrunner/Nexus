@@ -67,9 +67,23 @@ export type ToolDangerLevel = 'safe' | 'medium' | 'high' | 'critical';
 
 export type ToolPermissionDecision = 'allow' | 'deny' | 'ask';
 
+export type AgentToolSource =
+  | 'database'
+  | 'schema-rag'
+  | 'workspace'
+  | 'workspace-script'
+  | 'user-mcp'
+  | 'market-mcp'
+  | 'skill'
+  | 'official'
+  | 'unknown';
+
 export type AgentToolDefinition = LlmTool & {
   dangerLevel: ToolDangerLevel;
   readonly?: boolean;
+  source?: AgentToolSource;
+  sourceId?: string;
+  originalName?: string;
 };
 
 export type AgentToolApproval = {

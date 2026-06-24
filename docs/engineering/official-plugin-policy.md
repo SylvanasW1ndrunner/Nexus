@@ -67,3 +67,13 @@ DBAgent 的长期架构目标不是把所有能力堆进主程序，而是形成
 - secret 不进入 renderer、Agent context、日志、文档或提交历史。
 - 打包影响和离线行为有记录。
 
+## 运行时工具白名单
+
+官方插件 manifest 只声明能力和权限，不直接注册 handler。运行时必须先从真实 `ToolRegistry` 获取工具列表，再通过官方插件策略解析出 `allowedTools`：
+
+- 静态工具按工具名匹配。
+- MCP、workspace script 等动态工具必须由 adapter 写入 `source`、`sourceId`、`originalName`，再按 `runtimeSources` 匹配。
+- 禁用插件、只读模式、最大风险等级必须同时约束 manifest 贡献和真实工具。
+- 生成的 `allowedTools` 只是 Agent 第一层白名单，不能替代 permission manager、approval provider、tool handler 和底层服务的安全检查。
+
+这样做的目的，是让官方内置能力和未来第三方插件共用同一套发现、权限、审计和测试路径，避免主程序内部出现绕过插件合约的“特权工具”。

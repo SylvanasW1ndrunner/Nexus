@@ -9,6 +9,16 @@ export type OfficialPluginApprovalPolicy = 'never' | 'mode-dependent' | 'always'
 export type OfficialPluginNetworkAccess = 'none' | 'local' | 'remote';
 export type OfficialPluginProcessAccess = 'none' | 'managed-child-process' | 'external-service';
 export type OfficialPluginAuditLevel = 'none' | 'metadata' | 'metadata-and-arguments';
+export type OfficialPluginRuntimeToolSource =
+  | 'database'
+  | 'schema-rag'
+  | 'workspace'
+  | 'workspace-script'
+  | 'user-mcp'
+  | 'market-mcp'
+  | 'skill'
+  | 'official'
+  | 'unknown';
 export type OfficialPluginResourceScope =
   | 'database.connection'
   | 'rag.index'
@@ -41,6 +51,7 @@ export type OfficialPluginToolContribution = {
   permissions: string[];
   dynamic?: boolean;
   namePattern?: string;
+  runtimeSources?: OfficialPluginRuntimeToolSource[];
 };
 
 export type OfficialPluginManifest = {
@@ -68,6 +79,28 @@ export type OfficialPluginToolResolutionOptions = {
 export type OfficialPluginToolResolution = {
   toolNames: string[];
   dynamicTools: OfficialPluginToolContribution[];
+};
+
+export type OfficialPluginRuntimeToolDescriptor = {
+  name: string;
+  dangerLevel: ToolDangerLevel;
+  readonly?: boolean;
+  source?: string;
+  sourceId?: string;
+  originalName?: string;
+};
+
+export type OfficialPluginRuntimeToolResolutionOptions = OfficialPluginToolResolutionOptions & {
+  runtimeTools: OfficialPluginRuntimeToolDescriptor[];
+};
+
+export type OfficialPluginRuntimeToolResolution = {
+  allowedToolNames: string[];
+  blockedToolNames: string[];
+  staticToolNames: string[];
+  dynamicToolNames: string[];
+  missingStaticToolNames: string[];
+  dynamicContributions: OfficialPluginToolContribution[];
 };
 
 const dangerRank: Record<ToolDangerLevel, number> = {
@@ -134,6 +167,44 @@ export class OfficialPluginRegistry {
     }
 
     return { toolNames, dynamicTools };
+  }
+
+  resolveRuntimeTools(options: OfficialPluginRuntimeToolResolutionOptions): OfficialPluginRuntimeToolResolution {
+    const resolved = this.resolveToolContributions(options);
+    const staticToolNames = new Set(resolved.toolNames);
+    const runtimeToolNames = new Set<string>();
+    const allowedToolNames: string[] = [];
+    const blockedToolNames: string[] = [];
+    const dynamicToolNames: string[] = [];
+
+    for (const runtimeTool of options.runtimeTools) {
+      if (runtimeToolNames.has(runtimeTool.name)) {
+        throw new Error(`Duplicate runtime tool descriptor: ${runtimeTool.name}`);
+      }
+      runtimeToolNames.add(runtimeTool.name);
+
+      const staticAllowed = staticToolNames.has(runtimeTool.name);
+      const dynamicAllowed = resolved.dynamicTools.some((contribution) =>
+        dynamicContributionMatchesRuntimeTool(contribution, runtimeTool),
+      );
+      const runtimeAllowed = runtimeToolPassesResolutionOptions(runtimeTool, options);
+
+      if ((staticAllowed || dynamicAllowed) && runtimeAllowed) {
+        allowedToolNames.push(runtimeTool.name);
+        if (dynamicAllowed && !staticAllowed) dynamicToolNames.push(runtimeTool.name);
+      } else {
+        blockedToolNames.push(runtimeTool.name);
+      }
+    }
+
+    return {
+      allowedToolNames,
+      blockedToolNames,
+      staticToolNames: resolved.toolNames.filter((name) => runtimeToolNames.has(name)),
+      dynamicToolNames,
+      missingStaticToolNames: resolved.toolNames.filter((name) => !runtimeToolNames.has(name)),
+      dynamicContributions: resolved.dynamicTools,
+    };
   }
 }
 
@@ -276,6 +347,7 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
         readonly: false,
         permissions: ['workspace.process.execute'],
         dynamic: true,
+        runtimeSources: ['workspace-script'],
         namePattern: '工作区脚本声明的工具名',
       },
     ],
@@ -309,6 +381,7 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
         readonly: false,
         permissions: ['mcp.tool.invoke'],
         dynamic: true,
+        runtimeSources: ['user-mcp', 'market-mcp'],
         namePattern: '<serverId>__<toolName>',
       },
     ],
@@ -376,6 +449,14 @@ function validateManifest(manifest: OfficialPluginManifest): void {
         throw new Error(`Tool ${contribution.name} references unknown permission ${permission}.`);
       }
     }
+    if (contribution.dynamic && !contribution.namePattern?.trim()) {
+      throw new Error(`Dynamic tool ${contribution.name} must declare namePattern.`);
+    }
+    for (const runtimeSource of contribution.runtimeSources ?? []) {
+      if (!runtimeSource.trim()) {
+        throw new Error(`Tool ${contribution.name} declares an empty runtime source.`);
+      }
+    }
   }
 }
 
@@ -417,5 +498,32 @@ function cloneTool(tool: OfficialPluginToolContribution): OfficialPluginToolCont
   return {
     ...tool,
     permissions: [...tool.permissions],
+    ...(tool.runtimeSources === undefined ? {} : { runtimeSources: [...tool.runtimeSources] }),
   };
+}
+
+function runtimeToolPassesResolutionOptions(
+  runtimeTool: OfficialPluginRuntimeToolDescriptor,
+  options: Pick<OfficialPluginToolResolutionOptions, 'readonlyOnly' | 'maxDangerLevel'>,
+): boolean {
+  if (options.readonlyOnly === true && runtimeTool.readonly !== true) return false;
+  if (options.maxDangerLevel && dangerRank[runtimeTool.dangerLevel] > dangerRank[options.maxDangerLevel]) return false;
+  return true;
+}
+
+function dynamicContributionMatchesRuntimeTool(
+  contribution: OfficialPluginToolContribution,
+  runtimeTool: OfficialPluginRuntimeToolDescriptor,
+): boolean {
+  if (!contribution.dynamic) return false;
+  if (contribution.runtimeSources && contribution.runtimeSources.length > 0) {
+    return (
+      runtimeTool.source !== undefined &&
+      contribution.runtimeSources.includes(runtimeTool.source as OfficialPluginRuntimeToolSource)
+    );
+  }
+  if (contribution.name.endsWith('*')) {
+    return runtimeTool.name.startsWith(contribution.name.slice(0, -1));
+  }
+  return false;
 }

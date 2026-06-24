@@ -61,14 +61,19 @@ export async function registerWorkspaceScriptTools(
   const scriptTools = await workspace.discoverScriptTools(rootPath);
 
   for (const scriptTool of scriptTools) {
+    const definition = {
+      name: scriptTool.name,
+      description: scriptTool.description,
+      inputSchema: scriptToolSchema(scriptTool),
+      dangerLevel: 'medium' as const,
+      readonly: false,
+      source: 'workspace-script' as const,
+      sourceId: scriptTool.relativePath,
+      originalName: scriptTool.name,
+    };
+
     registry.register(
-      {
-        name: scriptTool.name,
-        description: scriptTool.description,
-        inputSchema: scriptToolSchema(scriptTool),
-        dangerLevel: 'medium',
-        readonly: false,
-      },
+      definition,
       async (args, context) =>
         runner({
           rootPath,
