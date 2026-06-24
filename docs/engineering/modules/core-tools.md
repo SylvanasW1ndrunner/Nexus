@@ -130,3 +130,28 @@
 因此模型直接伪造 `confirmed: true` 不会执行写 SQL；只有经过 `core-agent` approval provider 批准后，工具层才会继续调用 driver。driver 仍保留 `CONFIRMATION_REQUIRED` 兜底，防止绕过工具层的未确认写入。
 
 当前工具层不引入第三方 SQL parser。原因是本轮目标是执行安全边界和 Agent 工具合同闭环；AST 级 affected table、列级权限、函数副作用识别、SQL 改写和跨方言语义分析应作为后续 parser adapter 单独切片处理，并先完成开源方案评估与打包验证。
+
+## 官方插件能力清单
+
+`packages/core-tools/src/official-plugin-registry.ts` 提供官方能力 manifest registry。它不是运行时插件系统，也不注册 tool handler；它只声明官方内置能力、工具贡献、权限范围和安全元数据，用于后续插件市场、设置页、Skill allowedTools 过滤和 Agent 权限策略统一读取。
+
+当前默认官方插件：
+
+- `official.database-postgres`：PostgreSQL schema 浏览、SQL 预审、只读查询和写入执行。
+- `official.schema-rag`：本地 Schema RAG 检索、关系上下文和上下文构建。
+- `official.workspace-files`：工作区文件列出、读取和原子写入。
+- `official.workspace-python`：工作区 Python 脚本动态工具，manifest 中以 `workspace_script:*` 表示动态贡献。
+- `official.mcp-client`：MCP 客户端和动态 MCP 工具，manifest 中以 `mcp:*` 表示动态贡献。
+
+Manifest 稳定字段包括 `id`、`name`、`version`、`publisher`、`category`、`enabledByDefault`、`capabilities`、`permissions` 和 `tools`。权限字段必须声明：
+
+- `resourceScopes`：例如 `database.connection`、`workspace.root`、`mcp.server`。
+- `approvalPolicy`：`never`、`mode-dependent` 或 `always`。
+- `networkAccess`：`none`、`local` 或 `remote`。
+- `processAccess`：`none`、`managed-child-process` 或 `external-service`。
+- `secretKinds`：只声明密钥类别，不能包含密钥明文。
+- `auditLevel`：审计元数据粒度。
+
+Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manifest 的静态 tool 重名和未知 permission 引用。动态工具必须通过 `dynamic: true` 和 `namePattern` 表示来源，不能提前伪装成真实工具。官方插件不会获得特殊放权；真实执行仍必须经过 `ToolRegistry`、`allowedTools`、`dangerLevel`、`readonly`、approval provenance 和具体工具 handler 的边界。
+
+本轮参考了 VS Code Extension Manifest 的声明式元信息/contribution points 模式，以及 MCP Tools 规范中“工具有唯一 name、schema、annotations，敏感操作需要用户确认、超时和审计”的安全原则；但没有引入新依赖，也没有接入网络市场。
