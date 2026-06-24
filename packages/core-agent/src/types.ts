@@ -72,15 +72,24 @@ export type AgentToolDefinition = LlmTool & {
   readonly?: boolean;
 };
 
+export type AgentToolApproval = {
+  granted: true;
+  source: 'approval-provider';
+  toolCallId: string;
+  toolName: string;
+  approvedAt: string;
+};
+
 export type AgentToolContext = {
   session: AgentSession;
   signal?: AbortSignal;
+  approval?: AgentToolApproval;
 };
 
 export type AgentToolHandler = (
   args: Record<string, unknown>,
   context: AgentToolContext,
-) => Promise<unknown> | unknown;
+) => unknown;
 
 export type RegisteredAgentTool = AgentToolDefinition & {
   handler: AgentToolHandler;

@@ -41,5 +41,5 @@
 ## 已知边界
 
 - 当前安全预审仍是保守文本规则，不承诺完整 SQL AST 解析。
-- 用户确认来源仍需升级：后续应由 permission manager 或主进程签发确认上下文，工具层校验后再把 `confirmed` 传给 driver。
+- 用户确认来源已在后续安全切片中升级为 approval provenance；历史记录保留该风险是为了说明本切片的原始边界。
 - 真实 PostgreSQL readonly role、planner estimated rows 和函数副作用识别需要后续专项测试补齐。

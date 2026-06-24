@@ -122,7 +122,9 @@ Agent 不直接解析 SQL，也不直接访问数据库 driver。SQL 风险判�
 - 模型返回隐藏工具或未在 `allowedTools` 中声明的 `execute_sql` 时，`ReactAgent` 会拒绝该 tool call，并把拒绝结果写入工具执行记录。
 - Driver 层的 `CONFIRMATION_REQUIRED` 是最后兜底：即使上层误放行，未带确认标记的写 SQL 仍不会触达 PostgreSQL pool。
 
-后续必须补齐“确认来源”合同：`execute_sql.confirmed` 不能长期只依赖模型参数，应该由 permission manager 或主进程生成一次性 approval context，工具层校验后再传给 driver。该改动会作为安全增强切片单独实现，避免把用户确认和模型生成参数混在同一个信任域里。
+`core-agent` 已补齐“确认来源”合同：`PermissionManager.checkDetailed()` 会区分 `automatic` allow 和 `approval-provider` allow。只有 approval provider 批准后的工具调用，`ReactAgent` 才会把 `approval` provenance 写入 `AgentToolContext`，包含 tool call id、tool name 和批准时间。这样 `execute_sql.confirmed` 不再只依赖模型参数；工具层可以校验确认来源，再决定是否把 `confirmed` 传给 driver。
+
+当前边界：full-auto 对 high 工具的自动 allow 不会生成 approval provenance，因此需要确认的 SQL 仍会被 `core-tools` 拦截。后续如果产品要支持“全自动但允许特定写入”的模式，应新增显式策略和审计记录，而不是复用模型传入的 `confirmed: true`。
 
 ## 行为评估
 

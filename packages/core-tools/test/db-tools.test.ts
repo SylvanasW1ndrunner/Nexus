@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ReactAgent, ToolRegistry } from '@dbagent/core-agent';
+import { ReactAgent, ToolRegistry, type AgentToolApproval } from '@dbagent/core-agent';
 import { LlmRouter, type LlmChatResponse, type LlmProvider } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
 import { SchemaRagEngine } from '@dbagent/core-rag';
@@ -244,6 +244,58 @@ describe('registerDatabaseTools', () => {
     expect(driver.executedSql).toEqual([]);
   });
 
+  it('rejects model-provided confirmation without an approval context', async () => {
+    const registry = new ToolRegistry();
+    const driver = fakeDriver();
+    registerDatabaseTools({
+      registry,
+      driver,
+      getConnection: () => writableConnection(),
+    });
+
+    await expect(
+      registry.get('execute_sql')?.handler(
+        {
+          connectionId: 'conn_1',
+          sql: "update orders set status = 'paid'",
+          confirmed: true,
+        },
+        toolContext(),
+      ),
+    ).rejects.toThrow('SQL requires explicit confirmation');
+    expect(driver.executedSql).toEqual([]);
+  });
+
+  it('executes confirmed SQL only when the tool context carries approval provenance', async () => {
+    const registry = new ToolRegistry();
+    const driver = fakeDriver();
+    registerDatabaseTools({
+      registry,
+      driver,
+      getConnection: () => writableConnection(),
+    });
+
+    await expect(
+      registry.get('execute_sql')?.handler(
+        {
+          connectionId: 'conn_1',
+          sql: "update orders set status = 'paid'",
+          confirmed: true,
+        },
+        toolContext({
+          granted: true,
+          source: 'approval-provider',
+          toolCallId: 'call_write',
+          toolName: 'execute_sql',
+          approvedAt: '2026-06-24T00:00:00.000Z',
+        }),
+      ),
+    ).resolves.toMatchObject({
+      rowCount: 1,
+    });
+    expect(driver.executedSql).toEqual(["update orders set status = 'paid'"]);
+  });
+
   it('returns a clear error when the active connection is missing', async () => {
     const registry = new ToolRegistry();
     registerDatabaseTools({
@@ -404,7 +456,7 @@ function fixedDependencies() {
   };
 }
 
-function toolContext() {
+function toolContext(approval?: AgentToolApproval) {
   return {
     session: {
       id: 'session_tools',
@@ -415,5 +467,6 @@ function toolContext() {
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       aborted: false,
     },
+    ...(approval === undefined ? {} : { approval }),
   };
 }

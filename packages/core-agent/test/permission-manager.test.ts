@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decideAutomaticPermission } from '../src/index.js';
+import { PermissionManager, decideAutomaticPermission } from '../src/index.js';
 
 describe('decideAutomaticPermission', () => {
   it('allows safe tools in every mode', () => {
@@ -23,5 +23,23 @@ describe('decideAutomaticPermission', () => {
     expect(decideAutomaticPermission('full-auto', { dangerLevel: 'high' })).toBe('allow');
     expect(decideAutomaticPermission('auto', { dangerLevel: 'high' })).toBe('ask');
     expect(decideAutomaticPermission('ask', { dangerLevel: 'high' })).toBe('ask');
+  });
+});
+
+describe('PermissionManager', () => {
+  it('distinguishes automatic allow from approval-provider allow', async () => {
+    const automatic = await new PermissionManager().checkDetailed({
+      mode: 'full-auto',
+      tool: { name: 'execute_sql', description: '', inputSchema: { type: 'object' }, dangerLevel: 'high' },
+      toolCall: { id: 'call_auto', name: 'execute_sql', arguments: {} },
+    });
+    expect(automatic).toEqual({ decision: 'allow', source: 'automatic' });
+
+    const approved = await new PermissionManager(() => true).checkDetailed({
+      mode: 'ask',
+      tool: { name: 'execute_sql', description: '', inputSchema: { type: 'object' }, dangerLevel: 'high' },
+      toolCall: { id: 'call_approved', name: 'execute_sql', arguments: {} },
+    });
+    expect(approved).toEqual({ decision: 'allow', source: 'approval-provider' });
   });
 });

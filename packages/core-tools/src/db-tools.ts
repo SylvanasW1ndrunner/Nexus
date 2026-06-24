@@ -146,7 +146,7 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
       dangerLevel: 'high',
       readonly: false,
     },
-    async (args) => {
+    async (args, context) => {
       const connectionId = requireString(args, 'connectionId');
       const sql = requireString(args, 'sql');
       const connection = requireConnection(getConnection, connectionId);
@@ -154,7 +154,7 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
       if (safety.blocked) {
         throw new Error(`SQL is blocked by connection policy. ${safety.reasons.join(' ')}`);
       }
-      if (safety.requiresConfirmation && args.confirmed !== true) {
+      if (safety.requiresConfirmation && (args.confirmed !== true || !isApprovedToolContext(context, 'execute_sql'))) {
         throw new Error(`SQL requires explicit confirmation. ${safety.reasons.join(' ')}`);
       }
       const result = await driver.execute({ connectionId, sql, confirmed: args.confirmed === true }, connection);
@@ -199,6 +199,14 @@ function requireConnection(
   const connection = getConnection(connectionId);
   if (!connection) throw new Error(`Connection is not active: ${connectionId}`);
   return connection;
+}
+
+function isApprovedToolContext(context: unknown, toolName: string): boolean {
+  if (!context || typeof context !== 'object') return false;
+  const approval = (context as { approval?: unknown }).approval;
+  if (!approval || typeof approval !== 'object') return false;
+  const record = approval as { granted?: unknown; toolName?: unknown };
+  return record.granted === true && record.toolName === toolName;
 }
 
 function tableSummary(table: TableSummary): TableSummary {

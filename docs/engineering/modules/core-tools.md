@@ -122,6 +122,11 @@
 - `query_database`：只读查询工具。即使当前连接本身是可写连接，该工具也会以 `readOnly: true` 重新调用 `analyzeSqlSafety()`，只允许单条只读查询；写入、DDL、多语句、未知语句、`WITH` 包裹写操作和 `EXPLAIN ANALYZE` 包裹写操作都会在触达 driver 前拒绝。
 - `execute_sql`：写入/DDL 执行工具，`dangerLevel` 为 `high` 且 `readonly: false`。工具 handler 会先调用 `analyzeSqlSafety()`，只读连接阻断写操作；需要确认的 SQL 如果没有 `confirmed: true`，不会调用 driver。
 
-需要注意：`execute_sql.confirmed` 是执行层的技术门禁，不等同于“模型自己声称已经获得用户确认”。真正的用户确认来源仍应由 `core-agent` 的 permission / approval provider 或后续主进程确认流程提供；本模块只保证没有确认标记时不会误执行，并把 driver 作为最后一道兜底。后续如果加入更严格的 approval token，应在 `core-tools` 中校验确认来源，而不是只信任模型传入的布尔值。
+需要注意：`execute_sql.confirmed` 是执行层的技术门禁，不等同于“模型自己声称已经获得用户确认”。当前工具层会同时校验两件事：
+
+- 参数里有 `confirmed: true`。
+- `AgentToolContext` 里存在 approval provenance，且 `approval.toolName === 'execute_sql'`。
+
+因此模型直接伪造 `confirmed: true` 不会执行写 SQL；只有经过 `core-agent` approval provider 批准后，工具层才会继续调用 driver。driver 仍保留 `CONFIRMATION_REQUIRED` 兜底，防止绕过工具层的未确认写入。
 
 当前工具层不引入第三方 SQL parser。原因是本轮目标是执行安全边界和 Agent 工具合同闭环；AST 级 affected table、列级权限、函数副作用识别、SQL 改写和跨方言语义分析应作为后续 parser adapter 单独切片处理，并先完成开源方案评估与打包验证。

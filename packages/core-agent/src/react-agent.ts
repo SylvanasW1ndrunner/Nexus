@@ -5,8 +5,9 @@ import { buildAgentContext } from './context-manager.js';
 import { PermissionManager } from './permission-manager.js';
 import { addUsage, appendMessage, createAgentSession, createMessage } from './session.js';
 import type { AgentSessionWriter } from './session-store.js';
-import { AgentStreamStore, persistAgentStreamEvents } from './stream-store.js';
-import { ToolRegistry } from './tool-registry.js';
+import { persistAgentStreamEvents } from './stream-store.js';
+import type { AgentStreamStore } from './stream-store.js';
+import type { ToolRegistry } from './tool-registry.js';
 import type {
   AgentRunDependencies,
   AgentRunOptions,
@@ -228,14 +229,20 @@ export class ReactAgent {
             continue;
           }
 
-          const permission = await this.permissionManager.check({
+          const permission = await this.permissionManager.checkDetailed({
             mode: session.mode,
             tool,
             toolCall,
           });
 
-          if (permission !== 'allow') {
-            const record = executionRecord(toolCall.id, tool.name, 'denied', startedAt, `Permission: ${permission}`);
+          if (permission.decision !== 'allow') {
+            const record = executionRecord(
+              toolCall.id,
+              tool.name,
+              'denied',
+              startedAt,
+              `Permission: ${permission.decision}`,
+            );
             toolExecutions.push(record);
             await saveCheckpoint(iteration, 'running');
             appendMessage(
@@ -245,14 +252,14 @@ export class ReactAgent {
                   role: 'tool',
                   toolCallId: toolCall.id,
                   toolName: tool.name,
-                  content: JSON.stringify({ error: 'Permission denied.', permission }),
+                  content: JSON.stringify({ error: 'Permission denied.', permission: permission.decision }),
                 },
                 this.now,
               ),
             );
             await this.saveSession(session);
             await saveCheckpoint(iteration, 'running');
-            if (permission === 'deny') {
+            if (permission.decision === 'deny') {
               finalText = 'Permission denied.';
               await saveCheckpoint(iteration, 'done');
               await this.saveSession(session);
@@ -272,6 +279,17 @@ export class ReactAgent {
             const context = {
               session,
               ...(options.signal === undefined ? {} : { signal: options.signal }),
+              ...(permission.source === 'approval-provider'
+                ? {
+                    approval: {
+                      granted: true,
+                      source: permission.source,
+                      toolCallId: toolCall.id,
+                      toolName: tool.name,
+                      approvedAt: this.now(),
+                    } as const,
+                  }
+                : {}),
             };
             const result = await executeToolWithTimeout(
               tool.name,

@@ -10,7 +10,13 @@ import {
   type LlmProvider,
 } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
-import { AgentCheckpointStore, AgentStreamStore, ReactAgent, ToolRegistry } from '../src/index.js';
+import {
+  AgentCheckpointStore,
+  AgentStreamStore,
+  ReactAgent,
+  ToolRegistry,
+  type AgentToolApproval,
+} from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -165,6 +171,59 @@ describe('ReactAgent', () => {
     expect(executed).toBe(false);
     expect(result.toolExecutions).toMatchObject([{ status: 'denied', resultPreview: 'Permission: ask' }]);
     expect(result.finalText).toBe('需要用户批准后才能写入文件。');
+  });
+
+  it('passes approval provenance to tools only after the approval provider allows execution', async () => {
+    let approvalSeen: AgentToolApproval | undefined;
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'execute_sql',
+        description: 'Execute SQL with possible writes',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+        readonly: false,
+      },
+      (_args, context) => {
+        approvalSeen = context.approval;
+        return { ok: true };
+      },
+    );
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [{ id: 'call_write', name: 'execute_sql', arguments: { sql: 'delete from orders' } }],
+          },
+          {
+            text: '已执行。',
+            toolCalls: [],
+          },
+        ]),
+      ]),
+      registry,
+      usage,
+      () => true,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '删除订单',
+      mode: 'ask',
+      maxIterations: 2,
+    });
+
+    expect(result.status).toBe('done');
+    expect(approvalSeen).toMatchObject({
+      granted: true,
+      source: 'approval-provider',
+      toolCallId: 'call_write',
+      toolName: 'execute_sql',
+    });
   });
 
   it('returns tool failures to the model so the next iteration can recover', async () => {
