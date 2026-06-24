@@ -7,6 +7,7 @@ export type QueryResultExportOptions = QueryResultViewOptions & {
   format: QueryResultExportFormat;
   baseName?: string;
   jsonMode?: 'document' | 'rows';
+  escapeSpreadsheetFormulas?: boolean;
 };
 
 export type QueryResultExportArtifact = {
@@ -26,9 +27,16 @@ export function exportQueryResult(
 ): QueryResultExportArtifact {
   const view = createQueryResultView(result, normalizeExportViewOptions(result, options));
   const baseName = sanitizeExportBaseName(options.baseName ?? `query-${result.queryId}`);
+  const escapeSpreadsheetFormulas = options.escapeSpreadsheetFormulas ?? true;
   switch (options.format) {
     case 'csv':
-      return artifact('csv', `${baseName}.csv`, 'text/csv;charset=utf-8', viewToCsv(view), view);
+      return artifact(
+        'csv',
+        `${baseName}.csv`,
+        'text/csv;charset=utf-8',
+        viewToCsv(view, escapeSpreadsheetFormulas),
+        view,
+      );
     case 'json':
       return artifact(
         'json',
@@ -50,7 +58,7 @@ export function exportQueryResult(
         'excel-xml',
         `${baseName}.xls`,
         'application/vnd.ms-excel;charset=utf-8',
-        viewToExcelXml(result, view),
+        viewToExcelXml(result, view, escapeSpreadsheetFormulas),
         view,
       );
   }
@@ -92,9 +100,11 @@ function artifact(
   };
 }
 
-function viewToCsv(view: QueryResultView): string {
+function viewToCsv(view: QueryResultView, escapeSpreadsheetFormulas: boolean): string {
   const header = view.columns.map((column) => escapeCsvCell(column.name)).join(',');
-  const rows = view.rows.map((row) => view.columns.map((column) => escapeCsvCell(row[column.name])).join(','));
+  const rows = view.rows.map((row) =>
+    view.columns.map((column) => escapeCsvCell(row[column.name], escapeSpreadsheetFormulas)).join(','),
+  );
   return [header, ...rows].join('\r\n');
 }
 
@@ -117,10 +127,17 @@ function viewToJsonDocument(result: QueryExecutionResult, view: QueryResultView,
   )}\n`;
 }
 
-function viewToExcelXml(result: QueryExecutionResult, view: QueryResultView): string {
+function viewToExcelXml(
+  result: QueryExecutionResult,
+  view: QueryResultView,
+  escapeSpreadsheetFormulas: boolean,
+): string {
   const resultRows = [
     `<Row>${view.columns.map((column) => excelCell(column.name, 'String')).join('')}</Row>`,
-    ...view.rows.map((row) => `<Row>${view.columns.map((column) => excelCell(row[column.name])).join('')}</Row>`),
+    ...view.rows.map(
+      (row) =>
+        `<Row>${view.columns.map((column) => excelCell(row[column.name], undefined, escapeSpreadsheetFormulas)).join('')}</Row>`,
+    ),
   ];
   const metadataRows = [
     ['queryId', result.queryId],
@@ -156,9 +173,9 @@ function rowToNormalizedObject(
   return Object.fromEntries(columns.map((column) => [column.name, normalizeJsonValue(row[column.name])]));
 }
 
-function escapeCsvCell(value: unknown): string {
+function escapeCsvCell(value: unknown, escapeSpreadsheetFormulas = false): string {
   if (value === null || value === undefined) return '';
-  const text = formatResultCell(value);
+  const text = formatSpreadsheetText(value, escapeSpreadsheetFormulas);
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
@@ -173,10 +190,20 @@ function normalizeJsonValue(value: unknown): unknown {
   return value;
 }
 
-function excelCell(value: unknown, explicitType?: 'String' | 'Number'): string {
+function excelCell(value: unknown, explicitType?: 'String' | 'Number', escapeSpreadsheetFormulas = false): string {
   const type = explicitType ?? (typeof value === 'number' && Number.isFinite(value) ? 'Number' : 'String');
-  const text = type === 'Number' ? String(value) : formatResultCell(value);
+  const text = type === 'Number' ? String(value) : formatSpreadsheetText(value, escapeSpreadsheetFormulas);
   return `<Cell><Data ss:Type="${type}">${escapeXml(text)}</Data></Cell>`;
+}
+
+function formatSpreadsheetText(value: unknown, escapeSpreadsheetFormulas: boolean): string {
+  const text = formatResultCell(value);
+  if (!escapeSpreadsheetFormulas || typeof value !== 'string') return text;
+  return isSpreadsheetFormulaLike(text) ? `'${text}` : text;
+}
+
+function isSpreadsheetFormulaLike(value: string): boolean {
+  return /^[\t\r\n]/.test(value) || /^\s*[=+\-@]/.test(value);
 }
 
 function escapeXml(value: string): string {

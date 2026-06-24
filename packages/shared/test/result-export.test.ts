@@ -114,4 +114,41 @@ describe('query result export contract', () => {
     expect(artifact.content).toContain('&quot;quoted&quot;, second line');
     expect(artifact.content).toContain('exportedRowCount');
   });
+
+  it('escapes spreadsheet formulas by default for CSV and Excel exports', () => {
+    const formulaResult: QueryExecutionResult = {
+      ...result,
+      columns: [{ name: 'id' }, { name: 'comment' }, { name: 'amount' }],
+      rows: [
+        { id: 1, comment: '=HYPERLINK("http://example.test","open")', amount: -42 },
+        { id: 2, comment: '+cmd|calc!A0', amount: 12 },
+        { id: 3, comment: '  @SUM(1,2)', amount: 0 },
+      ],
+      rowCount: 3,
+    };
+
+    const csv = exportQueryResult(formulaResult, { format: 'csv' }).content;
+    expect(csv).toContain('1,"\'=HYPERLINK(""http://example.test"",""open"")",-42');
+    expect(csv).toContain("2,'+cmd|calc!A0,12");
+    expect(csv).toContain('3,"\'  @SUM(1,2)",0');
+
+    const workbook = exportQueryResult(formulaResult, { format: 'excel-xml' }).content;
+    expect(workbook).toContain('&apos;=HYPERLINK(&quot;http://example.test&quot;,&quot;open&quot;)');
+    expect(workbook).toContain('&apos;+cmd|calc!A0');
+    expect(workbook).toContain('<Data ss:Type="Number">-42</Data>');
+  });
+
+  it('allows callers to disable spreadsheet formula escaping for trusted exports', () => {
+    const artifact = exportQueryResult(
+      {
+        ...result,
+        columns: [{ name: 'comment' }],
+        rows: [{ comment: '=1+1' }],
+        rowCount: 1,
+      },
+      { format: 'csv', escapeSpreadsheetFormulas: false },
+    );
+
+    expect(artifact.content).toBe('comment\r\n=1+1');
+  });
 });

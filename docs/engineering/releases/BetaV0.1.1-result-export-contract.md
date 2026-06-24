@@ -17,6 +17,10 @@
 - `excel-xml` 输出 Excel 兼容 SpreadsheetML XML 工作簿：
   - `Result` worksheet：导出的结果行。
   - `Metadata` worksheet：queryId、源行数、筛选后行数、导出行数、耗时、风险等级。
+- CSV 和 Excel 兼容 XML 默认启用表格公式注入防护：
+  - 文本值以 `=`、`+`、`-`、`@` 或制表/换行等公式前缀开头时，导出层会添加前置单引号。
+  - 数字类型仍保持数值导出，避免负数被误处理成文本。
+  - 可信内部导出可显式设置 `escapeSpreadsheetFormulas: false` 关闭防护；面向普通用户的入口应保持默认开启。
 
 ## 依赖决策
 
@@ -35,6 +39,7 @@
 - 用户需要流式/下游处理时导出 NDJSON。
 - 用户导出 Excel 兼容工作簿，并能看到结果和元信息。
 - 文件名中含 Windows 非法字符时自动清洗。
+- 用户打开 CSV/Excel 导出文件时，数据库里的恶意文本不会被表格软件当作公式执行。
 
 ## 测试
 
@@ -43,4 +48,5 @@
   - 筛选视图 JSON 导出。
   - NDJSON 行导出。
   - Excel 兼容 XML 工作簿结构。
+  - CSV/Excel 默认公式注入防护和可信导出关闭防护。
 - `packages/shared/test/csv.test.ts`、`packages/shared/test/export.test.ts` 继续验证旧 helper。

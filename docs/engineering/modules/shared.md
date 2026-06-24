@@ -27,12 +27,14 @@
 
 `exportQueryResult()` 在视图合同之上生成导出制品，返回文件名、MIME、内容、导出行数和列数。默认导出完整列；如果调用方传入 `visibleColumnNames`、`searchText`、`offset`、`limit`，则严格导出当前视图。Excel 当前实现为 SpreadsheetML XML（`.xls`），包含 `Result` 和 `Metadata` 两个 worksheet。它能被 Excel/WPS/LibreOffice 打开，且不引入 `exceljs`/`xlsx` 等依赖，避免当前阶段增加包体和 native/打包风险。后续如果产品验收明确要求原生 `.xlsx`，需要单独评估依赖许可证、包体、离线安装和 Electron 打包影响。
 
+CSV 和 Excel 兼容 XML 默认启用表格公式注入防护：当真实数据库文本值以 `=`、`+`、`-`、`@` 或制表/换行等可被表格软件解释为公式的前缀开头时，导出层会在文本前加单引号。数字类型保持数值单元格，不会因为负数被错误转成文本。可信内部流程如确需原样导出，可显式传入 `escapeSpreadsheetFormulas: false`，但面向普通用户的入口应保持默认开启。
+
 ## 测试覆盖
 
 - `packages/shared/test/csv.test.ts`：覆盖逗号、引号、换行、对象值和 `NULL`。
 - `packages/shared/test/export.test.ts`：覆盖 JSON metadata、列顺序、`Date`、`bigint`、`Buffer` 和嵌套对象。
 - `packages/shared/test/query-result-view.test.ts`：覆盖可见列至少保留一列、列切换、仅在可见列内搜索、分页视图、Date/Buffer/JSON 单元格格式化。
-- `packages/shared/test/result-export.test.ts`：覆盖旧 CSV/JSON helper 兼容性、筛选视图导出、NDJSON、Excel 兼容 XML 工作簿、文件名清洗和元信息 worksheet。
+- `packages/shared/test/result-export.test.ts`：覆盖旧 CSV/JSON helper 兼容性、筛选视图导出、NDJSON、Excel 兼容 XML 工作簿、文件名清洗、元信息 worksheet、CSV/Excel 默认公式注入防护和可信导出关闭防护。
 - `packages/shared/test/ipc-contract.test.ts` 覆盖 IPC 契约：运行时快照固定 M0-M1.5 channel 集合，编译期断言保证 `IpcRequestMap` 和 `IpcResponseMap` 键集合一致。新增 channel 时必须同步更新该测试，避免 renderer、preload 和 main 只改一侧；当前包含 `db:cancel-query`。
 
 ## 后续扩展
