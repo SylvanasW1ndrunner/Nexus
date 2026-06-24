@@ -254,6 +254,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 将 core 能力注册为 Agent 可调用的内置工具。
 - 维护工具参数校验、危险等级、只读标记和 workspace 沙箱边界。
 - 让 Agent 后端可以在没有最终 UI 的情况下完成“查 schema → 查数据 → 汇报”的真实闭环。
+- 组合 Skill 自动匹配、官方插件工具策略和 Agent runtime，形成无 UI 的自动 Skill 执行入口。
 
 开发逻辑：
 
@@ -267,6 +268,10 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - `execute_sql` 是 high 且非只读工具；readonly Agent 模式会在 driver 执行前拒绝。
 - `read_workspace_file` 和 `list_workspace_dir` 是 safe readonly 工具；`write_workspace_file` 是 medium 非只读工具，需要遵守 Agent 模式权限。
 - `workspace_script:*` 工具是 medium 非只读工具；执行器由调用方注入，core-tools 不直接依赖 Electron main 或某个 Python runtime。
+- `runSkillAgent()` 接收已生成的 Skill plan，通过官方插件策略与 Skill `allowedTools` 求交后调用 Agent runtime。
+- `runAutoSkillAgent()` 先根据当前官方插件工具策略计算可用工具，再用 `core-skills` 自动匹配 Skill，最后复用 `runSkillAgent()` 执行。
+- 自动 Skill runner 默认不调用 LLM 做匹配，不直接注册工具，不绕过 `ReactAgent.allowedTools` 和 `PermissionManager` 的运行时二次校验。
+- 自动 Skill runner 在缺少必要工具时抛出 `NoMatchingSkillError`，返回候选 Skill、缺失工具和插件策略允许的工具列表，调用方可据此生成用户级诊断。
 - workspace 路径解析只接受相对路径，并拒绝 `..` 越界。
 - 当前不把 Electron main 的 Python/Terminal 服务反向依赖到 core 包；后续应通过抽象接口接入。
 
@@ -281,6 +286,9 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 未打开 workspace 时，workspace 工具不能触碰文件系统并返回明确错误。
 - Agent 能发现带 `DBAgent Tool:` docstring 的 Python 脚本，并通过注入 runner 真实执行。
 - 脚本参数会按 docstring 声明校验，类型错误时不会启动 runner。
+- 自动 Skill runner 能根据“生成昨日 GMV 日报”等真实用户任务命中日报 Skill，并只向 Agent 暴露 Skill 与官方插件策略交集内的工具。
+- Python 数据分析 Skill 缺少 workspace script runtime tool 时，runner 不调用 Agent，并返回缺失工具诊断。
+- 如果模型后续尝试调用未暴露工具，仍由 `core-agent` 的 allowedTools 硬白名单拒绝。
 
 ## `packages/core-workspace`
 

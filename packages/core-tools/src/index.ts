@@ -8,6 +8,7 @@ export * from './mcp-tool-adapter.js';
 export * from './mcp-tool-registration-manager.js';
 export * from './official-plugin-registry.js';
 export * from './official-plugin-tool-policy.js';
+export * from './auto-skill-agent-runner.js';
 export * from './skill-agent-runner.js';
 export * from './validation.js';
 export * from './workspace-sandbox.js';
