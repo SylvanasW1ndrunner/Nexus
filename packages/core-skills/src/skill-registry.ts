@@ -1,7 +1,16 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { parseSkillDefinition } from './skill-parser.js';
-import type { SkillDefinition, SkillExecutionPlan, SkillLoadResult, SkillSource } from './types.js';
+import { createAutoExecutionPlan, findMatchingSkills } from './skill-matcher.js';
+import type {
+  SkillAutoExecutionPlan,
+  SkillDefinition,
+  SkillExecutionPlan,
+  SkillLoadResult,
+  SkillMatchCandidate,
+  SkillMatchOptions,
+  SkillSource,
+} from './types.js';
 
 export class SkillRegistry {
   private readonly skills = new Map<string, SkillDefinition>();
@@ -34,6 +43,14 @@ export class SkillRegistry {
       steps: skill.steps,
       outputFormat: skill.outputFormat,
     };
+  }
+
+  findMatchingSkills(options: SkillMatchOptions): SkillMatchCandidate[] {
+    return findMatchingSkills(this.list(), options);
+  }
+
+  createAutoExecutionPlan(options: SkillMatchOptions): SkillAutoExecutionPlan | undefined {
+    return createAutoExecutionPlan(this.list(), options);
   }
 
   private requireSkill(name: string): SkillDefinition {

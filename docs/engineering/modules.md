@@ -334,6 +334,26 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 默认参数可渲染进用户输入，例如 `{date}`。
 - 当前 YAML parser 只支持 Skill 所需安全子集，避免引入额外 YAML 依赖；复杂 YAML 结构后续再扩展。
 
+### 自动匹配与注入策略
+
+- `skill-matcher.ts` 提供无 UI、无 LLM 的确定性 Skill 匹配能力。
+- 匹配输入包括用户自然语言、当前可用工具、显式 signals，以及可选的轻量信号推断。
+- 匹配依据包括：
+  - `natural_language_keywords`
+  - `auto_inject_when`
+  - Skill `name` / `title` / `description`
+  - `allowed_tools` 是否都在当前可用工具集合中
+- 默认只返回工具完整可用的 Skill；调用方可以通过 `includeIneligible` 获取缺失工具诊断。
+- 当前内置标准信号包括：
+  - `requires_visualization`
+  - `requires_python`
+  - `requires_modeling`
+  - `requires_multi_step_pipeline`
+  - `requires_schema_documentation`
+  - `requires_sql_optimization`
+- `SkillRegistry.findMatchingSkills()` 用于展示候选或后端决策；`SkillRegistry.createAutoExecutionPlan()` 用于生成最佳候选的执行计划。
+- 该机制不替代 Agent 判断，也不直接执行 Skill；后续 Agent service 应先生成候选，再交给 `core-tools` 的 Skill Agent Runner 和官方插件工具策略执行。
+
 测试重点：
 
 - 解析产品文档风格 YAML。

@@ -28,3 +28,36 @@ export type SkillExecutionPlan = {
   steps: string[];
   outputFormat: SkillDefinition['outputFormat'];
 };
+
+export type SkillAutoInjectSignal = string;
+
+export type SkillMatchReason = {
+  type: 'keyword' | 'auto_inject_signal' | 'name' | 'title' | 'description';
+  value: string;
+  score: number;
+};
+
+export type SkillMatchCandidate = {
+  skill: SkillDefinition;
+  score: number;
+  reasons: SkillMatchReason[];
+  matchedSignals: SkillAutoInjectSignal[];
+  availableTools: string[];
+  missingTools: string[];
+  eligible: boolean;
+};
+
+export type SkillMatchOptions = {
+  userInput: string;
+  availableTools?: string[];
+  signals?: SkillAutoInjectSignal[];
+  inferSignals?: boolean;
+  includeIneligible?: boolean;
+  maxResults?: number;
+  minScore?: number;
+};
+
+export type SkillAutoExecutionPlan = {
+  candidate: SkillMatchCandidate;
+  plan: SkillExecutionPlan;
+};
