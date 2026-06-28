@@ -12,8 +12,11 @@
     { "path": "../../packages/shared" },
     { "path": "../../packages/core-db" },
     { "path": "../../packages/core-auth" },
+    { "path": "../../packages/core-agent" },
     { "path": "../../packages/core-usage" },
-    { "path": "../../packages/core-llm" }
+    { "path": "../../packages/core-llm" },
+    { "path": "../../packages/core-skills" },
+    { "path": "../../packages/core-tools" }
   ],
   "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
 }

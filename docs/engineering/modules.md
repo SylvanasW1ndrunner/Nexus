@@ -44,12 +44,15 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - Renderer 和 main 必须共同依赖这里的 IPC 类型，新增主进程能力时先扩展契约。
 - `AppErrorCode` 要保持业务可解释，不直接泄露驱动内部错误码。
 - `QuerySafetyReport` 是 SQL 执行链路的结构化解释对象，后续 Agent 可以复用。
+- Agent/Skill 相关 IPC 只定义序列化后的公共合同，不直接引用 `core-agent`、`core-tools` 或 `core-skills` 类型，避免 shared 反向依赖业务包。
+- `skills:match` 用于只读候选诊断；`agent:tool-policy-preview` 用于只读工具策略预检；`agent:run` 和 `agent:abort` 是无头 Agent 运行边界，后续 UI 只消费这些 typed contract。
 
 测试重点：
 
 - CSV 边界值：逗号、引号、换行、JSON、`NULL`。
 - JSON 导出边界值：列顺序、metadata、`Date`、`bigint`、`Buffer` 和嵌套对象。
 - IPC 类型通过 TypeScript 编译约束和 `ipc-contract.test.ts` 双重兜底，避免新增 channel 时 request/response map 或运行时 channel 快照不一致。
+- Agent/Skill IPC 合同要覆盖无匹配 Skill、缺少工具、只读收窄、工具越权和中止等用户可见状态。
 
 ## `packages/core-db`
 
@@ -92,6 +95,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - Renderer 提供 M1.5 桌面界面：连接、Schema、SQL 编辑、结果、历史、CSV/JSON 导出。
 - Preload 暴露受控 IPC 入口。
 - 打包配置和 ASAR 裁剪。
+- 在前端重建前，提供无 UI 的 Agent service 边界，便于后续 UI 直接接 typed IPC，而不是把 Agent 逻辑写进 renderer。
 
 开发逻辑：
 
@@ -107,10 +111,14 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - Schema 面板点击表名加载表结构详情，点击 `SQL` 生成预览查询，避免把“看结构”和“查数据”混成同一个动作。
 - 工作区草稿通过 `workspace-state.json` 原子写入。
 - Connections、SQL Editor、Results 三个主区域分别包裹 ErrorBoundary，单个区域渲染错误不会拖垮整个应用壳。
+- `HeadlessAgentService` 组合 `ReactAgent`、`ToolRegistry`、Skill 列表和官方插件工具策略，提供 `tool-policy-preview`、`skills:match`、`agent:run`、`agent:abort` 四类能力。
+- Agent service 不持有密钥，不直接访问 renderer，不直接执行数据库或 Python；具体工具仍必须先注册到 `ToolRegistry`，再经过官方插件策略、Skill `allowed_tools` 和 `ReactAgent.allowedTools` 三层收窄。
+- 当前 main 只注册服务边界和空工具/空 Skill registry，真实 DB/RAG/workspace/Python 工具装配将在后续 headless acceptance 切片继续完成。
 
 测试重点：
 
 - 主进程可测试逻辑要尽量抽成纯模块，例如连接输入校验、连接 workflow、查询 workflow 和 Schema workflow。
+- Headless Agent service 必须通过 fake provider + 真实 `ReactAgent` + 真实 `ToolRegistry` 测试自动匹配、缺工具诊断、隐藏工具拒绝和 abort。
 - Renderer 展示逻辑要抽成 helper，例如远程错误文案、性能提示汇总和连接草稿转换。
 - 打包后必须启动 `win-unpacked/DBAgent.exe`，不能只相信 Vite dev server。
 

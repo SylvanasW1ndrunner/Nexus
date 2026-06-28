@@ -70,6 +70,10 @@ describe('ipc contract', () => {
       'plugin:uninstall',
       'plugin:enable',
       'plugin:disable',
+      'skills:match',
+      'agent:tool-policy-preview',
+      'agent:run',
+      'agent:abort',
       'usage:current-quota',
       'usage:history',
     ]);

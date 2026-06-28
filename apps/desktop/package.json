@@ -17,8 +17,11 @@
   },
   "dependencies": {
     "@dbagent/core-auth": "workspace:*",
+    "@dbagent/core-agent": "workspace:*",
     "@dbagent/core-db": "workspace:*",
     "@dbagent/core-llm": "workspace:*",
+    "@dbagent/core-skills": "workspace:*",
+    "@dbagent/core-tools": "workspace:*",
     "@dbagent/core-usage": "workspace:*",
     "@dbagent/shared": "workspace:*",
     "@monaco-editor/react": "^4.7.0",

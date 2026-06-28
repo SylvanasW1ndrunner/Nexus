@@ -82,6 +82,14 @@ export const ipcChannels = {
     enable: 'plugin:enable',
     disable: 'plugin:disable',
   },
+  skills: {
+    match: 'skills:match',
+  },
+  agent: {
+    toolPolicyPreview: 'agent:tool-policy-preview',
+    run: 'agent:run',
+    abort: 'agent:abort',
+  },
   usage: {
     currentQuota: 'usage:current-quota',
     history: 'usage:history',
@@ -477,6 +485,124 @@ export type PluginManifest = {
   };
 };
 
+export type AgentMode = 'ask' | 'auto' | 'full-auto' | 'readonly';
+
+export type AgentToolDangerLevel = 'safe' | 'medium' | 'high' | 'critical';
+
+export type AgentToolPolicyRequest = {
+  mode?: AgentMode;
+  enabledPluginIds?: string[];
+  disabledPluginIds?: string[];
+  readonlyOnly?: boolean;
+  allowedPermissions?: string[];
+  maxDangerLevel?: AgentToolDangerLevel;
+};
+
+export type AgentToolPolicyPreview = {
+  allowedToolNames: string[];
+  blockedToolNames: string[];
+  staticToolNames: string[];
+  dynamicToolNames: string[];
+  missingStaticToolNames: string[];
+};
+
+export type AgentSkillSummary = {
+  name: string;
+  title?: string;
+  description: string;
+  source: 'builtin' | 'user' | 'workspace';
+  sourcePath?: string;
+  allowedTools: string[];
+  outputFormat: 'markdown' | 'json' | 'text';
+};
+
+export type AgentSkillMatchReason = {
+  type: 'keyword' | 'auto_inject_signal' | 'name' | 'title' | 'description';
+  value: string;
+  score: number;
+};
+
+export type AgentSkillMatchCandidate = {
+  skill: AgentSkillSummary;
+  score: number;
+  reasons: AgentSkillMatchReason[];
+  matchedSignals: string[];
+  availableTools: string[];
+  missingTools: string[];
+  eligible: boolean;
+};
+
+export type SkillsMatchRequest = AgentToolPolicyRequest & {
+  userInput: string;
+  signals?: string[];
+  inferSignals?: boolean;
+  includeIneligible?: boolean;
+  maxResults?: number;
+  minScore?: number;
+};
+
+export type SkillsMatchResponse = {
+  userInput: string;
+  toolPolicy: AgentToolPolicyPreview;
+  candidates: AgentSkillMatchCandidate[];
+  selectedSkill?: AgentSkillMatchCandidate;
+};
+
+export type AgentRunRequest = SkillsMatchRequest & {
+  runId?: string;
+  providerId: string;
+  model: string;
+  usageMode?: UsageMode;
+  maxIterations?: number;
+  tokenBudget?: number;
+  contextWindowTokens?: number;
+  keepRecentMessages?: number;
+  maxToolResultChars?: number;
+  maxConsecutiveToolFailures?: number;
+  maxToolExecutionMs?: number;
+  userMessagePrefix?: string;
+};
+
+export type AgentToolExecution = {
+  toolCallId: string;
+  toolName: string;
+  status: 'success' | 'denied' | 'failed';
+  durationMs: number;
+  resultPreview: string;
+};
+
+export type AgentRunResponse = {
+  runId: string;
+  status:
+    | 'done'
+    | 'aborted'
+    | 'max_iterations_reached'
+    | 'permission_denied'
+    | 'tool_failed'
+    | 'quota_exceeded'
+    | 'no_matching_skill'
+    | 'failed';
+  sessionId?: string;
+  finalText: string;
+  iterations: number;
+  toolExecutions: AgentToolExecution[];
+  toolPolicy: AgentToolPolicyPreview;
+  candidates: AgentSkillMatchCandidate[];
+  selectedSkill?: AgentSkillMatchCandidate;
+  renderedUserMessage?: string;
+  errorMessage?: string;
+};
+
+export type AgentAbortRequest = {
+  runId: string;
+};
+
+export type AgentAbortResponse = {
+  runId: string;
+  aborted: boolean;
+  message: string;
+};
+
 export type WorkspaceSummary = Pick<
   WorkspaceProject,
   'id' | 'name' | 'rootPath' | 'description' | 'template' | 'updatedAt' | 'tags'
@@ -623,6 +749,10 @@ export type IpcRequestMap = {
   'plugin:uninstall': { id: string };
   'plugin:enable': { id: string };
   'plugin:disable': { id: string };
+  'skills:match': SkillsMatchRequest;
+  'agent:tool-policy-preview': AgentToolPolicyRequest;
+  'agent:run': AgentRunRequest;
+  'agent:abort': AgentAbortRequest;
   'usage:current-quota': void;
   'usage:history': { limit?: number };
   'app:load-workspace-state': void;
@@ -683,6 +813,10 @@ export type IpcResponseMap = {
   'plugin:uninstall': Result<PluginManifest>;
   'plugin:enable': Result<PluginManifest>;
   'plugin:disable': Result<PluginManifest>;
+  'skills:match': Result<SkillsMatchResponse>;
+  'agent:tool-policy-preview': Result<AgentToolPolicyPreview>;
+  'agent:run': Result<AgentRunResponse>;
+  'agent:abort': Result<AgentAbortResponse>;
   'usage:current-quota': Result<UsageSnapshot>;
   'usage:history': Result<UsageSnapshot[]>;
   'app:load-workspace-state': Result<WorkspaceState | undefined>;

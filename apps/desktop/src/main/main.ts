@@ -7,6 +7,8 @@ import { ConnectionStore, QueryCancellationRegistry, QueryHistoryStore, createDe
 import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, TestAuthRepository } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
+import { ReactAgent, ToolRegistry } from '@dbagent/core-agent';
+import { SkillRegistry } from '@dbagent/core-skills';
 import {
   ipcChannels,
   err,
@@ -28,6 +30,7 @@ import { PythonEnvironmentService } from './python-environment.js';
 import { TerminalService } from './terminal-service.js';
 import { WorkspaceStateStore } from './workspace-state-store.js';
 import { WorkspaceProjectStore } from './workspace-project-store.js';
+import { HeadlessAgentService } from './agent-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
@@ -66,6 +69,14 @@ const authCapabilities: AuthCapabilities = process.env.DBAGENT_AUTH_DATABASE_URL
 const authService = new AuthService(join(dataDir, 'auth-session.json'), authRepository);
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
+const agentToolRegistry = new ToolRegistry();
+const agentSkillRegistry = new SkillRegistry();
+const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker);
+const headlessAgentService = new HeadlessAgentService({
+  agent: reactAgent,
+  toolRegistry: agentToolRegistry,
+  loadSkills: () => agentSkillRegistry.list(),
+});
 const pythonEnvironmentService = new PythonEnvironmentService();
 const terminalService = new TerminalService();
 const pluginRegistry = new PluginRegistry(pluginStatePath);
@@ -299,6 +310,13 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.plugin.uninstall, async ({ id }) => safeResult(() => pluginRegistry.uninstall(id)));
   handle(ipcChannels.plugin.enable, async ({ id }) => safeResult(() => pluginRegistry.enable(id)));
   handle(ipcChannels.plugin.disable, async ({ id }) => safeResult(() => pluginRegistry.disable(id)));
+
+  handle(ipcChannels.skills.match, async (request) => safeResult(() => headlessAgentService.matchSkills(request)));
+  handle(ipcChannels.agent.toolPolicyPreview, (request) =>
+    safeResult(() => Promise.resolve(headlessAgentService.previewToolPolicy(request ?? {}))),
+  );
+  handle(ipcChannels.agent.run, async (request) => safeResult(() => headlessAgentService.run(request)));
+  handle(ipcChannels.agent.abort, (request) => safeResult(() => Promise.resolve(headlessAgentService.abort(request))));
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
   handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));

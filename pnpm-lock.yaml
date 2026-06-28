@@ -35,6 +35,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@dbagent/core-agent':
+        specifier: workspace:*
+        version: link:../../packages/core-agent
       '@dbagent/core-auth':
         specifier: workspace:*
         version: link:../../packages/core-auth
@@ -44,6 +47,12 @@ importers:
       '@dbagent/core-llm':
         specifier: workspace:*
         version: link:../../packages/core-llm
+      '@dbagent/core-skills':
+        specifier: workspace:*
+        version: link:../../packages/core-skills
+      '@dbagent/core-tools':
+        specifier: workspace:*
+        version: link:../../packages/core-tools
       '@dbagent/core-usage':
         specifier: workspace:*
         version: link:../../packages/core-usage
