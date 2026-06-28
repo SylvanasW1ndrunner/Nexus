@@ -8,7 +8,7 @@ import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, Test
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import { ReactAgent, ToolRegistry } from '@dbagent/core-agent';
-import { SkillRegistry } from '@dbagent/core-skills';
+import { SkillRegistry, registerDefaultBuiltinSkills } from '@dbagent/core-skills';
 import {
   ipcChannels,
   err,
@@ -71,6 +71,7 @@ const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
 const agentToolRegistry = new ToolRegistry();
 const agentSkillRegistry = new SkillRegistry();
+registerDefaultBuiltinSkills(agentSkillRegistry);
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker);
 const headlessAgentService = new HeadlessAgentService({
   agent: reactAgent,

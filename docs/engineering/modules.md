@@ -369,6 +369,8 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
   - `requires_sql_optimization`
 - `SkillRegistry.findMatchingSkills()` 用于展示候选或后端决策；`SkillRegistry.createAutoExecutionPlan()` 用于生成最佳候选的执行计划。
 - 该机制不替代 Agent 判断，也不直接执行 Skill；后续 Agent service 应先生成候选，再交给 `core-tools` 的 Skill Agent Runner 和官方插件工具策略执行。
+- `builtin-skills.ts` 提供第一批官方内置 Skill 的纯 TypeScript 定义，避免打包时遗漏外部 YAML 资源。当前包含 Schema 文档、SQL 优化、每日 GMV 日报、Python 数据分析和 ER 图说明。
+- `registerDefaultBuiltinSkills()` 用于 desktop main 或后续 CLI/service 启动时注册官方 Skill；返回值会 clone 数组字段，避免调用方修改污染默认定义。
 
 测试重点：
 
@@ -379,6 +381,7 @@ ORM 适合管理 DBAgent 自己的业务库，例如未来的本地 SQLite 配�
 - 内置、用户级、工作区级 Skill 覆盖顺序正确。
 - 坏 Skill 不阻止同目录其他 Skill 加载。
 - 执行计划会过滤不可用工具并渲染默认参数。
+- 默认内置 Skill 名称、source、工具声明和真实用户任务匹配保持稳定。
 
 ## `scripts`
 
