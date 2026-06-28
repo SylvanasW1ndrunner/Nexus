@@ -52,7 +52,7 @@ export function registerDesktopAgentTools(dependencies: AgentToolBootstrapDepend
   registerWorkspaceTools({
     registry: dependencies.registry,
     workspace: dependencies.workspace ?? new WorkspaceCore(),
-    getWorkspaceRoot: () => undefined,
+    getWorkspaceRoot: async () => (await dependencies.workspaceProjects.loadActive())?.rootPath,
   });
 }
 

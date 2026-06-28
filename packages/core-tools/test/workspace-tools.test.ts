@@ -78,6 +78,37 @@ describe('workspace Agent tools', () => {
       registry.get('list_workspace_dir')?.handler({ path: '.' }, context()),
     ).rejects.toThrow('No active workspace.');
   });
+
+  it('supports async active workspace root providers', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-workspace-tools-async-'));
+    tempDirs.push(rootPath);
+    const workspace = new WorkspaceCore();
+    await workspace.create({
+      name: 'Async Workspace',
+      rootPath,
+    });
+    const registry = new ToolRegistry();
+    registerWorkspaceTools({
+      registry,
+      workspace,
+      getWorkspaceRoot: () => Promise.resolve(rootPath),
+    });
+
+    await expect(
+      registry
+        .get('write_workspace_file')
+        ?.handler({ path: 'outputs/async-root.txt', content: 'async root ok' }, context()),
+    ).resolves.toMatchObject({
+      relativePath: 'outputs/async-root.txt',
+      bytes: 13,
+    });
+    await expect(
+      registry.get('read_workspace_file')?.handler({ path: 'outputs/async-root.txt' }, context()),
+    ).resolves.toMatchObject({
+      content: 'async root ok',
+      bytes: 13,
+    });
+  });
 });
 
 async function workspaceHarness(): Promise<{ registry: ToolRegistry; rootPath: string }> {

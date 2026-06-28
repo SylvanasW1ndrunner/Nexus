@@ -5,7 +5,7 @@ import { optionalPositiveInteger, optionalString, requireString } from './valida
 export type WorkspaceToolDependencies = {
   registry: ToolRegistry;
   workspace: WorkspaceCore;
-  getWorkspaceRoot: () => string | undefined;
+  getWorkspaceRoot: () => string | undefined | Promise<string | undefined>;
 };
 
 export function registerWorkspaceTools(dependencies: WorkspaceToolDependencies): void {
@@ -22,7 +22,7 @@ export function registerWorkspaceTools(dependencies: WorkspaceToolDependencies):
       readonly: true,
     },
     async (args) => {
-      const rootPath = requireWorkspaceRoot(getWorkspaceRoot);
+      const rootPath = await requireWorkspaceRoot(getWorkspaceRoot);
       const relativePath = optionalString(args, 'path') ?? '.';
       return {
         entries: await workspace.listFiles(rootPath, relativePath),
@@ -42,7 +42,7 @@ export function registerWorkspaceTools(dependencies: WorkspaceToolDependencies):
       readonly: true,
     },
     async (args) => {
-      const rootPath = requireWorkspaceRoot(getWorkspaceRoot);
+      const rootPath = await requireWorkspaceRoot(getWorkspaceRoot);
       const path = requireString(args, 'path');
       const maxBytes = optionalPositiveInteger(args, 'maxBytes', 1024 * 1024);
       const content = await workspace.readFile(rootPath, path, maxBytes);
@@ -67,7 +67,7 @@ export function registerWorkspaceTools(dependencies: WorkspaceToolDependencies):
       readonly: false,
     },
     async (args) => {
-      const rootPath = requireWorkspaceRoot(getWorkspaceRoot);
+      const rootPath = await requireWorkspaceRoot(getWorkspaceRoot);
       const path = requireString(args, 'path');
       const content = requireString(args, 'content');
       return workspace.writeFile(rootPath, path, content);
@@ -75,8 +75,10 @@ export function registerWorkspaceTools(dependencies: WorkspaceToolDependencies):
   );
 }
 
-function requireWorkspaceRoot(getWorkspaceRoot: () => string | undefined): string {
-  const rootPath = getWorkspaceRoot();
+async function requireWorkspaceRoot(
+  getWorkspaceRoot: () => string | undefined | Promise<string | undefined>,
+): Promise<string> {
+  const rootPath = await getWorkspaceRoot();
   if (!rootPath) throw new Error('No active workspace.');
   return rootPath;
 }

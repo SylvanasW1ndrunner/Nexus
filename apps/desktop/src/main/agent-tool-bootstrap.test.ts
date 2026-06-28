@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { ToolRegistry, type AgentToolContext } from '@dbagent/core-agent';
 import type { IDatabaseDriver, TableSummary } from '@dbagent/core-db';
+import { WorkspaceCore } from '@dbagent/core-workspace';
 import {
   ok,
   type DatabaseEngine,
@@ -13,6 +17,12 @@ import {
   type WorkspaceProject,
 } from '@dbagent/shared';
 import { registerDesktopAgentTools } from './agent-tool-bootstrap.js';
+
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 describe('registerDesktopAgentTools', () => {
   it('registers database, schema RAG, and workspace tools for the headless desktop agent', () => {
@@ -117,6 +127,55 @@ describe('registerDesktopAgentTools', () => {
       'No active workspace.',
     );
   });
+
+  it('resolves the active workspace root at tool execution time', async () => {
+    const registry = new ToolRegistry();
+    const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-workspace-'));
+    tempDirs.push(rootPath);
+    const workspace = new WorkspaceCore();
+    await workspace.create({
+      name: 'Desktop Agent Workspace',
+      rootPath,
+    });
+    const activeProject: { value: WorkspaceProject | undefined } = { value: undefined };
+
+    registerDesktopAgentTools({
+      registry,
+      connections: connectionReader([connectedConnection()]),
+      workspaceProjects: {
+        loadActive() {
+          return Promise.resolve(activeProject.value);
+        },
+      },
+      driverForEngine: () => fakeDriver(),
+      workspace,
+    });
+
+    await expect(
+      registry.get('read_workspace_file')?.handler({ path: 'outputs/summary.md' }, toolContext()),
+    ).rejects.toThrow('No active workspace.');
+
+    activeProject.value = workspaceProject(rootPath);
+
+    await expect(
+      registry
+        .get('write_workspace_file')
+        ?.handler({ path: 'outputs/summary.md', content: '# Summary\n\nactive workspace\n' }, toolContext()),
+    ).resolves.toMatchObject({
+      relativePath: 'outputs/summary.md',
+      bytes: 28,
+    });
+    await expect(readFile(join(rootPath, 'outputs', 'summary.md'), 'utf8')).resolves.toBe(
+      '# Summary\n\nactive workspace\n',
+    );
+    await expect(
+      registry.get('read_workspace_file')?.handler({ path: 'outputs/summary.md' }, toolContext()),
+    ).resolves.toMatchObject({
+      path: 'outputs/summary.md',
+      content: '# Summary\n\nactive workspace\n',
+      bytes: 28,
+    });
+  });
 });
 
 function connectionReader(connections: SavedConnection[]) {
@@ -132,6 +191,35 @@ function workspaceReader(project?: WorkspaceProject) {
     loadActive() {
       return Promise.resolve(project);
     },
+  };
+}
+
+function workspaceProject(rootPath: string): WorkspaceProject {
+  return {
+    version: 1,
+    id: 'workspace_desktop_agent',
+    name: 'Desktop Agent Workspace',
+    rootPath,
+    template: 'standard',
+    createdAt: '2026-06-28T00:00:00.000Z',
+    updatedAt: '2026-06-28T00:00:00.000Z',
+    connections: [],
+    defaults: {
+      agentMode: 'ask',
+    },
+    assetPaths: {
+      sqlLibrary: 'sql/analytics',
+      scripts: 'scripts',
+      docs: 'docs',
+      outputs: 'outputs',
+    },
+    python: {
+      mode: 'system',
+      requirementsPath: 'scripts/requirements.txt',
+    },
+    enabledSkills: [],
+    enabledMcpServers: [],
+    tags: [],
   };
 }
 
@@ -179,20 +267,22 @@ function fakeDriver(): IDatabaseDriver & {
         database: connection.database,
         sql: request.sql,
       });
-      return Promise.resolve(ok({
-        queryId: 'query_desktop_agent',
-        columns: [{ name: 'order_count', dataType: 'int8' }],
-        rows: [{ order_count: 42 }],
-        rowCount: 1,
-        elapsedMs: 9,
-        safety: {
-          statementKind: 'SELECT',
-          riskLevel: 'safe',
-          requiresConfirmation: false,
-          blocked: false,
-          reasons: [],
-        },
-      }));
+      return Promise.resolve(
+        ok({
+          queryId: 'query_desktop_agent',
+          columns: [{ name: 'order_count', dataType: 'int8' }],
+          rows: [{ order_count: 42 }],
+          rowCount: 1,
+          elapsedMs: 9,
+          safety: {
+            statementKind: 'SELECT',
+            riskLevel: 'safe',
+            requiresConfirmation: false,
+            blocked: false,
+            reasons: [],
+          },
+        }),
+      );
     },
     cancel(request: QueryCancelResponse) {
       return Promise.resolve(ok(request));
@@ -201,21 +291,23 @@ function fakeDriver(): IDatabaseDriver & {
       return Promise.resolve(ok([{ schema: 'public', name: 'orders', type: 'table' }]));
     },
     describeTable(): Promise<Result<TableDetail>> {
-      return Promise.resolve(ok({
-        schema: 'public',
-        name: 'orders',
-        type: 'table',
-        primaryKey: ['id'],
-        columns: [
-          {
-            name: 'id',
-            ordinal: 1,
-            dataType: 'uuid',
-            nullable: false,
-            isPrimaryKey: true,
-          },
-        ],
-      }));
+      return Promise.resolve(
+        ok({
+          schema: 'public',
+          name: 'orders',
+          type: 'table',
+          primaryKey: ['id'],
+          columns: [
+            {
+              name: 'id',
+              ordinal: 1,
+              dataType: 'uuid',
+              nullable: false,
+              isPrimaryKey: true,
+            },
+          ],
+        }),
+      );
     },
   };
 }
