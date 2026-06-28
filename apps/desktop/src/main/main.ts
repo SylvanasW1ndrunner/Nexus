@@ -74,7 +74,7 @@ const databaseDrivers = createDefaultDatabaseDriverRegistry();
 const agentToolRegistry = new ToolRegistry();
 const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
-registerDesktopAgentTools({
+const desktopAgentTools = registerDesktopAgentTools({
   registry: agentToolRegistry,
   connections: connectionStore,
   workspaceProjects: workspaceProjectStore,
@@ -121,6 +121,14 @@ function sendMenuCommand(command: string): void {
 
 function withAuthCapabilities(status: AuthStatus): AuthStatus {
   return { ...status, capabilities: authCapabilities };
+}
+
+async function refreshAgentWorkspaceScriptTools(): Promise<void> {
+  try {
+    await desktopAgentTools.refreshWorkspaceScriptTools();
+  } catch (error) {
+    logMain('agent:workspace-script-tools-refresh:error', error);
+  }
 }
 
 function installApplicationMenu(): void {
@@ -361,7 +369,9 @@ function registerIpcHandlers(): void {
   });
   handle(ipcChannels.workspace.create, async (request) => {
     try {
-      return ok(await workspaceProjectStore.create(request));
+      const workspace = await workspaceProjectStore.create(request);
+      await refreshAgentWorkspaceScriptTools();
+      return ok(workspace);
     } catch (error) {
       return err({
         code: 'VALIDATION_ERROR',
@@ -371,7 +381,9 @@ function registerIpcHandlers(): void {
   });
   handle(ipcChannels.workspace.open, async ({ rootPath }) => {
     try {
-      return ok(await workspaceProjectStore.open(rootPath));
+      const workspace = await workspaceProjectStore.open(rootPath);
+      await refreshAgentWorkspaceScriptTools();
+      return ok(workspace);
     } catch (error) {
       const detail = error instanceof Error ? error.message : undefined;
       return err({
@@ -473,7 +485,9 @@ function registerIpcHandlers(): void {
   });
   handle(ipcChannels.workspace.updateSettings, async (request) => {
     try {
-      return ok(await workspaceProjectStore.updateSettings(request));
+      const workspace = await workspaceProjectStore.updateSettings(request);
+      await refreshAgentWorkspaceScriptTools();
+      return ok(workspace);
     } catch (error) {
       return err({
         code: 'VALIDATION_ERROR',
@@ -488,10 +502,11 @@ function terminalScrollbackToChars(scrollback: number): number {
   return Math.max(1, Math.floor(scrollback)) * 200;
 }
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   logMain('app:ready');
   installApplicationMenu();
   registerIpcHandlers();
+  await refreshAgentWorkspaceScriptTools();
   void llmRouter;
   void createWindow().catch((error) => {
     logMain('createWindow:error', error);

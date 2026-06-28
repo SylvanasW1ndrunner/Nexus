@@ -48,7 +48,7 @@ export type WorkspaceScriptRunner = (request: WorkspaceScriptRunRequest) => Prom
 export type WorkspaceScriptToolDependencies = {
   registry: ToolRegistry;
   workspace: WorkspaceCore;
-  getWorkspaceRoot: () => string | undefined;
+  getWorkspaceRoot: () => string | undefined | Promise<string | undefined>;
   runner: WorkspaceScriptRunner;
   timeoutMs?: number;
 };
@@ -57,8 +57,9 @@ export async function registerWorkspaceScriptTools(
   dependencies: WorkspaceScriptToolDependencies,
 ): Promise<WorkspaceScriptTool[]> {
   const { registry, workspace, getWorkspaceRoot, runner, timeoutMs } = dependencies;
-  const rootPath = requireWorkspaceRoot(getWorkspaceRoot);
+  const rootPath = await requireWorkspaceRoot(getWorkspaceRoot);
   const scriptTools = await workspace.discoverScriptTools(rootPath);
+  assertRegisterableScriptTools(registry, scriptTools);
 
   for (const scriptTool of scriptTools) {
     const definition = {
@@ -180,10 +181,25 @@ export async function runWorkspacePythonScript(request: WorkspaceScriptRunReques
   });
 }
 
-function requireWorkspaceRoot(getWorkspaceRoot: () => string | undefined): string {
-  const rootPath = getWorkspaceRoot();
+async function requireWorkspaceRoot(
+  getWorkspaceRoot: () => string | undefined | Promise<string | undefined>,
+): Promise<string> {
+  const rootPath = await getWorkspaceRoot();
   if (!rootPath) throw new Error('No active workspace.');
   return rootPath;
+}
+
+function assertRegisterableScriptTools(registry: ToolRegistry, scriptTools: WorkspaceScriptTool[]): void {
+  const seen = new Set<string>();
+  for (const scriptTool of scriptTools) {
+    if (seen.has(scriptTool.name)) {
+      throw new Error(`Duplicate workspace script tool: ${scriptTool.name}`);
+    }
+    if (registry.has(scriptTool.name)) {
+      throw new Error(`Tool already registered: ${scriptTool.name}`);
+    }
+    seen.add(scriptTool.name);
+  }
 }
 
 function scriptToolSchema(scriptTool: WorkspaceScriptTool): Record<string, unknown> {

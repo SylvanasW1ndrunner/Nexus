@@ -92,6 +92,19 @@ export class PythonEnvironmentService {
   }
 }
 
+export function resolveWorkspacePythonExecution(
+  rootPath: string,
+  config: WorkspacePythonConfig,
+): { pythonPath?: string; pythonArgs?: string[]; timeoutMs?: number } {
+  const invocation = resolvePythonInvocation(rootPath, config, []);
+  const timeoutSeconds = (config as { timeoutSeconds?: unknown }).timeoutSeconds;
+  return {
+    pythonPath: invocation.command,
+    ...(invocation.args.length ? { pythonArgs: invocation.args } : {}),
+    timeoutMs: Math.max(1, Math.floor(typeof timeoutSeconds === 'number' ? timeoutSeconds : 300)) * 1000,
+  };
+}
+
 async function detectSystemPythonEnvironments(): Promise<PythonEnvironmentInfo[]> {
   const candidates = systemPythonCandidates();
   const inspected = await Promise.all(

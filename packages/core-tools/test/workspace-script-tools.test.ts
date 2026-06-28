@@ -87,6 +87,71 @@ describe('workspace Python script Agent tools', () => {
     ).rejects.toThrow('No active workspace.');
   });
 
+  it('supports async active workspace root providers when discovering script tools', async () => {
+    const { registry, rootPath } = await scriptWorkspace();
+
+    await expect(
+      registerWorkspaceScriptTools({
+        registry,
+        workspace: new WorkspaceCore(),
+        getWorkspaceRoot: () => Promise.resolve(rootPath),
+        runner: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '', elapsedMs: 0 }),
+      }),
+    ).resolves.toMatchObject([{ name: 'workspace_script:summarize_orders' }]);
+    expect(registry.has('workspace_script:summarize_orders')).toBe(true);
+  });
+
+  it('rejects duplicate declared script tool names before registering partial tools', async () => {
+    const { registry, rootPath } = await scriptWorkspace();
+    const workspace = new WorkspaceCore();
+    await workspace.writeFile(
+      rootPath,
+      'scripts/nested/duplicate.py',
+      [
+        '"""',
+        '@tool summarize_orders',
+        'Duplicate tool name.',
+        '@param count: int order count',
+        '@param region: str region',
+        '"""',
+        '',
+      ].join('\n'),
+    );
+
+    await expect(
+      registerWorkspaceScriptTools({
+        registry,
+        workspace,
+        getWorkspaceRoot: () => rootPath,
+        runner: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '', elapsedMs: 0 }),
+      }),
+    ).rejects.toThrow('Duplicate workspace script tool: workspace_script:summarize_orders');
+    expect(registry.has('workspace_script:summarize_orders')).toBe(false);
+  });
+
+  it('rejects pre-existing script tool names before registering partial tools', async () => {
+    const { registry, rootPath } = await scriptWorkspace();
+    registry.register(
+      {
+        name: 'workspace_script:summarize_orders',
+        description: 'Existing script tool',
+        inputSchema: { type: 'object', properties: {} },
+        dangerLevel: 'medium',
+        readonly: false,
+      },
+      () => ({ ok: true }),
+    );
+
+    await expect(
+      registerWorkspaceScriptTools({
+        registry,
+        workspace: new WorkspaceCore(),
+        getWorkspaceRoot: () => rootPath,
+        runner: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '', elapsedMs: 0 }),
+      }),
+    ).rejects.toThrow('Tool already registered: workspace_script:summarize_orders');
+  });
+
   it('returns stderr tail and a structured result when a Python script exits nonzero', async () => {
     const python = await availablePython();
     if (!python) return;

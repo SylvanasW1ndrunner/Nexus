@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ToolRegistry, type AgentToolContext } from '@dbagent/core-agent';
 import type { IDatabaseDriver, TableSummary } from '@dbagent/core-db';
+import type { WorkspaceScriptRunRequest } from '@dbagent/core-tools';
 import { WorkspaceCore } from '@dbagent/core-workspace';
 import {
   ok,
@@ -176,6 +177,87 @@ describe('registerDesktopAgentTools', () => {
       bytes: 28,
     });
   });
+
+  it('refreshes workspace Python script tools from the active workspace', async () => {
+    const registry = new ToolRegistry();
+    const { workspace, rootPath } = await scriptWorkspace('summarize_orders');
+    const activeProject = workspaceProject(rootPath);
+    const launched: WorkspaceScriptRunRequest[] = [];
+    const desktopTools = registerDesktopAgentTools({
+      registry,
+      connections: connectionReader([connectedConnection()]),
+      workspaceProjects: workspaceReader(activeProject),
+      driverForEngine: () => fakeDriver(),
+      workspace,
+      scriptRunner: (request) => {
+        launched.push(request);
+        return Promise.resolve({ exitCode: 0, stdout: 'ok', stderr: '', elapsedMs: 12 });
+      },
+    });
+
+    await expect(desktopTools.refreshWorkspaceScriptTools()).resolves.toMatchObject([
+      {
+        name: 'workspace_script:summarize_orders',
+        relativePath: 'scripts/summarize_orders.py',
+      },
+    ]);
+    expect(desktopTools.registeredWorkspaceScriptToolNames()).toEqual(['workspace_script:summarize_orders']);
+    expect(registry.get('workspace_script:summarize_orders')).toMatchObject({
+      dangerLevel: 'medium',
+      readonly: false,
+      source: 'workspace-script',
+      sourceId: 'scripts/summarize_orders.py',
+      originalName: 'workspace_script:summarize_orders',
+    });
+
+    await expect(
+      registry.get('workspace_script:summarize_orders')?.handler({ count: 3, region: 'east' }, toolContext()),
+    ).resolves.toMatchObject({
+      exitCode: 0,
+      stdout: 'ok',
+    });
+    expect(launched).toHaveLength(1);
+    expect(launched[0]).toMatchObject({
+      rootPath,
+      relativePath: 'scripts/summarize_orders.py',
+      args: { count: 3, region: 'east' },
+      pythonPath: 'python',
+      timeoutMs: 300_000,
+    });
+  });
+
+  it('unregisters stale workspace script tools when the active workspace changes', async () => {
+    const registry = new ToolRegistry();
+    const first = await scriptWorkspace('summarize_orders');
+    const second = await scriptWorkspace('plot_gmv');
+    const activeProject: { value: WorkspaceProject | undefined } = { value: workspaceProject(first.rootPath) };
+    const desktopTools = registerDesktopAgentTools({
+      registry,
+      connections: connectionReader([connectedConnection()]),
+      workspaceProjects: {
+        loadActive() {
+          return Promise.resolve(activeProject.value);
+        },
+      },
+      driverForEngine: () => fakeDriver(),
+      workspace: first.workspace,
+      scriptRunner: () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '', elapsedMs: 0 }),
+    });
+
+    await desktopTools.refreshWorkspaceScriptTools();
+    expect(registry.has('workspace_script:summarize_orders')).toBe(true);
+
+    activeProject.value = undefined;
+    await expect(
+      registry.get('workspace_script:summarize_orders')?.handler({ count: 1, region: 'east' }, toolContext()),
+    ).rejects.toThrow('Workspace script tool is no longer active.');
+
+    activeProject.value = workspaceProject(second.rootPath);
+    await desktopTools.refreshWorkspaceScriptTools();
+    expect(registry.has('workspace_script:summarize_orders')).toBe(false);
+    expect(registry.has('workspace_script:plot_gmv')).toBe(true);
+    expect(desktopTools.registeredWorkspaceScriptToolNames()).toEqual(['workspace_script:plot_gmv']);
+  });
 });
 
 function connectionReader(connections: SavedConnection[]) {
@@ -221,6 +303,34 @@ function workspaceProject(rootPath: string): WorkspaceProject {
     enabledMcpServers: [],
     tags: [],
   };
+}
+
+async function scriptWorkspace(toolName: string): Promise<{ workspace: WorkspaceCore; rootPath: string }> {
+  const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-script-workspace-'));
+  tempDirs.push(rootPath);
+  const workspace = new WorkspaceCore();
+  await workspace.create({
+    name: `Script Workspace ${toolName}`,
+    rootPath,
+  });
+  await workspace.writeFile(rootPath, `scripts/${toolName}.py`, scriptToolContent(toolName));
+  return { workspace, rootPath };
+}
+
+function scriptToolContent(toolName: string): string {
+  return [
+    '"""',
+    `@tool ${toolName}`,
+    `Run ${toolName} for analytics.`,
+    '@param count: int order count',
+    '@param region: str region code',
+    '"""',
+    'import json',
+    'import sys',
+    'payload = json.loads(sys.argv[1])',
+    'print(payload)',
+    '',
+  ].join('\n');
 }
 
 function connectedConnection(): SavedConnection {

@@ -7,8 +7,14 @@ import type {
   TableSummary,
 } from '@dbagent/core-db';
 import { SchemaRagEngine } from '@dbagent/core-rag';
-import { registerDatabaseTools, registerWorkspaceTools } from '@dbagent/core-tools';
-import { WorkspaceCore } from '@dbagent/core-workspace';
+import {
+  registerDatabaseTools,
+  registerWorkspaceScriptTools,
+  registerWorkspaceTools,
+  runWorkspacePythonScript,
+  type WorkspaceScriptRunner,
+} from '@dbagent/core-tools';
+import { WorkspaceCore, type WorkspaceScriptTool } from '@dbagent/core-workspace';
 import type {
   ConnectionId,
   DatabaseEngine,
@@ -20,6 +26,7 @@ import type {
   TableDetail,
   WorkspaceProject,
 } from '@dbagent/shared';
+import { resolveWorkspacePythonExecution } from './python-environment.js';
 
 type ConnectionReader = {
   list(): Promise<SavedConnection[]>;
@@ -36,10 +43,18 @@ export type AgentToolBootstrapDependencies = {
   driverForEngine: (engine: DatabaseEngine) => IDatabaseDriver;
   rag?: SchemaRagEngine;
   workspace?: WorkspaceCore;
+  scriptRunner?: WorkspaceScriptRunner;
 };
 
-export function registerDesktopAgentTools(dependencies: AgentToolBootstrapDependencies): void {
+export type DesktopAgentToolRegistration = {
+  refreshWorkspaceScriptTools(): Promise<WorkspaceScriptTool[]>;
+  registeredWorkspaceScriptToolNames(): string[];
+};
+
+export function registerDesktopAgentTools(dependencies: AgentToolBootstrapDependencies): DesktopAgentToolRegistration {
   const rag = dependencies.rag ?? new SchemaRagEngine();
+  const workspace = dependencies.workspace ?? new WorkspaceCore();
+  const registeredScriptToolNames = new Set<string>();
   registerDatabaseTools({
     registry: dependencies.registry,
     driver: new ConnectionRoutingDatabaseDriver(dependencies.connections, dependencies.driverForEngine),
@@ -51,9 +66,50 @@ export function registerDesktopAgentTools(dependencies: AgentToolBootstrapDepend
   });
   registerWorkspaceTools({
     registry: dependencies.registry,
-    workspace: dependencies.workspace ?? new WorkspaceCore(),
+    workspace,
     getWorkspaceRoot: async () => (await dependencies.workspaceProjects.loadActive())?.rootPath,
   });
+
+  return {
+    async refreshWorkspaceScriptTools() {
+      unregisterWorkspaceScriptTools(dependencies.registry, registeredScriptToolNames);
+      const activeWorkspace = await dependencies.workspaceProjects.loadActive();
+      if (!activeWorkspace) return [];
+      const scriptTools = await registerWorkspaceScriptTools({
+        registry: dependencies.registry,
+        workspace,
+        getWorkspaceRoot: () => activeWorkspace.rootPath,
+        runner: createWorkspaceScriptRunner(dependencies, activeWorkspace.rootPath),
+      });
+      for (const scriptTool of scriptTools) registeredScriptToolNames.add(scriptTool.name);
+      return scriptTools;
+    },
+    registeredWorkspaceScriptToolNames() {
+      return [...registeredScriptToolNames].sort();
+    },
+  };
+}
+
+function unregisterWorkspaceScriptTools(registry: ToolRegistry, registeredScriptToolNames: Set<string>): void {
+  for (const name of registeredScriptToolNames) registry.unregister(name);
+  registeredScriptToolNames.clear();
+}
+
+function createWorkspaceScriptRunner(
+  dependencies: AgentToolBootstrapDependencies,
+  registeredRootPath: string,
+): WorkspaceScriptRunner {
+  return async (request) => {
+    const activeWorkspace = await dependencies.workspaceProjects.loadActive();
+    if (!activeWorkspace || activeWorkspace.rootPath !== registeredRootPath) {
+      throw new Error('Workspace script tool is no longer active.');
+    }
+    const runScript = dependencies.scriptRunner ?? runWorkspacePythonScript;
+    return runScript({
+      ...request,
+      ...resolveWorkspacePythonExecution(activeWorkspace.rootPath, activeWorkspace.python),
+    });
+  };
 }
 
 class ConnectionRoutingDatabaseDriver implements IDatabaseDriver {
