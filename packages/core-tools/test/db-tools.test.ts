@@ -178,7 +178,7 @@ describe('registerDatabaseTools', () => {
     expect(driver.executedSql).toEqual([]);
   });
 
-  it('lets the agent audit SQL before execution', () => {
+  it('lets the agent audit SQL before execution', async () => {
     const registry = new ToolRegistry();
     registerDatabaseTools({
       registry,
@@ -186,7 +186,7 @@ describe('registerDatabaseTools', () => {
       getConnection: () => writableConnection(),
     });
 
-    expect(
+    await expect(
       registry.get('audit_sql')?.handler(
         {
           connectionId: 'conn_1',
@@ -194,7 +194,7 @@ describe('registerDatabaseTools', () => {
         },
         toolContext(),
       ),
-    ).toMatchObject({
+    ).resolves.toMatchObject({
       statementKind: 'DELETE',
       riskLevel: 'dangerous',
       requiresConfirmation: true,

@@ -210,3 +210,15 @@ Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manife
 - Skill plan 不能直接获得工具执行权。
 - runner 不捕获 provider / tool / quota 错误，不隐藏失败原因。
 - 真实执行仍由 `ReactAgent`、permission manager、approval provider 和各 tool handler 兜底。
+
+## 2026-06-28 增量：异步连接读取
+
+`registerDatabaseTools()` 的 `getConnection` 现在支持同步或异步返回，用于适配 desktop main 的 `ConnectionStore.list()`。这保证 Agent 工具执行前读取的是最新连接状态，而不是启动时快照。
+
+受影响工具：
+
+- `audit_sql`：等待最新连接后按 connection `readOnly` 策略生成 SQL 安全报告。
+- `query_database`：等待最新连接，并继续强制只允许单条只读查询。
+- `execute_sql`：等待最新连接，并继续校验只读策略、确认参数和 approval provenance。
+
+该变更不改变工具名称、风险等级或返回结构。测试需要使用 Promise 断言验证 `audit_sql`，避免同步假设掩盖连接读取问题。

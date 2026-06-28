@@ -89,3 +89,14 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 - 构造 `EXPLAIN (FORMAT JSON)` 后交给现有 `createQueryWorkflow` 执行。
 
 这个拆分让 `main.ts` 继续保持组合层职责，查询执行、危险 SQL 确认、连接 driver 路由和 EXPLAIN 安全边界分别有独立测试。当前测试文件是 `apps/desktop/src/main/explain-workflow.test.ts`，覆盖只读查询包装、`WITH`/`VALUES` 允许、空 SQL 拒绝、多语句拒绝、写操作/DDL 拒绝，以及被拒绝 SQL 不触发下游查询 workflow。
+
+## 2026-06-28 增量：Agent 工具注册
+
+`apps/desktop/src/main/agent-tool-bootstrap.ts` 负责把 desktop main 的 `ToolRegistry` 接到已有 core 工具能力：
+
+- 数据库工具来自 `@dbagent/core-tools/registerDatabaseTools()`，通过异步 `ConnectionStore.list()` 读取最新已连接 connection。
+- SQL 执行通过 connection `engine` 路由到 `DatabaseDriverRegistry` 中的真实 driver，不在 Agent service 内硬编码数据库 SDK。
+- Schema RAG 工具复用 `@dbagent/core-rag/SchemaRagEngine`，当前用于提供本地 schema 检索和上下文构建工具定义。
+- workspace 文件工具复用 `@dbagent/core-workspace/WorkspaceCore`，但 active workspace root 尚未接入 Agent runtime；当前 handler 会返回 `No active workspace.`，避免未确认项目根目录时访问文件系统。
+
+该装配层只做组合，不持有 API key，不绕过 official plugin tool policy、Skill `allowedTools` 或 `ReactAgent` 的权限判断。

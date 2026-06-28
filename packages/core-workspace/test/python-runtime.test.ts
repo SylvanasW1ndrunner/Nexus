@@ -27,15 +27,15 @@ describe('Workspace Python runtime resolution', () => {
       python: { mode: 'system', pythonPath: python },
     });
 
-    await expect(detectWorkspacePythonRuntime(workspace)).resolves.toMatchObject({
-      available: true,
-      version: expect.stringMatching(/^Python \d+\.\d+/),
-      resolution: {
-        mode: 'system',
-        source: 'explicit',
-        command: python,
-        argsPrefix: [],
-      },
+    const info = await detectWorkspacePythonRuntime(workspace);
+
+    expect(info.available).toBe(true);
+    expect(info.version).toMatch(/^Python \d+\.\d+/);
+    expect(info.resolution).toMatchObject({
+      mode: 'system',
+      source: 'explicit',
+      command: python,
+      argsPrefix: [],
     });
   });
 
@@ -91,14 +91,14 @@ describe('Workspace Python runtime resolution', () => {
       python: { mode: 'embedded' },
     });
 
-    await expect(detectWorkspacePythonRuntime(workspace)).resolves.toMatchObject({
-      available: false,
-      resolution: {
-        mode: 'embedded',
-        source: 'embedded',
-      },
-      errorMessage: expect.stringContaining('not implemented'),
+    const info = await detectWorkspacePythonRuntime(workspace);
+
+    expect(info.available).toBe(false);
+    expect(info.resolution).toMatchObject({
+      mode: 'embedded',
+      source: 'embedded',
     });
+    expect(info.errorMessage).toContain('not implemented');
   });
 });
 

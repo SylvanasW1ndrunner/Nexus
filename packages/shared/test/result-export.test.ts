@@ -50,7 +50,7 @@ describe('query result export contract', () => {
   });
 
   it('keeps the legacy JSON helper stable', () => {
-    const parsed = JSON.parse(queryResultToJson({ ...result, rows: [result.rows[0]!] }));
+    const parsed = JSON.parse(queryResultToJson({ ...result, rows: [result.rows[0]!] })) as unknown;
     expect(parsed).toMatchObject({
       queryId: 'query/export:1',
       rowCount: 3,

@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { parseWorkspaceScriptTool } from './script-tool-parser.js';
 import { normalizeWorkspaceDirectory, normalizeWorkspaceRelativePath, resolveInsideWorkspace, toPortablePath } from './path-utils.js';
 import type {
   WorkspaceAssetPaths,
   WorkspaceConfig,
   WorkspaceCreateInput,
+  WorkspaceConnectionLink,
   WorkspaceFileEntry,
   WorkspacePythonConfig,
   WorkspaceSavedFile,
@@ -290,7 +291,7 @@ function normalizeAgentMode(value: unknown): WorkspaceConfig['defaults']['agentM
   return 'ask';
 }
 
-function isConnectionLink(input: unknown): boolean {
+function isConnectionLink(input: unknown): input is WorkspaceConnectionLink {
   return isRecord(input) && typeof input.connectionId === 'string';
 }
 

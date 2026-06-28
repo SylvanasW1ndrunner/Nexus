@@ -15,8 +15,10 @@
     { "path": "../../packages/core-agent" },
     { "path": "../../packages/core-usage" },
     { "path": "../../packages/core-llm" },
+    { "path": "../../packages/core-rag" },
     { "path": "../../packages/core-skills" },
-    { "path": "../../packages/core-tools" }
+    { "path": "../../packages/core-tools" },
+    { "path": "../../packages/core-workspace" }
   ],
   "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
 }

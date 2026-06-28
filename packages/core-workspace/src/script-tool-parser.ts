@@ -43,7 +43,7 @@ function normalizeToolName(line: string): string | undefined {
 
 function parseParam(line: string): WorkspaceScriptTool['params'][number] | undefined {
   const raw = line.replace(/^@param/i, '').trim();
-  const match = raw.match(/^([a-zA-Z_][a-zA-Z0-9_]*)(?::\s*([a-zA-Z0-9_\[\]|]+))?\s*(.*)$/);
+  const match = raw.match(/^([a-zA-Z_][a-zA-Z0-9_]*)(?::\s*([a-zA-Z0-9_[\]|]+))?\s*(.*)$/);
   if (!match?.[1]) return undefined;
   return {
     name: match[1],

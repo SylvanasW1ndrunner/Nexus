@@ -7,7 +7,7 @@ import { optionalPositiveInteger, optionalString, requireString } from './valida
 export type DbToolDependencies = {
   registry: ToolRegistry;
   driver: IDatabaseDriver;
-  getConnection: (connectionId: string) => SavedConnection | undefined;
+  getConnection: (connectionId: string) => SavedConnection | undefined | Promise<SavedConnection | undefined>;
   rag?: SchemaRagEngine;
 };
 
@@ -89,10 +89,10 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
       dangerLevel: 'safe',
       readonly: true,
     },
-    (args) => {
+    async (args) => {
       const connectionId = requireString(args, 'connectionId');
       const sql = requireString(args, 'sql');
-      const connection = requireConnection(getConnection, connectionId);
+      const connection = await requireConnection(getConnection, connectionId);
       return analyzeSqlSafety(sql, { readOnly: connection.readOnly });
     },
   );
@@ -113,7 +113,7 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
       const connectionId = requireString(args, 'connectionId');
       const sql = requireString(args, 'sql');
       const limit = optionalPositiveInteger(args, 'limit', 100);
-      const connection = requireConnection(getConnection, connectionId);
+      const connection = await requireConnection(getConnection, connectionId);
       const safety = analyzeSqlSafety(sql, { readOnly: true });
       if (safety.statementKind === 'EMPTY') {
         throw new Error('SQL is empty.');
@@ -149,7 +149,7 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
     async (args, context) => {
       const connectionId = requireString(args, 'connectionId');
       const sql = requireString(args, 'sql');
-      const connection = requireConnection(getConnection, connectionId);
+      const connection = await requireConnection(getConnection, connectionId);
       const safety = analyzeSqlSafety(sql, { readOnly: connection.readOnly });
       if (safety.blocked) {
         throw new Error(`SQL is blocked by connection policy. ${safety.reasons.join(' ')}`);
@@ -192,11 +192,11 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
   }
 }
 
-function requireConnection(
-  getConnection: (connectionId: string) => SavedConnection | undefined,
+async function requireConnection(
+  getConnection: (connectionId: string) => SavedConnection | undefined | Promise<SavedConnection | undefined>,
   connectionId: string,
-): SavedConnection {
-  const connection = getConnection(connectionId);
+): Promise<SavedConnection> {
+  const connection = await getConnection(connectionId);
   if (!connection) throw new Error(`Connection is not active: ${connectionId}`);
   return connection;
 }

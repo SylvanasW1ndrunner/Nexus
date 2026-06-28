@@ -216,7 +216,9 @@ function escapeXml(value: string): string {
 }
 
 function sanitizeExportBaseName(name: string): string {
-  const sanitized = name.trim().replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_');
+  const sanitized = Array.from(name.trim().replace(/[<>:"/\\|?*]/g, '_'))
+    .map((char) => (char.charCodeAt(0) < 32 ? '_' : char))
+    .join('');
   return sanitized.length > 0 ? sanitized : 'query-result';
 }
 

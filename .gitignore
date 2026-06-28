@@ -5,6 +5,7 @@ coverage/
 release/
 apps/*/release/
 .turbo/
+.pnpm-store/
 .vite/
 *.log
 .env

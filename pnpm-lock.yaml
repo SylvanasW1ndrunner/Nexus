@@ -47,6 +47,9 @@ importers:
       '@dbagent/core-llm':
         specifier: workspace:*
         version: link:../../packages/core-llm
+      '@dbagent/core-rag':
+        specifier: workspace:*
+        version: link:../../packages/core-rag
       '@dbagent/core-skills':
         specifier: workspace:*
         version: link:../../packages/core-skills
@@ -56,6 +59,9 @@ importers:
       '@dbagent/core-usage':
         specifier: workspace:*
         version: link:../../packages/core-usage
+      '@dbagent/core-workspace':
+        specifier: workspace:*
+        version: link:../../packages/core-workspace
       '@dbagent/shared':
         specifier: workspace:*
         version: link:../../packages/shared

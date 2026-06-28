@@ -31,6 +31,7 @@ import { TerminalService } from './terminal-service.js';
 import { WorkspaceStateStore } from './workspace-state-store.js';
 import { WorkspaceProjectStore } from './workspace-project-store.js';
 import { HeadlessAgentService } from './agent-service.js';
+import { registerDesktopAgentTools } from './agent-tool-bootstrap.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
@@ -69,9 +70,16 @@ const authCapabilities: AuthCapabilities = process.env.DBAGENT_AUTH_DATABASE_URL
 const authService = new AuthService(join(dataDir, 'auth-session.json'), authRepository);
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
+const databaseDrivers = createDefaultDatabaseDriverRegistry();
 const agentToolRegistry = new ToolRegistry();
 const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
+registerDesktopAgentTools({
+  registry: agentToolRegistry,
+  connections: connectionStore,
+  workspaceProjects: workspaceProjectStore,
+  driverForEngine: (engine) => databaseDrivers.get(engine),
+});
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker);
 const headlessAgentService = new HeadlessAgentService({
   agent: reactAgent,
@@ -81,7 +89,6 @@ const headlessAgentService = new HeadlessAgentService({
 const pythonEnvironmentService = new PythonEnvironmentService();
 const terminalService = new TerminalService();
 const pluginRegistry = new PluginRegistry(pluginStatePath);
-const databaseDrivers = createDefaultDatabaseDriverRegistry();
 const queryCancellations = new QueryCancellationRegistry();
 const connectionWorkflow = createConnectionWorkflow({
   connections: connectionStore,
