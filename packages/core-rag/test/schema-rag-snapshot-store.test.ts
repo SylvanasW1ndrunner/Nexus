@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -57,6 +57,24 @@ describe('SchemaRagSnapshotStore', () => {
 
     await writeFile(store.getSnapshotPath('old-version'), JSON.stringify({ version: 0, connectionId: 'old-version' }), 'utf8');
     await expect(store.load('old-version')).resolves.toBeUndefined();
+  });
+
+  it('reports invalid snapshot diagnostics and quarantines the broken file', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-diagnostic-'));
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    const snapshotPath = store.getSnapshotPath('broken_connection');
+    await writeFile(snapshotPath, JSON.stringify({ version: 1, connectionId: 'other', documents: [], graph: [], glossary: [] }), 'utf8');
+
+    const result = await store.loadDetailed('broken_connection');
+
+    expect(result).toMatchObject({
+      status: 'invalid',
+      snapshotPath,
+      reason: 'Snapshot connection id does not match the requested connection.',
+    });
+    expect(result.status === 'invalid' ? result.quarantinedPath : undefined).toContain('.corrupt-');
+    await expect(store.load('broken_connection')).resolves.toBeUndefined();
+    await expect(readdir(rootDir)).resolves.toEqual(expect.arrayContaining([expect.stringMatching(/broken_connection.*\.corrupt-/)]));
   });
 
   it('removes only the selected connection snapshot', async () => {

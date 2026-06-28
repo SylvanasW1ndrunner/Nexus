@@ -65,12 +65,32 @@ export class ProgressiveSchemaRagIndexer {
 
   async restore(connectionId: string): Promise<SchemaRagIndexStatus | undefined> {
     if (!this.snapshotStore) return undefined;
-    const index = await this.snapshotStore.load(connectionId);
-    if (!index) return undefined;
-    this.engine.loadIndex(index);
-    const status = this.engine.getIndexStatus(connectionId);
-    this.statuses.set(connectionId, status);
-    return status;
+    const restoredAt = new Date().toISOString();
+    const result = await this.snapshotStore.loadDetailed(connectionId);
+    if (result.status === 'missing') return undefined;
+    if (result.status === 'invalid') {
+      const status = buildFailedRestoreStatus(connectionId, restoredAt, result.reason);
+      this.statuses.set(connectionId, status);
+      return status;
+    }
+    if (result.status === 'error') {
+      const message = result.error instanceof Error ? result.error.message : String(result.error);
+      const status = buildFailedRestoreStatus(connectionId, restoredAt, message);
+      this.statuses.set(connectionId, status);
+      return status;
+    }
+
+    try {
+      this.engine.loadIndex(result.index);
+      const status = this.engine.getIndexStatus(connectionId);
+      this.statuses.set(connectionId, status);
+      return status;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const status = buildFailedRestoreStatus(connectionId, restoredAt, message);
+      this.statuses.set(connectionId, status);
+      return status;
+    }
   }
 
   getStatus(connectionId: string): SchemaRagIndexStatus {
@@ -97,6 +117,30 @@ export class ProgressiveSchemaRagIndexer {
       stages,
     });
   }
+}
+
+function buildFailedRestoreStatus(connectionId: string, updatedAt: string, error: string): SchemaRagIndexStatus {
+  return {
+    connectionId,
+    stage: 'failed',
+    ready: false,
+    documentCount: 0,
+    tableCount: 0,
+    columnCount: 0,
+    relationCount: 0,
+    glossaryCount: 0,
+    updatedAt,
+    stages: [
+      {
+        stage: 'failed',
+        state: 'failed',
+        done: 0,
+        total: 1,
+        completedAt: updatedAt,
+        error,
+      },
+    ],
+  };
 }
 
 function buildInitialStages(tableCount: number, hotTableLimit: number | undefined, startedAt: string): SchemaRagIndexStageStatus[] {

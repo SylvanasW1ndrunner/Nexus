@@ -14,6 +14,29 @@ type PersistedSchemaRagSnapshot = {
   glossary: SchemaRagGlossaryEntry[];
 };
 
+export type SchemaRagSnapshotLoadResult =
+  | {
+      status: 'loaded';
+      snapshotPath: string;
+      index: SchemaRagIndex;
+    }
+  | {
+      status: 'missing';
+      snapshotPath: string;
+    }
+  | {
+      status: 'invalid';
+      snapshotPath: string;
+      reason: string;
+      quarantinedPath?: string;
+      quarantineError?: string;
+    }
+  | {
+      status: 'error';
+      snapshotPath: string;
+      error: unknown;
+    };
+
 export type SchemaRagSnapshotStoreOptions = {
   rootDir: string;
 };
@@ -47,20 +70,32 @@ export class SchemaRagSnapshotStore {
   }
 
   async load(connectionId: string): Promise<SchemaRagIndex | undefined> {
+    const result = await this.loadDetailed(connectionId);
+    if (result.status === 'loaded') return result.index;
+    if (result.status === 'error') throw result.error;
+    return undefined;
+  }
+
+  async loadDetailed(connectionId: string): Promise<SchemaRagSnapshotLoadResult> {
     const target = this.snapshotPath(connectionId);
     let raw: string;
     try {
       raw = await readFile(target, 'utf8');
     } catch (error) {
-      if (isNotFound(error)) return undefined;
-      throw error;
+      if (isNotFound(error)) return { status: 'missing', snapshotPath: target };
+      return { status: 'error', snapshotPath: target, error };
     }
 
+    let parsed: unknown;
     try {
-      return deserializeSnapshot(JSON.parse(raw), connectionId);
-    } catch {
-      return undefined;
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      return this.invalidSnapshotResult(target, error instanceof Error ? error.message : 'Snapshot JSON is invalid.');
     }
+
+    const deserialized = deserializeSnapshot(parsed, connectionId);
+    if (deserialized.status === 'invalid') return this.invalidSnapshotResult(target, deserialized.reason);
+    return { status: 'loaded', snapshotPath: target, index: deserialized.index };
   }
 
   async remove(connectionId: string): Promise<void> {
@@ -79,24 +114,46 @@ export class SchemaRagSnapshotStore {
     const safeName = encodeURIComponent(validateConnectionId(connectionId)).replace(/%/g, '_');
     return path.join(this.rootDir, `${safeName}.schema-rag.json`);
   }
+
+  private async invalidSnapshotResult(target: string, reason: string): Promise<SchemaRagSnapshotLoadResult> {
+    const result: SchemaRagSnapshotLoadResult = { status: 'invalid', snapshotPath: target, reason };
+    try {
+      const quarantinedPath = `${target}.corrupt-${Date.now()}`;
+      await rename(target, quarantinedPath);
+      return { ...result, quarantinedPath };
+    } catch (error) {
+      if (isNotFound(error)) return result;
+      return { ...result, quarantineError: error instanceof Error ? error.message : String(error) };
+    }
+  }
 }
 
-function deserializeSnapshot(value: unknown, expectedConnectionId: string): SchemaRagIndex | undefined {
-  if (!isRecord(value)) return undefined;
-  if (value.version !== SNAPSHOT_VERSION) return undefined;
-  if (value.connectionId !== expectedConnectionId) return undefined;
-  if (typeof value.indexedAt !== 'string') return undefined;
+type DeserializeSnapshotResult =
+  | {
+      status: 'loaded';
+      index: SchemaRagIndex;
+    }
+  | {
+      status: 'invalid';
+      reason: string;
+    };
+
+function deserializeSnapshot(value: unknown, expectedConnectionId: string): DeserializeSnapshotResult {
+  if (!isRecord(value)) return invalidSnapshot('Snapshot root must be an object.');
+  if (value.version !== SNAPSHOT_VERSION) return invalidSnapshot(`Unsupported snapshot version: ${String(value.version)}.`);
+  if (value.connectionId !== expectedConnectionId) return invalidSnapshot('Snapshot connection id does not match the requested connection.');
+  if (typeof value.indexedAt !== 'string') return invalidSnapshot('Snapshot indexedAt is missing or invalid.');
   if (!Array.isArray(value.documents) || !Array.isArray(value.graph) || !Array.isArray(value.glossary)) {
-    return undefined;
+    return invalidSnapshot('Snapshot documents, graph, or glossary section is missing.');
   }
 
   const documents = value.documents.filter(isSchemaRagDocument);
-  if (documents.length !== value.documents.length) return undefined;
+  if (documents.length !== value.documents.length) return invalidSnapshot('Snapshot contains invalid schema documents.');
 
   const graph = new Map<string, Set<string>>();
   for (const entry of value.graph) {
     if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) {
-      return undefined;
+      return invalidSnapshot('Snapshot contains invalid graph edges.');
     }
     graph.set(
       entry[0],
@@ -107,15 +164,22 @@ function deserializeSnapshot(value: unknown, expectedConnectionId: string): Sche
   }
 
   const glossary = value.glossary.filter(isSchemaRagGlossaryEntry);
-  if (glossary.length !== value.glossary.length) return undefined;
+  if (glossary.length !== value.glossary.length) return invalidSnapshot('Snapshot contains invalid glossary entries.');
 
   return {
-    connectionId: expectedConnectionId,
-    documents,
-    graph,
-    glossary,
-    indexedAt: value.indexedAt,
+    status: 'loaded',
+    index: {
+      connectionId: expectedConnectionId,
+      documents,
+      graph,
+      glossary,
+      indexedAt: value.indexedAt,
+    },
   };
+}
+
+function invalidSnapshot(reason: string): DeserializeSnapshotResult {
+  return { status: 'invalid', reason };
 }
 
 function isSchemaRagDocument(value: unknown): value is SchemaRagDocument {

@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -76,6 +76,32 @@ describe('ProgressiveSchemaRagIndexer', () => {
       ready: false,
       documentCount: 0,
     });
+  });
+
+  it('reports a failed restore status for a corrupted snapshot without throwing', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-restore-failed-'));
+    const engine = new SchemaRagEngine();
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    const indexer = new ProgressiveSchemaRagIndexer({ engine, snapshotStore: store });
+
+    await writeFile(store.getSnapshotPath('traffic_warehouse'), '{not-json', 'utf8');
+
+    const status = await indexer.restore('traffic_warehouse');
+
+    expect(status).toMatchObject({
+      connectionId: 'traffic_warehouse',
+      stage: 'failed',
+      ready: false,
+      documentCount: 0,
+    });
+    expect(status?.stages[0]).toMatchObject({
+      stage: 'failed',
+      state: 'failed',
+      done: 0,
+      total: 1,
+    });
+    expect(indexer.getStatus('traffic_warehouse').stage).toBe('failed');
+    expect(engine.hasIndex('traffic_warehouse')).toBe(false);
   });
 });
 
