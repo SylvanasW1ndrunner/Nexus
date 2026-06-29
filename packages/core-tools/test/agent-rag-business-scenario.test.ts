@@ -20,7 +20,12 @@ import {
   type DatabaseConnectionConfig,
   type IDatabaseDriver,
 } from '@dbagent/core-db';
-import { SchemaRagEngine, evaluateSchemaRagRetrieval } from '@dbagent/core-rag';
+import {
+  indexSchemaCatalogFromReader,
+  ProgressiveSchemaRagIndexer,
+  SchemaRagEngine,
+  evaluateSchemaRagRetrieval,
+} from '@dbagent/core-rag';
 import { UsageTracker } from '@dbagent/core-usage';
 import {
   err,
@@ -230,10 +235,26 @@ describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')(
 
       try {
         await expectOk(
-          driver.execute({ connectionId: config.id!, sql: businessFixtureSql() }, connected.data),
+          driver.execute(
+            { connectionId: config.id!, sql: businessFixtureSql(), confirmed: true },
+            connected.data,
+          ),
         );
 
-        const tableDetails = await describeBusinessTables(driver, config.id!);
+        const rag = new SchemaRagEngine();
+        const catalogIndex = await indexSchemaCatalogFromReader({
+          connectionId: config.id!,
+          reader: driver,
+          indexer: new ProgressiveSchemaRagIndexer({ engine: rag }),
+          includeSchemas: ['public', 'analytics'],
+          glossary: businessGlossary(),
+          hotTableLimit: 4,
+          continueOnTableError: false,
+        });
+        expect(catalogIndex.ok).toBe(true);
+        if (!catalogIndex.ok) throw new Error(catalogIndex.error.message);
+
+        const tableDetails = catalogIndex.data.tables;
         expect(tableDetails.map((table) => `${table.schema}.${table.name}`)).toEqual(
           expect.arrayContaining([
             'public.orders',
@@ -252,9 +273,9 @@ describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')(
         expect(orderColumns.find((column) => column.name === 'total_amount')?.comment).toContain(
           'GMV',
         );
+        expect(catalogIndex.data.status.ready).toBe(true);
+        expect(catalogIndex.data.warnings).toEqual([]);
 
-        const rag = new SchemaRagEngine();
-        rag.index({ connectionId: config.id!, tables: tableDetails, glossary: businessGlossary() });
         const registry = new ToolRegistry();
         registerDatabaseTools({
           registry,
@@ -302,7 +323,7 @@ describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')(
         ]);
       } finally {
         await driver.execute(
-          { connectionId: config.id!, sql: businessFixtureCleanupSql() },
+          { connectionId: config.id!, sql: businessFixtureCleanupSql(), confirmed: true },
           connected.data,
         );
         await driver.disconnect(config.id!);
@@ -458,23 +479,14 @@ function fakeBusinessDriver(): IDatabaseDriver & { executedSql: string[] } {
   };
 }
 
-async function describeBusinessTables(
-  driver: IDatabaseDriver,
-  connectionId: string,
-): Promise<TableDetail[]> {
-  const summaries = await expectOk(driver.listTables(connectionId));
-  const selected = summaries.filter((table) => ['public', 'analytics'].includes(table.schema));
-  const details: TableDetail[] = [];
-  for (const table of selected) {
-    details.push(await expectOk(driver.describeTable(connectionId, table.schema, table.name)));
-  }
-  return details;
-}
-
 async function expectOk<T>(promise: Promise<Result<T>>): Promise<T> {
   const result = await promise;
+  if (!result.ok) {
+    throw new Error(
+      `${result.error.code}: ${result.error.message}${result.error.detail ? ` ${result.error.detail}` : ''}`,
+    );
+  }
   expect(result.ok).toBe(true);
-  if (!result.ok) throw new Error(result.error.message);
   return result.data;
 }
 

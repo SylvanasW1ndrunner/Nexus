@@ -89,6 +89,7 @@ Mermaid 对标识符有限制，因此模块会把 `schema.table`、字段名和
 表引用支持 `schema.table` 或 `table + schema` 两种形式；裸表名在多个 schema 中命中时会抛出歧义错误，要求上层让 Agent 或用户补充 schema，而不是猜测。该行为用于避免 Agent 在生产库多 schema 场景下查询错表。
 
 本切片未引入新的第三方 RAG 框架或向量库。原因是当前能力是结构化 metadata 的轻量工具接口，直接复用现有内存索引即可；后续接入 sqlite-vec、FTS5、RRF、reranker 或 LlamaIndex/Haystack 等方案时，需要按 `docs/engineering/open-source-first.md` 重新记录许可证、Electron 打包、离线、模型下载和安全边界。
+
 ## 连接级持久化快照与渐进索引状态
 
 本轮新增 `SchemaRagSnapshotStore` 和 `ProgressiveSchemaRagIndexer`，目标是先解决 Schema RAG 在应用重启后的可恢复性，以及后续大 schema 渐进索引所需的状态合同。
@@ -110,3 +111,26 @@ Mermaid 对标识符有限制，因此模块会把 `schema.table`、字段名和
 
 - `schema-rag-snapshot-store.test.ts`：真实临时目录读写，覆盖保存、读取、恢复后检索、损坏快照、旧版本快照、按连接删除。
 - `progressive-schema-rag-indexer.test.ts`：覆盖渐进阶段状态、快照落盘、模拟进程重启后的恢复和空连接 idle 状态。
+
+## 真实数据库 catalog 渐进索引入口
+
+`packages/core-rag/src/schema-catalog-indexer.ts` 提供 `SchemaCatalogReader` 和 `indexSchemaCatalogFromReader()`。这是 Schema RAG 从真实数据库元数据进入渐进索引器的标准入口：
+
+- `SchemaCatalogReader.listTables(connectionId)`：返回当前连接下可见的表/视图摘要。
+- `SchemaCatalogReader.describeTable(connectionId, schema, table)`：返回单表 `TableDetail`。
+- `indexSchemaCatalogFromReader()`：负责 schema 过滤、表详情并发读取、warnings 聚合、严格模式失败返回，并调用 `ProgressiveSchemaRagIndexer`。
+
+该入口刻意不依赖 `core-db`。PostgreSQL driver、MySQL driver、企业元数据平台、MCP server 或官方插件只要实现 reader 合约，就可以复用同一套 RAG 索引流程。默认 `continueOnTableError: true`，适合远程数据库存在权限差异或单表元数据失败的场景；测试、后台强一致任务和发布验收可以设置为 `false`，让任何失败直接中断。
+
+本入口不新增第三方依赖。当前切片只做 catalog adapter 和现有渐进索引接线，暂不引入 LlamaIndex、Haystack、LangChain、pgvector 或 sqlite-vec。后续 embedding、rerank、向量索引、RAG eval 和 metadata extractor 可以作为 adapter 或官方插件接入，但不能把第三方框架类型暴露到 `core-rag` 稳定合约。
+
+新增测试：
+
+- `schema-catalog-indexer.test.ts`：覆盖 schema 过滤、局部失败 warning、严格模式失败和连接级 listTables 失败。
+- `core-tools` 真实 PostgreSQL 业务验收：在 `DBAGENT_RUN_POSTGRES_TESTS=1` 时实际建表、抽取 catalog、调用 `indexSchemaCatalogFromReader()`，再由 Agent 使用 `search_schema` 和 `query_database` 完成业务查询。
+
+后续扩展：
+
+- 把 PostgreSQL catalog reader 注册为官方插件候选，权限限定为读取 schema metadata。
+- 增加索引、唯一约束、check 约束、分区、视图定义、统计信息和估算行数。
+- 给大 schema 增加后台分批、取消、checkpoint 和性能压测。
