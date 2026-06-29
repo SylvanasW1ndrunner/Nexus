@@ -3,7 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { TableDetail } from '@dbagent/shared';
-import { ProgressiveSchemaRagIndexer, SchemaRagEngine, SchemaRagSnapshotStore } from '../src/index.js';
+import {
+  ProgressiveSchemaRagIndexer,
+  SchemaRagEngine,
+  SchemaRagSnapshotStore,
+} from '../src/index.js';
 
 describe('ProgressiveSchemaRagIndexer', () => {
   it('indexes schema metadata, records progressive stages, and persists a snapshot', async () => {
@@ -29,7 +33,9 @@ describe('ProgressiveSchemaRagIndexer', () => {
       columnCount: 5,
       indexedAt: '2026-06-24T01:00:00.000Z',
     });
-    expect(result.status.stages.map((stage) => [stage.stage, stage.state, stage.done, stage.total])).toEqual([
+    expect(
+      result.status.stages.map((stage) => [stage.stage, stage.state, stage.done, stage.total]),
+    ).toEqual([
       ['skeleton', 'completed', 2, 2],
       ['hot_tables', 'completed', 1, 1],
       ['long_tail', 'completed', 1, 1],
@@ -49,16 +55,61 @@ describe('ProgressiveSchemaRagIndexer', () => {
     });
 
     const secondEngine = new SchemaRagEngine();
-    const secondIndexer = new ProgressiveSchemaRagIndexer({ engine: secondEngine, snapshotStore: store });
+    const secondIndexer = new ProgressiveSchemaRagIndexer({
+      engine: secondEngine,
+      snapshotStore: store,
+    });
     const status = await secondIndexer.restore('traffic_warehouse');
 
     expect(status?.ready).toBe(true);
-    expect(secondEngine.search({ connectionId: 'traffic_warehouse', query: 'campaign visits', limit: 4 }).map((item) => item.document.id)).toContain(
-      'table:public.campaign_events',
-    );
     expect(
-      secondEngine.buildContext({ connectionId: 'traffic_warehouse', query: 'conversion revenue', limit: 4, maxChars: 800 }).text,
+      secondEngine
+        .search({ connectionId: 'traffic_warehouse', query: 'campaign visits', limit: 4 })
+        .map((item) => item.document.id),
+    ).toContain('table:public.campaign_events');
+    expect(
+      secondEngine.buildContext({
+        connectionId: 'traffic_warehouse',
+        query: 'conversion revenue',
+        limit: 4,
+        maxChars: 800,
+      }).text,
     ).toContain('public.conversions');
+  });
+
+  it('persists on-demand upserted tables so they survive process restart', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-upsert-restore-'));
+    const firstEngine = new SchemaRagEngine();
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    const firstIndexer = new ProgressiveSchemaRagIndexer({
+      engine: firstEngine,
+      snapshotStore: store,
+    });
+    await firstIndexer.index({
+      connectionId: 'traffic_warehouse',
+      tables: [fixtureTables()[0]!],
+    });
+    await firstIndexer.upsertTables({
+      connectionId: 'traffic_warehouse',
+      tables: [fixtureTables()[1]!],
+    });
+
+    const secondEngine = new SchemaRagEngine();
+    const secondIndexer = new ProgressiveSchemaRagIndexer({
+      engine: secondEngine,
+      snapshotStore: store,
+    });
+    await secondIndexer.restore('traffic_warehouse');
+
+    expect(
+      secondEngine
+        .search({
+          connectionId: 'traffic_warehouse',
+          query: '@public.conversions revenue',
+          limit: 3,
+        })
+        .map((item) => item.document.id),
+    ).toContain('table:public.conversions');
   });
 
   it('reports idle when no snapshot exists for a connection', async () => {
@@ -133,7 +184,14 @@ function fixtureTables(): TableDetail[] {
   ];
 }
 
-function column(name: string, ordinal: number, dataType: string, nullable: boolean, comment?: string, isPrimaryKey = false) {
+function column(
+  name: string,
+  ordinal: number,
+  dataType: string,
+  nullable: boolean,
+  comment?: string,
+  isPrimaryKey = false,
+) {
   return {
     name,
     ordinal,

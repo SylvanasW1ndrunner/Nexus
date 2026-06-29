@@ -21,6 +21,7 @@ import {
   type IDatabaseDriver,
 } from '@dbagent/core-db';
 import {
+  ensureSchemaCatalogTablesIndexed,
   indexSchemaCatalogFromReader,
   ProgressiveSchemaRagIndexer,
   SchemaRagEngine,
@@ -321,6 +322,63 @@ describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')(
           'search_schema',
           'query_database',
         ]);
+      } finally {
+        await driver.execute(
+          { connectionId: config.id!, sql: businessFixtureCleanupSql(), confirmed: true },
+          connected.data,
+        );
+        await driver.disconnect(config.id!);
+      }
+    }, 120_000);
+
+    it('on-demand indexes an explicitly referenced cold table from real PostgreSQL catalog', async () => {
+      const driver = new PostgresDriver();
+      const config = postgresConfig({ readOnly: false });
+      const connected = await driver.connect(config);
+      expect(connected.ok).toBe(true);
+      if (!connected.ok) return;
+
+      try {
+        await expectOk(
+          driver.execute(
+            { connectionId: config.id!, sql: businessFixtureSql(), confirmed: true },
+            connected.data,
+          ),
+        );
+
+        const rag = new SchemaRagEngine();
+        const indexer = new ProgressiveSchemaRagIndexer({ engine: rag });
+        const initial = await indexSchemaCatalogFromReader({
+          connectionId: config.id!,
+          reader: driver,
+          indexer,
+          includeSchemas: ['analytics'],
+          tableLimit: 1,
+          continueOnTableError: false,
+        });
+        expect(initial.ok).toBe(true);
+        if (!initial.ok) throw new Error(initial.error.message);
+        expect(rag.hasTable({ connectionId: config.id!, table: 'public.refunds' })).toBe(false);
+
+        const ensured = await ensureSchemaCatalogTablesIndexed({
+          connectionId: config.id!,
+          reader: driver,
+          indexer,
+          references: ['@public.refunds'],
+          continueOnTableError: false,
+        });
+        expect(ensured.ok).toBe(true);
+        if (!ensured.ok) throw new Error(ensured.error.message);
+
+        expect(ensured.data.indexedTableCount).toBe(1);
+        expect(rag.hasTable({ connectionId: config.id!, table: 'public.refunds' })).toBe(true);
+        expect(
+          rag.search({
+            connectionId: config.id!,
+            query: '@public.refunds refund amount',
+            limit: 3,
+          })[0]?.document.id,
+        ).toBe('table:public.refunds');
       } finally {
         await driver.execute(
           { connectionId: config.id!, sql: businessFixtureCleanupSql(), confirmed: true },

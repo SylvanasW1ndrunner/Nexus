@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { err, ok, type Result, type TableDetail } from '@dbagent/shared';
 import {
+  ensureSchemaCatalogTablesIndexed,
   indexSchemaCatalogFromReader,
   ProgressiveSchemaRagIndexer,
   SchemaRagEngine,
@@ -40,6 +41,57 @@ describe('indexSchemaCatalogFromReader', () => {
         .search({ connectionId: 'warehouse', query: 'GMV campaign conversion', limit: 6 })
         .map((item) => item.document.id),
     ).toEqual(expect.arrayContaining(['table:public.orders', 'table:analytics.traffic_sessions']));
+  });
+
+  it('on-demand indexes explicitly referenced cold tables from the database catalog', async () => {
+    const engine = new SchemaRagEngine();
+    const indexer = new ProgressiveSchemaRagIndexer({ engine });
+    const reader = fakeCatalogReader([ordersTable(), refundsTable()]);
+    await indexSchemaCatalogFromReader({
+      connectionId: 'warehouse',
+      reader,
+      indexer,
+      includeSchemas: ['public'],
+      tableLimit: 1,
+    });
+
+    expect(engine.hasTable({ connectionId: 'warehouse', table: 'public.refunds' })).toBe(false);
+
+    const result = await ensureSchemaCatalogTablesIndexed({
+      connectionId: 'warehouse',
+      reader,
+      indexer,
+      references: ['@public.refunds'],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.indexedTableCount).toBe(1);
+    expect(result.data.skippedReferenceCount).toBe(0);
+    expect(engine.hasTable({ connectionId: 'warehouse', table: 'public.refunds' })).toBe(true);
+    expect(
+      engine.search({
+        connectionId: 'warehouse',
+        query: '@public.refunds refund approval',
+        limit: 4,
+      })[0]?.document.id,
+    ).toBe('table:public.refunds');
+  });
+
+  it('reports ambiguous or missing on-demand references without mutating the index', async () => {
+    const engine = new SchemaRagEngine();
+    const indexer = new ProgressiveSchemaRagIndexer({ engine });
+    const result = await ensureSchemaCatalogTablesIndexed({
+      connectionId: 'warehouse',
+      reader: fakeCatalogReader([ordersTable(), reportingOrdersTable()]),
+      indexer,
+      references: ['@orders', '@public.missing_table'],
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('NOT_FOUND');
+    expect(engine.hasIndex('warehouse')).toBe(false);
   });
 
   it('continues indexing available tables and reports catalog warnings when a table describe fails', async () => {
@@ -201,6 +253,32 @@ function trafficSessionsTable(): TableDetail {
       },
       { name: 'utm_source', ordinal: 3, dataType: 'text', nullable: true },
     ],
+  };
+}
+
+function refundsTable(): TableDetail {
+  return {
+    schema: 'public',
+    name: 'refunds',
+    type: 'table',
+    comment: 'refund workflow table with approval status and refund amount',
+    primaryKey: ['id'],
+    columns: [
+      { name: 'id', ordinal: 1, dataType: 'uuid', nullable: false, isPrimaryKey: true },
+      { name: 'order_id', ordinal: 2, dataType: 'uuid', nullable: false },
+      { name: 'refund_amount', ordinal: 3, dataType: 'numeric', nullable: false },
+    ],
+  };
+}
+
+function reportingOrdersTable(): TableDetail {
+  return {
+    schema: 'reporting',
+    name: 'orders',
+    type: 'view',
+    comment: 'reporting order view for analyst dashboards',
+    primaryKey: [],
+    columns: [{ name: 'id', ordinal: 1, dataType: 'uuid', nullable: false }],
   };
 }
 

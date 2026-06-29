@@ -1,6 +1,34 @@
 import { describe, expect, it } from 'vitest';
 import type { TableDetail } from '@dbagent/shared';
-import { buildSchemaDocuments, SchemaRagEngine } from '../src/index.js';
+import {
+  buildSchemaDocuments,
+  extractExplicitSchemaReferences,
+  SchemaRagEngine,
+} from '../src/index.js';
+
+describe('extractExplicitSchemaReferences', () => {
+  it('parses explicit table and column references from user questions', () => {
+    expect(
+      extractExplicitSchemaReferences('Compare @public.orders and @public.orders.total_amount'),
+    ).toEqual([
+      { raw: 'public.orders', schema: 'public', table: 'orders' },
+      {
+        raw: 'public.orders.total_amount',
+        schema: 'public',
+        table: 'orders',
+        column: 'total_amount',
+      },
+    ]);
+    expect(extractExplicitSchemaReferences('Inspect @"Sales Data"."Order Items".sku')).toEqual([
+      {
+        raw: '"Sales Data"."Order Items".sku',
+        schema: 'Sales Data',
+        table: 'Order Items',
+        column: 'sku',
+      },
+    ]);
+  });
+});
 
 describe('buildSchemaDocuments', () => {
   it('turns tables and columns into stable schema documents', () => {
@@ -36,12 +64,92 @@ describe('SchemaRagEngine', () => {
     expect(results[0]?.reasons).toContain('token:orders');
   });
 
+  it('prioritizes explicit schema table references over fuzzy token matches', () => {
+    const engine = indexedEngine();
+
+    const results = engine.search({
+      connectionId: 'conn_1',
+      query: 'Ignore the broad order discussion and inspect @public.order_items',
+      limit: 4,
+    });
+
+    expect(results[0]?.document.id).toBe('table:public.order_items');
+    expect(results[0]?.reasons).toContain('explicit-table');
+    expect(
+      engine
+        .getRelations({ connectionId: 'conn_1', table: 'public.order_items' })
+        .relatedTables.map((table) => table.id),
+    ).toContain('table:public.orders');
+  });
+
+  it('prioritizes explicit column references while keeping table context available', () => {
+    const engine = indexedEngine();
+
+    const results = engine.search({
+      connectionId: 'conn_1',
+      query: 'Explain @public.orders.total_amount',
+      limit: 4,
+    });
+
+    expect(results[0]?.document.id).toBe('column:public.orders.total_amount');
+    expect(results[0]?.reasons).toContain('explicit-column');
+    expect(results.map((result) => result.document.id)).toContain('table:public.orders');
+  });
+
+  it('upserts on-demand table details into an existing skeleton index', () => {
+    const engine = new SchemaRagEngine();
+    engine.index({
+      connectionId: 'conn_1',
+      tables: [
+        {
+          schema: 'archive',
+          name: 'cold_orders',
+          type: 'table',
+          comment: 'Cold order archive skeleton',
+          primaryKey: [],
+          columns: [],
+        },
+      ],
+    });
+
+    engine.upsertTables({
+      connectionId: 'conn_1',
+      tables: [
+        {
+          schema: 'archive',
+          name: 'cold_orders',
+          type: 'table',
+          comment: 'Cold order archive with refund and retention facts',
+          primaryKey: ['id'],
+          columns: [
+            column('id', 1, 'uuid', false, 'archive id', true),
+            column('refund_amount', 2, 'numeric', false, 'refund amount'),
+          ],
+        },
+      ],
+    });
+
+    const description = engine.describeTable({
+      connectionId: 'conn_1',
+      table: 'archive.cold_orders',
+    });
+    expect(description.columns.map((item) => item.id)).toContain(
+      'column:archive.cold_orders.refund_amount',
+    );
+    expect(
+      engine.search({ connectionId: 'conn_1', query: '@archive.cold_orders refund', limit: 3 })[0]
+        ?.document.id,
+    ).toBe('table:archive.cold_orders');
+  });
+
   it('retrieves Chinese business comments for user-facing questions', () => {
     const engine = indexedEngine();
 
     const results = engine.search({ connectionId: 'conn_1', query: '订单金额', limit: 3 });
 
-    expect(results.map((result) => result.document.id)).toContain('column:public.orders.total_amount');
+    expect(results.map((result) => result.document.id)).toContain(
+      'column:public.orders.total_amount',
+    );
   });
 
   it('retrieves relation context when the question crosses tables', () => {
@@ -72,11 +180,13 @@ describe('SchemaRagEngine', () => {
 
     const results = engine.search({ connectionId: 'conn_1', query: '按月统计 GMV', limit: 4 });
 
-    expect(results.map((result) => result.document.id)).toContain('column:public.orders.total_amount');
-    expect(results.map((result) => result.document.id)).toContain('table:public.orders');
-    expect(results.find((result) => result.document.id === 'column:public.orders.total_amount')?.reasons).toContain(
-      'glossary:GMV',
+    expect(results.map((result) => result.document.id)).toContain(
+      'column:public.orders.total_amount',
     );
+    expect(results.map((result) => result.document.id)).toContain('table:public.orders');
+    expect(
+      results.find((result) => result.document.id === 'column:public.orders.total_amount')?.reasons,
+    ).toContain('glossary:GMV');
   });
 
   it('ignores glossary entries that point to missing schema documents', () => {
@@ -105,9 +215,11 @@ describe('SchemaRagEngine', () => {
     });
     engine.index({ connectionId: 'conn_2', tables: fixtureTables() });
 
-    expect(engine.search({ connectionId: 'conn_1', query: 'GMV', limit: 3 }).map((result) => result.document.id)).toContain(
-      'column:public.orders.total_amount',
-    );
+    expect(
+      engine
+        .search({ connectionId: 'conn_1', query: 'GMV', limit: 3 })
+        .map((result) => result.document.id),
+    ).toContain('column:public.orders.total_amount');
     expect(engine.search({ connectionId: 'conn_2', query: 'GMV', limit: 3 })).toEqual([]);
   });
 
@@ -132,19 +244,42 @@ describe('SchemaRagEngine', () => {
     const tables = engine.listTables({ connectionId: 'conn_1', schema: 'public', limit: 2 });
 
     expect(tables).toEqual([
-      { id: 'table:public.order_items', schema: 'public', table: 'order_items', title: 'public.order_items', type: 'table', columnCount: 4 },
-      { id: 'table:public.orders', schema: 'public', table: 'orders', title: 'public.orders', type: 'table', columnCount: 4 },
+      {
+        id: 'table:public.order_items',
+        schema: 'public',
+        table: 'order_items',
+        title: 'public.order_items',
+        type: 'table',
+        columnCount: 4,
+      },
+      {
+        id: 'table:public.orders',
+        schema: 'public',
+        table: 'orders',
+        title: 'public.orders',
+        type: 'table',
+        columnCount: 4,
+      },
     ]);
   });
 
   it('describes a table with columns and related tables for Agent tools', () => {
     const engine = indexedEngine();
 
-    const description = engine.describeTable({ connectionId: 'conn_1', table: 'public.orders', maxChars: 800 });
+    const description = engine.describeTable({
+      connectionId: 'conn_1',
+      table: 'public.orders',
+      maxChars: 800,
+    });
 
     expect(description.table.id).toBe('table:public.orders');
-    expect(description.columns.map((column) => column.id)).toContain('column:public.orders.total_amount');
-    expect(description.relatedTables.map((table) => table.id)).toEqual(['table:public.order_items', 'table:public.users']);
+    expect(description.columns.map((column) => column.id)).toContain(
+      'column:public.orders.total_amount',
+    );
+    expect(description.relatedTables.map((table) => table.id)).toEqual([
+      'table:public.order_items',
+      'table:public.users',
+    ]);
     expect(description.text).toContain('## public.orders');
     expect(description.truncated).toBe(false);
   });
@@ -152,11 +287,20 @@ describe('SchemaRagEngine', () => {
   it('returns direct relation documents for a table', () => {
     const engine = indexedEngine();
 
-    const relations = engine.getRelations({ connectionId: 'conn_1', table: 'orders', schema: 'public' });
+    const relations = engine.getRelations({
+      connectionId: 'conn_1',
+      table: 'orders',
+      schema: 'public',
+    });
 
     expect(relations.table.id).toBe('table:public.orders');
-    expect(relations.relatedTables.map((table) => table.id)).toEqual(['table:public.order_items', 'table:public.users']);
-    expect(relations.relationDocuments.map((document) => document.id)).toContain('column:public.orders.user_id');
+    expect(relations.relatedTables.map((table) => table.id)).toEqual([
+      'table:public.order_items',
+      'table:public.users',
+    ]);
+    expect(relations.relationDocuments.map((document) => document.id)).toContain(
+      'column:public.orders.user_id',
+    );
   });
 
   it('rejects ambiguous bare table references so Agent asks for schema instead of guessing', () => {
@@ -193,7 +337,11 @@ describe('SchemaRagEngine', () => {
 
 function indexedEngine(): SchemaRagEngine {
   const engine = new SchemaRagEngine();
-  engine.index({ connectionId: 'conn_1', tables: fixtureTables(), indexedAt: '2026-06-17T00:00:00.000Z' });
+  engine.index({
+    connectionId: 'conn_1',
+    tables: fixtureTables(),
+    indexedAt: '2026-06-17T00:00:00.000Z',
+  });
   return engine;
 }
 

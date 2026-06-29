@@ -1,4 +1,5 @@
 export * from './schema-documents.js';
+export * from './explicit-references.js';
 export * from './schema-rag-engine.js';
 export * from './schema-rag-snapshot-store.js';
 export * from './progressive-schema-rag-indexer.js';

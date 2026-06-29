@@ -39,8 +39,18 @@ export class ProgressiveSchemaRagIndexer {
 
     try {
       completeStage(stages, 'skeleton', input.tables.length, startedAt);
-      completeStage(stages, 'hot_tables', Math.min(input.tables.length, options.hotTableLimit ?? 50), startedAt);
-      completeStage(stages, 'long_tail', Math.max(0, input.tables.length - (options.hotTableLimit ?? 50)), startedAt);
+      completeStage(
+        stages,
+        'hot_tables',
+        Math.min(input.tables.length, options.hotTableLimit ?? 50),
+        startedAt,
+      );
+      completeStage(
+        stages,
+        'long_tail',
+        Math.max(0, input.tables.length - (options.hotTableLimit ?? 50)),
+        startedAt,
+      );
 
       const index = this.engine.index(input);
       if (this.snapshotStore) {
@@ -61,6 +71,22 @@ export class ProgressiveSchemaRagIndexer {
       this.setStatus(input.connectionId, 'failed', false, failedStages, failedAt);
       throw error;
     }
+  }
+
+  async upsertTables(input: SchemaRagIndexInput): Promise<ProgressiveSchemaRagIndexResult> {
+    const index = this.engine.upsertTables(input);
+    if (this.snapshotStore) {
+      await this.snapshotStore.save(index);
+    }
+    const status = buildStatus(
+      index,
+      'ready',
+      true,
+      buildUpsertStages(input.tables.length),
+      new Date().toISOString(),
+    );
+    this.statuses.set(input.connectionId, status);
+    return { index, status };
   }
 
   async restore(connectionId: string): Promise<SchemaRagIndexStatus | undefined> {
@@ -119,7 +145,11 @@ export class ProgressiveSchemaRagIndexer {
   }
 }
 
-function buildFailedRestoreStatus(connectionId: string, updatedAt: string, error: string): SchemaRagIndexStatus {
+function buildFailedRestoreStatus(
+  connectionId: string,
+  updatedAt: string,
+  error: string,
+): SchemaRagIndexStatus {
   return {
     connectionId,
     stage: 'failed',
@@ -143,7 +173,11 @@ function buildFailedRestoreStatus(connectionId: string, updatedAt: string, error
   };
 }
 
-function buildInitialStages(tableCount: number, hotTableLimit: number | undefined, startedAt: string): SchemaRagIndexStageStatus[] {
+function buildInitialStages(
+  tableCount: number,
+  hotTableLimit: number | undefined,
+  startedAt: string,
+): SchemaRagIndexStageStatus[] {
   const hotCount = Math.min(tableCount, hotTableLimit ?? 50);
   const longTailCount = Math.max(0, tableCount - hotCount);
   return [
@@ -154,7 +188,26 @@ function buildInitialStages(tableCount: number, hotTableLimit: number | undefine
   ];
 }
 
-function completeStage(stages: SchemaRagIndexStageStatus[], stage: SchemaRagIndexStage, done: number, startedAt: string): void {
+function buildUpsertStages(tableCount: number): SchemaRagIndexStageStatus[] {
+  const completedAt = new Date().toISOString();
+  return [
+    {
+      stage: 'ready',
+      state: 'completed',
+      done: tableCount,
+      total: tableCount,
+      startedAt: completedAt,
+      completedAt,
+    },
+  ];
+}
+
+function completeStage(
+  stages: SchemaRagIndexStageStatus[],
+  stage: SchemaRagIndexStage,
+  done: number,
+  startedAt: string,
+): void {
   const target = stages.find((candidate) => candidate.stage === stage);
   if (!target) return;
   const completedAt = new Date().toISOString();

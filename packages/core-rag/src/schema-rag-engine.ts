@@ -1,4 +1,9 @@
-import { buildSchemaDocuments, tokenize } from './schema-documents.js';
+import { buildSchemaDocuments, tableDocumentId, tokenize } from './schema-documents.js';
+import {
+  extractExplicitSchemaReferences,
+  parseExplicitSchemaReference,
+  type SchemaRagExplicitReference,
+} from './explicit-references.js';
 import type {
   SchemaRagDocument,
   SchemaRagContext,
@@ -24,16 +29,44 @@ export class SchemaRagEngine {
       connectionId: input.connectionId,
       tables: input.tables,
     });
-    const graph = new Map<string, Set<string>>();
-    for (const document of documents) {
-      graph.set(document.id, new Set(document.relationIds));
-    }
     const index: SchemaRagIndex = {
       connectionId: input.connectionId,
       documents,
-      graph,
+      graph: buildGraph(documents),
       glossary: normalizeGlossary(input.glossary ?? [], documents),
       indexedAt: input.indexedAt ?? new Date().toISOString(),
+    };
+    this.indexes.set(input.connectionId, index);
+    return index;
+  }
+
+  upsertTables(input: SchemaRagIndexInput): SchemaRagIndex {
+    if (input.tables.length === 0) return this.requireIndex(input.connectionId);
+    const existing = this.indexes.get(input.connectionId);
+    if (!existing) return this.index(input);
+
+    const affectedTables = new Set(
+      input.tables.map((table) => tableDocumentId(table.schema, table.name)),
+    );
+    const documents = buildSchemaDocuments({
+      connectionId: input.connectionId,
+      tables: input.tables,
+    });
+    const replacementIds = new Set(documents.map((document) => document.id));
+    const retained = existing.documents.filter((document) => {
+      if (affectedTables.has(tableDocumentId(document.schema, document.table))) return false;
+      if (replacementIds.has(document.id)) return false;
+      return true;
+    });
+    const mergedDocuments = [...retained, ...documents].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+    const index: SchemaRagIndex = {
+      connectionId: input.connectionId,
+      documents: mergedDocuments,
+      graph: buildGraph(mergedDocuments),
+      glossary: normalizeGlossary(input.glossary ?? existing.glossary, mergedDocuments),
+      indexedAt: input.indexedAt ?? existing.indexedAt,
     };
     this.indexes.set(input.connectionId, index);
     return index;
@@ -51,6 +84,17 @@ export class SchemaRagEngine {
 
   hasIndex(connectionId: string): boolean {
     return this.indexes.has(connectionId);
+  }
+
+  hasTable(request: SchemaRagTableRef): boolean {
+    const index = this.indexes.get(request.connectionId);
+    if (!index) return false;
+    try {
+      resolveTable(index, request);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   getIndexStatus(connectionId: string): SchemaRagIndexStatus {
@@ -96,7 +140,9 @@ export class SchemaRagEngine {
         table: document.table,
         title: document.title,
         ...(typeof document.metadata.type === 'string' ? { type: document.metadata.type } : {}),
-        ...(typeof document.metadata.columnCount === 'number' ? { columnCount: document.metadata.columnCount } : {}),
+        ...(typeof document.metadata.columnCount === 'number'
+          ? { columnCount: document.metadata.columnCount }
+          : {}),
       }));
   }
 
@@ -104,7 +150,12 @@ export class SchemaRagEngine {
     const index = this.requireIndex(request.connectionId);
     const table = resolveTable(index, request);
     const columns = index.documents
-      .filter((document) => document.kind === 'column' && document.schema === table.schema && document.table === table.table)
+      .filter(
+        (document) =>
+          document.kind === 'column' &&
+          document.schema === table.schema &&
+          document.table === table.table,
+      )
       .sort((left, right) => left.title.localeCompare(right.title));
     const relatedTables = relatedTableDocuments(index, table);
     const sections = [
@@ -131,7 +182,9 @@ export class SchemaRagEngine {
     const index = this.requireIndex(request.connectionId);
     const table = resolveTable(index, request);
     const relatedTables = relatedTableDocuments(index, table);
-    const relationDocuments = (index.graph.get(table.id) ? [...(index.graph.get(table.id) ?? [])] : [])
+    const relationDocuments = (
+      index.graph.get(table.id) ? [...(index.graph.get(table.id) ?? [])] : []
+    )
       .map((id) => index.documents.find((document) => document.id === id))
       .filter((document): document is SchemaRagDocument => document !== undefined);
     return { table, relatedTables, relationDocuments };
@@ -140,13 +193,29 @@ export class SchemaRagEngine {
   search(request: SchemaRagSearchRequest): SchemaRagSearchResult[] {
     const index = this.requireIndex(request.connectionId);
     const queryTokens = tokenize([request.query]);
+    const explicitReferences = [
+      ...extractExplicitSchemaReferences(request.query),
+      ...(request.explicitTables ?? []).flatMap((reference) => {
+        const parsed = parseExplicitSchemaReference(reference);
+        return parsed ? [parsed] : [];
+      }),
+      ...(request.explicitColumns ?? []).flatMap((reference) => {
+        const parsed = parseExplicitSchemaReference(reference);
+        return parsed ? [parsed] : [];
+      }),
+    ];
     const limit = request.limit ?? 8;
     const includeRelations = request.includeRelations ?? true;
 
     const scored = index.documents
-      .map((document) => scoreDocument(document, request.query, queryTokens, index.glossary))
+      .map((document) =>
+        scoreDocument(document, request.query, queryTokens, index.glossary, explicitReferences),
+      )
       .filter((result) => result.score > 0)
-      .sort((left, right) => right.score - left.score || left.document.id.localeCompare(right.document.id));
+      .sort(
+        (left, right) =>
+          right.score - left.score || left.document.id.localeCompare(right.document.id),
+      );
 
     const selected = new Map<string, SchemaRagSearchResult>();
     const directLimit = includeRelations ? Math.max(1, Math.ceil(limit / 2)) : limit;
@@ -172,7 +241,10 @@ export class SchemaRagEngine {
     }
 
     return [...selected.values()]
-      .sort((left, right) => right.score - left.score || left.document.id.localeCompare(right.document.id))
+      .sort(
+        (left, right) =>
+          right.score - left.score || left.document.id.localeCompare(right.document.id),
+      )
       .slice(0, limit);
   }
 
@@ -181,6 +253,10 @@ export class SchemaRagEngine {
       connectionId: request.connectionId,
       query: request.query,
       ...(request.limit === undefined ? {} : { limit: request.limit }),
+      ...(request.explicitTables === undefined ? {} : { explicitTables: request.explicitTables }),
+      ...(request.explicitColumns === undefined
+        ? {}
+        : { explicitColumns: request.explicitColumns }),
       includeRelations: true,
     });
     const maxChars = request.maxChars ?? 4_000;
@@ -258,12 +334,19 @@ function scoreDocument(
   query: string,
   queryTokens: string[],
   glossary: SchemaRagGlossaryEntry[],
+  explicitReferences: SchemaRagExplicitReference[],
 ): SchemaRagSearchResult {
   const reasons: string[] = [];
   let score = 0;
   const normalizedQuery = query.toLowerCase();
   const normalizedTitle = document.title.toLowerCase();
   const normalizedText = document.text.toLowerCase();
+
+  const explicitScore = scoreExplicitReference(document, explicitReferences);
+  if (explicitScore > 0) {
+    score += explicitScore;
+    reasons.push(document.kind === 'column' ? 'explicit-column' : 'explicit-table');
+  }
 
   if (normalizedTitle === normalizedQuery) {
     score += 100;
@@ -305,7 +388,38 @@ function scoreDocument(
   return { document, score, reasons };
 }
 
-function normalizeGlossary(entries: SchemaRagGlossaryEntry[], documents: SchemaRagDocument[]): SchemaRagGlossaryEntry[] {
+function scoreExplicitReference(
+  document: SchemaRagDocument,
+  references: SchemaRagExplicitReference[],
+): number {
+  let score = 0;
+  for (const reference of references) {
+    const schemaMatches = reference.schema === undefined || reference.schema === document.schema;
+    const tableMatches = reference.table === document.table;
+    if (!schemaMatches || !tableMatches) continue;
+
+    if (reference.column) {
+      if (document.kind === 'column' && document.column === reference.column) {
+        score = Math.max(score, 320);
+      } else if (document.kind === 'table') {
+        score = Math.max(score, 160);
+      }
+      continue;
+    }
+
+    if (document.kind === 'table') {
+      score = Math.max(score, reference.schema ? 300 : 240);
+    } else if (document.kind === 'column') {
+      score = Math.max(score, reference.schema ? 90 : 60);
+    }
+  }
+  return score;
+}
+
+function normalizeGlossary(
+  entries: SchemaRagGlossaryEntry[],
+  documents: SchemaRagDocument[],
+): SchemaRagGlossaryEntry[] {
   const documentIds = new Set(documents.map((document) => document.id));
   return entries
     .map((entry) => ({
@@ -335,6 +449,14 @@ function findGlossaryMatch(
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function buildGraph(documents: SchemaRagDocument[]): Map<string, Set<string>> {
+  const graph = new Map<string, Set<string>>();
+  for (const document of documents) {
+    graph.set(document.id, new Set(document.relationIds));
+  }
+  return graph;
 }
 
 function resolveTable(index: SchemaRagIndex, request: SchemaRagTableRef): SchemaRagDocument {
@@ -369,10 +491,16 @@ function parseTableRef(tableRef: string): { schema?: string; table: string } {
   throw new Error(`Invalid table reference: ${tableRef}`);
 }
 
-function relatedTableDocuments(index: SchemaRagIndex, table: SchemaRagDocument): SchemaRagDocument[] {
+function relatedTableDocuments(
+  index: SchemaRagIndex,
+  table: SchemaRagDocument,
+): SchemaRagDocument[] {
   return [...(index.graph.get(table.id) ?? [])]
     .map((id) => index.documents.find((document) => document.id === id))
-    .filter((document): document is SchemaRagDocument => document?.kind === 'table' && document.id !== table.id)
+    .filter(
+      (document): document is SchemaRagDocument =>
+        document?.kind === 'table' && document.id !== table.id,
+    )
     .sort((left, right) => left.title.localeCompare(right.title));
 }
 

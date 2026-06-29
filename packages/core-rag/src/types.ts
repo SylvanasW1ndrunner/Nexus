@@ -24,7 +24,13 @@ export type SchemaRagIndex = {
   indexedAt: string;
 };
 
-export type SchemaRagIndexStage = 'idle' | 'skeleton' | 'hot_tables' | 'long_tail' | 'ready' | 'failed';
+export type SchemaRagIndexStage =
+  | 'idle'
+  | 'skeleton'
+  | 'hot_tables'
+  | 'long_tail'
+  | 'ready'
+  | 'failed';
 
 export type SchemaRagIndexStageState = 'pending' | 'running' | 'completed' | 'failed';
 
@@ -59,6 +65,8 @@ export type SchemaRagProgressiveIndexOptions = {
 export type SchemaRagSearchRequest = {
   connectionId: string;
   query: string;
+  explicitTables?: string[];
+  explicitColumns?: string[];
   limit?: number;
   includeRelations?: boolean;
 };
@@ -72,6 +80,8 @@ export type SchemaRagSearchResult = {
 export type SchemaRagContextRequest = {
   connectionId: string;
   query: string;
+  explicitTables?: string[];
+  explicitColumns?: string[];
   maxChars?: number;
   limit?: number;
 };
