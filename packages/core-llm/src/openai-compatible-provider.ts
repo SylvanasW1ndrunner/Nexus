@@ -267,7 +267,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       if (!json || typeof json !== 'object') {
         throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM provider returned an empty response.', false);
       }
-      return json as OpenAIChatResponse;
+      return json;
     } catch (error) {
       if (isAbortError(error)) {
         if (!timedOut && signal?.aborted) {

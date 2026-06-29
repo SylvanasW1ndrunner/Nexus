@@ -5,15 +5,17 @@ import {
   OpenAICompatibleProvider,
 } from '../src/index.js';
 
+type TestFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
 describe('OpenAICompatibleProvider', () => {
   it('sends OpenAI-compatible chat requests and parses text usage', async () => {
-    const fetchMock = vi.fn(async () =>
-      jsonResponse(200, {
+    const fetchMock = vi.fn<TestFetch>(() =>
+      Promise.resolve(jsonResponse(200, {
         id: 'chatcmpl_test',
         model: 'deepseek-ai/DeepSeek-V4-Pro',
         choices: [{ message: { content: '查询结果说明' } }],
         usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 },
-      }),
+      })),
     );
     const provider = new OpenAICompatibleProvider({
       id: 'test',
@@ -37,17 +39,13 @@ describe('OpenAICompatibleProvider', () => {
       providerResponseId: 'chatcmpl_test',
       model: 'deepseek-ai/DeepSeek-V4-Pro',
     });
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://example.test/v1/chat/completions',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          authorization: 'Bearer test-key',
-          'content-type': 'application/json',
-        }),
-      }),
-    );
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://example.test/v1/chat/completions');
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('POST');
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json',
+    });
+    const body = parseFetchBody(fetchMock);
     expect(body).toMatchObject({
       model: 'deepseek-ai/DeepSeek-V4-Pro',
       messages: [{ role: 'user', content: '解释订单表' }],
@@ -62,8 +60,8 @@ describe('OpenAICompatibleProvider', () => {
       name: 'Test Provider',
       apiKey: 'test-key',
       baseUrl: 'https://example.test/v1',
-      fetch: async () =>
-        jsonResponse(200, {
+      fetch: () =>
+        Promise.resolve(jsonResponse(200, {
           choices: [
             {
               message: {
@@ -81,7 +79,7 @@ describe('OpenAICompatibleProvider', () => {
               },
             },
           ],
-        }),
+        })),
     });
 
     await expect(
@@ -109,8 +107,8 @@ describe('OpenAICompatibleProvider', () => {
   });
 
   it('streams text deltas, usage, and final response from OpenAI-compatible SSE', async () => {
-    const fetchMock = vi.fn(async () =>
-      streamResponse([
+    const fetchMock = vi.fn<TestFetch>(() =>
+      Promise.resolve(streamResponse([
         sse({ id: 'chatcmpl_stream', model: 'deepseek-ai/DeepSeek-V4-Pro', choices: [{ delta: { content: '查询' } }] }),
         sse({ id: 'chatcmpl_stream', model: 'deepseek-ai/DeepSeek-V4-Pro', choices: [{ delta: { content: '正常' } }] }),
         sse({
@@ -120,7 +118,7 @@ describe('OpenAICompatibleProvider', () => {
           usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
         }),
         'data: [DONE]\n\n',
-      ]),
+      ])),
     );
     const provider = new OpenAICompatibleProvider({
       id: 'test',
@@ -152,7 +150,7 @@ describe('OpenAICompatibleProvider', () => {
         },
       },
     ]);
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const body = parseFetchBody(fetchMock);
     expect(body).toMatchObject({
       stream: true,
       stream_options: { include_usage: true },
@@ -165,8 +163,8 @@ describe('OpenAICompatibleProvider', () => {
       name: 'Test Provider',
       apiKey: 'test-key',
       baseUrl: 'https://example.test/v1',
-      fetch: async () =>
-        streamResponse([
+      fetch: () =>
+        Promise.resolve(streamResponse([
           sse({
             choices: [
               {
@@ -193,7 +191,7 @@ describe('OpenAICompatibleProvider', () => {
             ],
           }),
           'data: [DONE]\n\n',
-        ]),
+        ])),
     });
 
     const events = await collect(
@@ -240,8 +238,8 @@ describe('OpenAICompatibleProvider', () => {
   });
 
   it('classifies auth failures as non-retryable', async () => {
-    const fetchMock = vi.fn(async () =>
-      jsonResponse(401, { error: { message: 'invalid api key' } }),
+    const fetchMock = vi.fn<TestFetch>(() =>
+      Promise.resolve(jsonResponse(401, { error: { message: 'invalid api key' } })),
     );
     const provider = new OpenAICompatibleProvider({
       id: 'test',
@@ -296,11 +294,11 @@ describe('OpenAICompatibleProvider', () => {
   it('does not retry user-aborted chat requests or report them as timeouts', async () => {
     const abortController = new AbortController();
     abortController.abort();
-    const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn<TestFetch>((_input: string | URL, init?: RequestInit) => {
       if (init?.signal instanceof AbortSignal && init.signal.aborted) {
-        throw new DOMException('aborted', 'AbortError');
+        return Promise.reject(new DOMException('aborted', 'AbortError'));
       }
-      return jsonResponse(200, { choices: [{ message: { content: 'should not happen' } }] });
+      return Promise.resolve(jsonResponse(200, { choices: [{ message: { content: 'should not happen' } }] }));
     });
     const provider = new OpenAICompatibleProvider({
       id: 'test',
@@ -327,7 +325,7 @@ describe('OpenAICompatibleProvider', () => {
 
   it('stops retry backoff immediately when the user aborts', async () => {
     const abortController = new AbortController();
-    const fetchMock = vi.fn(async () => jsonResponse(503, { error: { message: 'busy' } }));
+    const fetchMock = vi.fn<TestFetch>(() => Promise.resolve(jsonResponse(503, { error: { message: 'busy' } })));
     const provider = new OpenAICompatibleProvider({
       id: 'test',
       name: 'Test Provider',
@@ -470,6 +468,17 @@ function streamResponse(chunks: string[]): Response {
 
 function sse(body: unknown): string {
   return `data: ${JSON.stringify(body)}\n\n`;
+}
+
+function parseFetchBody(fetchMock: ReturnType<typeof vi.fn<TestFetch>>, callIndex = 0): Record<string, unknown> {
+  const body = fetchMock.mock.calls[callIndex]?.[1]?.body;
+  if (body === undefined) throw new Error(`Missing request body for fetch call ${callIndex}.`);
+  if (typeof body !== 'string') throw new Error(`Expected string request body for fetch call ${callIndex}.`);
+  const parsed: unknown = JSON.parse(body);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`Expected JSON object request body for fetch call ${callIndex}.`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {

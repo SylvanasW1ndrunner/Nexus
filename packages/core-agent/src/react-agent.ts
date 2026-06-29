@@ -18,6 +18,8 @@ import type {
   ApprovalProvider,
 } from './types.js';
 
+const DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS = 12_000;
+
 export class ReactAgent {
   private readonly permissionManager: PermissionManager;
   private readonly now: () => string;
@@ -77,6 +79,10 @@ export class ReactAgent {
     const maxIterations = options.maxIterations ?? 25;
     const maxConsecutiveToolFailures = options.maxConsecutiveToolFailures ?? 3;
     const maxToolExecutionMs = options.maxToolExecutionMs ?? 60_000;
+    const maxToolResultChars = normalizePositiveInteger(
+      options.maxToolResultChars,
+      DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS,
+    );
     const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
     let finalText = '';
     let currentIteration = 0;
@@ -298,7 +304,7 @@ export class ReactAgent {
               context,
               maxToolExecutionMs,
             );
-            const preview = serializeToolResult(result);
+            const preview = serializeToolResult(result, maxToolResultChars);
             toolExecutions.push(executionRecord(toolCall.id, tool.name, 'success', startedAt, preview));
             consecutiveToolFailures = 0;
             appendMessage(
@@ -316,7 +322,7 @@ export class ReactAgent {
             await this.saveSession(session);
             await saveCheckpoint(iteration, 'running');
           } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            const message = limitSerializedToolResult(error instanceof Error ? error.message : String(error), maxToolResultChars);
             const record = executionRecord(toolCall.id, tool.name, 'failed', startedAt, message);
             toolExecutions.push(record);
             consecutiveToolFailures += 1;
@@ -413,9 +419,50 @@ function titleFromMessage(message: string): string {
   return trimmed.length > 24 ? `${trimmed.slice(0, 24)}...` : trimmed || '新会话';
 }
 
-function serializeToolResult(result: unknown): string {
+function serializeToolResult(result: unknown, maxChars: number): string {
+  return limitSerializedToolResult(stringifyToolResult(result), maxChars);
+}
+
+function stringifyToolResult(result: unknown): string {
   if (typeof result === 'string') return result;
-  return JSON.stringify(result);
+  try {
+    const serialized = JSON.stringify(result);
+    return serialized === undefined ? String(result) : serialized;
+  } catch (error) {
+    return JSON.stringify({
+      error: 'Tool result could not be serialized.',
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function limitSerializedToolResult(content: string, maxChars: number): string {
+  const limit = normalizePositiveInteger(maxChars, DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS);
+  if (content.length <= limit) return content;
+
+  if (limit < 160) {
+    const suffix = '...[truncated]';
+    return `${content.slice(0, Math.max(0, limit - suffix.length))}${suffix}`;
+  }
+
+  let headLength = Math.max(40, Math.floor(limit * 0.42));
+  let tailLength = Math.max(24, Math.floor(limit * 0.18));
+  while (headLength > 20 && tailLength > 12) {
+    const summary = JSON.stringify({
+      truncated: true,
+      reason: 'tool_result_too_large',
+      summary: '工具结果已在本地摘要，保留开头、结尾和原始长度，避免超过模型上下文。',
+      originalChars: content.length,
+      head: content.slice(0, headLength),
+      tail: content.slice(-tailLength),
+    });
+    if (summary.length <= limit) return summary;
+    headLength = Math.floor(headLength * 0.85);
+    tailLength = Math.floor(tailLength * 0.85);
+  }
+
+  const suffix = '...[truncated]';
+  return `${content.slice(0, Math.max(0, limit - suffix.length))}${suffix}`;
 }
 
 function executionRecord(
@@ -484,6 +531,12 @@ async function executeToolWithTimeout(
   }
 }
 
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
+  return Math.floor(value);
+}
+
 function toolTimeoutMessage(toolName: string, timeoutMs: number): string {
+  return `工具 ${toolName} 执行超时（${timeoutMs}ms）。`;
   return `工具 ${toolName} 执行超时（${timeoutMs}ms）。`;
 }

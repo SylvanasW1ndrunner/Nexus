@@ -259,13 +259,13 @@ function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
     id: 'fake',
     name: 'Fake Provider',
     mode: 'byok',
-    async chat() {
+    chat() {
       const next = script.shift();
       if (!next) throw new Error('No scripted response left.');
-      return next;
+      return Promise.resolve(next);
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }

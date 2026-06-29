@@ -255,7 +255,7 @@ export function expandSqlSnippet(
   const sql = snippet.body.replace(
     /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g,
     (_match, name: string) => {
-      if (values[name] !== undefined && values[name] !== null) return String(values[name]);
+      if (values[name] !== undefined && values[name] !== null) return stringifySnippetValue(values[name]);
       const fallback = variableDefaults.get(name);
       if (fallback !== undefined) return fallback;
       missingVariables.add(name);
@@ -270,6 +270,18 @@ export function expandSqlSnippet(
       'Snippet variables are inserted as SQL text; generated SQL must still pass normal execution review.',
     ],
   };
+}
+
+function stringifySnippetValue(value: unknown): string {
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint'
+  ) {
+    return String(value);
+  }
+  return JSON.stringify(value);
 }
 
 function validateSnippetInput(

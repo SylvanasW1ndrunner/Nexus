@@ -1,4 +1,4 @@
-import type { LlmChatStreamEvent, LlmProvider, LlmToolCall } from './types.js';
+import type { LlmProvider, LlmToolCall } from './types.js';
 
 export type LlmCapabilityProbeOptions = {
   model: string;

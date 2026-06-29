@@ -245,13 +245,16 @@ function normalizeServerBase(
 function normalizeServerByTransport(server: McpServerConfig): McpServerConfig {
   if (server.transport === 'stdio') {
     if (!server.command) throw new Error(`MCP stdio server ${server.id} requires a command.`);
-    const { url: _url, ...stdioServer } = server;
+    const stdioServer = { ...server };
+    delete stdioServer.url;
     return stdioServer;
   }
 
   if (!server.url) throw new Error(`MCP ${server.transport} server ${server.id} requires a URL.`);
   if (!/^https?:\/\//i.test(server.url)) throw new Error(`MCP server ${server.id} URL must use http or https.`);
-  const { command: _command, args: _args, ...remoteServer } = server;
+  const remoteServer = { ...server };
+  delete remoteServer.command;
+  delete remoteServer.args;
   return remoteServer;
 }
 

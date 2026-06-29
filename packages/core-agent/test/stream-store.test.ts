@@ -199,11 +199,13 @@ async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
 }
 
 async function* interruptedEvents() {
+  await Promise.resolve();
   yield { type: 'text-delta' as const, text: 'partial response' };
   throw new Error('network reset');
 }
 
 async function* abortedEvents() {
+  await Promise.resolve();
   yield { type: 'text-delta' as const, text: 'partial response' };
   throw new LlmProviderError('LLM_ABORTED', 'user stopped', false);
 }

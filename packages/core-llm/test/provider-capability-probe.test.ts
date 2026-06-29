@@ -40,21 +40,22 @@ function healthyProvider(): LlmProvider {
     id: 'fake',
     name: 'Fake Provider',
     mode: 'byok',
-    async chat(request) {
+    chat(request) {
       if (request.tools?.some((tool) => tool.name === 'dbagent_probe_echo')) {
-        return {
+        return Promise.resolve({
           text: '',
           toolCalls: [{ id: 'tool_probe', name: 'dbagent_probe_echo', arguments: { value: 'ok' } }],
-        };
+        });
       }
-      return { text: 'READY', toolCalls: [] };
+      return Promise.resolve({ text: 'READY', toolCalls: [] });
     },
     async *stream(): AsyncIterable<LlmChatStreamEvent> {
+      await Promise.resolve();
       yield { type: 'text-delta', text: 'STREAM_READY' };
       yield { type: 'finish', response: { text: 'STREAM_READY', toolCalls: [] } };
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }
@@ -64,11 +65,11 @@ function partialFailureProvider(): LlmProvider {
     id: 'partial',
     name: 'Partial Provider',
     mode: 'byok',
-    async chat() {
-      return { text: '', toolCalls: [] };
+    chat() {
+      return Promise.resolve({ text: '', toolCalls: [] });
     },
-    async isAvailable() {
-      return { available: false, detail: 'endpoint unavailable' };
+    isAvailable() {
+      return Promise.resolve({ available: false, detail: 'endpoint unavailable' });
     },
   };
 }

@@ -67,7 +67,7 @@ export function analyzePostgresExplainJson(input: unknown): Result<ExplainPlanAn
 function normalizeExplainDocument(input: unknown): Result<Record<string, unknown>> {
   const value = unwrapQueryPlanCell(input);
   if (Array.isArray(value)) {
-    const first = value[0];
+    const first: unknown = value[0];
     if (isRecord(first)) return ok(first);
   }
   if (isRecord(value)) return ok(value);

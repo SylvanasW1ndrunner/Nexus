@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { ipcChannels, type AuthStatus, type IdeSettings } from '@dbagent/shared';
 
+type HealthStatus = 'checking' | 'ok' | 'failed' | 'unavailable';
+
 type HealthState = {
-  auth: 'checking' | 'ok' | 'failed' | 'unavailable';
-  settings: 'checking' | 'ok' | 'failed' | 'unavailable';
+  auth: HealthStatus;
+  settings: HealthStatus;
   authMode?: AuthStatus['capabilities'] extends infer Capabilities
     ? Capabilities extends { mode: infer Mode }
       ? Mode
@@ -99,7 +101,7 @@ function HealthItem({
 }: {
   label: string;
   value: string;
-  tone?: HealthState['auth'] | HealthState['settings'];
+  tone?: HealthStatus;
 }) {
   return (
     <div className={tone ? `health-item ${tone}` : 'health-item'}>
@@ -109,7 +111,7 @@ function HealthItem({
   );
 }
 
-function statusLabel(status: HealthState['auth'] | HealthState['settings']): string {
+function statusLabel(status: HealthStatus): string {
   if (status === 'checking') return '检查中';
   if (status === 'ok') return '正常';
   if (status === 'unavailable') return '不可用';

@@ -213,12 +213,11 @@ describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')('real PostgreSQL
           'analytics.campaign_spend',
         ]),
       );
-      expect(tableDetails.find((table) => table.name === 'orders')?.columns).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ name: 'customer_id', foreignKey: { schema: 'public', table: 'customers', column: 'id' } }),
-          expect.objectContaining({ name: 'total_amount', comment: expect.stringContaining('GMV') }),
-        ]),
+      const orderColumns = tableDetails.find((table) => table.name === 'orders')?.columns ?? [];
+      expect(orderColumns).toContainEqual(
+        expect.objectContaining({ name: 'customer_id', foreignKey: { schema: 'public', table: 'customers', column: 'id' } }),
       );
+      expect(orderColumns.find((column) => column.name === 'total_amount')?.comment).toContain('GMV');
 
       const rag = new SchemaRagEngine();
       rag.index({ connectionId: config.id!, tables: tableDetails, glossary: businessGlossary() });
@@ -339,21 +338,21 @@ function fakeBusinessDriver(): IDatabaseDriver & { executedSql: string[] } {
       supportsExplain: true,
       supportsSchemas: true,
     },
-    async test() {
-      return ok({ latencyMs: 1 });
+    test() {
+      return Promise.resolve(ok({ latencyMs: 1 }));
     },
-    async connect() {
-      return ok(savedBusinessConnection());
+    connect() {
+      return Promise.resolve(ok(savedBusinessConnection()));
     },
-    async disconnect() {
-      return ok(undefined);
+    disconnect() {
+      return Promise.resolve(ok(undefined));
     },
-    async execute(request: QueryRequest): Promise<Result<QueryExecutionResult>> {
+    execute(request: QueryRequest): Promise<Result<QueryExecutionResult>> {
       executedSql.push(request.sql);
       if (/delete|update|insert|drop|truncate/i.test(request.sql)) {
-        return err({ code: 'READ_ONLY_VIOLATION', message: 'Write SQL is blocked in the business fixture.' });
+        return Promise.resolve(err({ code: 'READ_ONLY_VIOLATION', message: 'Write SQL is blocked in the business fixture.' }));
       }
-      return ok({
+      return Promise.resolve(ok({
         queryId: request.queryId ?? 'business_query',
         columns: [
           { name: 'utm_source', dataType: 'text' },
@@ -375,21 +374,21 @@ function fakeBusinessDriver(): IDatabaseDriver & { executedSql: string[] } {
           blocked: false,
           reasons: [],
         },
-      });
+      }));
     },
-    async listTables(): Promise<Result<TableSummary[]>> {
-      return ok(
+    listTables(): Promise<Result<TableSummary[]>> {
+      return Promise.resolve(ok(
         businessFixtureTables().map((table) => ({
           schema: table.schema,
           name: table.name,
           type: table.type,
           ...(table.comment === undefined ? {} : { comment: table.comment }),
         })),
-      );
+      ));
     },
-    async describeTable(_connectionId: string, schema: string, table: string): Promise<Result<TableDetail>> {
+    describeTable(_connectionId: string, schema: string, table: string): Promise<Result<TableDetail>> {
       const detail = businessFixtureTables().find((item) => item.schema === schema && item.name === table);
-      return detail ? ok(detail) : err({ code: 'NOT_FOUND', message: `Table ${schema}.${table} not found.` });
+      return Promise.resolve(detail ? ok(detail) : err({ code: 'NOT_FOUND', message: `Table ${schema}.${table} not found.` }));
     },
   };
 }
@@ -471,13 +470,13 @@ function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
     id: 'fake',
     name: 'Fake Provider',
     mode: 'byok',
-    async chat() {
+    chat() {
       const next = script.shift();
       if (!next) throw new Error('No scripted response left.');
-      return next;
+      return Promise.resolve(next);
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }

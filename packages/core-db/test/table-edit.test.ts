@@ -54,8 +54,8 @@ describe('table edit preview builder', () => {
     if (preview.ok) return;
     expect(preview.error).toMatchObject({
       code: 'UNSUPPORTED_OPERATION',
-      message: expect.stringContaining('Tables without primary keys cannot be edited safely'),
     });
+    expect(preview.error.message).toContain('Tables without primary keys cannot be edited safely');
   });
 
   it('rejects update operations that would mutate a primary key column', () => {
@@ -90,7 +90,7 @@ describe('table edit preview builder', () => {
     expect(preview.ok).toBe(true);
     if (!preview.ok) return;
     expect(preview.data.requiresExtraConfirmation).toBe(true);
-    expect(preview.data.warnings).toEqual(expect.arrayContaining([expect.stringContaining('requires extra confirmation')]));
+    expect(preview.data.warnings.some((warning) => warning.includes('requires extra confirmation'))).toBe(true);
   });
 
   it('rejects blank identifiers before building SQL', () => {

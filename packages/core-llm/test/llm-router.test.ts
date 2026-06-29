@@ -179,15 +179,15 @@ function fakeProvider(totalTokens: number): LlmProvider {
     id: 'fake',
     name: 'Fake Provider',
     mode: 'byok',
-    async chat() {
-      return {
+    chat() {
+      return Promise.resolve({
         text: 'ok',
         toolCalls: [],
         usage: { promptTokens: totalTokens - 1, completionTokens: 1, totalTokens },
-      };
+      });
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }
@@ -197,11 +197,11 @@ function failingProvider(): LlmProvider {
     id: 'failing',
     name: 'Failing Provider',
     mode: 'byok',
-    async chat() {
-      throw new Error('provider timeout');
+    chat() {
+      return Promise.reject(new Error('provider timeout'));
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }
@@ -211,10 +211,11 @@ function streamingProvider(): LlmProvider {
     id: 'streaming',
     name: 'Streaming Provider',
     mode: 'byok',
-    async chat() {
-      throw new Error('chat fallback should not be used');
+    chat() {
+      return Promise.reject(new Error('chat fallback should not be used'));
     },
     async *stream(): AsyncIterable<LlmChatStreamEvent> {
+      await Promise.resolve();
       yield { type: 'text-delta', text: 'hello' };
       yield { type: 'usage', usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 } };
       yield {
@@ -226,8 +227,8 @@ function streamingProvider(): LlmProvider {
         },
       };
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }

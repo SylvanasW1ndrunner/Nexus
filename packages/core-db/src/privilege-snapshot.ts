@@ -15,7 +15,7 @@ import {
   buildRevokeRoleMembershipPreview,
 } from './privilege-preview.js';
 import type { Result } from '@dbagent/shared';
-import { err, ok } from '@dbagent/shared';
+import { ok } from '@dbagent/shared';
 
 export type RolePrivilegeSnapshot = {
   role: string;
@@ -253,12 +253,12 @@ function groupObjectPrivilegeDiff(items: ExplodedObjectPrivilege[]): Array<
     const key = `${targetKey(item.target)}|${item.grantee}|${item.grantOption}`;
     const existing =
       grouped.get(key) ??
-      ({
+      {
         target: item.target,
         grantee: item.grantee,
         privileges: [],
         grantOption: item.grantOption,
-      } as BuildGrantPrivilegesPreviewRequest & BuildRevokePrivilegesPreviewRequest);
+      };
     existing.privileges.push(item.privilege);
     grouped.set(key, existing);
   }

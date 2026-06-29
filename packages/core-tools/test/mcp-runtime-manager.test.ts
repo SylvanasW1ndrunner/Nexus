@@ -117,8 +117,8 @@ async function runtimeHarness(input: { launcher?: (server: McpServerConfig) => M
       ((server) => {
         launchedServers.push(server.id);
         return {
-          async listTools() {
-            return [{ name: 'list_tables', annotations: { readOnlyHint: true } }];
+          listTools() {
+            return Promise.resolve([{ name: 'list_tables', annotations: { readOnlyHint: true } }]);
           },
           callTool(toolName, args) {
             return { toolName, args };

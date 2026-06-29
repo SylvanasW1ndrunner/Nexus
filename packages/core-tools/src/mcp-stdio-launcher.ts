@@ -85,11 +85,12 @@ class StdioMcpRuntimeClient implements McpRuntimeClient {
     return this.request('tools/call', { name: toolName, arguments: args }, signal);
   }
 
-  async stop(): Promise<void> {
-    if (this.closed) return;
+  stop(): Promise<void> {
+    if (this.closed) return Promise.resolve();
     this.closed = true;
     this.rejectAll(new Error(`MCP server ${this.serverId} stopped.`));
     this.child.kill();
+    return Promise.resolve();
   }
 
   private async ensureInitialized(): Promise<void> {

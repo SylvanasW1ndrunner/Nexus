@@ -96,17 +96,16 @@ export function buildDiagnosticReport(input: DiagnosticReportInput): DiagnosticR
 export function redactDiagnosticText(text: string): RedactedText {
   let redactionCount = 0;
   const replaceAll = (pattern: RegExp, replacement: string) => {
-    text = text.replace(pattern, (...args: unknown[]) => {
-      const match = String(args[0] ?? '');
+    text = text.replace(pattern, (match: string) => {
       if (match === replacement) return match;
       redactionCount += 1;
       return replacement;
     });
   };
   const replacePrefixed = (pattern: RegExp, replacement: string) => {
-    text = text.replace(pattern, (...args: unknown[]) => {
+    text = text.replace(pattern, (_match: string, prefix: string) => {
       redactionCount += 1;
-      return `${String(args[1] ?? '')}${replacement}`;
+      return `${prefix}${replacement}`;
     });
   };
 

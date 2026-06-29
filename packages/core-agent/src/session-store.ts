@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { AgentMessage, AgentMode, AgentSession } from './types.js';
+import type { AgentMode, AgentSession } from './types.js';
 
 export type AgentSessionSummary = {
   id: string;

@@ -1,11 +1,11 @@
-import { McpConfigStore, type McpServerConfig } from './mcp-config-store.js';
-import { McpHealthManager, type McpServerHealthState } from './mcp-health.js';
-import { McpToolRegistrationManager } from './mcp-tool-registration-manager.js';
+import type { McpConfigStore, McpServerConfig } from './mcp-config-store.js';
+import type { McpHealthManager, McpServerHealthState } from './mcp-health.js';
+import type { McpToolRegistrationManager } from './mcp-tool-registration-manager.js';
 import type { McpToolSpec } from './mcp-tool-adapter.js';
 
 export type McpRuntimeClient = {
   listTools(): Promise<McpToolSpec[]>;
-  callTool(toolName: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> | unknown;
+  callTool(toolName: string, args: Record<string, unknown>, signal: AbortSignal): unknown;
   stop(): Promise<void> | void;
 };
 

@@ -1,6 +1,6 @@
 import type { LlmMessage, LlmTool } from '@dbagent/core-llm';
 import { toLlmMessages } from './session.js';
-import type { AgentMessage, AgentSession } from './types.js';
+import type { AgentSession } from './types.js';
 
 export type AgentContextCompressionLevel = 'none' | 'tool-summary' | 'archive-early-messages';
 

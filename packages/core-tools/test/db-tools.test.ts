@@ -6,7 +6,7 @@ import { ReactAgent, ToolRegistry, type AgentToolApproval } from '@dbagent/core-
 import { LlmRouter, type LlmChatResponse, type LlmProvider } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
 import { SchemaRagEngine } from '@dbagent/core-rag';
-import type { DatabaseConnectionConfig, IDatabaseDriver } from '@dbagent/core-db';
+import type { IDatabaseDriver } from '@dbagent/core-db';
 import type {
   QueryExecutionResult,
   QueryRequest,
@@ -91,15 +91,17 @@ describe('registerDatabaseTools', () => {
     ).resolves.toEqual({
       tables: [{ schema: 'public', name: 'orders', type: 'table', comment: '订单事实表' }],
     });
-    await expect(
-      registry
-        .get('describe_table')
-        ?.handler({ connectionId: 'conn_1', schema: 'public', table: 'orders' }, toolContext()),
-    ).resolves.toMatchObject({
+    const description = await registry
+      .get('describe_table')
+      ?.handler({ connectionId: 'conn_1', schema: 'public', table: 'orders' }, toolContext());
+
+    expect(description).toMatchObject({
       schema: 'public',
       name: 'orders',
-      columns: expect.arrayContaining([expect.objectContaining({ name: 'total_amount' })]),
     });
+    expect(isRecord(description) && Array.isArray(description.columns)).toBe(true);
+    if (!isRecord(description) || !Array.isArray(description.columns)) return;
+    expect(description.columns.some((column) => isRecord(column) && column.name === 'total_amount')).toBe(true);
   });
 
   it('composes database and RAG tools without duplicate tool names', async () => {
@@ -326,24 +328,24 @@ function fakeDriver(): IDatabaseDriver & { executedSql: string[] } {
       supportsExplain: true,
       supportsSchemas: true,
     },
-    async test(_config: DatabaseConnectionConfig) {
-      return ok({ latencyMs: 3 });
+    test() {
+      return Promise.resolve(ok({ latencyMs: 3 }));
     },
-    async connect() {
-      return ok(savedConnection());
+    connect() {
+      return Promise.resolve(ok(savedConnection()));
     },
-    async disconnect() {
-      return ok(undefined);
+    disconnect() {
+      return Promise.resolve(ok(undefined));
     },
-    async execute(request: QueryRequest): Promise<Result<QueryExecutionResult>> {
+    execute(request: QueryRequest): Promise<Result<QueryExecutionResult>> {
       executedSql.push(request.sql);
       if (/delete/i.test(request.sql) && !request.confirmed) {
-        return err({
+        return Promise.resolve(err({
           code: 'CONFIRMATION_REQUIRED',
           message: 'Confirmation required.',
-        });
+        }));
       }
-      return ok({
+      return Promise.resolve(ok({
         queryId: 'query_1',
         columns: [{ name: 'order_count', dataType: 'int8' }],
         rows: [{ order_count: 42 }],
@@ -356,16 +358,16 @@ function fakeDriver(): IDatabaseDriver & { executedSql: string[] } {
           blocked: false,
           reasons: [],
         },
-      });
+      }));
     },
-    async listTables(): Promise<Result<TableSummary[]>> {
-      return ok([
+    listTables(): Promise<Result<TableSummary[]>> {
+      return Promise.resolve(ok([
         { schema: 'public', name: 'orders', type: 'table', comment: '订单事实表' },
         { schema: 'analytics', name: 'daily_orders', type: 'view' },
-      ]);
+      ]));
     },
-    async describeTable(): Promise<Result<TableDetail>> {
-      return ok(orderTable());
+    describeTable(): Promise<Result<TableDetail>> {
+      return Promise.resolve(ok(orderTable()));
     },
   };
 }
@@ -425,13 +427,13 @@ function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
     id: 'fake',
     name: 'Fake Provider',
     mode: 'byok',
-    async chat() {
+    chat() {
       const next = script.shift();
       if (!next) throw new Error('No scripted response left.');
-      return next;
+      return Promise.resolve(next);
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }
@@ -454,6 +456,10 @@ function fixedDependencies() {
     now: () => '2026-06-17T00:00:00.000Z',
     createSessionId: () => 'session_tools',
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function toolContext(approval?: AgentToolApproval) {

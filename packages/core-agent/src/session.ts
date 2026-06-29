@@ -23,7 +23,7 @@ export function appendMessage(session: AgentSession, message: AgentMessage): voi
 }
 
 export function createMessage(message: AgentMessageDraft, now: () => string): AgentMessage {
-  return { ...message, createdAt: now() } as AgentMessage;
+  return { ...message, createdAt: now() };
 }
 
 export function toLlmMessages(session: AgentSession): LlmMessage[] {

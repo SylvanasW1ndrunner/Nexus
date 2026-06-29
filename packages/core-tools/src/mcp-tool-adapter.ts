@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { AgentToolDefinition, AgentToolHandler, ToolDangerLevel, ToolRegistry } from '@dbagent/core-agent';
 import {
-  McpHealthManager,
   invokeMcpToolWithTimeout,
+  type McpHealthManager,
   type McpToolTimeoutOptions,
 } from './mcp-health.js';
 
@@ -29,7 +29,7 @@ export type McpToolCallRequest = {
   signal: AbortSignal;
 };
 
-export type McpToolCall = (request: McpToolCallRequest) => Promise<unknown> | unknown;
+export type McpToolCall = (request: McpToolCallRequest) => unknown;
 
 export type McpToolAdapterOptions = McpToolTimeoutOptions & {
   registry: ToolRegistry;

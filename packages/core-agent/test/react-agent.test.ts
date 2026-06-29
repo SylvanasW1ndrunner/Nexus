@@ -402,6 +402,7 @@ describe('ReactAgent', () => {
       {
         iteration: 1,
         status: 'failed',
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         errorMessage: expect.stringContaining('工具 query_database 执行超时'),
       },
     ]);
@@ -470,11 +471,13 @@ describe('ReactAgent', () => {
     await expect(checkpointStore.listBySession('session_test')).resolves.toMatchObject([
       { iteration: 1, status: 'running' },
       { iteration: 2, status: 'running' },
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       { iteration: 3, status: 'failed', errorMessage: expect.stringContaining('连续 3 次工具执行失败') },
     ]);
     await expect(checkpointStore.listRecoverable()).resolves.toEqual([]);
     await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
     await expect(usage.roundHistory()).resolves.toMatchObject([
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       { sessionId: 'session_test', status: 'failed', errorMessage: expect.stringContaining('连续 3 次工具执行失败') },
     ]);
   });
@@ -701,6 +704,56 @@ describe('ReactAgent', () => {
     expect(calls[1]?.messages.some((message) => message.content.includes('工具结果已在本地摘要'))).toBe(true);
   });
 
+  it('bounds large tool results before persisting them into the session and model context', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: '',
+        toolCalls: [{ id: 'large_export', name: 'query_database', arguments: { sql: 'select * from event_logs' } }],
+      },
+      {
+        text: 'The large result was summarized before analysis.',
+        toolCalls: [],
+      },
+    ]);
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => ({
+        rows: Array.from({ length: 500 }, (_, index) => ({
+          id: index,
+          payload: `large-payload-${index}-${'x'.repeat(80)}`,
+        })),
+      }),
+    );
+    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registry, usage, undefined, fixedDependencies());
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Analyze a large event log export.',
+      mode: 'readonly',
+      maxIterations: 2,
+      maxToolResultChars: 260,
+    });
+
+    const toolMessage = result.session.messages.find((message) => message.role === 'tool');
+
+    expect(result.status).toBe('done');
+    expect(result.toolExecutions[0]?.resultPreview.length).toBeLessThanOrEqual(260);
+    expect(result.toolExecutions[0]?.resultPreview).toContain('tool_result_too_large');
+    expect(toolMessage?.content.length).toBeLessThanOrEqual(260);
+    expect(toolMessage?.content).toContain('tool_result_too_large');
+    expect(calls[1]?.messages.some((message) => message.content.includes('tool_result_too_large'))).toBe(true);
+    expect(calls[1]?.messages.some((message) => message.content.includes('large-payload-499'))).toBe(false);
+  });
+
   it('denies tool calls that are registered but not allowed for the current run', async () => {
     let writeExecuted = false;
     const registry = new ToolRegistry();
@@ -898,14 +951,14 @@ function scriptedProviderWithCalls(script: LlmChatResponse[]): { provider: LlmPr
     id: 'fake',
     name: 'Fake Provider',
     mode: 'byok',
-    async chat(request) {
+    chat(request) {
       calls.push(request);
       const next = script.shift();
       if (!next) throw new Error('No scripted response left.');
-      return next;
+      return Promise.resolve(next);
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
   return { provider, calls };
@@ -916,11 +969,11 @@ function throwingProvider(message: string): LlmProvider {
     id: 'throwing',
     name: 'Throwing Provider',
     mode: 'byok',
-    async chat() {
-      throw new Error(message);
+    chat() {
+      return Promise.reject(new Error(message));
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }
@@ -930,14 +983,15 @@ function streamingProvider(events: LlmChatStreamEvent[]): LlmProvider {
     id: 'streaming',
     name: 'Streaming Provider',
     mode: 'byok',
-    async chat() {
-      throw new Error('chat should not be called when stream store is configured');
+    chat() {
+      return Promise.reject(new Error('chat should not be called when stream store is configured'));
     },
     async *stream() {
+      await Promise.resolve();
       for (const event of events) yield event;
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }
@@ -947,15 +1001,16 @@ function interruptingStreamingProvider(): LlmProvider {
     id: 'streaming',
     name: 'Interrupting Streaming Provider',
     mode: 'byok',
-    async chat() {
-      throw new Error('chat should not be called when stream store is configured');
+    chat() {
+      return Promise.reject(new Error('chat should not be called when stream store is configured'));
     },
     async *stream() {
       yield { type: 'text-delta', text: '已查到订单，' };
+      await Promise.resolve();
       throw new Error('stream network reset');
     },
-    async isAvailable() {
-      return { available: true };
+    isAvailable() {
+      return Promise.resolve({ available: true });
     },
   };
 }
