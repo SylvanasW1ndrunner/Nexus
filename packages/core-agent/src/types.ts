@@ -171,3 +171,42 @@ export type AgentBehaviorEvaluationSummary = {
   passRate: number;
   results: AgentBehaviorEvaluationResult[];
 };
+
+export type AgentBehaviorEvaluationReportInput = {
+  reportId?: string;
+  suiteId: string;
+  suiteName: string;
+  summary: AgentBehaviorEvaluationSummary;
+  generatedAt?: string;
+  environment?: 'unit' | 'integration' | 'postgres' | 'llm-live' | 'manual';
+  run?: {
+    providerId?: string;
+    model?: string;
+    live?: boolean;
+    postgres?: boolean;
+    commit?: string;
+  };
+  notes?: string[];
+};
+
+export type AgentBehaviorEvaluationReportFile = {
+  path: string;
+  content: string;
+  bytes: number;
+};
+
+export type AgentBehaviorEvaluationReport = {
+  reportId: string;
+  suiteId: string;
+  suiteName: string;
+  generatedAt: string;
+  environment: NonNullable<AgentBehaviorEvaluationReportInput['environment']>;
+  run: NonNullable<AgentBehaviorEvaluationReportInput['run']>;
+  files: AgentBehaviorEvaluationReportFile[];
+  summary: {
+    totalCases: number;
+    passedCases: number;
+    failedCases: number;
+    passRate: number;
+  };
+};

@@ -18,6 +18,8 @@ type TerminalRuntime = {
   process: pty.IPty;
   output: string;
   outputBaseCursor: number;
+  recentInputEchoNeedles: string[];
+  staleInputEchoNeedles: string[];
   status: 'running' | 'exited';
   exitCode?: number | null;
 };
@@ -54,6 +56,8 @@ export class TerminalService {
       process: child,
       output: '',
       outputBaseCursor: 0,
+      recentInputEchoNeedles: [],
+      staleInputEchoNeedles: [],
       status: 'running',
     };
     child.onData((data) => {
@@ -88,7 +92,8 @@ export class TerminalService {
 
   resize(request: TerminalResizeRequest): { id: string; cols: number; rows: number } {
     const runtime = this.runtimes.get(request.terminalId);
-    if (!runtime || runtime.status !== 'running') throw new Error('Terminal session is not running.');
+    if (!runtime || runtime.status !== 'running')
+      throw new Error('Terminal session is not running.');
     const cols = Math.max(2, Math.floor(request.cols));
     const rows = Math.max(1, Math.floor(request.rows));
     runtime.process.resize(cols, rows);
@@ -97,12 +102,28 @@ export class TerminalService {
 
   write(request: TerminalWriteRequest): { id: string } {
     const runtime = this.runtimes.get(request.terminalId);
-    if (!runtime || runtime.status !== 'running') throw new Error('Terminal session is not running.');
+    if (!runtime || runtime.status !== 'running')
+      throw new Error('Terminal session is not running.');
+    const command = request.data.replace(/[\r\n]+$/, '').trim();
+    if (command) {
+      if (runtime.outputBaseCursor > 0) {
+        runtime.staleInputEchoNeedles = boundedUnique([
+          ...runtime.staleInputEchoNeedles,
+          ...runtime.recentInputEchoNeedles,
+        ]);
+      }
+      runtime.recentInputEchoNeedles = boundedUnique([
+        ...runtime.recentInputEchoNeedles,
+        ...extractInputEchoNeedles(command),
+      ]);
+    }
     runtime.process.write(request.data);
     const current = this.sessions.get(request.terminalId);
     if (current) {
-      const command = request.data.replace(/[\r\n]+$/, '').trim();
-      this.sessions.set(request.terminalId, command ? { ...current, lastCommand: command } : current);
+      this.sessions.set(
+        request.terminalId,
+        command ? { ...current, lastCommand: command } : current,
+      );
     }
     return { id: request.terminalId };
   }
@@ -110,6 +131,15 @@ export class TerminalService {
   read(request: TerminalReadRequest): TerminalReadResult {
     const runtime = this.runtimes.get(request.terminalId);
     if (!runtime) throw new Error('Terminal session does not exist.');
+    if (request.cursor > 0 && request.cursor < runtime.outputBaseCursor) {
+      return {
+        terminalId: request.terminalId,
+        chunk: '',
+        cursor: runtime.outputBaseCursor,
+        status: runtime.status,
+        ...(runtime.exitCode !== undefined ? { exitCode: runtime.exitCode } : {}),
+      };
+    }
     const cursor = Math.max(runtime.outputBaseCursor, request.cursor);
     const start = cursor - runtime.outputBaseCursor;
     const nextCursor = runtime.outputBaseCursor + runtime.output.length;
@@ -123,7 +153,8 @@ export class TerminalService {
   }
 
   async run(request: TerminalRunRequest): Promise<PythonRunResult> {
-    const session = this.sessions.get(request.terminalId) ?? this.create(request.cwd ? { cwd: request.cwd } : {});
+    const session =
+      this.sessions.get(request.terminalId) ?? this.create(request.cwd ? { cwd: request.cwd } : {});
     const cwd = request.cwd ?? session.cwd ?? process.cwd();
     const startedAt = Date.now();
     try {
@@ -132,7 +163,12 @@ export class TerminalService {
         timeout: request.timeoutMs ?? 30_000,
         maxBuffer: 1024 * 1024 * 4,
       });
-      this.sessions.set(session.id, { ...session, cwd, lastCommand: request.command, lastExitCode: 0 });
+      this.sessions.set(session.id, {
+        ...session,
+        cwd,
+        lastCommand: request.command,
+        lastExitCode: 0,
+      });
       return {
         command: request.command,
         cwd,
@@ -142,7 +178,11 @@ export class TerminalService {
         elapsedMs: Date.now() - startedAt,
       };
     } catch (error) {
-      const failed = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number | null };
+      const failed = error as NodeJS.ErrnoException & {
+        stdout?: string;
+        stderr?: string;
+        code?: number | null;
+      };
       this.sessions.set(session.id, {
         ...session,
         cwd,
@@ -167,7 +207,8 @@ function getShellCandidates(configuredShell?: string): ShellCandidate[] {
   const systemShell = getSystemShell();
   if (configuredShell?.trim()) {
     const command = configuredShell.trim();
-    if (command !== systemShell.command) return [{ command, args: [], label: command.split(/[\\/]/).at(-1) ?? command }, systemShell];
+    if (command !== systemShell.command)
+      return [{ command, args: [], label: command.split(/[\\/]/).at(-1) ?? command }, systemShell];
   }
   return [systemShell];
 }
@@ -188,7 +229,10 @@ function getSystemShell(): ShellCandidate {
   };
 }
 
-function spawnFirstAvailableShell(shells: ShellCandidate[], cwd: string): { child: pty.IPty; shell: ShellCandidate } {
+function spawnFirstAvailableShell(
+  shells: ShellCandidate[],
+  cwd: string,
+): { child: pty.IPty; shell: ShellCandidate } {
   let lastError: unknown;
   for (const shell of shells) {
     try {
@@ -210,12 +254,46 @@ function spawnFirstAvailableShell(shells: ShellCandidate[], cwd: string): { chil
   throw lastError instanceof Error ? lastError : new Error('Unable to start terminal shell.');
 }
 
-function appendTerminalOutput(runtime: TerminalRuntime, data: string, maxOutputChars?: number): void {
-  runtime.output += data;
+function appendTerminalOutput(
+  runtime: TerminalRuntime,
+  data: string,
+  maxOutputChars?: number,
+): void {
+  runtime.output += redactStaleInputEchoes(data, runtime.staleInputEchoNeedles);
   const limit = Math.max(1, Math.floor(maxOutputChars ?? 1024 * 1024));
   if (runtime.output.length <= limit) return;
 
   const overflow = runtime.output.length - limit;
-  runtime.output = runtime.output.slice(overflow);
-  runtime.outputBaseCursor += overflow;
+  const trimStart = terminalTrimStart(runtime.output, overflow);
+  runtime.output = runtime.output.slice(trimStart);
+  runtime.outputBaseCursor += trimStart;
+}
+
+function terminalTrimStart(output: string, overflow: number): number {
+  const newlineIndex = output.indexOf('\n', overflow);
+  const carriageReturnIndex = output.indexOf('\r', overflow);
+  const boundary = [newlineIndex, carriageReturnIndex]
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  if (boundary === undefined) return overflow;
+  const nextStart = boundary + 1;
+  return output.length - nextStart > 0 ? nextStart : overflow;
+}
+
+function extractInputEchoNeedles(command: string): string[] {
+  const needles = [command];
+  const firstWhitespace = command.search(/\s/);
+  if (firstWhitespace >= 0) needles.push(command.slice(firstWhitespace).trim());
+  return needles.map((needle) => needle.slice(0, 80)).filter((needle) => needle.length >= 8);
+}
+
+function redactStaleInputEchoes(data: string, staleNeedles: string[]): string {
+  return staleNeedles.reduce(
+    (text, needle) => text.replaceAll(needle, '[trimmed-input-echo]'),
+    data,
+  );
+}
+
+function boundedUnique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))].slice(-20);
 }

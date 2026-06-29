@@ -132,6 +132,12 @@ Agent 不直接解析 SQL，也不直接访问数据库 driver。SQL 风险判�
 
 当前评估器不直接调用 LLM，也不引入第三方 Agent eval 依赖。它用于默认测试中的确定性质量基线；后续接入真实 SiliconFlow/DeepSeek、LLM judge 或开源 eval 框架时，必须按开源优先规则记录许可证、打包、离线、安全和成本影响。
 
+`buildAgentBehaviorEvaluationReport()` 在评估汇总之上生成可持久化的验收报告，当前包含 `manifest.json`、`results.json` 和 `report.md`。报告只记录结构化验收结果、工具名称、状态、迭代次数和脱敏后的最终回答，不持久化原始 tool args、原始 SQL 或查询结果 preview。
+
+`AgentBehaviorEvaluationReportStore` 提供本地 JSON 报告索引，使用原子写入，支持保存、覆盖、按 `reportId` 读取和倒序列表。读取路径会再次执行 Agent 脱敏规则，避免历史报告中的 API key、Bearer token 或数据库连接串密码被重新暴露。损坏 JSON 会降级为空列表，避免测试/主进程启动时被单个坏报告阻断。
+
+该能力是后续官方“Agent/RAG Eval”插件的后端基础：插件可以负责注册业务场景、运行真实依赖门控、保存报告和暴露权限声明；`core-agent` 保持通用合同，不依赖具体数据库、RAG fixture、LLM provider 或 UI。
+
 ## 测试覆盖
 
 - `permission-manager.test.ts`：不同模式和工具危险级别下的权限决策。

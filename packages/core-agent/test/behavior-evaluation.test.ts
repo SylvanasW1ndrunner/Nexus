@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateAgentBehavior, type AgentRunResult } from '../src/index.js';
+import {
+  buildAgentBehaviorEvaluationReport,
+  evaluateAgentBehavior,
+  type AgentRunResult,
+} from '../src/index.js';
 
 describe('evaluateAgentBehavior', () => {
   it('passes scenarios that match user-visible Agent behavior', () => {
@@ -62,7 +66,13 @@ describe('evaluateAgentBehavior', () => {
             finalText: '已经处理完成。',
             iterations: 2,
             toolExecutions: [
-              { toolCallId: 'call_1', toolName: 'execute_sql', status: 'success', durationMs: 1, resultPreview: '{}' },
+              {
+                toolCallId: 'call_1',
+                toolName: 'execute_sql',
+                status: 'success',
+                durationMs: 1,
+                resultPreview: '{}',
+              },
             ],
           }),
         },
@@ -79,6 +89,78 @@ describe('evaluateAgentBehavior', () => {
       'Final text does not include: 拒绝.',
       'Expected at most 1 iterations, got 2.',
     ]);
+  });
+
+  it('builds redacted JSON and Markdown report artifacts for user-level acceptance evidence', () => {
+    const apiKey = ['sk', 'report-secret-123456'].join('-');
+    const databaseUrl = 'postgres://tester:secret@127.0.0.1/db';
+    const summary = evaluateAgentBehavior({
+      cases: [
+        {
+          case: {
+            id: 'AGENT-REPORT-001',
+            userTask: '生成渠道 GMV 验收报告',
+            expectedStatus: 'done',
+            requiredToolCalls: ['search_schema', 'query_database'],
+            finalTextIncludes: ['GMV'],
+          },
+          result: runResult({
+            finalText: `GMV 已生成。测试密钥 ${apiKey} 和连接串 ${databaseUrl} 不应进入报告。`,
+            toolExecutions: [
+              {
+                toolCallId: 'call_1',
+                toolName: 'search_schema',
+                status: 'success',
+                durationMs: 1,
+                resultPreview: '{}',
+              },
+              {
+                toolCallId: 'call_2',
+                toolName: 'query_database',
+                status: 'success',
+                durationMs: 2,
+                resultPreview: '{}',
+              },
+            ],
+          }),
+        },
+      ],
+    });
+
+    const report = buildAgentBehaviorEvaluationReport({
+      suiteId: 'agent-rag-business',
+      suiteName: 'Agent/RAG 业务验收',
+      generatedAt: '2026-06-29T00:00:00.000Z',
+      environment: 'llm-live',
+      run: {
+        providerId: 'siliconflow',
+        model: 'deepseek-ai/DeepSeek-V4-Pro',
+        live: true,
+        postgres: true,
+      },
+      notes: ['真实报告不得包含明文密钥。'],
+      summary,
+    });
+
+    expect(report.summary).toMatchObject({
+      totalCases: 1,
+      passedCases: 1,
+      failedCases: 0,
+      passRate: 1,
+    });
+    expect(report.files.map((file) => file.path)).toEqual([
+      'manifest.json',
+      'results.json',
+      'report.md',
+    ]);
+    const combined = report.files.map((file) => file.content).join('\n');
+    expect(combined).toContain('Agent/RAG 业务验收');
+    expect(combined).toContain('query_database');
+    expect(combined).toContain('sk-[REDACTED]');
+    expect(combined).toContain('postgres://tester:[REDACTED]@127.0.0.1/db');
+    expect(combined).not.toContain(apiKey);
+    expect(combined).not.toContain('tester:secret@');
+    expect(report.files.every((file) => file.bytes > 0)).toBe(true);
   });
 });
 

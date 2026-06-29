@@ -1,13 +1,37 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ReactAgent, ToolRegistry } from '@dbagent/core-agent';
-import { createSiliconFlowProvider, LlmRouter, type LlmChatResponse, type LlmProvider } from '@dbagent/core-llm';
-import { PostgresDriver, type DatabaseConnectionConfig, type IDatabaseDriver } from '@dbagent/core-db';
+import {
+  AgentBehaviorEvaluationReportStore,
+  buildAgentBehaviorEvaluationReport,
+  evaluateAgentBehavior,
+  ReactAgent,
+  ToolRegistry,
+} from '@dbagent/core-agent';
+import {
+  createSiliconFlowProvider,
+  LlmRouter,
+  type LlmChatResponse,
+  type LlmProvider,
+} from '@dbagent/core-llm';
+import {
+  PostgresDriver,
+  type DatabaseConnectionConfig,
+  type IDatabaseDriver,
+} from '@dbagent/core-db';
 import { SchemaRagEngine, evaluateSchemaRagRetrieval } from '@dbagent/core-rag';
 import { UsageTracker } from '@dbagent/core-usage';
-import { err, ok, type QueryExecutionResult, type QueryRequest, type Result, type SavedConnection, type TableDetail, type TableSummary } from '@dbagent/shared';
+import {
+  err,
+  ok,
+  type QueryExecutionResult,
+  type QueryRequest,
+  type Result,
+  type SavedConnection,
+  type TableDetail,
+  type TableSummary,
+} from '@dbagent/shared';
 import { registerDatabaseTools } from '../src/index.js';
 import {
   BUSINESS_CONNECTION_ID,
@@ -108,7 +132,8 @@ describe('Agent with business RAG and database tools', () => {
       registry,
       driver,
       rag,
-      getConnection: (connectionId) => (connectionId === BUSINESS_CONNECTION_ID ? savedBusinessConnection() : undefined),
+      getConnection: (connectionId) =>
+        connectionId === BUSINESS_CONNECTION_ID ? savedBusinessConnection() : undefined,
     });
     const usage = new UsageTracker(await usagePath());
     const agent = new ReactAgent(
@@ -193,81 +218,98 @@ describe('Agent with business RAG and database tools', () => {
   });
 });
 
-describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')('real PostgreSQL business fixture', () => {
-  it('creates production-like tables, extracts schema, indexes RAG, and runs the Agent workflow', async () => {
-    const driver = new PostgresDriver();
-    const config = postgresConfig({ readOnly: false });
-    const connected = await driver.connect(config);
-    expect(connected.ok).toBe(true);
-    if (!connected.ok) return;
+describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')(
+  'real PostgreSQL business fixture',
+  () => {
+    it('creates production-like tables, extracts schema, indexes RAG, and runs the Agent workflow', async () => {
+      const driver = new PostgresDriver();
+      const config = postgresConfig({ readOnly: false });
+      const connected = await driver.connect(config);
+      expect(connected.ok).toBe(true);
+      if (!connected.ok) return;
 
-    try {
-      await expectOk(driver.execute({ connectionId: config.id!, sql: businessFixtureSql() }, connected.data));
+      try {
+        await expectOk(
+          driver.execute({ connectionId: config.id!, sql: businessFixtureSql() }, connected.data),
+        );
 
-      const tableDetails = await describeBusinessTables(driver, config.id!);
-      expect(tableDetails.map((table) => `${table.schema}.${table.name}`)).toEqual(
-        expect.arrayContaining([
-          'public.orders',
-          'public.refunds',
-          'analytics.traffic_sessions',
-          'analytics.campaign_spend',
-        ]),
-      );
-      const orderColumns = tableDetails.find((table) => table.name === 'orders')?.columns ?? [];
-      expect(orderColumns).toContainEqual(
-        expect.objectContaining({ name: 'customer_id', foreignKey: { schema: 'public', table: 'customers', column: 'id' } }),
-      );
-      expect(orderColumns.find((column) => column.name === 'total_amount')?.comment).toContain('GMV');
-
-      const rag = new SchemaRagEngine();
-      rag.index({ connectionId: config.id!, tables: tableDetails, glossary: businessGlossary() });
-      const registry = new ToolRegistry();
-      registerDatabaseTools({
-        registry,
-        driver,
-        rag,
-        getConnection: (connectionId) => (connectionId === config.id ? connected.data : undefined),
-      });
-
-      const usage = new UsageTracker(await usagePath());
-      const agent = new ReactAgent(
-        new LlmRouter(usage, [
-          scriptedProvider([
-            responseWithTool('call_schema', 'search_schema', {
-              connectionId: config.id,
-              query: '按流量渠道统计 GMV 退款率 ROI',
-              limit: 8,
-            }),
-            responseWithTool('call_query', 'query_database', {
-              connectionId: config.id,
-              sql: channelPerformanceSql(),
-              limit: 20,
-            }),
-            { text: '真实 PostgreSQL 夹具已完成渠道 GMV、退款率和 ROI 查询。', toolCalls: [] },
+        const tableDetails = await describeBusinessTables(driver, config.id!);
+        expect(tableDetails.map((table) => `${table.schema}.${table.name}`)).toEqual(
+          expect.arrayContaining([
+            'public.orders',
+            'public.refunds',
+            'analytics.traffic_sessions',
+            'analytics.campaign_spend',
           ]),
-        ]),
-        registry,
-        usage,
-        undefined,
-        fixedDependencies(),
-      );
+        );
+        const orderColumns = tableDetails.find((table) => table.name === 'orders')?.columns ?? [];
+        expect(orderColumns).toContainEqual(
+          expect.objectContaining({
+            name: 'customer_id',
+            foreignKey: { schema: 'public', table: 'customers', column: 'id' },
+          }),
+        );
+        expect(orderColumns.find((column) => column.name === 'total_amount')?.comment).toContain(
+          'GMV',
+        );
 
-      const result = await agent.run({
-        providerId: 'fake',
-        model: 'fake-business-model',
-        userMessage: '按渠道统计 GMV、退款率和 ROI。',
-        mode: 'readonly',
-        maxIterations: 5,
-      });
+        const rag = new SchemaRagEngine();
+        rag.index({ connectionId: config.id!, tables: tableDetails, glossary: businessGlossary() });
+        const registry = new ToolRegistry();
+        registerDatabaseTools({
+          registry,
+          driver,
+          rag,
+          getConnection: (connectionId) =>
+            connectionId === config.id ? connected.data : undefined,
+        });
 
-      expect(result.status).toBe('done');
-      expect(result.toolExecutions.map((record) => record.toolName)).toEqual(['search_schema', 'query_database']);
-    } finally {
-      await driver.execute({ connectionId: config.id!, sql: businessFixtureCleanupSql() }, connected.data);
-      await driver.disconnect(config.id!);
-    }
-  }, 120_000);
-});
+        const usage = new UsageTracker(await usagePath());
+        const agent = new ReactAgent(
+          new LlmRouter(usage, [
+            scriptedProvider([
+              responseWithTool('call_schema', 'search_schema', {
+                connectionId: config.id,
+                query: '按流量渠道统计 GMV 退款率 ROI',
+                limit: 8,
+              }),
+              responseWithTool('call_query', 'query_database', {
+                connectionId: config.id,
+                sql: channelPerformanceSql(),
+                limit: 20,
+              }),
+              { text: '真实 PostgreSQL 夹具已完成渠道 GMV、退款率和 ROI 查询。', toolCalls: [] },
+            ]),
+          ]),
+          registry,
+          usage,
+          undefined,
+          fixedDependencies(),
+        );
+
+        const result = await agent.run({
+          providerId: 'fake',
+          model: 'fake-business-model',
+          userMessage: '按渠道统计 GMV、退款率和 ROI。',
+          mode: 'readonly',
+          maxIterations: 5,
+        });
+
+        expect(result.status).toBe('done');
+        expect(result.toolExecutions.map((record) => record.toolName)).toEqual([
+          'search_schema',
+          'query_database',
+        ]);
+      } finally {
+        await driver.execute(
+          { connectionId: config.id!, sql: businessFixtureCleanupSql() },
+          connected.data,
+        );
+        await driver.disconnect(config.id!);
+      }
+    }, 120_000);
+  },
+);
 
 describe('SiliconFlow live Agent and RAG integration', () => {
   const runLive = process.env.DBAGENT_RUN_AGENT_RAG_LIVE === '1';
@@ -283,11 +325,14 @@ describe('SiliconFlow live Agent and RAG integration', () => {
         registry,
         driver,
         rag: indexedBusinessRag(),
-        getConnection: (connectionId) => (connectionId === BUSINESS_CONNECTION_ID ? savedBusinessConnection() : undefined),
+        getConnection: (connectionId) =>
+          connectionId === BUSINESS_CONNECTION_ID ? savedBusinessConnection() : undefined,
       });
       const usage = new UsageTracker(await usagePath());
       const agent = new ReactAgent(
-        new LlmRouter(usage, [createSiliconFlowProvider({ apiKey: apiKey!, timeoutMs: 120_000, maxRetries: 1 })]),
+        new LlmRouter(usage, [
+          createSiliconFlowProvider({ apiKey: apiKey!, timeoutMs: 120_000, maxRetries: 1 }),
+        ]),
         registry,
         usage,
         undefined,
@@ -312,6 +357,7 @@ describe('SiliconFlow live Agent and RAG integration', () => {
         ]),
       );
       expect(result.finalText.length).toBeGreaterThan(0);
+      await writeLiveAgentRagReport(result, { providerId: 'siliconflow', model });
     },
     180_000,
   );
@@ -350,50 +396,72 @@ function fakeBusinessDriver(): IDatabaseDriver & { executedSql: string[] } {
     execute(request: QueryRequest): Promise<Result<QueryExecutionResult>> {
       executedSql.push(request.sql);
       if (/delete|update|insert|drop|truncate/i.test(request.sql)) {
-        return Promise.resolve(err({ code: 'READ_ONLY_VIOLATION', message: 'Write SQL is blocked in the business fixture.' }));
+        return Promise.resolve(
+          err({
+            code: 'READ_ONLY_VIOLATION',
+            message: 'Write SQL is blocked in the business fixture.',
+          }),
+        );
       }
-      return Promise.resolve(ok({
-        queryId: request.queryId ?? 'business_query',
-        columns: [
-          { name: 'utm_source', dataType: 'text' },
-          { name: 'gmv', dataType: 'numeric' },
-          { name: 'refund_rate', dataType: 'numeric' },
-          { name: 'roi', dataType: 'numeric' },
-        ],
-        rows: [
-          { utm_source: 'paid_search', gmv: '199.00', refund_rate: '0.2513', roi: '1.6583' },
-          { utm_source: 'seo', gmv: '398.00', refund_rate: '0.0000', roi: '19.9000' },
-          { utm_source: 'social', gmv: '0.00', refund_rate: '0.0000', roi: '0.0000' },
-        ],
-        rowCount: 3,
-        elapsedMs: 7,
-        safety: {
-          statementKind: 'select',
-          riskLevel: 'safe',
-          requiresConfirmation: false,
-          blocked: false,
-          reasons: [],
-        },
-      }));
+      return Promise.resolve(
+        ok({
+          queryId: request.queryId ?? 'business_query',
+          columns: [
+            { name: 'utm_source', dataType: 'text' },
+            { name: 'gmv', dataType: 'numeric' },
+            { name: 'refund_rate', dataType: 'numeric' },
+            { name: 'roi', dataType: 'numeric' },
+          ],
+          rows: [
+            { utm_source: 'paid_search', gmv: '199.00', refund_rate: '0.2513', roi: '1.6583' },
+            { utm_source: 'seo', gmv: '398.00', refund_rate: '0.0000', roi: '19.9000' },
+            { utm_source: 'social', gmv: '0.00', refund_rate: '0.0000', roi: '0.0000' },
+          ],
+          rowCount: 3,
+          elapsedMs: 7,
+          safety: {
+            statementKind: 'select',
+            riskLevel: 'safe',
+            requiresConfirmation: false,
+            blocked: false,
+            reasons: [],
+          },
+        }),
+      );
     },
     listTables(): Promise<Result<TableSummary[]>> {
-      return Promise.resolve(ok(
-        businessFixtureTables().map((table) => ({
-          schema: table.schema,
-          name: table.name,
-          type: table.type,
-          ...(table.comment === undefined ? {} : { comment: table.comment }),
-        })),
-      ));
+      return Promise.resolve(
+        ok(
+          businessFixtureTables().map((table) => ({
+            schema: table.schema,
+            name: table.name,
+            type: table.type,
+            ...(table.comment === undefined ? {} : { comment: table.comment }),
+          })),
+        ),
+      );
     },
-    describeTable(_connectionId: string, schema: string, table: string): Promise<Result<TableDetail>> {
-      const detail = businessFixtureTables().find((item) => item.schema === schema && item.name === table);
-      return Promise.resolve(detail ? ok(detail) : err({ code: 'NOT_FOUND', message: `Table ${schema}.${table} not found.` }));
+    describeTable(
+      _connectionId: string,
+      schema: string,
+      table: string,
+    ): Promise<Result<TableDetail>> {
+      const detail = businessFixtureTables().find(
+        (item) => item.schema === schema && item.name === table,
+      );
+      return Promise.resolve(
+        detail
+          ? ok(detail)
+          : err({ code: 'NOT_FOUND', message: `Table ${schema}.${table} not found.` }),
+      );
     },
   };
 }
 
-async function describeBusinessTables(driver: IDatabaseDriver, connectionId: string): Promise<TableDetail[]> {
+async function describeBusinessTables(
+  driver: IDatabaseDriver,
+  connectionId: string,
+): Promise<TableDetail[]> {
   const summaries = await expectOk(driver.listTables(connectionId));
   const selected = summaries.filter((table) => ['public', 'analytics'].includes(table.schema));
   const details: TableDetail[] = [];
@@ -481,7 +549,11 @@ function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
   };
 }
 
-function responseWithTool(id: string, name: string, args: Record<string, unknown>): LlmChatResponse {
+function responseWithTool(
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+): LlmChatResponse {
   return {
     text: '',
     toolCalls: [{ id, name, arguments: args }],
@@ -499,4 +571,54 @@ function fixedDependencies() {
     now: () => '2026-06-23T00:00:00.000Z',
     createSessionId: () => 'business_agent_session',
   };
+}
+
+async function writeLiveAgentRagReport(
+  result: Awaited<ReturnType<ReactAgent['run']>>,
+  run: { providerId: string; model: string },
+): Promise<void> {
+  const reportDir = process.env.DBAGENT_AGENT_RAG_REPORT_DIR;
+  if (!reportDir) return;
+
+  const summary = evaluateAgentBehavior({
+    cases: [
+      {
+        case: {
+          id: 'BUS-AGENT-LIVE-001',
+          userTask: '真实模型调用 Schema RAG 和数据库查询工具，回答渠道 GMV、退款率和 ROI。',
+          expectedStatus: 'done',
+          requiredToolCalls: ['search_schema', 'query_database'],
+          requiredToolStatuses: [
+            { toolName: 'search_schema', status: 'success' },
+            { toolName: 'query_database', status: 'success' },
+          ],
+          minIterations: 2,
+          maxIterations: 5,
+        },
+        result,
+      },
+    ],
+  });
+
+  const report = buildAgentBehaviorEvaluationReport({
+    suiteId: 'agent-rag-business-live',
+    suiteName: 'Agent/RAG 真实业务验收',
+    environment: 'llm-live',
+    run: {
+      ...run,
+      live: true,
+      postgres: false,
+    },
+    notes: [
+      '该报告只记录结构化验收结果和脱敏后的最终回答。',
+      'API key 只允许通过本机环境变量注入，不写入报告、日志或仓库。',
+    ],
+    summary,
+  });
+
+  await mkdir(reportDir, { recursive: true });
+  await Promise.all(
+    report.files.map((file) => writeFile(join(reportDir, file.path), file.content, 'utf8')),
+  );
+  await new AgentBehaviorEvaluationReportStore(join(reportDir, 'reports.json')).save(report);
 }
