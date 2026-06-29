@@ -8,16 +8,28 @@ import type {
   QueryRequest,
   QueryResultSet,
   SavedConnection,
+  TableConstraintSummary,
   TableDetail,
+  TableIndexSummary,
 } from '@dbagent/shared';
 import { err, ok, type Result } from '@dbagent/shared';
-import type { Pool as PgPool, PoolClient as PgPoolClient, QueryResult as PgQueryResult, QueryResultRow } from 'pg';
+import type {
+  Pool as PgPool,
+  PoolClient as PgPoolClient,
+  QueryResult as PgQueryResult,
+  QueryResultRow,
+} from 'pg';
 import {
   classifyPostgresConnectionError,
   classifyPostgresRuntimeError,
 } from './postgres-errors.js';
 import { analyzeSqlSafety } from './sql-safety.js';
-import type { DatabaseConnectionConfig, IDatabaseDriver, QueryExecutionObserver, TableSummary } from './types.js';
+import type {
+  DatabaseConnectionConfig,
+  IDatabaseDriver,
+  QueryExecutionObserver,
+  TableSummary,
+} from './types.js';
 
 type SafePgQueryResult = PgQueryResult<QueryResultRow>;
 
@@ -146,7 +158,10 @@ export class PostgresDriver implements IDatabaseDriver {
     }
   }
 
-  async cancel(request: QueryCancelResponse, connection: SavedConnection): Promise<Result<QueryCancelResponse>> {
+  async cancel(
+    request: QueryCancelResponse,
+    connection: SavedConnection,
+  ): Promise<Result<QueryCancelResponse>> {
     if (request.decision === 'disconnect-connection') {
       const disconnected = await this.disconnect(connection.id);
       if (!disconnected.ok) return disconnected;
@@ -155,7 +170,10 @@ export class PostgresDriver implements IDatabaseDriver {
 
     if (request.decision !== 'cancel-backend') return ok(request);
     if (!request.backendPid) {
-      return err({ code: 'VALIDATION_ERROR', message: 'Backend pid is required to cancel PostgreSQL query.' });
+      return err({
+        code: 'VALIDATION_ERROR',
+        message: 'Backend pid is required to cancel PostgreSQL query.',
+      });
     }
 
     const pool = this.pools.get(connection.id);
@@ -168,9 +186,10 @@ export class PostgresDriver implements IDatabaseDriver {
     }
 
     try {
-      const result = await pool.query<{ cancelled: boolean }>('select pg_cancel_backend($1) as cancelled', [
-        request.backendPid,
-      ]);
+      const result = await pool.query<{ cancelled: boolean }>(
+        'select pg_cancel_backend($1) as cancelled',
+        [request.backendPid],
+      );
       if (!result.rows[0]?.cancelled) {
         return err({
           code: 'QUERY_FAILED',
@@ -247,13 +266,17 @@ export class PostgresDriver implements IDatabaseDriver {
         table_name: string;
         table_type: string;
         comment: string | null;
+        row_estimate: string | number | null;
+        view_definition: string | null;
       }>(
         `
           select
             n.nspname as schema_name,
             c.relname as table_name,
             case c.relkind when 'v' then 'view' else 'table' end as table_type,
-            obj_description(c.oid) as comment
+            obj_description(c.oid) as comment,
+            greatest(c.reltuples, 0)::bigint as row_estimate,
+            case when c.relkind = 'v' then pg_get_viewdef(c.oid, true) else null end as view_definition
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           where c.relkind in ('r', 'p', 'v')
@@ -279,6 +302,8 @@ export class PostgresDriver implements IDatabaseDriver {
         foreign_schema: string | null;
         foreign_table: string | null;
         foreign_column: string | null;
+        is_indexed: boolean;
+        is_unique: boolean;
       }>(
         `
           select
@@ -297,7 +322,21 @@ export class PostgresDriver implements IDatabaseDriver {
             ) as is_primary_key,
             fn.nspname as foreign_schema,
             fc.relname as foreign_table,
-            fa.attname as foreign_column
+            fa.attname as foreign_column,
+            exists (
+              select 1
+              from pg_index indexed
+              where indexed.indrelid = a.attrelid
+                and a.attnum = any(indexed.indkey)
+            ) as is_indexed,
+            exists (
+              select 1
+              from pg_index unique_idx
+              where unique_idx.indrelid = a.attrelid
+                and unique_idx.indisunique
+                and unique_idx.indnkeyatts = 1
+                and a.attnum = any(unique_idx.indkey)
+            ) as is_unique
           from pg_attribute a
           join pg_class c on c.oid = a.attrelid
           join pg_namespace n on n.oid = c.relnamespace
@@ -320,6 +359,70 @@ export class PostgresDriver implements IDatabaseDriver {
         [schema, table],
       );
 
+      const indexResult = await pool.query<{
+        index_name: string;
+        method: string;
+        columns: string[] | string | null;
+        is_unique: boolean;
+        is_primary: boolean;
+        is_valid: boolean;
+        definition: string;
+      }>(
+        `
+          select
+            index_class.relname as index_name,
+            access_method.amname as method,
+            array(
+              select pg_get_indexdef(indexes.indexrelid, key_ordinal, true)
+              from generate_series(1, indexes.indnkeyatts) as key_ordinal
+            ) as columns,
+            indexes.indisunique as is_unique,
+            indexes.indisprimary as is_primary,
+            indexes.indisvalid as is_valid,
+            pg_get_indexdef(indexes.indexrelid) as definition
+          from pg_index indexes
+          join pg_class table_class on table_class.oid = indexes.indrelid
+          join pg_namespace table_namespace on table_namespace.oid = table_class.relnamespace
+          join pg_class index_class on index_class.oid = indexes.indexrelid
+          join pg_am access_method on access_method.oid = index_class.relam
+          where table_namespace.nspname = $1
+            and table_class.relname = $2
+          order by indexes.indisprimary desc, indexes.indisunique desc, index_class.relname
+        `,
+        [schema, table],
+      );
+
+      const constraintResult = await pool.query<{
+        constraint_name: string;
+        constraint_type: string;
+        columns: string[] | string | null;
+        definition: string;
+      }>(
+        `
+          select
+            constraint_info.conname as constraint_name,
+            constraint_info.contype as constraint_type,
+            coalesce(
+              array_agg(attribute.attname order by key_position.ordinality)
+                filter (where attribute.attname is not null),
+              array[]::text[]
+            ) as columns,
+            pg_get_constraintdef(constraint_info.oid, true) as definition
+          from pg_constraint constraint_info
+          join pg_class table_class on table_class.oid = constraint_info.conrelid
+          join pg_namespace table_namespace on table_namespace.oid = table_class.relnamespace
+          left join unnest(constraint_info.conkey) with ordinality as key_position(attnum, ordinality) on true
+          left join pg_attribute attribute
+            on attribute.attrelid = table_class.oid
+            and attribute.attnum = key_position.attnum
+          where table_namespace.nspname = $1
+            and table_class.relname = $2
+          group by constraint_info.oid, constraint_info.conname, constraint_info.contype
+          order by constraint_info.contype, constraint_info.conname
+        `,
+        [schema, table],
+      );
+
       const columns = columnResult.rows.map((row): ColumnSummary => {
         const column: ColumnSummary = {
           name: row.column_name,
@@ -330,6 +433,8 @@ export class PostgresDriver implements IDatabaseDriver {
         };
         if (row.column_default) column.defaultValue = row.column_default;
         if (row.comment) column.comment = row.comment;
+        if (row.is_indexed) column.isIndexed = true;
+        if (row.is_unique) column.isUnique = true;
         if (row.foreign_schema && row.foreign_table && row.foreign_column) {
           column.foreignKey = {
             schema: row.foreign_schema,
@@ -339,6 +444,25 @@ export class PostgresDriver implements IDatabaseDriver {
         }
         return column;
       });
+      const indexes = indexResult.rows.map(
+        (row): TableIndexSummary => ({
+          name: row.index_name,
+          method: row.method,
+          columns: normalizePgTextArray(row.columns),
+          unique: row.is_unique,
+          primary: row.is_primary,
+          valid: row.is_valid,
+          definition: row.definition,
+        }),
+      );
+      const constraints = constraintResult.rows.map(
+        (row): TableConstraintSummary => ({
+          name: row.constraint_name,
+          type: toConstraintType(row.constraint_type),
+          columns: normalizePgTextArray(row.columns),
+          definition: row.definition,
+        }),
+      );
 
       const detail: TableDetail = {
         schema: tableRow.schema_name,
@@ -348,11 +472,49 @@ export class PostgresDriver implements IDatabaseDriver {
         primaryKey: columns.filter((column) => column.isPrimaryKey).map((column) => column.name),
       };
       if (tableRow.comment) detail.comment = tableRow.comment;
+      const rowEstimate = toOptionalNumber(tableRow.row_estimate);
+      if (rowEstimate !== undefined) detail.rowEstimate = rowEstimate;
+      if (tableRow.view_definition) detail.viewDefinition = tableRow.view_definition;
+      if (indexes.length > 0) detail.indexes = indexes;
+      if (constraints.length > 0) detail.constraints = constraints;
       return ok(detail);
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
     }
   }
+}
+
+function toConstraintType(type: string): TableConstraintSummary['type'] {
+  switch (type) {
+    case 'p':
+      return 'primary_key';
+    case 'f':
+      return 'foreign_key';
+    case 'u':
+      return 'unique';
+    case 'c':
+      return 'check';
+    case 'x':
+      return 'exclusion';
+    default:
+      return 'unknown';
+  }
+}
+
+function toOptionalNumber(value: string | number | null): number | undefined {
+  if (value === null) return undefined;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function normalizePgTextArray(value: string[] | string | null): string[] {
+  if (Array.isArray(value)) return value;
+  if (value === null || value === '{}') return [];
+  return value
+    .replace(/^\{|\}$/g, '')
+    .split(',')
+    .map((item) => item.trim().replace(/^"|"$/g, ''))
+    .filter(Boolean);
 }
 
 async function executeInTransaction(

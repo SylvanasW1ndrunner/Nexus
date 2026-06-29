@@ -44,8 +44,18 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
     expect(usersDetail.data.primaryKey).toEqual(['id']);
     expect(usersDetail.data.columns).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'id', dataType: 'bigint', isPrimaryKey: true, nullable: false }),
-        expect.objectContaining({ name: 'email', dataType: 'text', isPrimaryKey: false, nullable: false }),
+        expect.objectContaining({
+          name: 'id',
+          dataType: 'bigint',
+          isPrimaryKey: true,
+          nullable: false,
+        }),
+        expect.objectContaining({
+          name: 'email',
+          dataType: 'text',
+          isPrimaryKey: false,
+          nullable: false,
+        }),
       ]),
     );
 
@@ -168,6 +178,112 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
     }
   });
 
+  it('describes PostgreSQL indexes, constraints, view definitions, and row estimates', async () => {
+    const driver = new PostgresDriver();
+    const writableConfig = {
+      ...config,
+      id: 'integration-postgres-catalog-metadata',
+      readOnly: false,
+    };
+
+    const connectResult = await driver.connect(writableConfig);
+    expect(connectResult.ok).toBe(true);
+    if (!connectResult.ok) return;
+
+    const suffix = Date.now();
+    const tableName = `dbagent_catalog_probe_${suffix}`;
+    const viewName = `dbagent_catalog_probe_view_${suffix}`;
+    const indexName = `ix_${tableName}_created_at`;
+
+    const createResult = await driver.execute(
+      {
+        connectionId: writableConfig.id,
+        sql: `
+          create table ${tableName} (
+            id integer generated always as identity primary key,
+            email text not null unique,
+            tenant_id integer not null,
+            external_id text not null,
+            total_amount numeric not null check (total_amount >= 0),
+            created_at timestamptz not null default now(),
+            unique (tenant_id, external_id)
+          );
+          comment on table ${tableName} is 'catalog metadata probe for RAG indexing';
+          create index ${indexName} on ${tableName} (created_at);
+          create view ${viewName} as
+            select id, email, total_amount
+            from ${tableName}
+            where total_amount >= 0;
+        `,
+        confirmed: true,
+      },
+      connectResult.data,
+    );
+    expect(createResult.ok).toBe(true);
+
+    try {
+      const tableDetail = await driver.describeTable(writableConfig.id, 'public', tableName);
+      expect(tableDetail.ok).toBe(true);
+      if (!tableDetail.ok) return;
+
+      expect(tableDetail.data.rowEstimate).toEqual(expect.any(Number));
+      expect(tableDetail.data.indexes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: indexName,
+            method: 'btree',
+            unique: false,
+            primary: false,
+            valid: true,
+          }),
+          expect.objectContaining({ unique: true, primary: true, valid: true }),
+        ]),
+      );
+      expect(tableDetail.data.constraints).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'primary_key', columns: ['id'] }),
+          expect.objectContaining({ type: 'unique', columns: ['email'] }),
+          expect.objectContaining({ type: 'unique', columns: ['tenant_id', 'external_id'] }),
+          expect.objectContaining({ type: 'check' }),
+        ]),
+      );
+      const checkConstraint = tableDetail.data.constraints?.find(
+        (constraint) => constraint.type === 'check',
+      );
+      expect(checkConstraint?.definition).toContain('total_amount');
+      const emailColumn = tableDetail.data.columns.find((column) => column.name === 'email');
+      const tenantIdColumn = tableDetail.data.columns.find((column) => column.name === 'tenant_id');
+      const createdAtColumn = tableDetail.data.columns.find(
+        (column) => column.name === 'created_at',
+      );
+      expect(emailColumn).toMatchObject({ isIndexed: true, isUnique: true });
+      expect(tenantIdColumn).toMatchObject({ isIndexed: true });
+      expect(tenantIdColumn?.isUnique).toBeUndefined();
+      expect(createdAtColumn).toMatchObject({ isIndexed: true });
+
+      const viewDetail = await driver.describeTable(writableConfig.id, 'public', viewName);
+      expect(viewDetail.ok).toBe(true);
+      if (!viewDetail.ok) return;
+      expect(viewDetail.data.type).toBe('view');
+      expect(viewDetail.data.viewDefinition).toContain(tableName);
+      expect(viewDetail.data.columns.map((column) => column.name)).toEqual([
+        'id',
+        'email',
+        'total_amount',
+      ]);
+    } finally {
+      await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `drop view if exists ${viewName}; drop table if exists ${tableName};`,
+          confirmed: true,
+        },
+        connectResult.data,
+      );
+      await driver.disconnect(writableConfig.id);
+    }
+  });
+
   it('commits table edit previews transactionally and rolls back failed previews', async () => {
     const driver = new PostgresDriver();
     const writableConfig = {
@@ -197,7 +313,10 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
         table: tableName,
         primaryKey: ['id'],
         operations: [
-          { type: 'insert', values: { id: 1, label: 'draft', payload: { channel: 'web' }, active: true } },
+          {
+            type: 'insert',
+            values: { id: 1, label: 'draft', payload: { channel: 'web' }, active: true },
+          },
           { type: 'insert', values: { id: 2, label: 'to_delete', active: false } },
           { type: 'update', key: { id: 1 }, values: { label: 'paid' } },
           { type: 'delete', key: { id: 2 } },

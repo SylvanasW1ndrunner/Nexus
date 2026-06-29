@@ -2,11 +2,21 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LlmRouter, type LlmChatRequest, type LlmChatResponse, type LlmProvider } from '@dbagent/core-llm';
+import {
+  LlmRouter,
+  type LlmChatRequest,
+  type LlmChatResponse,
+  type LlmProvider,
+} from '@dbagent/core-llm';
 import { SchemaRagEngine } from '@dbagent/core-rag';
 import { UsageTracker } from '@dbagent/core-usage';
 import type { TableDetail } from '@dbagent/shared';
-import { ReactAgent, registerSchemaRagTools, SCHEMA_RAG_TOOL_NAMES, ToolRegistry } from '../src/index.js';
+import {
+  ReactAgent,
+  registerSchemaRagTools,
+  SCHEMA_RAG_TOOL_NAMES,
+  ToolRegistry,
+} from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -35,12 +45,14 @@ describe('schema RAG Agent tools', () => {
 
   it('searches business glossary terms and returns compact context for the next Agent turn', async () => {
     const registry = new ToolRegistry();
-    registerSchemaRagTools(registry, indexedRag(), { defaultConnectionId: 'conn_1', maxContextChars: 1_200 });
+    registerSchemaRagTools(registry, indexedRag(), {
+      defaultConnectionId: 'conn_1',
+      maxContextChars: 1_200,
+    });
 
-    const result = await registry.get(SCHEMA_RAG_TOOL_NAMES.searchSchema)?.handler(
-      { query: 'monthly GMV', limit: 4 },
-      { session: minimalSession() },
-    );
+    const result = await registry
+      .get(SCHEMA_RAG_TOOL_NAMES.searchSchema)
+      ?.handler({ query: 'monthly GMV', limit: 4 }, { session: minimalSession() });
 
     expect(result).toMatchObject({
       connectionId: 'conn_1',
@@ -56,7 +68,9 @@ describe('schema RAG Agent tools', () => {
     registerSchemaRagTools(registry, indexedRag());
 
     await expect(
-      Promise.resolve().then(() => registry.get(SCHEMA_RAG_TOOL_NAMES.listTables)?.handler({}, { session: minimalSession() })),
+      Promise.resolve().then(() =>
+        registry.get(SCHEMA_RAG_TOOL_NAMES.listTables)?.handler({}, { session: minimalSession() }),
+      ),
     ).rejects.toThrow('connectionId is required.');
   });
 
@@ -78,9 +92,28 @@ describe('schema RAG Agent tools', () => {
       skipExistingTools: true,
     });
 
-    expect(registry.get(SCHEMA_RAG_TOOL_NAMES.describeTable)?.description).toBe('Live database describe table');
+    expect(registry.get(SCHEMA_RAG_TOOL_NAMES.describeTable)?.description).toBe(
+      'Live database describe table',
+    );
     expect(registry.has(SCHEMA_RAG_TOOL_NAMES.searchSchema)).toBe(true);
     expect(registry.has(SCHEMA_RAG_TOOL_NAMES.getRelations)).toBe(true);
+  });
+
+  it('exposes catalog metadata through describe_table for Agent reasoning', async () => {
+    const registry = new ToolRegistry();
+    registerSchemaRagTools(registry, indexedRag(), {
+      defaultConnectionId: 'conn_1',
+      maxContextChars: 1_200,
+    });
+
+    const result = await registry
+      .get(SCHEMA_RAG_TOOL_NAMES.describeTable)
+      ?.handler({ table: 'public.orders' }, { session: minimalSession() });
+    const serialized = JSON.stringify(result);
+
+    expect(serialized).toContain('idx_orders_user_created_at');
+    expect(serialized).toContain('chk_orders_amount_nonnegative');
+    expect(serialized).toContain('估算行数');
   });
 
   it('lets the Agent inspect schema before answering a user data question', async () => {
@@ -104,13 +137,10 @@ describe('schema RAG Agent tools', () => {
       },
     ]);
 
-    const agent = new ReactAgent(
-      new LlmRouter(usage, [provider]),
-      registry,
-      usage,
-      undefined,
-      { now: () => '2026-06-23T00:00:00.000Z', createSessionId: () => 'session_rag' },
-    );
+    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registry, usage, undefined, {
+      now: () => '2026-06-23T00:00:00.000Z',
+      createSessionId: () => 'session_rag',
+    });
 
     const result = await agent.run({
       providerId: 'fake',
@@ -123,7 +153,9 @@ describe('schema RAG Agent tools', () => {
 
     expect(result.status).toBe('done');
     expect(calls[0]?.tools?.map((tool) => tool.name)).toEqual([SCHEMA_RAG_TOOL_NAMES.searchSchema]);
-    expect(result.toolExecutions).toMatchObject([{ toolName: SCHEMA_RAG_TOOL_NAMES.searchSchema, status: 'success' }]);
+    expect(result.toolExecutions).toMatchObject([
+      { toolName: SCHEMA_RAG_TOOL_NAMES.searchSchema, status: 'success' },
+    ]);
     expect(result.session.messages.find((message) => message.role === 'tool')?.content).toContain(
       'public.orders.total_amount',
     );
@@ -158,12 +190,38 @@ function fixtureTables(): TableDetail[] {
       type: 'table',
       comment: 'Order fact table for revenue analysis',
       primaryKey: ['id'],
+      rowEstimate: 120000,
+      indexes: [
+        {
+          name: 'idx_orders_user_created_at',
+          method: 'btree',
+          columns: ['user_id', 'created_at'],
+          unique: false,
+          primary: false,
+          valid: true,
+          definition:
+            'CREATE INDEX idx_orders_user_created_at ON public.orders USING btree (user_id, created_at)',
+        },
+      ],
+      constraints: [
+        {
+          name: 'chk_orders_amount_nonnegative',
+          type: 'check',
+          columns: ['total_amount'],
+          definition: 'CHECK (total_amount >= 0)',
+        },
+      ],
       columns: [
         column('id', 1, 'uuid', false, 'Order id', true),
         column('total_amount', 2, 'numeric', false, 'GMV amount'),
         {
           ...column('user_id', 3, 'uuid', false, 'Buyer user id'),
+          isIndexed: true,
           foreignKey: { schema: 'public', table: 'users', column: 'id' },
+        },
+        {
+          ...column('created_at', 4, 'timestamptz', false, 'Order creation time'),
+          isIndexed: true,
         },
       ],
     },
@@ -173,7 +231,10 @@ function fixtureTables(): TableDetail[] {
       type: 'table',
       comment: 'Registered users',
       primaryKey: ['id'],
-      columns: [column('id', 1, 'uuid', false, 'User id', true), column('email', 2, 'text', false, 'Email')],
+      columns: [
+        column('id', 1, 'uuid', false, 'User id', true),
+        column('email', 2, 'text', false, 'Email'),
+      ],
     },
     {
       schema: 'public',
@@ -223,7 +284,10 @@ function minimalSession() {
   };
 }
 
-function scriptedProviderWithCalls(script: LlmChatResponse[]): { provider: LlmProvider; calls: LlmChatRequest[] } {
+function scriptedProviderWithCalls(script: LlmChatResponse[]): {
+  provider: LlmProvider;
+  calls: LlmChatRequest[];
+} {
   const calls: LlmChatRequest[] = [];
   const provider: LlmProvider = {
     id: 'fake',
