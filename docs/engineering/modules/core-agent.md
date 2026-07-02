@@ -128,15 +128,24 @@ Agent 不直接解析 SQL，也不直接访问数据库 driver。SQL 风险判�
 
 ## 行为评估
 
-`evaluateAgentBehavior()` 用于把 Agent 测试从内部路径推进到用户效果验收。调用方为每个真实用户任务提供期望状态、必须调用工具、禁止调用工具、工具执行状态、最终回答关键内容和迭代数范围；评估器返回每条 case 的失败原因和汇总通过率。
+`evaluateAgentBehavior()` 用于把 Agent 测试从内部路径推进到用户效果验收。调用方为每个真实用户任务提供期望状态、必须调用工具、禁止调用工具、工具执行状态、最终回答关键内容、最终回答禁止片段和迭代数范围；评估器返回每条 case 的失败原因和汇总通过率。
+
+工具执行记录现在包含脱敏后的 `argumentPreview`，用于验证真实 Agent run 是否把正确业务上下文传给了工具。评估 case 可以通过 `toolExpectations` 检查：
+
+- 指定工具的最小/最大调用次数。
+- 指定工具的执行状态。
+- 工具参数必须包含或禁止包含的片段。
+- 工具结果必须包含或禁止包含的片段。
+
+这样 Agent/RAG 业务验收可以判断模型是否真的检索了 GMV/ROI schema、是否查询了正确表、工具结果是否包含可解释证据，而不是只看“调用过工具”。参数快照在写入前执行 `redaction.ts` 脱敏，报告生成和报告存储会再次脱敏，避免 API key、Bearer token、数据库连接串密码或敏感字段值进入验收报告。
 
 当前评估器不直接调用 LLM，也不引入第三方 Agent eval 依赖。它用于默认测试中的确定性质量基线；后续接入真实 SiliconFlow/DeepSeek、LLM judge 或开源 eval 框架时，必须按开源优先规则记录许可证、打包、离线、安全和成本影响。
 
-`buildAgentBehaviorEvaluationReport()` 在评估汇总之上生成可持久化的验收报告，当前包含 `manifest.json`、`results.json` 和 `report.md`。报告只记录结构化验收结果、工具名称、状态、迭代次数和脱敏后的最终回答，不持久化原始 tool args、原始 SQL 或查询结果 preview。
+`buildAgentBehaviorEvaluationReport()` 在评估汇总之上生成可持久化的验收报告，当前包含 `manifest.json`、`results.json` 和 `report.md`。报告记录结构化验收结果、工具名称、状态、迭代次数、脱敏后的工具证据和脱敏后的最终回答；不持久化原始明文凭证或完整审计日志。
 
 `AgentBehaviorEvaluationReportStore` 提供本地 JSON 报告索引，使用原子写入，支持保存、覆盖、按 `reportId` 读取和倒序列表。读取路径会再次执行 Agent 脱敏规则，避免历史报告中的 API key、Bearer token 或数据库连接串密码被重新暴露。损坏 JSON 会降级为空列表，避免测试/主进程启动时被单个坏报告阻断。
 
-该能力是后续官方“Agent/RAG Eval”插件的后端基础：插件可以负责注册业务场景、运行真实依赖门控、保存报告和暴露权限声明；`core-agent` 保持通用合同，不依赖具体数据库、RAG fixture、LLM provider 或 UI。
+该能力是后续官方“Agent/RAG Eval”插件的后端基础：插件可以负责注册业务场景、运行真实依赖门控、保存报告和暴露权限声明；`core-agent` 保持通用合同，不依赖具体数据库、RAG fixture、LLM provider 或 UI。详细设计见 `docs/engineering/modules/core-agent-behavior-evaluation.md`。
 
 ## 测试覆盖
 
@@ -144,7 +153,7 @@ Agent 不直接解析 SQL，也不直接访问数据库 driver。SQL 风险判�
 - `checkpoint-store.test.ts`：checkpoint 原子持久化、同一 iteration 更新、可恢复任务列表、running 标记中断、损坏 JSON 降级。
 - `react-agent.test.ts`：只读数据库工具调用、只读模式写操作拦截、ask 模式未授权拦截、工具失败后模型恢复、工具执行超时与 abort signal、超时进入连续失败熔断、allowedTools 白名单、subscription quota 拦截、用户中止、provider 失败不计费、checkpoint 与 Agent 主循环集成。
 - `context-manager.test.ts`：小会话不压缩、大型工具结果摘要、长会话早期消息归档、超小预算 warning 和 token 估算。
-- `behavior-evaluation.test.ts`：按用户任务评估 Agent 状态、工具调用、工具状态、最终回答和迭代范围。
+- `behavior-evaluation.test.ts`：按用户任务评估 Agent 状态、工具调用、工具状态、工具参数、工具结果、最终回答和迭代范围。
 
 ## 已知边界
 

@@ -4,6 +4,7 @@ import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import { buildAgentContext } from './context-manager.js';
 import { PermissionManager } from './permission-manager.js';
 import { addUsage, appendMessage, createAgentSession, createMessage } from './session.js';
+import { redactPersistedAgentValue } from './redaction.js';
 import type { AgentSessionWriter } from './session-store.js';
 import { persistAgentStreamEvents } from './stream-store.js';
 import type { AgentStreamStore } from './stream-store.js';
@@ -19,6 +20,7 @@ import type {
 } from './types.js';
 
 const DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS = 12_000;
+const DEFAULT_MAX_PERSISTED_TOOL_ARGUMENT_CHARS = 4_000;
 
 export class ReactAgent {
   private readonly permissionManager: PermissionManager;
@@ -171,6 +173,7 @@ export class ReactAgent {
               toolCall.name,
               'denied',
               startedAt,
+              toolCall.arguments,
               'Tool not allowed by run policy.',
             );
             toolExecutions.push(record);
@@ -202,7 +205,14 @@ export class ReactAgent {
 
           const tool = this.toolRegistry.get(toolCall.name);
           if (!tool) {
-            const record = executionRecord(toolCall.id, toolCall.name, 'failed', startedAt, 'Tool is not registered.');
+            const record = executionRecord(
+              toolCall.id,
+              toolCall.name,
+              'failed',
+              startedAt,
+              toolCall.arguments,
+              'Tool is not registered.',
+            );
             toolExecutions.push(record);
             consecutiveToolFailures += 1;
             await saveCheckpoint(iteration, 'running');
@@ -247,6 +257,7 @@ export class ReactAgent {
               tool.name,
               'denied',
               startedAt,
+              toolCall.arguments,
               `Permission: ${permission.decision}`,
             );
             toolExecutions.push(record);
@@ -305,7 +316,9 @@ export class ReactAgent {
               maxToolExecutionMs,
             );
             const preview = serializeToolResult(result, maxToolResultChars);
-            toolExecutions.push(executionRecord(toolCall.id, tool.name, 'success', startedAt, preview));
+            toolExecutions.push(
+              executionRecord(toolCall.id, tool.name, 'success', startedAt, toolCall.arguments, preview),
+            );
             consecutiveToolFailures = 0;
             appendMessage(
               session,
@@ -323,7 +336,14 @@ export class ReactAgent {
             await saveCheckpoint(iteration, 'running');
           } catch (error) {
             const message = limitSerializedToolResult(error instanceof Error ? error.message : String(error), maxToolResultChars);
-            const record = executionRecord(toolCall.id, tool.name, 'failed', startedAt, message);
+            const record = executionRecord(
+              toolCall.id,
+              tool.name,
+              'failed',
+              startedAt,
+              toolCall.arguments,
+              message,
+            );
             toolExecutions.push(record);
             consecutiveToolFailures += 1;
             appendMessage(
@@ -423,6 +443,13 @@ function serializeToolResult(result: unknown, maxChars: number): string {
   return limitSerializedToolResult(stringifyToolResult(result), maxChars);
 }
 
+function serializeToolArguments(args: Record<string, unknown>): string {
+  return limitSerializedToolResult(
+    stringifyToolResult(redactPersistedAgentValue(args)),
+    DEFAULT_MAX_PERSISTED_TOOL_ARGUMENT_CHARS,
+  );
+}
+
 function stringifyToolResult(result: unknown): string {
   if (typeof result === 'string') return result;
   try {
@@ -470,13 +497,16 @@ function executionRecord(
   toolName: string,
   status: AgentToolExecutionRecord['status'],
   startedAt: number,
+  args: Record<string, unknown>,
   resultPreview: string,
 ): AgentToolExecutionRecord {
+  const argumentPreview = serializeToolArguments(args);
   return {
     toolCallId,
     toolName,
     status,
     durationMs: Math.max(0, Date.now() - startedAt),
+    ...(argumentPreview === '{}' ? {} : { argumentPreview }),
     resultPreview,
   };
 }

@@ -5,6 +5,7 @@ import type {
   AgentBehaviorEvaluationReportInput,
   AgentBehaviorEvaluationResult,
   AgentBehaviorEvaluationSummary,
+  AgentBehaviorToolExpectation,
   AgentRunResult,
 } from './types.js';
 import { redactPersistedAgentValue } from './redaction.js';
@@ -33,6 +34,13 @@ function evaluateCase(
   const failures: string[] = [];
   const observedToolCalls = result.toolExecutions.map((execution) => execution.toolName);
   const observedToolCallSet = new Set(observedToolCalls);
+  const observedToolDetails = result.toolExecutions.map((execution) => ({
+    toolCallId: execution.toolCallId,
+    toolName: execution.toolName,
+    status: execution.status,
+    ...(execution.argumentPreview === undefined ? {} : { argumentPreview: execution.argumentPreview }),
+    resultPreview: execution.resultPreview,
+  }));
 
   if (testCase.expectedStatus !== undefined && result.status !== testCase.expectedStatus) {
     failures.push(`Expected status ${testCase.expectedStatus}, got ${result.status}.`);
@@ -56,9 +64,18 @@ function evaluateCase(
       failures.push(`Expected tool ${expected.toolName} to have status ${expected.status}.`);
   }
 
+  for (const expectation of testCase.toolExpectations ?? []) {
+    failures.push(...evaluateToolExpectation(expectation, result.toolExecutions));
+  }
+
   for (const snippet of testCase.finalTextIncludes ?? []) {
     if (!result.finalText.includes(snippet))
       failures.push(`Final text does not include: ${snippet}.`);
+  }
+
+  for (const snippet of testCase.finalTextExcludes ?? []) {
+    if (result.finalText.includes(snippet))
+      failures.push(`Final text includes forbidden snippet: ${snippet}.`);
   }
 
   if (testCase.minIterations !== undefined && result.iterations < testCase.minIterations) {
@@ -80,9 +97,60 @@ function evaluateCase(
     failures,
     observedStatus: result.status,
     observedToolCalls,
+    observedToolDetails,
     observedFinalText: result.finalText,
     observedIterations: result.iterations,
   };
+}
+
+function evaluateToolExpectation(
+  expectation: AgentBehaviorToolExpectation,
+  executions: AgentRunResult['toolExecutions'],
+): string[] {
+  const failures: string[] = [];
+  const matches = executions.filter((execution) => execution.toolName === expectation.toolName);
+
+  if (expectation.minCalls !== undefined && matches.length < expectation.minCalls) {
+    failures.push(
+      `Expected tool ${expectation.toolName} to be called at least ${expectation.minCalls} times, got ${matches.length}.`,
+    );
+  }
+
+  if (expectation.maxCalls !== undefined && matches.length > expectation.maxCalls) {
+    failures.push(
+      `Expected tool ${expectation.toolName} to be called at most ${expectation.maxCalls} times, got ${matches.length}.`,
+    );
+  }
+
+  if (matches.length === 0) {
+    failures.push(`Expected tool ${expectation.toolName} to be called for detailed checks.`);
+    return failures;
+  }
+
+  if (expectation.status !== undefined && !matches.some((execution) => execution.status === expectation.status)) {
+    failures.push(`Expected tool ${expectation.toolName} to have status ${expectation.status}.`);
+  }
+
+  const argumentsText = matches.map((execution) => execution.argumentPreview ?? '').join('\n');
+  const resultsText = matches.map((execution) => execution.resultPreview).join('\n');
+  failures.push(...includesFailures(`Tool ${expectation.toolName} arguments`, argumentsText, expectation.argumentIncludes));
+  failures.push(...excludesFailures(`Tool ${expectation.toolName} arguments`, argumentsText, expectation.argumentExcludes));
+  failures.push(...includesFailures(`Tool ${expectation.toolName} result`, resultsText, expectation.resultIncludes));
+  failures.push(...excludesFailures(`Tool ${expectation.toolName} result`, resultsText, expectation.resultExcludes));
+
+  return failures;
+}
+
+function includesFailures(label: string, text: string, snippets: string[] | undefined): string[] {
+  return (snippets ?? [])
+    .filter((snippet) => !text.includes(snippet))
+    .map((snippet) => `${label} does not include: ${snippet}.`);
+}
+
+function excludesFailures(label: string, text: string, snippets: string[] | undefined): string[] {
+  return (snippets ?? [])
+    .filter((snippet) => text.includes(snippet))
+    .map((snippet) => `${label} includes forbidden snippet: ${snippet}.`);
 }
 
 export function buildAgentBehaviorEvaluationReport(
@@ -178,6 +246,11 @@ function buildMarkdownReport(
     lines.push(
       `- Observed Tool Calls: ${result.observedToolCalls.length > 0 ? result.observedToolCalls.join(', ') : 'none'}`,
     );
+    if (result.observedToolDetails.length > 0) {
+      lines.push(
+        `- Tool Details: ${result.observedToolDetails.map(formatObservedToolDetail).join(' | ')}`,
+      );
+    }
     lines.push(`- Iterations: ${result.observedIterations}`);
     if (result.failures.length > 0) {
       lines.push(`- Failures: ${result.failures.join(' | ')}`);
@@ -217,6 +290,14 @@ function toReportFile(path: string, content: string): AgentBehaviorEvaluationRep
 
 function singleLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
+}
+
+function formatObservedToolDetail(
+  tool: AgentBehaviorEvaluationResult['observedToolDetails'][number],
+): string {
+  return singleLine(
+    `${tool.toolName}:${tool.status}:${tool.argumentPreview ?? ''}:${tool.resultPreview}`,
+  );
 }
 
 function defaultReportId(suiteId: string, generatedAt: string): string {

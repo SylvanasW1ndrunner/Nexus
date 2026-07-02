@@ -183,6 +183,43 @@ describe('Agent with business RAG and database tools', () => {
     expect(result.finalText).toContain('paid_search');
     expect(result.finalText).toContain('GMV');
     expect(driver.executedSql).toEqual([channelPerformanceSql()]);
+
+    const evaluation = evaluateAgentBehavior({
+      cases: [
+        {
+          case: {
+            id: 'BUS-AGENT-EVAL-001',
+            userTask: '按流量渠道统计 GMV、退款率和 ROI',
+            expectedStatus: 'done',
+            requiredToolCalls: ['search_schema', 'query_database'],
+            toolExpectations: [
+              {
+                toolName: 'search_schema',
+                status: 'success',
+                minCalls: 1,
+                maxCalls: 1,
+                argumentIncludes: ['GMV', 'ROI'],
+                resultIncludes: ['public.orders', 'analytics.campaign_spend'],
+              },
+              {
+                toolName: 'query_database',
+                status: 'success',
+                minCalls: 1,
+                maxCalls: 1,
+                argumentIncludes: ['analytics.traffic_sessions', 'public.refunds'],
+                resultIncludes: ['paid_search', 'seo'],
+              },
+            ],
+            finalTextIncludes: ['paid_search', 'GMV'],
+            finalTextExcludes: ['password', 'apiKey'],
+            minIterations: 2,
+            maxIterations: 5,
+          },
+          result,
+        },
+      ],
+    });
+    expect(evaluation.passRate).toBe(1);
   });
 
   it('refuses destructive SQL in readonly mode before any database write occurs', async () => {
@@ -662,6 +699,23 @@ async function writeLiveAgentRagReport(
             { toolName: 'search_schema', status: 'success' },
             { toolName: 'query_database', status: 'success' },
           ],
+          toolExpectations: [
+            {
+              toolName: 'search_schema',
+              status: 'success',
+              minCalls: 1,
+              argumentIncludes: ['GMV'],
+              resultIncludes: ['orders'],
+            },
+            {
+              toolName: 'query_database',
+              status: 'success',
+              minCalls: 1,
+              argumentIncludes: ['select'],
+              resultIncludes: ['paid_search'],
+            },
+          ],
+          finalTextExcludes: ['api_key', 'password', 'secret'],
           minIterations: 2,
           maxIterations: 5,
         },

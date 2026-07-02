@@ -114,6 +114,7 @@ export type AgentToolExecutionRecord = {
   toolName: string;
   status: 'success' | 'denied' | 'failed';
   durationMs: number;
+  argumentPreview?: string;
   resultPreview: string;
 };
 
@@ -148,9 +149,22 @@ export type AgentBehaviorEvaluationCase = {
     toolName: string;
     status: AgentToolExecutionRecord['status'];
   }>;
+  toolExpectations?: AgentBehaviorToolExpectation[];
   finalTextIncludes?: string[];
+  finalTextExcludes?: string[];
   minIterations?: number;
   maxIterations?: number;
+};
+
+export type AgentBehaviorToolExpectation = {
+  toolName: string;
+  status?: AgentToolExecutionRecord['status'];
+  minCalls?: number;
+  maxCalls?: number;
+  argumentIncludes?: string[];
+  argumentExcludes?: string[];
+  resultIncludes?: string[];
+  resultExcludes?: string[];
 };
 
 export type AgentBehaviorEvaluationResult = {
@@ -160,8 +174,17 @@ export type AgentBehaviorEvaluationResult = {
   failures: string[];
   observedStatus: AgentRunStatus;
   observedToolCalls: string[];
+  observedToolDetails: AgentBehaviorObservedTool[];
   observedFinalText: string;
   observedIterations: number;
+};
+
+export type AgentBehaviorObservedTool = {
+  toolCallId: string;
+  toolName: string;
+  status: AgentToolExecutionRecord['status'];
+  argumentPreview?: string;
+  resultPreview: string;
 };
 
 export type AgentBehaviorEvaluationSummary = {

@@ -8,6 +8,7 @@
 2. [core-db 数据库核心模块](./core-db.md)
 3. [core-rag Schema RAG 模块](./core-rag.md)
 4. [core-agent Agent 执行模块](./core-agent.md)
+   - [core-agent 行为评估与工具证据](./core-agent-behavior-evaluation.md)
 5. [core-llm 大模型接入模块](./core-llm.md)
 6. [core-tools 工具与诊断模块](./core-tools.md)
 7. [workspace / Python 模块](./workspace-python.md)

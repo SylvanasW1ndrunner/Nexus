@@ -78,6 +78,60 @@ describe('ReactAgent', () => {
     });
   });
 
+  it('records redacted tool argument previews for user-level Agent evaluation', async () => {
+    const apiKey = ['sk', 'agent-secret-123456'].join('-');
+    const databaseUrl = ['postgres://tester', 'secret@127.0.0.1/db'].join(':');
+    const usage = new UsageTracker(await usagePath());
+    const provider = scriptedProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_secret',
+            name: 'query_database',
+            arguments: {
+              sql: 'select count(*) as order_count from orders',
+              apiKey,
+              databaseUrl,
+            },
+          },
+        ],
+      },
+      {
+        text: '订单总数是 42。',
+        toolCalls: [],
+      },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '帮我看一下订单总数',
+      mode: 'readonly',
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.toolExecutions[0]).toMatchObject({
+      toolCallId: 'call_secret',
+      toolName: 'query_database',
+      status: 'success',
+    });
+    const argumentPreview = result.toolExecutions[0]?.argumentPreview ?? '';
+    expect(argumentPreview).toContain('select count(*) as order_count from orders');
+    expect(argumentPreview).toContain('"apiKey":"[REDACTED]"');
+    expect(argumentPreview).toContain('"databaseUrl":"[REDACTED]"');
+    const serialized = JSON.stringify(result.toolExecutions);
+    expect(serialized).not.toContain(apiKey);
+    expect(serialized).not.toContain('tester:secret@');
+  });
+
   it('blocks non-readonly tools in readonly mode before side effects happen', async () => {
     let writeExecuted = false;
     const registry = new ToolRegistry();

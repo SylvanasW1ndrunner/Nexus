@@ -91,9 +91,131 @@ describe('evaluateAgentBehavior', () => {
     ]);
   });
 
+  it('checks tool arguments, tool results, call counts and forbidden final text', () => {
+    const summary = evaluateAgentBehavior({
+      cases: [
+        {
+          case: {
+            id: 'AGENT-003',
+            userTask: '按渠道分析 GMV、退款率和 ROI',
+            expectedStatus: 'done',
+            toolExpectations: [
+              {
+                toolName: 'search_schema',
+                status: 'success',
+                minCalls: 1,
+                maxCalls: 1,
+                argumentIncludes: ['GMV', 'ROI'],
+                argumentExcludes: ['drop table'],
+                resultIncludes: ['public.orders', 'analytics.campaign_spend'],
+              },
+              {
+                toolName: 'query_database',
+                status: 'success',
+                minCalls: 1,
+                argumentIncludes: ['select', 'analytics.traffic_sessions'],
+                resultIncludes: ['paid_search'],
+                resultExcludes: ['password'],
+              },
+            ],
+            finalTextIncludes: ['paid_search'],
+            finalTextExcludes: ['sk-secret'],
+          },
+          result: runResult({
+            finalText: 'paid_search 渠道 GMV 为 199.00。',
+            toolExecutions: [
+              {
+                toolCallId: 'call_schema',
+                toolName: 'search_schema',
+                status: 'success',
+                durationMs: 1,
+                argumentPreview: '{"query":"GMV ROI"}',
+                resultPreview: 'public.orders analytics.campaign_spend',
+              },
+              {
+                toolCallId: 'call_query',
+                toolName: 'query_database',
+                status: 'success',
+                durationMs: 2,
+                argumentPreview: '{"sql":"select * from analytics.traffic_sessions"}',
+                resultPreview: '{"rows":[{"utm_source":"paid_search"}]}',
+              },
+            ],
+          }),
+        },
+      ],
+    });
+
+    expect(summary.passRate).toBe(1);
+    expect(summary.results[0]?.observedToolDetails).toMatchObject([
+      {
+        toolCallId: 'call_schema',
+        toolName: 'search_schema',
+        status: 'success',
+        argumentPreview: '{"query":"GMV ROI"}',
+      },
+      {
+        toolCallId: 'call_query',
+        toolName: 'query_database',
+        status: 'success',
+      },
+    ]);
+  });
+
+  it('reports detailed tool expectation failures', () => {
+    const summary = evaluateAgentBehavior({
+      cases: [
+        {
+          case: {
+            id: 'AGENT-004',
+            userTask: '验证错误工具参数会被验收拦截',
+            expectedStatus: 'done',
+            toolExpectations: [
+              {
+                toolName: 'query_database',
+                status: 'success',
+                minCalls: 2,
+                maxCalls: 1,
+                argumentIncludes: ['orders'],
+                argumentExcludes: ['delete'],
+                resultIncludes: ['paid_search'],
+                resultExcludes: ['raw_secret'],
+              },
+            ],
+            finalTextExcludes: ['raw_secret'],
+          },
+          result: runResult({
+            finalText: 'raw_secret should not be visible',
+            toolExecutions: [
+              {
+                toolCallId: 'call_bad',
+                toolName: 'query_database',
+                status: 'failed',
+                durationMs: 1,
+                argumentPreview: '{"sql":"delete from users"}',
+                resultPreview: '{"error":"raw_secret leaked"}',
+              },
+            ],
+          }),
+        },
+      ],
+    });
+
+    expect(summary.failedCases).toBe(1);
+    expect(summary.results[0]?.failures).toEqual([
+      'Expected tool query_database to be called at least 2 times, got 1.',
+      'Expected tool query_database to have status success.',
+      'Tool query_database arguments does not include: orders.',
+      'Tool query_database arguments includes forbidden snippet: delete.',
+      'Tool query_database result does not include: paid_search.',
+      'Tool query_database result includes forbidden snippet: raw_secret.',
+      'Final text includes forbidden snippet: raw_secret.',
+    ]);
+  });
+
   it('builds redacted JSON and Markdown report artifacts for user-level acceptance evidence', () => {
     const apiKey = ['sk', 'report-secret-123456'].join('-');
-    const databaseUrl = 'postgres://tester:secret@127.0.0.1/db';
+    const databaseUrl = ['postgres://tester', 'secret@127.0.0.1/db'].join(':');
     const summary = evaluateAgentBehavior({
       cases: [
         {
@@ -112,6 +234,7 @@ describe('evaluateAgentBehavior', () => {
                 toolName: 'search_schema',
                 status: 'success',
                 durationMs: 1,
+                argumentPreview: `{"query":"GMV","apiKey":"${apiKey}"}`,
                 resultPreview: '{}',
               },
               {
@@ -119,6 +242,7 @@ describe('evaluateAgentBehavior', () => {
                 toolName: 'query_database',
                 status: 'success',
                 durationMs: 2,
+                argumentPreview: `{"connectionString":"${databaseUrl}"}`,
                 resultPreview: '{}',
               },
             ],
@@ -156,8 +280,9 @@ describe('evaluateAgentBehavior', () => {
     const combined = report.files.map((file) => file.content).join('\n');
     expect(combined).toContain('Agent/RAG 业务验收');
     expect(combined).toContain('query_database');
+    expect(combined).toContain('Tool Details');
     expect(combined).toContain('sk-[REDACTED]');
-    expect(combined).toContain('postgres://tester:[REDACTED]@127.0.0.1/db');
+    expect(combined).toContain('tester:[REDACTED]@127.0.0.1/db');
     expect(combined).not.toContain(apiKey);
     expect(combined).not.toContain('tester:secret@');
     expect(report.files.every((file) => file.bytes > 0)).toBe(true);
