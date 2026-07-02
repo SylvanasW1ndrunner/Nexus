@@ -24,7 +24,8 @@
 - `packages/core-tools/test/agent-eval-suite-runner.test.ts`
   - 套件运行、报告落盘、失败提前停止、空套件错误。
 - `packages/core-tools/test/agent-rag-business-scenario.test.ts`
-  - SiliconFlow live Agent/RAG 验收已通过 runner 执行，并继续输出 `manifest.json`、`results.json`、`report.md` 和 `reports.json`。
+  - 默认 scripted provider 业务夹具验收和 SiliconFlow live Agent/RAG 验收均通过 runner 执行。
+  - live 入口继续输出 `manifest.json`、`results.json`、`report.md` 和 `reports.json`。
 
 ## 运行合同
 
@@ -80,6 +81,9 @@ Manifest 信息：
   - 工具参数、工具结果和最终回答被评估。
   - 报告写入本地 store。
   - 明文 API key 不进入报告。
+- 默认业务夹具套件：
+  - 使用 scripted provider、fake PostgreSQL driver 和真实 `ReactAgent` 调用路径。
+  - 验证 `search_schema`、`query_database`、最终回答、实际 SQL 执行记录和临时 report store。
 - live 套件：
   - `scripts/run-agent-rag-live-tests.mjs` 设置 `DBAGENT_RUN_AGENT_RAG_LIVE=1` 后，真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` case 会通过 `runAgentBehaviorEvaluationSuite()` 执行。
   - live 报告目录仍兼容旧入口：`tmp/agent-rag-live-report` 下写入 `manifest.json`、`results.json`、`report.md`、`reports.json` 和 `run.json`。

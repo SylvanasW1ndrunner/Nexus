@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   type AgentBehaviorEvaluationReport,
-  evaluateAgentBehavior,
   ReactAgent,
   ToolRegistry,
 } from '@dbagent/core-agent';
@@ -166,59 +165,70 @@ describe('Agent with business RAG and database tools', () => {
       fixedDependencies(),
     );
 
-    const result = await agent.run({
-      providerId: 'fake',
-      model: 'fake-business-model',
-      userMessage: '帮我按流量渠道统计 GMV、退款率和 ROI，说明使用了哪些字段。',
-      mode: 'readonly',
-      maxIterations: 5,
+    const output = await runAgentBehaviorEvaluationSuite({
+      agent,
+      reportStorePath: join(await tempDir(), 'reports.json'),
+      baseRun: {
+        providerId: 'fake',
+        model: 'fake-business-model',
+        mode: 'readonly',
+        maxIterations: 5,
+      },
+      suite: {
+        suiteId: 'agent-rag-business-fixture',
+        suiteName: 'Agent/RAG 业务夹具验收',
+        environment: 'integration',
+        notes: ['默认测试使用 scripted provider 和 fake PostgreSQL driver，验证 runner 合同和工具证据。'],
+        cases: [
+          {
+            case: {
+              id: 'BUS-AGENT-EVAL-001',
+              userTask: '帮我按流量渠道统计 GMV、退款率和 ROI，说明使用了哪些字段。',
+              expectedStatus: 'done',
+              requiredToolCalls: ['search_schema', 'query_database'],
+              toolExpectations: [
+                {
+                  toolName: 'search_schema',
+                  status: 'success',
+                  minCalls: 1,
+                  maxCalls: 1,
+                  argumentIncludes: ['GMV', 'ROI'],
+                  resultIncludes: ['public.orders', 'analytics.campaign_spend'],
+                },
+                {
+                  toolName: 'query_database',
+                  status: 'success',
+                  minCalls: 1,
+                  maxCalls: 1,
+                  argumentIncludes: ['analytics.traffic_sessions', 'public.refunds'],
+                  resultIncludes: ['paid_search', 'seo'],
+                },
+              ],
+              finalTextIncludes: ['paid_search', 'GMV'],
+              finalTextExcludes: ['password', 'apiKey'],
+              minIterations: 2,
+              maxIterations: 5,
+            },
+          },
+        ],
+      },
     });
+    const result = output.caseResults[0]?.result;
 
-    expect(result.status).toBe('done');
-    expect(result.toolExecutions).toMatchObject([
+    expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
+    expect(output.savedReport).toMatchObject({
+      suiteId: 'agent-rag-business-fixture',
+      suiteName: 'Agent/RAG 业务夹具验收',
+      passRate: 1,
+    });
+    expect(result?.status).toBe('done');
+    expect(result?.toolExecutions).toMatchObject([
       { toolName: 'search_schema', status: 'success' },
       { toolName: 'query_database', status: 'success' },
     ]);
-    expect(result.finalText).toContain('paid_search');
-    expect(result.finalText).toContain('GMV');
+    expect(result?.finalText).toContain('paid_search');
+    expect(result?.finalText).toContain('GMV');
     expect(driver.executedSql).toEqual([channelPerformanceSql()]);
-
-    const evaluation = evaluateAgentBehavior({
-      cases: [
-        {
-          case: {
-            id: 'BUS-AGENT-EVAL-001',
-            userTask: '按流量渠道统计 GMV、退款率和 ROI',
-            expectedStatus: 'done',
-            requiredToolCalls: ['search_schema', 'query_database'],
-            toolExpectations: [
-              {
-                toolName: 'search_schema',
-                status: 'success',
-                minCalls: 1,
-                maxCalls: 1,
-                argumentIncludes: ['GMV', 'ROI'],
-                resultIncludes: ['public.orders', 'analytics.campaign_spend'],
-              },
-              {
-                toolName: 'query_database',
-                status: 'success',
-                minCalls: 1,
-                maxCalls: 1,
-                argumentIncludes: ['analytics.traffic_sessions', 'public.refunds'],
-                resultIncludes: ['paid_search', 'seo'],
-              },
-            ],
-            finalTextIncludes: ['paid_search', 'GMV'],
-            finalTextExcludes: ['password', 'apiKey'],
-            minIterations: 2,
-            maxIterations: 5,
-          },
-          result,
-        },
-      ],
-    });
-    expect(evaluation.passRate).toBe(1);
   });
 
   it('refuses destructive SQL in readonly mode before any database write occurs', async () => {
@@ -716,9 +726,13 @@ function responseWithTool(
 }
 
 async function usagePath(): Promise<string> {
+  return join(await tempDir(), 'usage-history.json');
+}
+
+async function tempDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-rag-'));
   tempDirs.push(dir);
-  return join(dir, 'usage-history.json');
+  return dir;
 }
 
 function fixedDependencies() {
