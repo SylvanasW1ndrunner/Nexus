@@ -23,6 +23,9 @@
   - `parseAgentEvalSuiteManifest(input)`
   - `parseAgentEvalSuiteManifestJson(json)`
   - `AgentEvalSuiteManifest`
+- `packages/core-tools/src/agent-eval-suite-workspace-loader.ts`
+  - `loadWorkspaceAgentEvalSuiteManifests(options)`
+  - `WorkspaceAgentEvalSuiteSource`
 - `packages/core-tools/src/official-plugin-registry.ts`
   - 新增默认关闭的 `official.agent-rag-eval` manifest。
   - 声明内置 `official.agent-rag.business-readonly` eval suite manifest。
@@ -92,6 +95,29 @@
 - manifest 不承载 API key、数据库密码或连接串。
 - parser 不读写文件、不依赖 Electron、不引入新依赖；文件发现和权限控制留给官方插件/工作区服务层。
 
+## 工作区 Suite 加载
+
+`loadWorkspaceAgentEvalSuiteManifests()` 提供工作区文件入口，默认扫描：
+
+```text
+.dbagent/evals/*.json
+```
+
+加载规则：
+
+- 只接受工作区相对路径，复用 `resolveWorkspacePath()` 防止路径逃逸。
+- 默认单个 manifest 最大 256KB，可由调用方配置。
+- 只读取当前目录下 `.json` 文件，按文件名排序，忽略其他扩展名。
+- 缺失 `.dbagent/evals` 目录时返回空列表。
+- 返回 `relativePath`、raw `manifest` 和已解析的 `suite`。
+- 拒绝重复 `suiteId`，错误信息包含冲突文件路径。
+
+安全边界：
+
+- loader 只读工作区文件，不运行 Agent、不调用 LLM、不连接数据库、不写报告。
+- loader 不解析 API key、数据库密码或连接串；这些字段不属于 suite manifest 合同。
+- 工作区是否启用 eval、是否允许运行真实 LLM/PG，仍由调用方或后续服务层控制。
+
 ## 官方插件边界
 
 `official.agent-rag-eval` 当前默认关闭，且不贡献 Agent tool。原因：
@@ -160,6 +186,9 @@ Manifest 信息：
   - 解析 JSON 文本和对象输入。
   - 拒绝重复 case id、空 suite、非法状态、非法迭代范围、非法工具调用次数范围。
   - 拒绝 manifest 覆盖 provider、model、userMessage 和 signal。
+- 工作区 loader：
+  - 从真实临时工作区读取 `.dbagent/evals/*.json`。
+  - 覆盖缺失目录、路径逃逸、目录指向文件、非法 JSON、非法 manifest、重复 suite id、超大文件。
 - 官方插件：
   - `official.agent-rag-eval` 携带默认 suite manifest。
   - registry 拒绝非 eval 插件声明 eval suite。

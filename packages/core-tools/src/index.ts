@@ -11,6 +11,7 @@ export * from './official-plugin-tool-policy.js';
 export * from './auto-skill-agent-runner.js';
 export * from './agent-eval-suite-runner.js';
 export * from './agent-eval-suite-manifest.js';
+export * from './agent-eval-suite-workspace-loader.js';
 export * from './skill-agent-runner.js';
 export * from './validation.js';
 export * from './workspace-sandbox.js';
