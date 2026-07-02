@@ -10,6 +10,7 @@ export * from './official-plugin-registry.js';
 export * from './official-plugin-tool-policy.js';
 export * from './auto-skill-agent-runner.js';
 export * from './agent-eval-suite-runner.js';
+export * from './agent-eval-suite-manifest.js';
 export * from './skill-agent-runner.js';
 export * from './validation.js';
 export * from './workspace-sandbox.js';

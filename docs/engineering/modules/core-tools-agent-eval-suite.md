@@ -19,6 +19,10 @@
   - `AgentEvalSuite`
   - `AgentEvalSuiteCase`
   - `AgentEvalSuiteRunResult`
+- `packages/core-tools/src/agent-eval-suite-manifest.ts`
+  - `parseAgentEvalSuiteManifest(input)`
+  - `parseAgentEvalSuiteManifestJson(json)`
+  - `AgentEvalSuiteManifest`
 - `packages/core-tools/src/official-plugin-registry.ts`
   - 新增默认关闭的 `official.agent-rag-eval` manifest。
 - `packages/core-tools/test/agent-eval-suite-runner.test.ts`
@@ -40,6 +44,51 @@
 每个 suite case 可以通过 `run` 覆盖部分运行参数，例如更高的超时、更小的迭代上限或不同模式。最终 `userMessage` 固定来自 `case.userTask`，避免评估定义和真实任务输入脱节。
 
 `AgentBehaviorToolExpectation` 支持 `caseSensitive: false`。该选项只影响单个工具期望里的 `argumentIncludes`、`argumentExcludes`、`resultIncludes` 和 `resultExcludes`。默认仍保持大小写敏感；live LLM 场景可以对 SQL 关键字、枚举值等开启大小写不敏感匹配，避免 `SELECT`/`select` 这类无业务差异导致真实验收误失败。
+
+## Suite Manifest
+
+`AgentEvalSuiteManifest` 是后续官方插件和工作区自定义验收的稳定入口，当前版本为 `version: 1`：
+
+```json
+{
+  "version": 1,
+  "suite": {
+    "suiteId": "agent-rag-workspace-eval",
+    "suiteName": "Agent/RAG 工作区验收",
+    "environment": "postgres",
+    "notes": ["从工作区 manifest 加载，不包含 provider、model 或 secret。"],
+    "cases": [
+      {
+        "id": "WORKSPACE-EVAL-001",
+        "userTask": "按渠道统计 GMV 和 ROI。",
+        "expectedStatus": "done",
+        "requiredToolCalls": ["search_schema", "query_database"],
+        "toolExpectations": [
+          {
+            "toolName": "query_database",
+            "status": "success",
+            "caseSensitive": false,
+            "argumentIncludes": ["select"],
+            "resultIncludes": ["paid_search"]
+          }
+        ],
+        "run": {
+          "allowedTools": ["search_schema", "query_database"],
+          "mode": "readonly",
+          "maxIterations": 5
+        }
+      }
+    ]
+  }
+}
+```
+
+安全边界：
+
+- manifest 只能描述 suite、case 和安全的 case-level run override。
+- manifest 不允许覆盖 `providerId`、`model`、`userMessage` 或 `signal`；这些由调用方、发布门禁或后续主进程服务控制。
+- manifest 不承载 API key、数据库密码或连接串。
+- parser 不读写文件、不依赖 Electron、不引入新依赖；文件发现和权限控制留给官方插件/工作区服务层。
 
 ## 官方插件边界
 
@@ -64,6 +113,7 @@ Manifest 信息：
 - OpenAI Evals：适合模型行为批量评测，但 runner 与 DBAgent 工具权限、脱敏报告、工作区路径和发布门禁不直接匹配。
 - promptfoo：适合 prompt/provider 回归测试，但仍需 adapter 才能表达 DBAgent 的工具参数、工具结果和权限证据。
 - LangSmith/LangChain eval：适合 tracing 和云端可视化，但当前 core 包不能依赖外部云服务，也不能把 tracing 类型暴露为稳定合同。
+- JSON Schema / Zod：适合通用 manifest 校验，但本切片字段较小且不新增依赖可以降低打包和离线风险；后续 manifest 扩展到复杂插件市场字段时再评估引入 schema validator。
 
 本切片选择自建轻量 runner，原因：
 
@@ -95,9 +145,13 @@ Manifest 信息：
   - `stopOnFirstFailure` 只运行第一个失败用例。
 - 输入错误：
   - 空 suite 在调用 Agent 前失败。
+- manifest parser：
+  - 解析 JSON 文本和对象输入。
+  - 拒绝重复 case id、空 suite、非法状态、非法迭代范围、非法工具调用次数范围。
+  - 拒绝 manifest 覆盖 provider、model、userMessage 和 signal。
 
 ## 已知边界
 
 - 当前 runner 串行执行 case，后续可增加并发，但要先处理 provider rate limit 和数据库 fixture 隔离。
-- 当前 suite 本身不持久化，后续可由官方插件或工作区文件提供 suite manifest。
+- 当前只提供 suite manifest 解析，不负责扫描工作区文件或官方插件目录；这些应在服务层做路径、权限和来源控制后再调用 parser。
 - 当前不内置 LLM judge；自然语言充分性仍依赖 case 中的确定性断言或后续人工/模型评审。
