@@ -161,6 +161,7 @@ export type AgentBehaviorToolExpectation = {
   status?: AgentToolExecutionRecord['status'];
   minCalls?: number;
   maxCalls?: number;
+  caseSensitive?: boolean;
   argumentIncludes?: string[];
   argumentExcludes?: string[];
   resultIncludes?: string[];

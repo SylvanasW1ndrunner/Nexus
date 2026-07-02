@@ -23,6 +23,8 @@
   - 新增默认关闭的 `official.agent-rag-eval` manifest。
 - `packages/core-tools/test/agent-eval-suite-runner.test.ts`
   - 套件运行、报告落盘、失败提前停止、空套件错误。
+- `packages/core-tools/test/agent-rag-business-scenario.test.ts`
+  - SiliconFlow live Agent/RAG 验收已通过 runner 执行，并继续输出 `manifest.json`、`results.json`、`report.md` 和 `reports.json`。
 
 ## 运行合同
 
@@ -35,6 +37,8 @@
 - `stopOnFirstFailure`：可选，失败后立即停止，适合 release gate。
 
 每个 suite case 可以通过 `run` 覆盖部分运行参数，例如更高的超时、更小的迭代上限或不同模式。最终 `userMessage` 固定来自 `case.userTask`，避免评估定义和真实任务输入脱节。
+
+`AgentBehaviorToolExpectation` 支持 `caseSensitive: false`。该选项只影响单个工具期望里的 `argumentIncludes`、`argumentExcludes`、`resultIncludes` 和 `resultExcludes`。默认仍保持大小写敏感；live LLM 场景可以对 SQL 关键字、枚举值等开启大小写不敏感匹配，避免 `SELECT`/`select` 这类无业务差异导致真实验收误失败。
 
 ## 官方插件边界
 
@@ -76,6 +80,10 @@ Manifest 信息：
   - 工具参数、工具结果和最终回答被评估。
   - 报告写入本地 store。
   - 明文 API key 不进入报告。
+- live 套件：
+  - `scripts/run-agent-rag-live-tests.mjs` 设置 `DBAGENT_RUN_AGENT_RAG_LIVE=1` 后，真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` case 会通过 `runAgentBehaviorEvaluationSuite()` 执行。
+  - live 报告目录仍兼容旧入口：`tmp/agent-rag-live-report` 下写入 `manifest.json`、`results.json`、`report.md`、`reports.json` 和 `run.json`。
+  - live SQL 参数断言对 SQL 关键字使用 `caseSensitive: false`，仍要求 `query_database` 成功执行并返回 `paid_search` 等业务结果。
 - 失败套件：
   - `stopOnFirstFailure` 只运行第一个失败用例。
 - 输入错误：

@@ -3,8 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  AgentBehaviorEvaluationReportStore,
-  buildAgentBehaviorEvaluationReport,
+  type AgentBehaviorEvaluationReport,
   evaluateAgentBehavior,
   ReactAgent,
   ToolRegistry,
@@ -38,7 +37,7 @@ import {
   type TableDetail,
   type TableSummary,
 } from '@dbagent/shared';
-import { registerDatabaseTools } from '../src/index.js';
+import { registerDatabaseTools, runAgentBehaviorEvaluationSuite } from '../src/index.js';
 import {
   BUSINESS_CONNECTION_ID,
   businessFixtureCleanupSql,
@@ -455,25 +454,74 @@ describe('SiliconFlow live Agent and RAG integration', () => {
         fixedDependencies(),
       );
 
-      const result = await agent.run({
-        providerId: 'siliconflow',
-        model,
-        userMessage:
-          '你是数据分析助手。请先调用 search_schema 查找 GMV、退款率、ROI 相关 schema，再调用 query_database 查询渠道表现，最后用中文简短回答。connectionId 是 business_fixture。',
-        mode: 'readonly',
-        allowedTools: ['search_schema', 'query_database'],
-        maxIterations: 5,
+      const output = await runAgentBehaviorEvaluationSuite({
+        agent,
+        reportStorePath: reportStorePath(),
+        stopOnFirstFailure: true,
+        baseRun: {
+          providerId: 'siliconflow',
+          model,
+          mode: 'readonly',
+          allowedTools: ['search_schema', 'query_database'],
+          maxIterations: 5,
+        },
+        suite: {
+          suiteId: 'agent-rag-business-live',
+          suiteName: 'Agent/RAG 真实业务验收',
+          environment: 'llm-live',
+          notes: [
+            '该报告由 Agent/RAG Eval Suite Runner 生成，只记录结构化验收结果和脱敏后的最终回答。',
+            'API key 只允许通过本机环境变量注入，不写入报告、日志或仓库。',
+          ],
+          cases: [
+            {
+              case: {
+                id: 'BUS-AGENT-LIVE-001',
+                userTask:
+                  '你是数据分析助手。请先调用 search_schema 查找 GMV、退款率、ROI 相关 schema，再调用 query_database 查询渠道表现，最后用中文简短回答。connectionId 是 business_fixture。',
+                expectedStatus: 'done',
+                requiredToolCalls: ['search_schema', 'query_database'],
+                requiredToolStatuses: [
+                  { toolName: 'search_schema', status: 'success' },
+                  { toolName: 'query_database', status: 'success' },
+                ],
+                toolExpectations: [
+                  {
+                    toolName: 'search_schema',
+                    status: 'success',
+                    minCalls: 1,
+                    argumentIncludes: ['GMV'],
+                    resultIncludes: ['orders'],
+                  },
+                  {
+                    toolName: 'query_database',
+                    status: 'success',
+                    minCalls: 1,
+                    caseSensitive: false,
+                    argumentIncludes: ['select'],
+                    resultIncludes: ['paid_search'],
+                  },
+                ],
+                finalTextExcludes: ['api_key', 'password', 'secret'],
+                minIterations: 2,
+                maxIterations: 5,
+              },
+            },
+          ],
+        },
       });
+      const result = output.caseResults[0]?.result;
 
-      expect(result.status).toBe('done');
-      expect(result.toolExecutions).toEqual(
+      expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
+      expect(result?.status).toBe('done');
+      expect(result?.toolExecutions).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ toolName: 'search_schema', status: 'success' }),
           expect.objectContaining({ toolName: 'query_database', status: 'success' }),
         ]),
       );
-      expect(result.finalText.length).toBeGreaterThan(0);
-      await writeLiveAgentRagReport(result, { providerId: 'siliconflow', model });
+      expect(result?.finalText.length).toBeGreaterThan(0);
+      await writeLiveAgentRagReport(output.report);
     },
     180_000,
   );
@@ -680,69 +728,17 @@ function fixedDependencies() {
   };
 }
 
-async function writeLiveAgentRagReport(
-  result: Awaited<ReturnType<ReactAgent['run']>>,
-  run: { providerId: string; model: string },
-): Promise<void> {
+function reportStorePath(): string | undefined {
+  const reportDir = process.env.DBAGENT_AGENT_RAG_REPORT_DIR;
+  return reportDir ? join(reportDir, 'reports.json') : undefined;
+}
+
+async function writeLiveAgentRagReport(report: AgentBehaviorEvaluationReport): Promise<void> {
   const reportDir = process.env.DBAGENT_AGENT_RAG_REPORT_DIR;
   if (!reportDir) return;
-
-  const summary = evaluateAgentBehavior({
-    cases: [
-      {
-        case: {
-          id: 'BUS-AGENT-LIVE-001',
-          userTask: '真实模型调用 Schema RAG 和数据库查询工具，回答渠道 GMV、退款率和 ROI。',
-          expectedStatus: 'done',
-          requiredToolCalls: ['search_schema', 'query_database'],
-          requiredToolStatuses: [
-            { toolName: 'search_schema', status: 'success' },
-            { toolName: 'query_database', status: 'success' },
-          ],
-          toolExpectations: [
-            {
-              toolName: 'search_schema',
-              status: 'success',
-              minCalls: 1,
-              argumentIncludes: ['GMV'],
-              resultIncludes: ['orders'],
-            },
-            {
-              toolName: 'query_database',
-              status: 'success',
-              minCalls: 1,
-              argumentIncludes: ['select'],
-              resultIncludes: ['paid_search'],
-            },
-          ],
-          finalTextExcludes: ['api_key', 'password', 'secret'],
-          minIterations: 2,
-          maxIterations: 5,
-        },
-        result,
-      },
-    ],
-  });
-
-  const report = buildAgentBehaviorEvaluationReport({
-    suiteId: 'agent-rag-business-live',
-    suiteName: 'Agent/RAG 真实业务验收',
-    environment: 'llm-live',
-    run: {
-      ...run,
-      live: true,
-      postgres: false,
-    },
-    notes: [
-      '该报告只记录结构化验收结果和脱敏后的最终回答。',
-      'API key 只允许通过本机环境变量注入，不写入报告、日志或仓库。',
-    ],
-    summary,
-  });
 
   await mkdir(reportDir, { recursive: true });
   await Promise.all(
     report.files.map((file) => writeFile(join(reportDir, file.path), file.content, 'utf8')),
   );
-  await new AgentBehaviorEvaluationReportStore(join(reportDir, 'reports.json')).save(report);
 }

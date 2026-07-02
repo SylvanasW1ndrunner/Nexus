@@ -133,24 +133,69 @@ function evaluateToolExpectation(
 
   const argumentsText = matches.map((execution) => execution.argumentPreview ?? '').join('\n');
   const resultsText = matches.map((execution) => execution.resultPreview).join('\n');
-  failures.push(...includesFailures(`Tool ${expectation.toolName} arguments`, argumentsText, expectation.argumentIncludes));
-  failures.push(...excludesFailures(`Tool ${expectation.toolName} arguments`, argumentsText, expectation.argumentExcludes));
-  failures.push(...includesFailures(`Tool ${expectation.toolName} result`, resultsText, expectation.resultIncludes));
-  failures.push(...excludesFailures(`Tool ${expectation.toolName} result`, resultsText, expectation.resultExcludes));
+  const matchOptions = { caseSensitive: expectation.caseSensitive ?? true };
+  failures.push(
+    ...includesFailures(
+      `Tool ${expectation.toolName} arguments`,
+      argumentsText,
+      expectation.argumentIncludes,
+      matchOptions,
+    ),
+  );
+  failures.push(
+    ...excludesFailures(
+      `Tool ${expectation.toolName} arguments`,
+      argumentsText,
+      expectation.argumentExcludes,
+      matchOptions,
+    ),
+  );
+  failures.push(
+    ...includesFailures(
+      `Tool ${expectation.toolName} result`,
+      resultsText,
+      expectation.resultIncludes,
+      matchOptions,
+    ),
+  );
+  failures.push(
+    ...excludesFailures(
+      `Tool ${expectation.toolName} result`,
+      resultsText,
+      expectation.resultExcludes,
+      matchOptions,
+    ),
+  );
 
   return failures;
 }
 
-function includesFailures(label: string, text: string, snippets: string[] | undefined): string[] {
+function includesFailures(
+  label: string,
+  text: string,
+  snippets: string[] | undefined,
+  options: { caseSensitive: boolean } = { caseSensitive: true },
+): string[] {
+  const haystack = searchableText(text, options);
   return (snippets ?? [])
-    .filter((snippet) => !text.includes(snippet))
+    .filter((snippet) => !haystack.includes(searchableText(snippet, options)))
     .map((snippet) => `${label} does not include: ${snippet}.`);
 }
 
-function excludesFailures(label: string, text: string, snippets: string[] | undefined): string[] {
+function excludesFailures(
+  label: string,
+  text: string,
+  snippets: string[] | undefined,
+  options: { caseSensitive: boolean } = { caseSensitive: true },
+): string[] {
+  const haystack = searchableText(text, options);
   return (snippets ?? [])
-    .filter((snippet) => text.includes(snippet))
+    .filter((snippet) => haystack.includes(searchableText(snippet, options)))
     .map((snippet) => `${label} includes forbidden snippet: ${snippet}.`);
+}
+
+function searchableText(text: string, options: { caseSensitive: boolean }): string {
+  return options.caseSensitive ? text : text.toLocaleLowerCase();
 }
 
 export function buildAgentBehaviorEvaluationReport(
