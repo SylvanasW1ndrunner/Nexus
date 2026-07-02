@@ -84,6 +84,9 @@ Manifest 信息：
 - 默认业务夹具套件：
   - 使用 scripted provider、fake PostgreSQL driver 和真实 `ReactAgent` 调用路径。
   - 验证 `search_schema`、`query_database`、最终回答、实际 SQL 执行记录和临时 report store。
+- PostgreSQL 套件：
+  - `pnpm test:postgres` 会创建真实 PostgreSQL 业务表、抽取 catalog、索引 RAG，并通过 `runAgentBehaviorEvaluationSuite()` 执行 Agent 工具链。
+  - 报告 run metadata 标记 `postgres: true`，并验证临时 report store 摘要。
 - live 套件：
   - `scripts/run-agent-rag-live-tests.mjs` 设置 `DBAGENT_RUN_AGENT_RAG_LIVE=1` 后，真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` case 会通过 `runAgentBehaviorEvaluationSuite()` 执行。
   - live 报告目录仍兼容旧入口：`tmp/agent-rag-live-report` 下写入 `manifest.json`、`results.json`、`report.md`、`reports.json` 和 `run.json`。
