@@ -11,6 +11,7 @@
    - [core-agent 行为评估与工具证据](./core-agent-behavior-evaluation.md)
 5. [core-llm 大模型接入模块](./core-llm.md)
 6. [core-tools 工具与诊断模块](./core-tools.md)
+   - [core-tools Agent/RAG Eval Suite Runner](./core-tools-agent-eval-suite.md)
 7. [workspace / Python 模块](./workspace-python.md)
 8. [core-skills 与开发 Skill 模块](./development-skills.md)
 9. [desktop 桌面应用模块](./desktop.md)

@@ -11,6 +11,7 @@ describe('OfficialPluginRegistry', () => {
     const registry = createDefaultOfficialPluginRegistry();
 
     expect(registry.list().map((plugin) => plugin.id)).toEqual([
+      'official.agent-rag-eval',
       'official.database-postgres',
       'official.mcp-client',
       'official.schema-rag',
@@ -35,6 +36,12 @@ describe('OfficialPluginRegistry', () => {
       'mcp:*',
       'workspace_script:*',
     ]);
+    expect(registry.get('official.agent-rag-eval')).toMatchObject({
+      category: 'eval',
+      enabledByDefault: false,
+      capabilities: ['agent-eval-suite', 'tool-evidence-report', 'release-quality-gate'],
+      tools: [],
+    });
   });
 
   it('filters tools by disabled plugin, readonly mode, permission allow list, and danger level', () => {
@@ -213,7 +220,9 @@ describe('OfficialPluginRegistry', () => {
     manifest!.tools[0]!.name = 'mutated';
 
     expect(registry.get('official.database-postgres')?.tools[0]?.name).toBe('list_schemas');
-    expect(DEFAULT_OFFICIAL_PLUGIN_MANIFESTS[0]?.tools[0]?.name).toBe('list_schemas');
+    expect(
+      DEFAULT_OFFICIAL_PLUGIN_MANIFESTS.find((item) => item.id === 'official.database-postgres')?.tools[0]?.name,
+    ).toBe('list_schemas');
   });
 });
 

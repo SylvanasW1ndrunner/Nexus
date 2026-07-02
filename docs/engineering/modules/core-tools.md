@@ -142,6 +142,7 @@
 - `official.workspace-files`：工作区文件列出、读取和原子写入。
 - `official.workspace-python`：工作区 Python 脚本动态工具，manifest 中以 `workspace_script:*` 表示动态贡献。
 - `official.mcp-client`：MCP 客户端和动态 MCP 工具，manifest 中以 `mcp:*` 表示动态贡献。
+- `official.agent-rag-eval`：Agent/RAG 业务验收套件 runner，默认关闭，不贡献 Agent tool，用于发布前质量门禁和后续官方评估插件。
 
 Manifest 稳定字段包括 `id`、`name`、`version`、`publisher`、`category`、`enabledByDefault`、`capabilities`、`permissions` 和 `tools`。权限字段必须声明：
 
@@ -155,6 +156,23 @@ Manifest 稳定字段包括 `id`、`name`、`version`、`publisher`、`category`
 Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manifest 的静态 tool 重名和未知 permission 引用。动态工具必须通过 `dynamic: true` 和 `namePattern` 表示来源，不能提前伪装成真实工具。官方插件不会获得特殊放权；真实执行仍必须经过 `ToolRegistry`、`allowedTools`、`dangerLevel`、`readonly`、approval provenance 和具体工具 handler 的边界。
 
 本轮参考了 VS Code Extension Manifest 的声明式元信息/contribution points 模式，以及 MCP Tools 规范中“工具有唯一 name、schema、annotations，敏感操作需要用户确认、超时和审计”的安全原则；但没有引入新依赖，也没有接入网络市场。
+
+`official.agent-rag-eval` 额外参考 OpenAI Evals、promptfoo 和 LangSmith/LangChain eval 的套件/报告/追踪思路，但当前只保留轻量本地 runner 合同。原因是 core 包不能依赖外部云服务，且 DBAgent 需要直接评估工具参数、工具结果、权限边界和脱敏报告。后续接入第三方 eval runner 时，应放在官方插件 adapter 层。
+
+## Agent/RAG Eval Suite Runner
+
+`agent-eval-suite-runner.ts` 提供无 UI 的 Agent/RAG 业务验收入口：
+
+- `runAgentBehaviorEvaluationSuite(options)`：
+  - 按 suite case 串行调用传入的 Agent。
+  - 每个 case 的 `userTask` 直接作为 `ReactAgent.run()` 的 `userMessage`。
+  - 支持 case-level run option 覆盖，例如超时、迭代数或模式。
+  - 调用 `evaluateAgentBehavior()` 验证工具证据和最终回答。
+  - 调用 `buildAgentBehaviorEvaluationReport()` 生成脱敏报告。
+  - 可选写入 `AgentBehaviorEvaluationReportStore`。
+- `stopOnFirstFailure` 可作为 release gate 使用，首个失败 case 后停止继续消耗 LLM 或数据库资源。
+
+该 runner 是后续官方 “Agent/RAG Eval” 插件的后端底座。当前 suite 由调用方传入；后续可以从工作区文件、插件 manifest 或 CI 配置加载。
 
 ## 官方插件运行时工具策略
 

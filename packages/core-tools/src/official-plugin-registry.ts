@@ -1,6 +1,6 @@
 import type { ToolDangerLevel } from '@dbagent/core-agent';
 
-export type OfficialPluginCategory = 'database' | 'rag' | 'workspace' | 'python' | 'mcp' | 'skill';
+export type OfficialPluginCategory = 'database' | 'rag' | 'workspace' | 'python' | 'mcp' | 'skill' | 'eval';
 
 export type OfficialPluginSource = 'official';
 
@@ -25,7 +25,9 @@ export type OfficialPluginResourceScope =
   | 'workspace.root'
   | 'workspace.process'
   | 'mcp.server'
-  | 'skill.source';
+  | 'skill.source'
+  | 'agent.session'
+  | 'eval.report';
 export type OfficialPluginSecretKind = 'database-password' | 'api-key' | 'mcp-env' | 'ssh-key' | 'none';
 
 export type OfficialPluginPermission = {
@@ -213,6 +215,28 @@ export function createDefaultOfficialPluginRegistry(): OfficialPluginRegistry {
 }
 
 export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
+  {
+    id: 'official.agent-rag-eval',
+    name: 'Agent/RAG 业务评估',
+    version: '0.1.0',
+    publisher: 'DBAgent',
+    source: 'official',
+    category: 'eval',
+    description: '运行 Agent/RAG 业务验收套件，生成脱敏报告，用于发布前质量门禁。',
+    enabledByDefault: false,
+    capabilities: ['agent-eval-suite', 'tool-evidence-report', 'release-quality-gate'],
+    permissions: [
+      permission('eval.report.write', '写入评估报告', '写入脱敏后的 Agent/RAG 行为评估报告和索引。', 'safe', true, {
+        resourceScopes: ['agent.session', 'eval.report'],
+        approvalPolicy: 'never',
+        networkAccess: 'none',
+        processAccess: 'none',
+        secretKinds: ['none'],
+        auditLevel: 'metadata',
+      }),
+    ],
+    tools: [],
+  },
   {
     id: 'official.database-postgres',
     name: 'PostgreSQL 数据库核心工具',
