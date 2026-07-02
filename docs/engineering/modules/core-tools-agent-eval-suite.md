@@ -26,6 +26,9 @@
 - `packages/core-tools/src/agent-eval-suite-workspace-loader.ts`
   - `loadWorkspaceAgentEvalSuiteManifests(options)`
   - `WorkspaceAgentEvalSuiteSource`
+- `packages/core-tools/src/agent-eval-suite-catalog.ts`
+  - `loadAgentEvalSuiteCatalog(options)`
+  - `AgentEvalSuiteCatalogEntry`
 - `packages/core-tools/src/official-plugin-registry.ts`
   - 新增默认关闭的 `official.agent-rag-eval` manifest。
   - 声明内置 `official.agent-rag.business-readonly` eval suite manifest。
@@ -118,6 +121,29 @@
 - loader 不解析 API key、数据库密码或连接串；这些字段不属于 suite manifest 合同。
 - 工作区是否启用 eval、是否允许运行真实 LLM/PG，仍由调用方或后续服务层控制。
 
+## Eval Suite Catalog
+
+`loadAgentEvalSuiteCatalog()` 是后续服务层读取验收 suite 的统一入口。它把官方插件 suite 和工作区 suite 合并为带来源信息的 catalog，但仍不执行 suite。
+
+来源类型：
+
+- `official`：来自官方插件 registry，记录 `pluginId`。
+- `workspace`：来自工作区 `.dbagent/evals/*.json`，记录 `relativePath`。
+
+加载规则：
+
+- 默认只解析已启用官方插件；`official.agent-rag-eval` 仍然默认关闭，必须显式启用。
+- 只有调用方传入 `workspace` 配置时才读取工作区文件。
+- catalog entry 包含 `suiteId`、`suiteName`、`environment`、`source`、raw `manifest` 和 parsed `suite`。
+- 合并后拒绝重复 `suiteId`，错误信息包含冲突来源。
+- 返回值会 clone manifest 和 suite，调用方修改 catalog 不会污染后续加载。
+
+安全边界：
+
+- catalog 只做发现、解析、合并和去重。
+- catalog 不调用 Agent、不调用 LLM、不连接 PostgreSQL、不写报告。
+- 后续运行门禁、provider、数据库 fixture、报告目录和权限提示必须由服务层显式控制。
+
 ## 官方插件边界
 
 `official.agent-rag-eval` 当前默认关闭，且不贡献 Agent tool。原因：
@@ -189,6 +215,9 @@ Manifest 信息：
 - 工作区 loader：
   - 从真实临时工作区读取 `.dbagent/evals/*.json`。
   - 覆盖缺失目录、路径逃逸、目录指向文件、非法 JSON、非法 manifest、重复 suite id、超大文件。
+- catalog：
+  - 合并显式启用的官方 suite 和真实临时工作区 suite。
+  - 覆盖默认禁用官方 eval、仅工作区加载、跨来源重复 suite id、clone 防污染。
 - 官方插件：
   - `official.agent-rag-eval` 携带默认 suite manifest。
   - registry 拒绝非 eval 插件声明 eval suite。
