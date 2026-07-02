@@ -1,4 +1,5 @@
 import type { ToolDangerLevel } from '@dbagent/core-agent';
+import { parseAgentEvalSuiteManifest, type AgentEvalSuiteManifest } from './agent-eval-suite-manifest.js';
 
 export type OfficialPluginCategory = 'database' | 'rag' | 'workspace' | 'python' | 'mcp' | 'skill' | 'eval';
 
@@ -68,6 +69,7 @@ export type OfficialPluginManifest = {
   capabilities: string[];
   permissions: OfficialPluginPermission[];
   tools: OfficialPluginToolContribution[];
+  evalSuites?: AgentEvalSuiteManifest[];
 };
 
 export type OfficialPluginToolResolutionOptions = {
@@ -214,6 +216,57 @@ export function createDefaultOfficialPluginRegistry(): OfficialPluginRegistry {
   return new OfficialPluginRegistry();
 }
 
+export const DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST: AgentEvalSuiteManifest = {
+  version: 1,
+  suite: {
+    suiteId: 'official.agent-rag.business-readonly',
+    suiteName: '官方 Agent/RAG 业务只读验收',
+    environment: 'integration',
+    notes: [
+      '官方 eval suite 只描述验收合同，不包含 provider、model、API key、数据库密码或连接串。',
+      '调用方必须显式提供 baseRun、连接 fixture 和报告输出目录。',
+    ],
+    cases: [
+      {
+        id: 'OFFICIAL-AGENT-RAG-001',
+        userTask:
+          '你是数据分析助手。请先调用 search_schema 查找 GMV、退款率、ROI 相关 schema，再调用 query_database 查询渠道表现，最后用中文简短回答。connectionId 是 business_fixture。',
+        expectedStatus: 'done',
+        requiredToolCalls: ['search_schema', 'query_database'],
+        requiredToolStatuses: [
+          { toolName: 'search_schema', status: 'success' },
+          { toolName: 'query_database', status: 'success' },
+        ],
+        toolExpectations: [
+          {
+            toolName: 'search_schema',
+            status: 'success',
+            minCalls: 1,
+            argumentIncludes: ['GMV'],
+            resultIncludes: ['orders'],
+          },
+          {
+            toolName: 'query_database',
+            status: 'success',
+            minCalls: 1,
+            caseSensitive: false,
+            argumentIncludes: ['select'],
+            resultIncludes: ['paid_search'],
+          },
+        ],
+        finalTextExcludes: ['api_key', 'password', 'secret'],
+        minIterations: 2,
+        maxIterations: 5,
+        run: {
+          allowedTools: ['search_schema', 'query_database'],
+          mode: 'readonly',
+          maxIterations: 5,
+        },
+      },
+    ],
+  },
+};
+
 export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
   {
     id: 'official.agent-rag-eval',
@@ -236,6 +289,7 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
       }),
     ],
     tools: [],
+    evalSuites: [DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST],
   },
   {
     id: 'official.database-postgres',
@@ -482,6 +536,20 @@ function validateManifest(manifest: OfficialPluginManifest): void {
       }
     }
   }
+
+  if (manifest.evalSuites !== undefined) {
+    if (manifest.category !== 'eval') {
+      throw new Error(`Only eval official plugins can declare eval suites: ${manifest.id}`);
+    }
+    const suiteIds = new Set<string>();
+    for (const evalSuite of manifest.evalSuites) {
+      const parsed = parseAgentEvalSuiteManifest(evalSuite);
+      if (suiteIds.has(parsed.suiteId)) {
+        throw new Error(`Duplicate eval suite in official plugin ${manifest.id}: ${parsed.suiteId}`);
+      }
+      suiteIds.add(parsed.suiteId);
+    }
+  }
 }
 
 function assertNoStaticToolNameConflict(existing: OfficialPluginManifest, next: OfficialPluginManifest): void {
@@ -515,6 +583,11 @@ function cloneManifest(manifest: OfficialPluginManifest): OfficialPluginManifest
       secretKinds: [...permission.secretKinds],
     })),
     tools: manifest.tools.map(cloneTool),
+    ...(manifest.evalSuites === undefined
+      ? {}
+      : {
+          evalSuites: manifest.evalSuites.map((suite) => JSON.parse(JSON.stringify(suite)) as AgentEvalSuiteManifest),
+        }),
   };
 }
 

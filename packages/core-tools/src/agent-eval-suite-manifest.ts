@@ -11,10 +11,20 @@ import type { AgentEvalSuite, AgentEvalSuiteCase } from './agent-eval-suite-runn
 
 export type AgentEvalSuiteManifest = {
   version: 1;
-  suite: AgentEvalSuite;
+  suite: {
+    suiteId: string;
+    suiteName: string;
+    cases: AgentEvalSuiteManifestCase[];
+    environment?: AgentEvalSuite['environment'];
+    notes?: string[];
+  };
 };
 
-type ManifestCase = {
+export type AgentEvalSuiteManifestCase = AgentBehaviorEvaluationCase & {
+  run?: SafeManifestRunOverride;
+};
+
+type UnknownManifestCase = {
   id?: unknown;
   userTask?: unknown;
   expectedStatus?: unknown;
@@ -41,7 +51,7 @@ type ManifestToolExpectation = {
   resultExcludes?: unknown;
 };
 
-type SafeManifestRunOverride = Partial<
+export type SafeManifestRunOverride = Partial<
   Pick<
     AgentRunOptions,
     | 'allowedTools'
@@ -133,7 +143,7 @@ export function parseAgentEvalSuiteManifest(input: unknown): AgentEvalSuite {
 
 function parseCase(input: unknown, index: number): AgentEvalSuiteCase {
   const label = `Agent eval suite case at index ${index}`;
-  const record = objectRecord(input, label) as ManifestCase;
+  const record = objectRecord(input, label) as UnknownManifestCase;
   const id = requiredNonEmptyString(record, 'id', label);
   const userTask = requiredNonEmptyString(record, 'userTask', label);
   const expectedStatus = optionalEnum(record, 'expectedStatus', RUN_STATUSES, label);

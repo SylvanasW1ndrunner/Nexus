@@ -25,6 +25,7 @@
   - `AgentEvalSuiteManifest`
 - `packages/core-tools/src/official-plugin-registry.ts`
   - 新增默认关闭的 `official.agent-rag-eval` manifest。
+  - 声明内置 `official.agent-rag.business-readonly` eval suite manifest。
 - `packages/core-tools/test/agent-eval-suite-runner.test.ts`
   - 套件运行、报告落盘、失败提前停止、空套件错误。
 - `packages/core-tools/test/agent-rag-business-scenario.test.ts`
@@ -105,6 +106,14 @@ Manifest 信息：
 - `permission: eval.report.write`
 - `resourceScopes: agent.session, eval.report`
 - `enabledByDefault: false`
+- `evalSuites: official.agent-rag.business-readonly`
+
+默认 suite 边界：
+
+- 只读模式，默认允许 `search_schema` 和 `query_database`。
+- 不包含 provider、model、API key、数据库密码或连接串。
+- 仍不贡献 Agent tool；它是发布/验收能力，由测试脚本、服务层或后续设置页显式触发。
+- registry 注册时会调用 `parseAgentEvalSuiteManifest()` 校验 suite manifest，避免官方插件声明和 runner 合同漂移。
 
 ## 开源方案评估
 
@@ -149,6 +158,10 @@ Manifest 信息：
   - 解析 JSON 文本和对象输入。
   - 拒绝重复 case id、空 suite、非法状态、非法迭代范围、非法工具调用次数范围。
   - 拒绝 manifest 覆盖 provider、model、userMessage 和 signal。
+- 官方插件：
+  - `official.agent-rag-eval` 携带默认 suite manifest。
+  - registry 拒绝非 eval 插件声明 eval suite。
+  - registry 返回 clone，调用方无法污染默认 suite manifest。
 
 ## 已知边界
 

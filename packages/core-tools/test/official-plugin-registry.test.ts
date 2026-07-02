@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST,
   DEFAULT_OFFICIAL_PLUGIN_MANIFESTS,
   OfficialPluginRegistry,
   createDefaultOfficialPluginRegistry,
+  parseAgentEvalSuiteManifest,
   type OfficialPluginManifest,
 } from '../src/index.js';
 
@@ -41,6 +43,30 @@ describe('OfficialPluginRegistry', () => {
       enabledByDefault: false,
       capabilities: ['agent-eval-suite', 'tool-evidence-report', 'release-quality-gate'],
       tools: [],
+      evalSuites: [
+        {
+          version: 1,
+          suite: {
+            suiteId: 'official.agent-rag.business-readonly',
+            suiteName: '官方 Agent/RAG 业务只读验收',
+          },
+        },
+      ],
+    });
+    expect(parseAgentEvalSuiteManifest(DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST)).toMatchObject({
+      suiteId: 'official.agent-rag.business-readonly',
+      cases: [
+        {
+          case: {
+            id: 'OFFICIAL-AGENT-RAG-001',
+            requiredToolCalls: ['search_schema', 'query_database'],
+          },
+          run: {
+            allowedTools: ['search_schema', 'query_database'],
+            mode: 'readonly',
+          },
+        },
+      ],
     });
   });
 
@@ -211,6 +237,37 @@ describe('OfficialPluginRegistry', () => {
         runtimeTools: [runtimeTool('query_database', 'medium', true), runtimeTool('query_database', 'medium', true)],
       }),
     ).toThrow('Duplicate runtime tool descriptor: query_database');
+
+    expect(
+      () =>
+        new OfficialPluginRegistry([
+          {
+            ...minimalManifest('official.bad-eval-suite-owner'),
+            evalSuites: [DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST],
+          },
+        ]),
+    ).toThrow('Only eval official plugins can declare eval suites');
+
+    expect(
+      () =>
+        new OfficialPluginRegistry([
+          {
+            ...minimalManifest('official.bad-eval-suite'),
+            category: 'eval',
+            tools: [],
+            evalSuites: [
+              {
+                version: 1,
+                suite: {
+                  suiteId: 'bad-suite',
+                  suiteName: 'Bad Suite',
+                  cases: [],
+                },
+              },
+            ],
+          },
+        ]),
+    ).toThrow('Agent eval suite manifest suite must contain at least one case.');
   });
 
   it('returns cloned manifests so callers cannot mutate the registry', () => {
@@ -218,11 +275,17 @@ describe('OfficialPluginRegistry', () => {
     const manifest = registry.get('official.database-postgres');
     expect(manifest).toBeDefined();
     manifest!.tools[0]!.name = 'mutated';
+    const evalManifest = registry.get('official.agent-rag-eval');
+    evalManifest!.evalSuites![0]!.suite.suiteId = 'mutated-suite';
 
     expect(registry.get('official.database-postgres')?.tools[0]?.name).toBe('list_schemas');
+    expect(registry.get('official.agent-rag-eval')?.evalSuites?.[0]?.suite.suiteId).toBe(
+      'official.agent-rag.business-readonly',
+    );
     expect(
       DEFAULT_OFFICIAL_PLUGIN_MANIFESTS.find((item) => item.id === 'official.database-postgres')?.tools[0]?.name,
     ).toBe('list_schemas');
+    expect(DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST.suite.suiteId).toBe('official.agent-rag.business-readonly');
   });
 });
 
