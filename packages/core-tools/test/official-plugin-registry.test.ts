@@ -173,6 +173,53 @@ describe('OfficialPluginRegistry', () => {
     ).toEqual(['test_tool', 'experimental_tool']);
   });
 
+  it('resolves eval suites only from enabled official eval plugins', () => {
+    const registry = createDefaultOfficialPluginRegistry();
+
+    expect(registry.resolveEvalSuites()).toEqual({ suites: [], manifests: [] });
+
+    const resolved = registry.resolveEvalSuites({
+      enabledPluginIds: ['official.agent-rag-eval'],
+    });
+
+    expect(resolved.suites).toMatchObject([
+      {
+        suiteId: 'official.agent-rag.business-readonly',
+        suiteName: '官方 Agent/RAG 业务只读验收',
+        environment: 'integration',
+        cases: [
+          {
+            case: {
+              id: 'OFFICIAL-AGENT-RAG-001',
+              requiredToolCalls: ['search_schema', 'query_database'],
+            },
+            run: {
+              allowedTools: ['search_schema', 'query_database'],
+              mode: 'readonly',
+              maxIterations: 5,
+            },
+          },
+        ],
+      },
+    ]);
+    expect(resolved.manifests).toMatchObject([
+      {
+        pluginId: 'official.agent-rag-eval',
+        manifest: {
+          version: 1,
+          suite: { suiteId: 'official.agent-rag.business-readonly' },
+        },
+      },
+    ]);
+
+    expect(
+      registry.resolveEvalSuites({
+        enabledPluginIds: ['official.agent-rag-eval'],
+        suiteIds: ['missing-suite'],
+      }),
+    ).toEqual({ suites: [], manifests: [] });
+  });
+
   it('validates duplicate plugin ids, duplicate tool names, cross-plugin tool conflicts, and unknown permission references', () => {
     const first = minimalManifest('official.test');
     const registry = new OfficialPluginRegistry([first]);
@@ -268,6 +315,25 @@ describe('OfficialPluginRegistry', () => {
           },
         ]),
     ).toThrow('Agent eval suite manifest suite must contain at least one case.');
+
+    expect(() =>
+      new OfficialPluginRegistry([
+        {
+          ...minimalManifest('official.eval-a'),
+          category: 'eval',
+          tools: [],
+          evalSuites: [DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST],
+        },
+        {
+          ...minimalManifest('official.eval-b'),
+          category: 'eval',
+          tools: [],
+          evalSuites: [DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST],
+        },
+      ]).resolveEvalSuites({
+        enabledPluginIds: ['official.eval-a', 'official.eval-b'],
+      }),
+    ).toThrow('Duplicate resolved official eval suite: official.agent-rag.business-readonly');
   });
 
   it('returns cloned manifests so callers cannot mutate the registry', () => {
@@ -277,11 +343,18 @@ describe('OfficialPluginRegistry', () => {
     manifest!.tools[0]!.name = 'mutated';
     const evalManifest = registry.get('official.agent-rag-eval');
     evalManifest!.evalSuites![0]!.suite.suiteId = 'mutated-suite';
+    const resolved = registry.resolveEvalSuites({
+      enabledPluginIds: ['official.agent-rag-eval'],
+    });
+    resolved.manifests[0]!.manifest.suite.suiteId = 'mutated-resolved-suite';
 
     expect(registry.get('official.database-postgres')?.tools[0]?.name).toBe('list_schemas');
     expect(registry.get('official.agent-rag-eval')?.evalSuites?.[0]?.suite.suiteId).toBe(
       'official.agent-rag.business-readonly',
     );
+    expect(
+      registry.resolveEvalSuites({ enabledPluginIds: ['official.agent-rag-eval'] }).manifests[0]?.manifest.suite.suiteId,
+    ).toBe('official.agent-rag.business-readonly');
     expect(
       DEFAULT_OFFICIAL_PLUGIN_MANIFESTS.find((item) => item.id === 'official.database-postgres')?.tools[0]?.name,
     ).toBe('list_schemas');

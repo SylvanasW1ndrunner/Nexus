@@ -1,5 +1,6 @@
 import type { ToolDangerLevel } from '@dbagent/core-agent';
 import { parseAgentEvalSuiteManifest, type AgentEvalSuiteManifest } from './agent-eval-suite-manifest.js';
+import type { AgentEvalSuite } from './agent-eval-suite-runner.js';
 
 export type OfficialPluginCategory = 'database' | 'rag' | 'workspace' | 'python' | 'mcp' | 'skill' | 'eval';
 
@@ -107,6 +108,21 @@ export type OfficialPluginRuntimeToolResolution = {
   dynamicContributions: OfficialPluginToolContribution[];
 };
 
+export type OfficialPluginEvalSuiteResolutionOptions = Pick<
+  OfficialPluginToolResolutionOptions,
+  'enabledPluginIds' | 'disabledPluginIds'
+> & {
+  suiteIds?: string[];
+};
+
+export type OfficialPluginEvalSuiteResolution = {
+  suites: AgentEvalSuite[];
+  manifests: Array<{
+    pluginId: string;
+    manifest: AgentEvalSuiteManifest;
+  }>;
+};
+
 const dangerRank: Record<ToolDangerLevel, number> = {
   safe: 0,
   medium: 1,
@@ -209,6 +225,31 @@ export class OfficialPluginRegistry {
       missingStaticToolNames: resolved.toolNames.filter((name) => !runtimeToolNames.has(name)),
       dynamicContributions: resolved.dynamicTools,
     };
+  }
+
+  resolveEvalSuites(options: OfficialPluginEvalSuiteResolutionOptions = {}): OfficialPluginEvalSuiteResolution {
+    const suiteFilter = options.suiteIds === undefined ? undefined : new Set(options.suiteIds);
+    const suites: AgentEvalSuite[] = [];
+    const manifests: OfficialPluginEvalSuiteResolution['manifests'] = [];
+    const seenSuiteIds = new Set<string>();
+
+    for (const plugin of this.listEnabled(options)) {
+      for (const manifest of plugin.evalSuites ?? []) {
+        const suite = parseAgentEvalSuiteManifest(manifest);
+        if (suiteFilter && !suiteFilter.has(suite.suiteId)) continue;
+        if (seenSuiteIds.has(suite.suiteId)) {
+          throw new Error(`Duplicate resolved official eval suite: ${suite.suiteId}`);
+        }
+        seenSuiteIds.add(suite.suiteId);
+        suites.push(suite);
+        manifests.push({
+          pluginId: plugin.id,
+          manifest: cloneEvalSuiteManifest(manifest),
+        });
+      }
+    }
+
+    return { suites, manifests };
   }
 }
 
@@ -586,9 +627,13 @@ function cloneManifest(manifest: OfficialPluginManifest): OfficialPluginManifest
     ...(manifest.evalSuites === undefined
       ? {}
       : {
-          evalSuites: manifest.evalSuites.map((suite) => JSON.parse(JSON.stringify(suite)) as AgentEvalSuiteManifest),
+          evalSuites: manifest.evalSuites.map(cloneEvalSuiteManifest),
         }),
   };
+}
+
+function cloneEvalSuiteManifest(manifest: AgentEvalSuiteManifest): AgentEvalSuiteManifest {
+  return JSON.parse(JSON.stringify(manifest)) as AgentEvalSuiteManifest;
 }
 
 function cloneTool(tool: OfficialPluginToolContribution): OfficialPluginToolContribution {

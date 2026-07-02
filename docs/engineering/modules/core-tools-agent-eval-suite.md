@@ -26,6 +26,7 @@
 - `packages/core-tools/src/official-plugin-registry.ts`
   - 新增默认关闭的 `official.agent-rag-eval` manifest。
   - 声明内置 `official.agent-rag.business-readonly` eval suite manifest。
+  - `resolveEvalSuites(options)` 按已启用官方插件解析可运行 suite。
 - `packages/core-tools/test/agent-eval-suite-runner.test.ts`
   - 套件运行、报告落盘、失败提前停止、空套件错误。
 - `packages/core-tools/test/agent-rag-business-scenario.test.ts`
@@ -114,6 +115,7 @@ Manifest 信息：
 - 不包含 provider、model、API key、数据库密码或连接串。
 - 仍不贡献 Agent tool；它是发布/验收能力，由测试脚本、服务层或后续设置页显式触发。
 - registry 注册时会调用 `parseAgentEvalSuiteManifest()` 校验 suite manifest，避免官方插件声明和 runner 合同漂移。
+- `resolveEvalSuites()` 默认不会返回 `official.agent-rag-eval`，调用方必须显式传入 `enabledPluginIds: ['official.agent-rag-eval']`；这是为了避免默认关闭的验收能力被隐式执行真实 LLM、真实 PostgreSQL 或写报告文件。
 
 ## 开源方案评估
 
@@ -161,6 +163,8 @@ Manifest 信息：
 - 官方插件：
   - `official.agent-rag-eval` 携带默认 suite manifest。
   - registry 拒绝非 eval 插件声明 eval suite。
+  - registry 只从启用插件解析 eval suite，支持按 `suiteIds` 过滤。
+  - registry 拒绝解析阶段出现重复 suite id。
   - registry 返回 clone，调用方无法污染默认 suite manifest。
 
 ## 已知边界
