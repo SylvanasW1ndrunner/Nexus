@@ -36,7 +36,12 @@ import {
   type TableDetail,
   type TableSummary,
 } from '@dbagent/shared';
-import { registerDatabaseTools, runAgentBehaviorEvaluationSuite } from '../src/index.js';
+import {
+  loadAgentEvalSuiteCatalog,
+  registerDatabaseTools,
+  runAgentBehaviorEvaluationSuite,
+  type AgentEvalSuite,
+} from '../src/index.js';
 import {
   BUSINESS_CONNECTION_ID,
   businessFixtureCleanupSql,
@@ -46,6 +51,7 @@ import {
 } from './business-scenario-fixture.js';
 
 const tempDirs: string[] = [];
+const OFFICIAL_AGENT_RAG_LIVE_SUITE_ID = 'official.agent-rag.business-readonly';
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -267,6 +273,30 @@ describe('Agent with business RAG and database tools', () => {
 
     expect(result.status).toBe('permission_denied');
     expect(driver.executedSql).toEqual([]);
+  });
+});
+
+describe('Agent/RAG eval suite catalog wiring', () => {
+  it('loads the official business readonly suite used by the live gate', async () => {
+    const suite = await loadLiveAgentRagSuite();
+
+    expect(suite).toMatchObject({
+      suiteId: OFFICIAL_AGENT_RAG_LIVE_SUITE_ID,
+      suiteName: '官方 Agent/RAG 业务只读验收',
+      cases: [
+        {
+          case: {
+            id: 'OFFICIAL-AGENT-RAG-001',
+            requiredToolCalls: ['search_schema', 'query_database'],
+          },
+          run: {
+            allowedTools: ['search_schema', 'query_database'],
+            mode: 'readonly',
+            maxIterations: 5,
+          },
+        },
+      ],
+    });
   });
 });
 
@@ -528,50 +558,7 @@ describe('SiliconFlow live Agent and RAG integration', () => {
           allowedTools: ['search_schema', 'query_database'],
           maxIterations: 5,
         },
-        suite: {
-          suiteId: 'agent-rag-business-live',
-          suiteName: 'Agent/RAG 真实业务验收',
-          environment: 'llm-live',
-          notes: [
-            '该报告由 Agent/RAG Eval Suite Runner 生成，只记录结构化验收结果和脱敏后的最终回答。',
-            'API key 只允许通过本机环境变量注入，不写入报告、日志或仓库。',
-          ],
-          cases: [
-            {
-              case: {
-                id: 'BUS-AGENT-LIVE-001',
-                userTask:
-                  '你是数据分析助手。请先调用 search_schema 查找 GMV、退款率、ROI 相关 schema，再调用 query_database 查询渠道表现，最后用中文简短回答。connectionId 是 business_fixture。',
-                expectedStatus: 'done',
-                requiredToolCalls: ['search_schema', 'query_database'],
-                requiredToolStatuses: [
-                  { toolName: 'search_schema', status: 'success' },
-                  { toolName: 'query_database', status: 'success' },
-                ],
-                toolExpectations: [
-                  {
-                    toolName: 'search_schema',
-                    status: 'success',
-                    minCalls: 1,
-                    argumentIncludes: ['GMV'],
-                    resultIncludes: ['orders'],
-                  },
-                  {
-                    toolName: 'query_database',
-                    status: 'success',
-                    minCalls: 1,
-                    caseSensitive: false,
-                    argumentIncludes: ['select'],
-                    resultIncludes: ['paid_search'],
-                  },
-                ],
-                finalTextExcludes: ['api_key', 'password', 'secret'],
-                minIterations: 2,
-                maxIterations: 5,
-              },
-            },
-          ],
-        },
+        suite: await loadLiveAgentRagSuite(),
       });
       const result = output.caseResults[0]?.result;
 
@@ -808,4 +795,22 @@ async function writeLiveAgentRagReport(report: AgentBehaviorEvaluationReport): P
   await Promise.all(
     report.files.map((file) => writeFile(join(reportDir, file.path), file.content, 'utf8')),
   );
+}
+
+async function loadLiveAgentRagSuite(): Promise<AgentEvalSuite> {
+  const suiteId = process.env.DBAGENT_AGENT_RAG_SUITE_ID ?? OFFICIAL_AGENT_RAG_LIVE_SUITE_ID;
+  const workspaceRoot = process.env.DBAGENT_AGENT_RAG_EVAL_WORKSPACE;
+  const catalog = await loadAgentEvalSuiteCatalog({
+    official: { enabledPluginIds: ['official.agent-rag-eval'] },
+    ...(workspaceRoot === undefined ? {} : { workspace: { workspaceRoot } }),
+  });
+  const entry = catalog.entries.find((item) => item.suiteId === suiteId);
+  if (entry === undefined) {
+    throw new Error(
+      `Agent/RAG live eval suite is not available: ${suiteId}. Available suites: ${catalog.entries
+        .map((item) => item.suiteId)
+        .join(', ')}`,
+    );
+  }
+  return entry.suite;
 }
