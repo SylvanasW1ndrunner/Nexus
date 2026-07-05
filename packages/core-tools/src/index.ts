@@ -13,6 +13,7 @@ export * from './agent-eval-suite-runner.js';
 export * from './agent-eval-suite-manifest.js';
 export * from './agent-eval-suite-workspace-loader.js';
 export * from './agent-eval-suite-catalog.js';
+export * from './agent-eval-suite-catalog-service.js';
 export * from './skill-agent-runner.js';
 export * from './validation.js';
 export * from './workspace-sandbox.js';

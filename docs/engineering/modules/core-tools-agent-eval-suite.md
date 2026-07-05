@@ -29,6 +29,10 @@
 - `packages/core-tools/src/agent-eval-suite-catalog.ts`
   - `loadAgentEvalSuiteCatalog(options)`
   - `AgentEvalSuiteCatalogEntry`
+- `packages/core-tools/src/agent-eval-suite-catalog-service.ts`
+  - `AgentEvalSuiteCatalogService`
+  - `list(options)`
+  - `get(options)`
 - `packages/core-tools/src/official-plugin-registry.ts`
   - 新增默认关闭的 `official.agent-rag-eval` manifest。
   - 声明内置 `official.agent-rag.business-readonly` eval suite manifest。
@@ -145,6 +149,29 @@
 - catalog 只做发现、解析、合并和去重。
 - catalog 不调用 Agent、不调用 LLM、不连接 PostgreSQL、不写报告。
 - 后续运行门禁、provider、数据库 fixture、报告目录和权限提示必须由服务层显式控制。
+
+## Eval Suite Catalog Service
+
+`AgentEvalSuiteCatalogService` 是 catalog 之上的查询服务层，用于后续主进程、typed IPC、插件市场和 release gate 查询可用评测套件。它不会执行 suite，只返回安全摘要或调用方显式请求的明细。
+
+查询能力：
+
+- `list(options)`：按 `suiteIds`、`sourceKinds`、`environments` 过滤 suite，并返回可用于列表页、配置页或发布门禁的摘要。
+- `get(options)`：按单个 `suiteId` 查询 suite，未找到时返回 `undefined`。
+- `includeManifest` / `includeSuite`：默认不返回完整 manifest 和 suite；只有调用方明确请求时才返回深拷贝明细。
+
+摘要字段：
+
+- `suiteId`、`suiteName`、`environment`、`source`、`sourceLabel`。
+- `caseCount`、`caseIds`、`notes`。
+- `declaredToolNames`、`requiredToolNames`、`allowedToolNames`、`runModes`、`readonlyOnly`。
+
+服务边界：
+
+- service 只组合 `loadAgentEvalSuiteCatalog()` 的结果，不调用 Agent、不调用 LLM、不连接 PostgreSQL、不写报告。
+- service 不保存 provider、model、API key、数据库密码或连接串。
+- service 返回值会 clone 关键对象，调用方修改结果不会污染后续查询。
+- 未来 UI/IPC 只能通过该 service 查询 suite 元数据，真正运行 suite 仍需进入显式 release/test gate。
 
 ## 官方插件边界
 
