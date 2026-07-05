@@ -40,7 +40,7 @@ import {
   loadAgentEvalSuiteCatalog,
   registerDatabaseTools,
   runAgentBehaviorEvaluationSuite,
-  type AgentEvalSuite,
+  type AgentEvalSuiteCatalogEntry,
 } from '../src/index.js';
 import {
   BUSINESS_CONNECTION_ID,
@@ -278,9 +278,10 @@ describe('Agent with business RAG and database tools', () => {
 
 describe('Agent/RAG eval suite catalog wiring', () => {
   it('loads the official business readonly suite used by the live gate', async () => {
-    const suite = await loadLiveAgentRagSuite();
+    const entry = await loadLiveAgentRagSuite();
 
-    expect(suite).toMatchObject({
+    expect(entry.source).toEqual({ kind: 'official', pluginId: 'official.agent-rag-eval' });
+    expect(entry.suite).toMatchObject({
       suiteId: OFFICIAL_AGENT_RAG_LIVE_SUITE_ID,
       suiteName: '官方 Agent/RAG 业务只读验收',
       cases: [
@@ -547,6 +548,7 @@ describe('SiliconFlow live Agent and RAG integration', () => {
         fixedDependencies(),
       );
 
+      const liveSuite = await loadLiveAgentRagSuite();
       const output = await runAgentBehaviorEvaluationSuite({
         agent,
         reportStorePath: reportStorePath(),
@@ -558,7 +560,8 @@ describe('SiliconFlow live Agent and RAG integration', () => {
           allowedTools: ['search_schema', 'query_database'],
           maxIterations: 5,
         },
-        suite: await loadLiveAgentRagSuite(),
+        suite: liveSuite.suite,
+        suiteSource: liveSuite.source,
       });
       const result = output.caseResults[0]?.result;
 
@@ -797,7 +800,7 @@ async function writeLiveAgentRagReport(report: AgentBehaviorEvaluationReport): P
   );
 }
 
-async function loadLiveAgentRagSuite(): Promise<AgentEvalSuite> {
+async function loadLiveAgentRagSuite(): Promise<Pick<AgentEvalSuiteCatalogEntry, 'source' | 'suite'>> {
   const suiteId = process.env.DBAGENT_AGENT_RAG_SUITE_ID ?? OFFICIAL_AGENT_RAG_LIVE_SUITE_ID;
   const workspaceRoot = process.env.DBAGENT_AGENT_RAG_EVAL_WORKSPACE;
   const catalog = await loadAgentEvalSuiteCatalog({
@@ -812,5 +815,5 @@ async function loadLiveAgentRagSuite(): Promise<AgentEvalSuite> {
         .join(', ')}`,
     );
   }
-  return entry.suite;
+  return { suite: entry.suite, source: entry.source };
 }

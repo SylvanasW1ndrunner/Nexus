@@ -47,6 +47,7 @@
 - `agent`：提供 `run(options)` 的 Agent 实例或 adapter。
 - `suite`：业务用例集合，每个 case 使用 `AgentBehaviorEvaluationCase` 描述验收规则。
 - `baseRun`：公共 Agent 运行参数，例如 provider、model、mode、迭代数。
+- `suiteSource`：可选来源信息，支持 official plugin、workspace manifest 或 manual，用于报告追踪。
 - `reportStorePath`：可选报告索引路径。
 - `stopOnFirstFailure`：可选，失败后立即停止，适合 release gate。
 
@@ -205,6 +206,7 @@ Manifest 信息：
   - `scripts/run-agent-rag-live-tests.mjs` 设置 `DBAGENT_RUN_AGENT_RAG_LIVE=1` 后，真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` case 会通过 `runAgentBehaviorEvaluationSuite()` 执行。
   - live case 默认从 catalog 加载 `official.agent-rag.business-readonly`；可通过 `DBAGENT_AGENT_RAG_SUITE_ID` 选择 suite，通过 `DBAGENT_AGENT_RAG_EVAL_WORKSPACE` 加载工作区 `.dbagent/evals/*.json`。
   - live 报告目录仍兼容旧入口：`tmp/agent-rag-live-report` 下写入 `manifest.json`、`results.json`、`report.md`、`reports.json` 和 `run.json`。
+  - `manifest.json`、`results.json` 和 `report.md` 记录 `suiteSource`，用于区分官方 suite 与工作区 suite。
   - live SQL 参数断言对 SQL 关键字使用 `caseSensitive: false`，仍要求 `query_database` 成功执行并返回 `paid_search` 等业务结果。
 - 失败套件：
   - `stopOnFirstFailure` 只运行第一个失败用例。

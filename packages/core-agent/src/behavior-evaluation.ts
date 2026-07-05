@@ -210,6 +210,7 @@ export function buildAgentBehaviorEvaluationReport(
     suiteName: redactedInput.suiteName,
     generatedAt,
     environment: redactedInput.environment ?? 'manual',
+    ...(redactedInput.suiteSource === undefined ? {} : { suiteSource: redactedInput.suiteSource }),
     run: redactedInput.run ?? {},
     notes: redactedInput.notes ?? [],
     summary: publicSummary(redactedInput.summary),
@@ -223,6 +224,7 @@ export function buildAgentBehaviorEvaluationReport(
     suiteName: redactedInput.suiteName,
     generatedAt,
     environment: redactedInput.environment ?? 'manual',
+    ...(redactedInput.suiteSource === undefined ? {} : { suiteSource: redactedInput.suiteSource }),
     run: redactedInput.run ?? {},
     summary: publicSummary(redactedInput.summary),
     files: [
@@ -248,6 +250,7 @@ function buildManifest(
     suiteId: input.suiteId,
     suiteName: input.suiteName,
     environment: input.environment ?? 'manual',
+    ...(input.suiteSource === undefined ? {} : { suiteSource: input.suiteSource }),
     run: input.run ?? {},
     notes: input.notes ?? [],
     summary: publicSummary(input.summary),
@@ -266,6 +269,7 @@ function buildMarkdownReport(
     `- Suite: ${input.suiteId}`,
     `- Generated At: ${generatedAt}`,
     `- Environment: ${input.environment ?? 'manual'}`,
+    `- Suite Source: ${formatSuiteSource(input.suiteSource)}`,
     `- Provider: ${input.run?.providerId ?? 'n/a'}`,
     `- Model: ${input.run?.model ?? 'n/a'}`,
     `- Live LLM: ${input.run?.live === true ? 'yes' : 'no'}`,
@@ -343,6 +347,13 @@ function formatObservedToolDetail(
   return singleLine(
     `${tool.toolName}:${tool.status}:${tool.argumentPreview ?? ''}:${tool.resultPreview}`,
   );
+}
+
+function formatSuiteSource(source: AgentBehaviorEvaluationReportInput['suiteSource']): string {
+  if (source === undefined) return 'manual';
+  if (source.kind === 'official') return `official:${source.pluginId ?? 'unknown'}`;
+  if (source.kind === 'workspace') return `workspace:${source.relativePath ?? 'unknown'}`;
+  return source.kind;
 }
 
 function defaultReportId(suiteId: string, generatedAt: string): string {

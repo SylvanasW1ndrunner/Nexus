@@ -43,6 +43,7 @@ describe('runAgentBehaviorEvaluationSuite', () => {
       agent,
       reportStorePath,
       generatedAt: '2026-07-02T00:00:00.000Z',
+      suiteSource: { kind: 'workspace', relativePath: '.dbagent/evals/ecommerce.json' },
       baseRun: {
         providerId: 'fake',
         model: 'fake-model',
@@ -100,8 +101,18 @@ describe('runAgentBehaviorEvaluationSuite', () => {
     ]);
     const combined = output.report.files.map((file) => file.content).join('\n');
     expect(combined).toContain('Tool Details');
+    expect(combined).toContain('.dbagent/evals/ecommerce.json');
     expect(combined).toContain('sk-[REDACTED]');
     expect(combined).not.toContain(apiKey);
+    expect(output.report.suiteSource).toEqual({
+      kind: 'workspace',
+      relativePath: '.dbagent/evals/ecommerce.json',
+    });
+    expect(
+      JSON.parse(output.report.files.find((file) => file.path === 'manifest.json')!.content),
+    ).toMatchObject({
+      suiteSource: { kind: 'workspace', relativePath: '.dbagent/evals/ecommerce.json' },
+    });
   });
 
   it('stops on the first failed case when requested', async () => {

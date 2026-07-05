@@ -5,6 +5,7 @@ import {
   type AgentBehaviorEvaluationCase,
   type AgentBehaviorEvaluationReport,
   type AgentBehaviorEvaluationReportSummary,
+  type AgentBehaviorEvaluationReportInput,
   type AgentBehaviorEvaluationSummary,
   type AgentRunOptions,
   type AgentRunResult,
@@ -31,6 +32,7 @@ export type AgentEvalSuiteRunOptions = {
   agent: AgentEvalSuiteAgent;
   suite: AgentEvalSuite;
   baseRun: Omit<AgentRunOptions, 'userMessage'>;
+  suiteSource?: AgentBehaviorEvaluationReportInput['suiteSource'];
   reportId?: string;
   generatedAt?: string;
   reportStorePath?: string;
@@ -82,6 +84,7 @@ export async function runAgentBehaviorEvaluationSuite(
     summary,
     ...(options.generatedAt === undefined ? {} : { generatedAt: options.generatedAt }),
     environment: options.suite.environment ?? 'manual',
+    ...(options.suiteSource === undefined ? {} : { suiteSource: options.suiteSource }),
     run: {
       providerId: options.baseRun.providerId,
       model: options.baseRun.model,

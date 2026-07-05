@@ -203,6 +203,11 @@ export type AgentBehaviorEvaluationReportInput = {
   summary: AgentBehaviorEvaluationSummary;
   generatedAt?: string;
   environment?: 'unit' | 'integration' | 'postgres' | 'llm-live' | 'manual';
+  suiteSource?: {
+    kind: 'official' | 'workspace' | 'manual';
+    pluginId?: string;
+    relativePath?: string;
+  };
   run?: {
     providerId?: string;
     model?: string;
@@ -225,6 +230,7 @@ export type AgentBehaviorEvaluationReport = {
   suiteName: string;
   generatedAt: string;
   environment: NonNullable<AgentBehaviorEvaluationReportInput['environment']>;
+  suiteSource?: AgentBehaviorEvaluationReportInput['suiteSource'];
   run: NonNullable<AgentBehaviorEvaluationReportInput['run']>;
   files: AgentBehaviorEvaluationReportFile[];
   summary: {
