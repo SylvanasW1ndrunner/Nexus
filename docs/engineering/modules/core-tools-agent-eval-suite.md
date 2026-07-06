@@ -33,6 +33,9 @@
   - `AgentEvalSuiteCatalogService`
   - `list(options)`
   - `get(options)`
+- `packages/core-tools/src/agent-eval-suite-run-service.ts`
+  - `AgentEvalSuiteRunService`
+  - `run(options)`
 - `packages/core-tools/src/official-plugin-registry.ts`
   - 新增默认关闭的 `official.agent-rag-eval` manifest。
   - 声明内置 `official.agent-rag.business-readonly` eval suite manifest。
@@ -173,6 +176,35 @@
 - service 返回值会 clone 关键对象，调用方修改结果不会污染后续查询。
 - 未来 UI/IPC 只能通过该 service 查询 suite 元数据，真正运行 suite 仍需进入显式 release/test gate。
 
+## Eval Suite Run Service
+
+`AgentEvalSuiteRunService` 是 catalog 与 runner 之间的执行服务层，用于后续发布门禁、主进程服务、typed IPC 和官方插件入口。它负责从 catalog 中选择 suite、检查真实依赖门禁、自动写入 suite source，并调用 `runAgentBehaviorEvaluationSuite()` 执行。
+
+执行能力：
+
+- `run(options)`：按 `suiteId` 从 catalog 读取 suite，并执行该 suite。
+- `catalog`：可传入官方插件启用项、工作区路径等 catalog 查询配置。
+- `baseRun`：由调用方显式提供 provider、model、模式和预算等公共 Agent 参数。
+- `reportStorePath`、`generatedAt`、`reportId`、`stopOnFirstFailure`：透传给 runner，用于发布门禁和报告落盘。
+
+真实依赖门禁：
+
+- `environment: postgres` 的 suite 默认拒绝执行，必须传入 `allowPostgresSuites: true`。
+- `environment: llm-live` 的 suite 默认拒绝执行，必须传入 `allowLiveSuites: true`。
+- 拒绝发生在调用 Agent 前，避免误触发真实数据库或真实模型。
+
+报告来源：
+
+- official suite 自动写入 `{ kind: 'official', pluginId }`。
+- workspace suite 自动写入 `{ kind: 'workspace', relativePath }`。
+- 该来源会进入 `manifest.json`、`results.json`、`report.md` 和返回对象，便于追踪发布验收使用的是官方套件还是工作区套件。
+
+服务边界：
+
+- service 不自行构造 Agent、Provider、数据库 fixture 或报告目录。
+- service 不读取 API key、数据库密码或连接串。
+- service 只做 suite 选择、真实依赖门禁和 runner 编排；真正的工具权限、SQL 只读约束和 LLM 行为仍由 Agent runtime 与 suite case 共同约束。
+
 ## 官方插件边界
 
 `official.agent-rag-eval` 当前默认关闭，且不贡献 Agent tool。原因：
@@ -249,6 +281,12 @@ Manifest 信息：
 - catalog：
   - 合并显式启用的官方 suite 和真实临时工作区 suite。
   - 覆盖默认禁用官方 eval、仅工作区加载、跨来源重复 suite id、clone 防污染。
+- run service：
+  - 从真实临时工作区 catalog 选择 suite 并执行。
+  - 自动把 workspace suite source 写入报告。
+  - 默认拒绝 `postgres` 和 `llm-live` suite，并确认拒绝时不调用 Agent。
+  - 显式打开 PostgreSQL 门禁后允许执行 `postgres` suite。
+  - suite 不存在时返回明确错误。
 - 官方插件：
   - `official.agent-rag-eval` 携带默认 suite manifest。
   - registry 拒绝非 eval 插件声明 eval suite。
