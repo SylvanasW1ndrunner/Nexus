@@ -57,6 +57,7 @@
 - `suiteSource`：可选来源信息，支持 official plugin、workspace manifest 或 manual，用于报告追踪。
 - `reportStorePath`：可选报告索引路径。
 - `stopOnFirstFailure`：可选，失败后立即停止，适合 release gate。
+- `reportRun`：可选报告运行元数据覆盖项，例如真实模型门禁可显式写入 `live: true`，避免只依赖 suite environment 推断。
 
 每个 suite case 可以通过 `run` 覆盖部分运行参数，例如更高的超时、更小的迭代上限或不同模式。最终 `userMessage` 固定来自 `case.userTask`，避免评估定义和真实任务输入脱节。
 
@@ -186,6 +187,7 @@
 - `catalog`：可传入官方插件启用项、工作区路径等 catalog 查询配置。
 - `baseRun`：由调用方显式提供 provider、model、模式和预算等公共 Agent 参数。
 - `reportStorePath`、`generatedAt`、`reportId`、`stopOnFirstFailure`：透传给 runner，用于发布门禁和报告落盘。
+- `reportRun`：透传给 runner，用于写入 `live`、`postgres`、`commit` 等报告运行元数据。
 
 真实依赖门禁：
 
@@ -198,6 +200,7 @@
 - official suite 自动写入 `{ kind: 'official', pluginId }`。
 - workspace suite 自动写入 `{ kind: 'workspace', relativePath }`。
 - 该来源会进入 `manifest.json`、`results.json`、`report.md` 和返回对象，便于追踪发布验收使用的是官方套件还是工作区套件。
+- SiliconFlow live gate 已统一通过 `AgentEvalSuiteRunService` 执行，并显式写入 `reportRun.live=true`。
 
 服务边界：
 
@@ -262,10 +265,12 @@ Manifest 信息：
   - `pnpm test:postgres` 会创建真实 PostgreSQL 业务表、抽取 catalog、索引 RAG，并通过 `runAgentBehaviorEvaluationSuite()` 执行 Agent 工具链。
   - 报告 run metadata 标记 `postgres: true`，并验证临时 report store 摘要。
 - live 套件：
-  - `scripts/run-agent-rag-live-tests.mjs` 设置 `DBAGENT_RUN_AGENT_RAG_LIVE=1` 后，真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` case 会通过 `runAgentBehaviorEvaluationSuite()` 执行。
+  - `scripts/run-agent-rag-live-tests.mjs` 设置 `DBAGENT_RUN_AGENT_RAG_LIVE=1` 后，真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` case 会通过 `AgentEvalSuiteRunService` 执行。
   - live case 默认从 catalog 加载 `official.agent-rag.business-readonly`；可通过 `DBAGENT_AGENT_RAG_SUITE_ID` 选择 suite，通过 `DBAGENT_AGENT_RAG_EVAL_WORKSPACE` 加载工作区 `.dbagent/evals/*.json`。
+  - live case 通过 `AgentEvalSuiteRunService` 选择并执行 suite，不再在测试里手工拼接 catalog 和 runner。
   - live 报告目录仍兼容旧入口：`tmp/agent-rag-live-report` 下写入 `manifest.json`、`results.json`、`report.md`、`reports.json` 和 `run.json`。
   - `manifest.json`、`results.json` 和 `report.md` 记录 `suiteSource`，用于区分官方 suite 与工作区 suite。
+  - live 报告显式记录 `run.live=true`。
   - live SQL 参数断言对 SQL 关键字使用 `caseSensitive: false`，仍要求 `query_database` 成功执行并返回 `paid_search` 等业务结果。
 - 失败套件：
   - `stopOnFirstFailure` 只运行第一个失败用例。

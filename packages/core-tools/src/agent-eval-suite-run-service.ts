@@ -20,6 +20,7 @@ export type AgentEvalSuiteRunServiceOptions = {
   generatedAt?: string;
   reportStorePath?: string;
   stopOnFirstFailure?: boolean;
+  reportRun?: AgentBehaviorEvaluationReportInput['run'];
   allowPostgresSuites?: boolean;
   allowLiveSuites?: boolean;
 };
@@ -53,6 +54,7 @@ export class AgentEvalSuiteRunService {
       ...(options.generatedAt === undefined ? {} : { generatedAt: options.generatedAt }),
       ...(options.reportStorePath === undefined ? {} : { reportStorePath: options.reportStorePath }),
       ...(options.stopOnFirstFailure === undefined ? {} : { stopOnFirstFailure: options.stopOnFirstFailure }),
+      ...(options.reportRun === undefined ? {} : { reportRun: options.reportRun }),
     });
 
     return {

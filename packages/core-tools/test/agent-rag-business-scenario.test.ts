@@ -37,6 +37,7 @@ import {
   type TableSummary,
 } from '@dbagent/shared';
 import {
+  AgentEvalSuiteRunService,
   loadAgentEvalSuiteCatalog,
   registerDatabaseTools,
   runAgentBehaviorEvaluationSuite,
@@ -548,11 +549,15 @@ describe('SiliconFlow live Agent and RAG integration', () => {
         fixedDependencies(),
       );
 
-      const liveSuite = await loadLiveAgentRagSuite();
-      const output = await runAgentBehaviorEvaluationSuite({
+      const output = await new AgentEvalSuiteRunService().run({
         agent,
+        suiteId: liveSuiteId(),
+        catalog: liveSuiteCatalogOptions(),
         reportStorePath: reportStorePath(),
         stopOnFirstFailure: true,
+        allowLiveSuites: true,
+        allowPostgresSuites: true,
+        reportRun: { live: true },
         baseRun: {
           providerId: 'siliconflow',
           model,
@@ -560,12 +565,12 @@ describe('SiliconFlow live Agent and RAG integration', () => {
           allowedTools: ['search_schema', 'query_database'],
           maxIterations: 5,
         },
-        suite: liveSuite.suite,
-        suiteSource: liveSuite.source,
       });
       const result = output.caseResults[0]?.result;
 
       expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
+      expect(output.report.run.live).toBe(true);
+      expect(output.suiteSource).toEqual(output.report.suiteSource);
       expect(result?.status).toBe('done');
       expect(result?.toolExecutions).toEqual(
         expect.arrayContaining([
@@ -790,6 +795,18 @@ function reportStorePath(): string | undefined {
   return reportDir ? join(reportDir, 'reports.json') : undefined;
 }
 
+function liveSuiteId(): string {
+  return process.env.DBAGENT_AGENT_RAG_SUITE_ID ?? OFFICIAL_AGENT_RAG_LIVE_SUITE_ID;
+}
+
+function liveSuiteCatalogOptions() {
+  const workspaceRoot = process.env.DBAGENT_AGENT_RAG_EVAL_WORKSPACE;
+  return {
+    official: { enabledPluginIds: ['official.agent-rag-eval'] },
+    ...(workspaceRoot === undefined ? {} : { workspace: { workspaceRoot } }),
+  };
+}
+
 async function writeLiveAgentRagReport(report: AgentBehaviorEvaluationReport): Promise<void> {
   const reportDir = process.env.DBAGENT_AGENT_RAG_REPORT_DIR;
   if (!reportDir) return;
@@ -801,12 +818,8 @@ async function writeLiveAgentRagReport(report: AgentBehaviorEvaluationReport): P
 }
 
 async function loadLiveAgentRagSuite(): Promise<Pick<AgentEvalSuiteCatalogEntry, 'source' | 'suite'>> {
-  const suiteId = process.env.DBAGENT_AGENT_RAG_SUITE_ID ?? OFFICIAL_AGENT_RAG_LIVE_SUITE_ID;
-  const workspaceRoot = process.env.DBAGENT_AGENT_RAG_EVAL_WORKSPACE;
-  const catalog = await loadAgentEvalSuiteCatalog({
-    official: { enabledPluginIds: ['official.agent-rag-eval'] },
-    ...(workspaceRoot === undefined ? {} : { workspace: { workspaceRoot } }),
-  });
+  const suiteId = liveSuiteId();
+  const catalog = await loadAgentEvalSuiteCatalog(liveSuiteCatalogOptions());
   const entry = catalog.entries.find((item) => item.suiteId === suiteId);
   if (entry === undefined) {
     throw new Error(

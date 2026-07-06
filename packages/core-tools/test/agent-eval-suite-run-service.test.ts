@@ -52,6 +52,7 @@ describe('AgentEvalSuiteRunService', () => {
       catalog: { official: false, workspace: { workspaceRoot: rootPath } },
       reportStorePath,
       generatedAt: '2026-07-06T00:00:00.000Z',
+      reportRun: { live: true, commit: 'test-commit' },
       baseRun: {
         providerId: 'fake',
         model: 'fake-model',
@@ -67,6 +68,7 @@ describe('AgentEvalSuiteRunService', () => {
     });
     expect(output.suiteSource).toEqual({ kind: 'workspace', relativePath: '.dbagent/evals/run.json' });
     expect(output.report.suiteSource).toEqual({ kind: 'workspace', relativePath: '.dbagent/evals/run.json' });
+    expect(output.report.run).toMatchObject({ providerId: 'fake', model: 'fake-model', live: true, commit: 'test-commit' });
     expect(output.savedReport).toMatchObject({ suiteId: 'workspace.run', passRate: 1 });
     expect(agent.calls).toMatchObject([
       {

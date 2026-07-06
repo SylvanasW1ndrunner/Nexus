@@ -37,6 +37,7 @@ export type AgentEvalSuiteRunOptions = {
   generatedAt?: string;
   reportStorePath?: string;
   stopOnFirstFailure?: boolean;
+  reportRun?: AgentBehaviorEvaluationReportInput['run'];
 };
 
 export type AgentEvalSuiteRunResult = {
@@ -90,6 +91,7 @@ export async function runAgentBehaviorEvaluationSuite(
       model: options.baseRun.model,
       live: options.suite.environment === 'llm-live',
       postgres: options.suite.environment === 'postgres',
+      ...(options.reportRun ?? {}),
     },
     ...(options.suite.notes === undefined ? {} : { notes: options.suite.notes }),
   });
