@@ -262,7 +262,8 @@ Manifest 信息：
   - 使用 scripted provider、fake PostgreSQL driver 和真实 `ReactAgent` 调用路径。
   - 验证 `search_schema`、`query_database`、最终回答、实际 SQL 执行记录和临时 report store。
 - PostgreSQL 套件：
-  - `pnpm test:postgres` 会创建真实 PostgreSQL 业务表、抽取 catalog、索引 RAG，并通过 `runAgentBehaviorEvaluationSuite()` 执行 Agent 工具链。
+  - `pnpm test:postgres` 会创建真实 PostgreSQL 业务表、抽取 catalog、索引 RAG，并通过 `AgentEvalSuiteRunService` 执行 Agent 工具链。
+  - PostgreSQL gate 在临时工作区写入 `.dbagent/evals/postgres-business.json`，再由 workspace catalog 加载 suite，验证真实依赖门禁和 workspace suite source。
   - 报告 run metadata 标记 `postgres: true`，并验证临时 report store 摘要。
 - live 套件：
   - `scripts/run-agent-rag-live-tests.mjs` 设置 `DBAGENT_RUN_AGENT_RAG_LIVE=1` 后，真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` case 会通过 `AgentEvalSuiteRunService` 执行。
@@ -291,6 +292,7 @@ Manifest 信息：
   - 自动把 workspace suite source 写入报告。
   - 默认拒绝 `postgres` 和 `llm-live` suite，并确认拒绝时不调用 Agent。
   - 显式打开 PostgreSQL 门禁后允许执行 `postgres` suite。
+  - 真实 PostgreSQL gate 和 SiliconFlow live gate 均通过该 service 进入 runner。
   - suite 不存在时返回明确错误。
 - 官方插件：
   - `official.agent-rag-eval` 携带默认 suite manifest。

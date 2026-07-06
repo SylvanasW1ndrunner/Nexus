@@ -387,62 +387,30 @@ describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')(
           fixedDependencies(),
         );
 
-        const output = await runAgentBehaviorEvaluationSuite({
+        const evalWorkspace = await tempDir();
+        await writePostgresAgentRagSuiteManifest(evalWorkspace);
+
+        const output = await new AgentEvalSuiteRunService().run({
           agent,
+          suiteId: 'agent-rag-business-postgres',
+          catalog: { official: false, workspace: { workspaceRoot: evalWorkspace } },
           reportStorePath: join(await tempDir(), 'reports.json'),
+          allowPostgresSuites: true,
           baseRun: {
             providerId: 'fake',
             model: 'fake-business-model',
             mode: 'readonly',
             maxIterations: 5,
           },
-          suite: {
-            suiteId: 'agent-rag-business-postgres',
-            suiteName: 'Agent/RAG 真实 PostgreSQL 业务验收',
-            environment: 'postgres',
-            notes: ['该套件创建真实 PostgreSQL 业务表、抽取 catalog、索引 RAG，并通过 Agent 工具链执行查询。'],
-            cases: [
-              {
-                case: {
-                  id: 'BUS-AGENT-PG-001',
-                  userTask: '按渠道统计 GMV、退款率和 ROI。',
-                  expectedStatus: 'done',
-                  requiredToolCalls: ['search_schema', 'query_database'],
-                  requiredToolStatuses: [
-                    { toolName: 'search_schema', status: 'success' },
-                    { toolName: 'query_database', status: 'success' },
-                  ],
-                  toolExpectations: [
-                    {
-                      toolName: 'search_schema',
-                      status: 'success',
-                      minCalls: 1,
-                      maxCalls: 1,
-                      argumentIncludes: ['GMV', 'ROI'],
-                      resultIncludes: ['public.orders', 'analytics.campaign_spend'],
-                    },
-                    {
-                      toolName: 'query_database',
-                      status: 'success',
-                      minCalls: 1,
-                      maxCalls: 1,
-                      argumentIncludes: ['analytics.traffic_sessions', 'public.refunds'],
-                      resultIncludes: ['paid_search'],
-                    },
-                  ],
-                  finalTextIncludes: ['GMV'],
-                  finalTextExcludes: ['password', 'apiKey'],
-                  minIterations: 2,
-                  maxIterations: 5,
-                },
-              },
-            ],
-          },
         });
         const result = output.caseResults[0]?.result;
 
         expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
         expect(output.report.run.postgres).toBe(true);
+        expect(output.suiteSource).toEqual({
+          kind: 'workspace',
+          relativePath: '.dbagent/evals/postgres-business.json',
+        });
         expect(output.savedReport).toMatchObject({
           suiteId: 'agent-rag-business-postgres',
           suiteName: 'Agent/RAG 真实 PostgreSQL 业务验收',
@@ -781,6 +749,61 @@ async function tempDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-rag-'));
   tempDirs.push(dir);
   return dir;
+}
+
+async function writePostgresAgentRagSuiteManifest(workspaceRoot: string): Promise<void> {
+  await mkdir(join(workspaceRoot, '.dbagent', 'evals'), { recursive: true });
+  await writeFile(
+    join(workspaceRoot, '.dbagent', 'evals', 'postgres-business.json'),
+    JSON.stringify(
+      {
+        version: 1,
+        suite: {
+          suiteId: 'agent-rag-business-postgres',
+          suiteName: 'Agent/RAG 真实 PostgreSQL 业务验收',
+          environment: 'postgres',
+          notes: ['该套件创建真实 PostgreSQL 业务表、抽取 catalog、索引 RAG，并通过 Agent 工具链执行查询。'],
+          cases: [
+            {
+              id: 'BUS-AGENT-PG-001',
+              userTask: '按渠道统计 GMV、退款率和 ROI。',
+              expectedStatus: 'done',
+              requiredToolCalls: ['search_schema', 'query_database'],
+              requiredToolStatuses: [
+                { toolName: 'search_schema', status: 'success' },
+                { toolName: 'query_database', status: 'success' },
+              ],
+              toolExpectations: [
+                {
+                  toolName: 'search_schema',
+                  status: 'success',
+                  minCalls: 1,
+                  maxCalls: 1,
+                  argumentIncludes: ['GMV', 'ROI'],
+                  resultIncludes: ['public.orders', 'analytics.campaign_spend'],
+                },
+                {
+                  toolName: 'query_database',
+                  status: 'success',
+                  minCalls: 1,
+                  maxCalls: 1,
+                  argumentIncludes: ['analytics.traffic_sessions', 'public.refunds'],
+                  resultIncludes: ['paid_search'],
+                },
+              ],
+              finalTextIncludes: ['GMV'],
+              finalTextExcludes: ['password', 'apiKey'],
+              minIterations: 2,
+              maxIterations: 5,
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
 }
 
 function fixedDependencies() {
