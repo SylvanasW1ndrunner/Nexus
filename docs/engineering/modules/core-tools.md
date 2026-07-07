@@ -180,10 +180,11 @@ Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manife
 
 匹配规则：
 
-- 静态工具按 tool name 匹配，例如 `query_database`、`execute_sql`、`read_workspace_file`。
+- 静态工具按 tool name + runtime source 匹配，例如 `query_database`、`execute_sql`、`read_workspace_file`。未声明 source 的历史内置工具仍可匹配；一旦 runtime tool 声明了 `source: "user-mcp"`、`source: "market-mcp"`、`source: "workspace-script"` 等动态来源，就不能冒充同名官方静态工具。
 - 动态工具按 runtime source 匹配，而不是只靠名称前缀。当前官方动态来源为：
   - `workspace_script:*` 匹配 `source: "workspace-script"`。
   - `mcp:*` 匹配 `source: "user-mcp"` 和 `source: "market-mcp"`。
+- 如果动态 runtime tool 的名称碰撞官方静态工具名，动态贡献不能接管该名称；该工具必须通过对应静态工具的 source 边界才能被放行。
 - `readonlyOnly` 和 `maxDangerLevel` 同时作用于 manifest 贡献和真实 runtime tool，避免真实工具风险高于声明时被放行。
 - 重复 runtime tool name 会直接报错，避免上层 Agent 得到不确定白名单。
 
@@ -201,6 +202,7 @@ Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manife
 
 - `runtimeToolsFromToolRegistry(registry)`：从 `ToolRegistry.list()` 提取工具名、风险等级、只读标记和来源元数据。
 - `resolveOfficialPluginAgentTools(options)`：合并官方插件启用状态、runtime tools、只读/风险过滤和可选 Skill `allowedTools`。
+- `toolPermissions`：输出最终允许进入 Agent 的工具权限快照，包括插件 id、贡献项、动态/静态标记、runtime source、权限 id、风险等级、审批策略、资源范围、网络/进程访问和 secret 类型。该字段用于后续无 UI 质量门禁、Agent 运行审计和插件市场权限说明。
 
 调用语义：
 
@@ -208,6 +210,7 @@ Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manife
 - 选择 Skill 时，`agentAllowedToolNames` 按 Skill `allowedTools` 原始顺序输出，但只保留插件策略允许且 runtime 中真实存在的工具。
 - `blockedByPluginToolNames` 表示 Skill 想用但插件策略、运行时缺失、禁用状态或风险过滤导致不可用的工具。
 - `blockedBySkillToolNames` 表示插件允许但当前 Skill 未声明的工具。
+- `toolPermissions` 只包含 `agentAllowedToolNames` 中最终可执行的工具，不包含被 Skill 或插件策略拦截的工具，避免上层误把“可见诊断”当成“可执行授权”。
 
 上层 Agent runner 应把 `agentAllowedToolNames` 传入 `ReactAgent.run({ allowedTools })`。Skill 不能扩大工具权限；它只能在官方插件和运行时策略允许的范围内进一步收窄工具集合。
 

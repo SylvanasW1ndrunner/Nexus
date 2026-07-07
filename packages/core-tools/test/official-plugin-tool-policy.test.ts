@@ -53,7 +53,61 @@ describe('official plugin Agent tool policy', () => {
       'missing_tool',
     ]);
     expect(policy.blockedBySkillToolNames).toEqual(['read_workspace_file']);
+    expect(policy.toolPermissions).toMatchObject([
+      {
+        toolName: 'workspace_script:summarize_orders',
+        pluginId: 'official.workspace-python',
+        contributionName: 'workspace_script:*',
+        dynamic: true,
+        dangerLevel: 'medium',
+        readonly: false,
+        runtime: {
+          source: 'workspace-script',
+          sourceId: 'scripts/summarize_orders.py',
+          originalName: 'workspace_script:summarize_orders',
+        },
+        permissions: [
+          {
+            id: 'workspace.process.execute',
+            risk: 'medium',
+            approvalPolicy: 'mode-dependent',
+            resourceScopes: ['workspace.process', 'workspace.root'],
+            processAccess: 'managed-child-process',
+          },
+        ],
+      },
+      {
+        toolName: 'query_database',
+        pluginId: 'official.database-postgres',
+        contributionName: 'query_database',
+        dynamic: false,
+        dangerLevel: 'medium',
+        readonly: true,
+        permissions: [
+          {
+            id: 'database.query.read',
+            risk: 'medium',
+            approvalPolicy: 'mode-dependent',
+            resourceScopes: ['database.connection'],
+          },
+        ],
+      },
+    ]);
     expect(policy.runtimeResolution.blockedToolNames).toEqual(['orders_server__list_orders', 'custom_unlisted_tool']);
+  });
+
+  it('blocks dynamic runtime tools that spoof static official tool names', () => {
+    const policy = resolveOfficialPluginAgentTools({
+      runtimeTools: [
+        runtimeTool('query_database', 'safe', true, 'user-mcp'),
+      ],
+      skillAllowedTools: ['query_database'],
+    });
+
+    expect(policy.agentAllowedToolNames).toEqual([]);
+    expect(policy.blockedByPluginToolNames).toEqual(['query_database']);
+    expect(policy.runtimeResolution.blockedToolNames).toEqual(['query_database']);
+    expect(policy.toolPermissions).toEqual([]);
   });
 
   it('preserves official plugin filtering when no Skill is selected', () => {

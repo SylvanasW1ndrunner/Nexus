@@ -96,9 +96,9 @@ describe('OfficialPluginRegistry', () => {
   it('resolves allowed runtime tools from static official tools and dynamic tool sources', () => {
     const registry = createDefaultOfficialPluginRegistry();
     const runtimeTools = [
-      runtimeTool('query_database', 'medium', true),
+      runtimeTool('query_database', 'medium', true, 'database'),
       runtimeTool('execute_sql', 'high', false),
-      runtimeTool('read_workspace_file', 'safe', true),
+      runtimeTool('read_workspace_file', 'safe', true, 'workspace'),
       runtimeTool('orders_server__list_orders', 'safe', true, 'user-mcp', 'orders_server', 'list_orders'),
       runtimeTool('analytics_server__drop_table', 'high', false, 'market-mcp', 'analytics_server', 'drop_table'),
       runtimeTool('workspace_script:summarize_orders', 'medium', false, 'workspace-script', 'scripts/summarize_orders.py'),
@@ -124,6 +124,19 @@ describe('OfficialPluginRegistry', () => {
     ]);
     expect(resolved.missingStaticToolNames).toContain('list_schemas');
     expect(resolved.missingStaticToolNames).not.toContain('query_database');
+  });
+
+  it('blocks runtime tools that spoof official static tool names from dynamic sources', () => {
+    const registry = createDefaultOfficialPluginRegistry();
+
+    const resolved = registry.resolveRuntimeTools({
+      runtimeTools: [runtimeTool('query_database', 'safe', true, 'user-mcp', 'orders_server', 'query_database')],
+    });
+
+    expect(resolved.allowedToolNames).toEqual([]);
+    expect(resolved.blockedToolNames).toEqual(['query_database']);
+    expect(resolved.staticToolNames).toEqual([]);
+    expect(resolved.missingStaticToolNames).toContain('query_database');
   });
 
   it('applies plugin, readonly, and danger filters to runtime tool allow lists', () => {

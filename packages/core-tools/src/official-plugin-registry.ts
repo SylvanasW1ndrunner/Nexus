@@ -83,6 +83,7 @@ export type OfficialPluginToolResolutionOptions = {
 
 export type OfficialPluginToolResolution = {
   toolNames: string[];
+  staticTools: OfficialPluginToolContribution[];
   dynamicTools: OfficialPluginToolContribution[];
 };
 
@@ -166,6 +167,7 @@ export class OfficialPluginRegistry {
   resolveToolContributions(options: OfficialPluginToolResolutionOptions = {}): OfficialPluginToolResolution {
     const allowedPermissions = options.allowedPermissions === undefined ? undefined : new Set(options.allowedPermissions);
     const toolNames: string[] = [];
+    const staticTools: OfficialPluginToolContribution[] = [];
     const dynamicTools: OfficialPluginToolContribution[] = [];
     const seen = new Set<string>();
 
@@ -183,18 +185,19 @@ export class OfficialPluginRegistry {
         if (seen.has(tool.name)) throw new Error(`Duplicate resolved official tool contribution: ${tool.name}`);
         seen.add(tool.name);
         toolNames.push(tool.name);
+        staticTools.push(cloned);
       }
     }
 
-    return { toolNames, dynamicTools };
+    return { toolNames, staticTools, dynamicTools };
   }
 
   resolveRuntimeTools(options: OfficialPluginRuntimeToolResolutionOptions): OfficialPluginRuntimeToolResolution {
     const resolved = this.resolveToolContributions(options);
-    const staticToolNames = new Set(resolved.toolNames);
     const runtimeToolNames = new Set<string>();
     const allowedToolNames: string[] = [];
     const blockedToolNames: string[] = [];
+    const staticToolNames: string[] = [];
     const dynamicToolNames: string[] = [];
 
     for (const runtimeTool of options.runtimeTools) {
@@ -203,14 +206,17 @@ export class OfficialPluginRegistry {
       }
       runtimeToolNames.add(runtimeTool.name);
 
-      const staticAllowed = staticToolNames.has(runtimeTool.name);
-      const dynamicAllowed = resolved.dynamicTools.some((contribution) =>
-        dynamicContributionMatchesRuntimeTool(contribution, runtimeTool),
+      const staticAllowed = resolved.staticTools.some((contribution) =>
+        staticContributionMatchesRuntimeTool(contribution, runtimeTool),
       );
+      const dynamicAllowed =
+        !resolved.toolNames.includes(runtimeTool.name) &&
+        resolved.dynamicTools.some((contribution) => dynamicContributionMatchesRuntimeTool(contribution, runtimeTool));
       const runtimeAllowed = runtimeToolPassesResolutionOptions(runtimeTool, options);
 
       if ((staticAllowed || dynamicAllowed) && runtimeAllowed) {
         allowedToolNames.push(runtimeTool.name);
+        if (staticAllowed) staticToolNames.push(runtimeTool.name);
         if (dynamicAllowed && !staticAllowed) dynamicToolNames.push(runtimeTool.name);
       } else {
         blockedToolNames.push(runtimeTool.name);
@@ -220,9 +226,9 @@ export class OfficialPluginRegistry {
     return {
       allowedToolNames,
       blockedToolNames,
-      staticToolNames: resolved.toolNames.filter((name) => runtimeToolNames.has(name)),
+      staticToolNames,
       dynamicToolNames,
-      missingStaticToolNames: resolved.toolNames.filter((name) => !runtimeToolNames.has(name)),
+      missingStaticToolNames: resolved.toolNames.filter((name) => !staticToolNames.includes(name)),
       dynamicContributions: resolved.dynamicTools,
     };
   }
@@ -369,12 +375,12 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
       }),
     ],
     tools: [
-      tool('list_schemas', '列出 Schema', '列出当前连接中的 schema。', 'safe', true, ['database.schema.read']),
-      tool('list_tables', '列出表', '列出当前连接中的表和视图。', 'safe', true, ['database.schema.read']),
-      tool('describe_table', '描述表', '读取单表字段、主键和注释。', 'safe', true, ['database.schema.read']),
-      tool('audit_sql', 'SQL 预审', '在执行前返回 SQL 安全报告。', 'safe', true, ['database.query.read']),
-      tool('query_database', '只读查询', '执行单条只读 SQL 并返回结果。', 'medium', true, ['database.query.read']),
-      tool('execute_sql', '执行 SQL', '执行需要批准的写入或 DDL SQL。', 'high', false, ['database.query.write']),
+      tool('list_schemas', '列出 Schema', '列出当前连接中的 schema。', 'safe', true, ['database.schema.read'], ['database']),
+      tool('list_tables', '列出表', '列出当前连接中的表和视图。', 'safe', true, ['database.schema.read'], ['database']),
+      tool('describe_table', '描述表', '读取单表字段、主键和注释。', 'safe', true, ['database.schema.read'], ['database']),
+      tool('audit_sql', 'SQL 预审', '在执行前返回 SQL 安全报告。', 'safe', true, ['database.query.read'], ['database']),
+      tool('query_database', '只读查询', '执行单条只读 SQL 并返回结果。', 'medium', true, ['database.query.read'], ['database']),
+      tool('execute_sql', '执行 SQL', '执行需要批准的写入或 DDL SQL。', 'high', false, ['database.query.write'], ['database']),
     ],
   },
   {
@@ -398,9 +404,9 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
       }),
     ],
     tools: [
-      tool('search_schema', '检索 Schema', '按业务问题检索 schema 文档。', 'safe', true, ['rag.schema.read']),
-      tool('get_relations', '读取关系上下文', '读取单表一跳关系上下文。', 'safe', true, ['rag.schema.read']),
-      tool('build_schema_context', '构建 Schema 上下文', '构建供 Agent 使用的紧凑 schema 上下文。', 'safe', true, ['rag.schema.read']),
+      tool('search_schema', '检索 Schema', '按业务问题检索 schema 文档。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
+      tool('get_relations', '读取关系上下文', '读取单表一跳关系上下文。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
+      tool('build_schema_context', '构建 Schema 上下文', '构建供 Agent 使用的紧凑 schema 上下文。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
     ],
   },
   {
@@ -432,9 +438,9 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
       }),
     ],
     tools: [
-      tool('list_workspace_dir', '列出目录', '列出工作区目录内容。', 'safe', true, ['workspace.file.read']),
-      tool('read_workspace_file', '读取文件', '读取 UTF-8 文本文件。', 'safe', true, ['workspace.file.read']),
-      tool('write_workspace_file', '写入文件', '原子写入 UTF-8 文本文件。', 'medium', false, ['workspace.file.write']),
+      tool('list_workspace_dir', '列出目录', '列出工作区目录内容。', 'safe', true, ['workspace.file.read'], ['workspace']),
+      tool('read_workspace_file', '读取文件', '读取 UTF-8 文本文件。', 'safe', true, ['workspace.file.read'], ['workspace']),
+      tool('write_workspace_file', '写入文件', '原子写入 UTF-8 文本文件。', 'medium', false, ['workspace.file.write'], ['workspace']),
     ],
   },
   {
@@ -514,8 +520,17 @@ function tool(
   dangerLevel: ToolDangerLevel,
   readonly: boolean,
   permissions: string[],
+  runtimeSources?: OfficialPluginRuntimeToolSource[],
 ): OfficialPluginToolContribution {
-  return { name, title, description, dangerLevel, readonly, permissions };
+  return {
+    name,
+    title,
+    description,
+    dangerLevel,
+    readonly,
+    permissions,
+    ...(runtimeSources === undefined ? {} : { runtimeSources }),
+  };
 }
 
 function permission(
@@ -651,6 +666,18 @@ function runtimeToolPassesResolutionOptions(
   if (options.readonlyOnly === true && runtimeTool.readonly !== true) return false;
   if (options.maxDangerLevel && dangerRank[runtimeTool.dangerLevel] > dangerRank[options.maxDangerLevel]) return false;
   return true;
+}
+
+function staticContributionMatchesRuntimeTool(
+  contribution: OfficialPluginToolContribution,
+  runtimeTool: OfficialPluginRuntimeToolDescriptor,
+): boolean {
+  if (contribution.dynamic || contribution.name !== runtimeTool.name) return false;
+  if (runtimeTool.source === undefined || runtimeTool.source === 'official') return true;
+  return (
+    contribution.runtimeSources !== undefined &&
+    contribution.runtimeSources.includes(runtimeTool.source as OfficialPluginRuntimeToolSource)
+  );
 }
 
 function dynamicContributionMatchesRuntimeTool(

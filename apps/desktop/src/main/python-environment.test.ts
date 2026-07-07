@@ -8,6 +8,7 @@ import { PythonEnvironmentService, systemPythonCandidates } from './python-envir
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
+const REAL_PYTHON_TEST_TIMEOUT_MS = 20_000;
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -25,7 +26,7 @@ describe('PythonEnvironmentService', () => {
 
     expect(environments.length).toBeGreaterThanOrEqual(1);
     expect(environments[0]).toHaveProperty('valid');
-  });
+  }, REAL_PYTHON_TEST_TIMEOUT_MS);
 
   it('runs Python code when system Python is available', async () => {
     try {
@@ -42,7 +43,7 @@ describe('PythonEnvironmentService', () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('42');
-  });
+  }, REAL_PYTHON_TEST_TIMEOUT_MS);
 
   it('runs a Python file by workspace relative path', async () => {
     try {
@@ -62,7 +63,7 @@ describe('PythonEnvironmentService', () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('file-run-ok');
-  });
+  }, REAL_PYTHON_TEST_TIMEOUT_MS);
 
   it('creates a venv and runs code through that environment when Python venv is available', async () => {
     try {
@@ -96,7 +97,7 @@ describe('PythonEnvironmentService', () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('venv-run-ok');
     expect(result.stdout.replaceAll('\\', '/')).toContain(join(rootPath, '.venv', 'smoke').replaceAll('\\', '/'));
-  });
+  }, REAL_PYTHON_TEST_TIMEOUT_MS);
 
   it('rejects Python file paths outside the workspace', async () => {
     const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-python-run-'));
@@ -158,7 +159,7 @@ describe('PythonEnvironmentService', () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('conda-prefix-input-ok');
     expect(result.command).not.toContain('conda run -n');
-  });
+  }, REAL_PYTHON_TEST_TIMEOUT_MS);
 
   it('runs Conda environments by environment name when conda is available', async () => {
     try {
@@ -177,5 +178,5 @@ describe('PythonEnvironmentService', () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('conda-name-ok');
     expect(result.command).toContain('conda run -n base python');
-  });
+  }, REAL_PYTHON_TEST_TIMEOUT_MS);
 });

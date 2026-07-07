@@ -191,6 +191,28 @@ function toSharedToolPolicy(policy: OfficialPluginAgentToolPolicy): AgentToolPol
     staticToolNames: policy.runtimeResolution.staticToolNames,
     dynamicToolNames: policy.runtimeResolution.dynamicToolNames,
     missingStaticToolNames: policy.runtimeResolution.missingStaticToolNames,
+    toolPermissions: policy.toolPermissions.map((permission) => ({
+      toolName: permission.toolName,
+      pluginId: permission.pluginId,
+      pluginName: permission.pluginName,
+      contributionName: permission.contributionName,
+      dynamic: permission.dynamic,
+      dangerLevel: permission.dangerLevel,
+      readonly: permission.readonly,
+      runtime: permission.runtime,
+      permissions: permission.permissions.map((item) => ({
+        id: item.id,
+        title: item.title,
+        risk: item.risk,
+        readonly: item.readonly,
+        resourceScopes: [...item.resourceScopes],
+        approvalPolicy: item.approvalPolicy,
+        networkAccess: item.networkAccess,
+        processAccess: item.processAccess,
+        secretKinds: [...item.secretKinds],
+        auditLevel: item.auditLevel,
+      })),
+    })),
   };
 }
 

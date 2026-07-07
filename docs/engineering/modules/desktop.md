@@ -100,3 +100,9 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 - workspace 文件工具复用 `@dbagent/core-workspace/WorkspaceCore`，但 active workspace root 尚未接入 Agent runtime；当前 handler 会返回 `No active workspace.`，避免未确认项目根目录时访问文件系统。
 
 该装配层只做组合，不持有 API key，不绕过 official plugin tool policy、Skill `allowedTools` 或 `ReactAgent` 的权限判断。
+
+## 2026-07-06 增量：终端启动期输入队列
+
+`apps/desktop/src/main/terminal-service.ts` 在真实 PTY shell 刚创建时会先缓存早期输入，等检测到 shell 提示符后再写入 PTY；如果 shell 没有输出提示符，则通过短超时兜底写入。这样可以避免 Windows PowerShell/ConPTY 启动阶段仍在终端能力协商时吞掉用户刚输入的命令。
+
+该逻辑仍然保持真实终端语义：`terminal:write` 对调用方立即返回，session 继续保持 running；后端只调整写入 PTY 的时机，不伪造输出、不模拟 shell。测试侧使用真实 PowerShell 覆盖创建后立即写入、逐字符输入、fallback shell、指定 cwd、清空输出和输出缓冲裁剪。

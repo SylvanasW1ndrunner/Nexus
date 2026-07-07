@@ -18,11 +18,16 @@ type TerminalRuntime = {
   process: pty.IPty;
   output: string;
   outputBaseCursor: number;
+  ready: boolean;
+  pendingWrites: string[];
+  initialWriteFlushTimer: ReturnType<typeof setTimeout>;
   recentInputEchoNeedles: string[];
   staleInputEchoNeedles: string[];
   status: 'running' | 'exited';
   exitCode?: number | null;
 };
+
+const INITIAL_WRITE_FLUSH_DELAY_MS = 3_000;
 
 export class TerminalService {
   private readonly sessions = new Map<string, TerminalSession>();
@@ -56,16 +61,27 @@ export class TerminalService {
       process: child,
       output: '',
       outputBaseCursor: 0,
+      ready: false,
+      pendingWrites: [],
+      initialWriteFlushTimer: setTimeout(
+        () => flushPendingTerminalWrites(runtime),
+        INITIAL_WRITE_FLUSH_DELAY_MS,
+      ),
       recentInputEchoNeedles: [],
       staleInputEchoNeedles: [],
       status: 'running',
     };
     child.onData((data) => {
       appendTerminalOutput(runtime, data, this.options.maxOutputChars);
+      if (!runtime.ready && terminalOutputLooksReady(runtime.output)) {
+        clearTimeout(runtime.initialWriteFlushTimer);
+        flushPendingTerminalWrites(runtime);
+      }
     });
     child.onExit(({ exitCode }) => {
       runtime.status = 'exited';
       runtime.exitCode = exitCode;
+      clearTimeout(runtime.initialWriteFlushTimer);
       const current = this.sessions.get(id);
       if (current) this.sessions.set(id, { ...current, status: 'exited', lastExitCode: exitCode });
     });
@@ -76,6 +92,7 @@ export class TerminalService {
 
   close(id: string): { id: string } {
     const runtime = this.runtimes.get(id);
+    if (runtime) clearTimeout(runtime.initialWriteFlushTimer);
     if (runtime?.status === 'running') runtime.process.kill();
     this.runtimes.delete(id);
     this.sessions.delete(id);
@@ -117,7 +134,11 @@ export class TerminalService {
         ...extractInputEchoNeedles(command),
       ]);
     }
-    runtime.process.write(request.data);
+    if (runtime.ready) {
+      runtime.process.write(request.data);
+    } else {
+      runtime.pendingWrites.push(request.data);
+    }
     const current = this.sessions.get(request.terminalId);
     if (current) {
       this.sessions.set(
@@ -267,6 +288,24 @@ function appendTerminalOutput(
   const trimStart = terminalTrimStart(runtime.output, overflow);
   runtime.output = runtime.output.slice(trimStart);
   runtime.outputBaseCursor += trimStart;
+}
+
+function flushPendingTerminalWrites(runtime: TerminalRuntime): void {
+  if (runtime.status !== 'running' || runtime.pendingWrites.length === 0) return;
+  runtime.ready = true;
+  const pending = runtime.pendingWrites.splice(0);
+  for (const data of pending) runtime.process.write(data);
+}
+
+function terminalOutputLooksReady(output: string): boolean {
+  const plainOutput = stripAnsiControlSequences(output);
+  if (process.platform === 'win32') return /PS [^\r\n]*>\s*$/u.test(plainOutput);
+  return /(?:^|\r?\n).*(?:[$#%>])\s*$/u.test(plainOutput);
+}
+
+function stripAnsiControlSequences(value: string): string {
+  const escape = String.fromCharCode(27);
+  return value.replace(new RegExp(`${escape}\\[[\\d;?]*[A-Za-z]`, 'gu'), '');
 }
 
 function terminalTrimStart(output: string, overflow: number): number {

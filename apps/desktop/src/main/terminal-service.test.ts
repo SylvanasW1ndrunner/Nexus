@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { TerminalService } from './terminal-service.js';
 
+const REAL_TERMINAL_TEST_TIMEOUT_MS = 15_000;
+
 describe('TerminalService', () => {
   it('creates, lists, runs, and closes terminal sessions', async () => {
     const service = new TerminalService();
@@ -23,7 +25,7 @@ describe('TerminalService', () => {
 
     service.close(terminal.id);
     expect(service.list()).toHaveLength(0);
-  });
+  }, REAL_TERMINAL_TEST_TIMEOUT_MS);
 
   it('keeps a shell session alive for write/read terminal output', async () => {
     const service = new TerminalService();
@@ -41,7 +43,7 @@ describe('TerminalService', () => {
     } finally {
       service.close(terminal.id);
     }
-  });
+  }, REAL_TERMINAL_TEST_TIMEOUT_MS);
 
   it('shows the PowerShell prompt after terminal capability negotiation on Windows', async () => {
     if (process.platform !== 'win32') return;
@@ -60,7 +62,7 @@ describe('TerminalService', () => {
     } finally {
       service.close(terminal.id);
     }
-  });
+  }, REAL_TERMINAL_TEST_TIMEOUT_MS);
 
   it('falls back to the system shell when a configured shell cannot start', async () => {
     const service = new TerminalService({ defaultShell: 'dbagent-missing-shell-for-test' });
@@ -77,7 +79,7 @@ describe('TerminalService', () => {
     } finally {
       service.close(terminal.id);
     }
-  });
+  }, REAL_TERMINAL_TEST_TIMEOUT_MS);
 
   it('accepts character-by-character interactive input', async () => {
     const service = new TerminalService();
@@ -97,7 +99,7 @@ describe('TerminalService', () => {
     } finally {
       service.close(terminal.id);
     }
-  });
+  }, REAL_TERMINAL_TEST_TIMEOUT_MS);
 
   it('starts interactive shell sessions in the requested working directory', async () => {
     const service = new TerminalService();
@@ -121,7 +123,7 @@ describe('TerminalService', () => {
       service.close(terminal.id);
       await removeWhenUnlocked(cwd);
     }
-  });
+  }, REAL_TERMINAL_TEST_TIMEOUT_MS);
 
   it('clears buffered output without closing the terminal', async () => {
     const service = new TerminalService();
@@ -145,7 +147,7 @@ describe('TerminalService', () => {
     } finally {
       service.close(terminal.id);
     }
-  });
+  }, REAL_TERMINAL_TEST_TIMEOUT_MS);
 
   it('bounds terminal output while keeping read cursors monotonic', async () => {
     const service = new TerminalService({ maxOutputChars: 120 });
@@ -174,7 +176,7 @@ describe('TerminalService', () => {
     } finally {
       service.close(terminal.id);
     }
-  });
+  }, REAL_TERMINAL_TEST_TIMEOUT_MS);
 
   it('resizes an interactive PTY session', () => {
     const service = new TerminalService();

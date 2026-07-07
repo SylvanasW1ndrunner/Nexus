@@ -504,6 +504,34 @@ export type AgentToolPolicyPreview = {
   staticToolNames: string[];
   dynamicToolNames: string[];
   missingStaticToolNames: string[];
+  toolPermissions: AgentToolPermissionPreview[];
+};
+
+export type AgentToolPermissionPreview = {
+  toolName: string;
+  pluginId: string;
+  pluginName: string;
+  contributionName: string;
+  dynamic: boolean;
+  dangerLevel: AgentToolDangerLevel;
+  readonly: boolean;
+  runtime: {
+    source?: string;
+    sourceId?: string;
+    originalName?: string;
+  };
+  permissions: Array<{
+    id: string;
+    title: string;
+    risk: AgentToolDangerLevel;
+    readonly: boolean;
+    resourceScopes: string[];
+    approvalPolicy: 'never' | 'mode-dependent' | 'always';
+    networkAccess: 'none' | 'local' | 'remote';
+    processAccess: 'none' | 'managed-child-process' | 'external-service';
+    secretKinds: string[];
+    auditLevel: 'none' | 'metadata' | 'metadata-and-arguments';
+  }>;
 };
 
 export type AgentSkillSummary = {

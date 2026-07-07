@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { launchStdioMcpServer, type McpServerConfig } from '../src/index.js';
 
 const tempDirs: string[] = [];
+const REAL_PROCESS_REQUEST_TIMEOUT_MS = 5_000;
+const REAL_PROCESS_TEST_TIMEOUT_MS = 10_000;
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -22,7 +24,7 @@ describe('stdio MCP launcher', () => {
         },
       },
       {
-        requestTimeoutMs: 1_000,
+        requestTimeoutMs: REAL_PROCESS_REQUEST_TIMEOUT_MS,
         resolveSecret: (ref) => (ref === 'mcp:fixture:env:API_TOKEN' ? 'token-from-keychain' : undefined),
       },
     );
@@ -41,7 +43,7 @@ describe('stdio MCP launcher', () => {
     });
 
     await expect(client.stop()).resolves.toBeUndefined();
-  });
+  }, REAL_PROCESS_TEST_TIMEOUT_MS);
 
   it('fails fast when a secret ref cannot be resolved', async () => {
     const script = await fixtureServer();
@@ -68,12 +70,12 @@ describe('stdio MCP launcher', () => {
   it('surfaces process exit and bounded stderr for startup failures after spawn', async () => {
     const script = await crashServer();
     const client = await launchStdioMcpServer(serverConfig(script), {
-      requestTimeoutMs: 1_000,
+      requestTimeoutMs: REAL_PROCESS_REQUEST_TIMEOUT_MS,
       stderrLimitBytes: 64,
     });
 
     await expect(client.listTools()).rejects.toThrow(/exited with code 7/);
-  });
+  }, REAL_PROCESS_TEST_TIMEOUT_MS);
 });
 
 function serverConfig(script: string): McpServerConfig {
