@@ -11,6 +11,7 @@ import {
 } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
 import {
+  AgentAuditLogStore,
   AgentCheckpointStore,
   AgentStreamStore,
   ReactAgent,
@@ -132,8 +133,84 @@ describe('ReactAgent', () => {
     expect(serialized).not.toContain('tester:secret@');
   });
 
+  it('writes a redacted Agent audit trail for model and tool execution replay', async () => {
+    const auditLog = new AgentAuditLogStore(await auditPath());
+    const apiKey = ['sk', 'audit-run-secret-123456'].join('-');
+    const usage = new UsageTracker(await usagePath());
+    const provider = scriptedProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'audit_query',
+            name: 'query_database',
+            arguments: {
+              sql: 'select count(*) as order_count from orders',
+              apiKey,
+            },
+          },
+        ],
+        usage: { promptTokens: 8, completionTokens: 4, totalTokens: 12 },
+      },
+      {
+        text: '订单总数是 42。',
+        toolCalls: [],
+        usage: { promptTokens: 16, completionTokens: 6, totalTokens: 22 },
+      },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      { ...fixedDependencies(), auditLog },
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '统计订单总数',
+      mode: 'readonly',
+      allowedTools: ['query_database'],
+      maxIterations: 3,
+    });
+    const events = await auditLog.readAll();
+    const serialized = JSON.stringify(events);
+
+    expect(result.status).toBe('done');
+    expect(events.map((event) => event.type)).toEqual([
+      'run_started',
+      'model_call_started',
+      'model_call_finished',
+      'tool_call_started',
+      'tool_call_finished',
+      'model_call_started',
+      'model_call_finished',
+      'run_finished',
+    ]);
+    expect(events).toMatchObject([
+      { type: 'run_started', sessionId: 'session_test', mode: 'readonly', allowedTools: ['query_database'] },
+      { type: 'model_call_started', iteration: 1, providerId: 'fake', model: 'fake-model', toolCount: 1 },
+      { type: 'model_call_finished', iteration: 1, toolCallCount: 1, usage: { totalTokens: 12 } },
+      {
+        type: 'tool_call_started',
+        toolCallId: 'audit_query',
+        toolName: 'query_database',
+      },
+      { type: 'tool_call_finished', toolCallId: 'audit_query', status: 'success' },
+      { type: 'model_call_started', iteration: 2 },
+      { type: 'model_call_finished', iteration: 2, toolCallCount: 0 },
+      { type: 'run_finished', status: 'done', iterations: 2, finalTextPreview: '订单总数是 42。' },
+    ]);
+    const toolStarted = events.find((event) => event.type === 'tool_call_started');
+    expect(toolStarted).toMatchObject({ type: 'tool_call_started', toolName: 'query_database' });
+    expect(toolStarted?.argumentPreview).toContain('"apiKey":"[REDACTED]"');
+    expect(serialized).not.toContain(apiKey);
+  });
+
   it('blocks non-readonly tools in readonly mode before side effects happen', async () => {
     let writeExecuted = false;
+    const auditLog = new AgentAuditLogStore(await auditPath());
     const registry = new ToolRegistry();
     registry.register(
       {
@@ -161,7 +238,7 @@ describe('ReactAgent', () => {
       registry,
       usage,
       undefined,
-      fixedDependencies(),
+      { ...fixedDependencies(), auditLog },
     );
 
     const result = await agent.run({
@@ -175,6 +252,14 @@ describe('ReactAgent', () => {
     expect(writeExecuted).toBe(false);
     expect(result.toolExecutions).toMatchObject([
       { toolCallId: 'call_write', toolName: 'execute_sql', status: 'denied' },
+    ]);
+    await expect(auditLog.readAll()).resolves.toMatchObject([
+      { type: 'run_started' },
+      { type: 'model_call_started' },
+      { type: 'model_call_finished' },
+      { type: 'tool_call_started', toolName: 'execute_sql' },
+      { type: 'tool_call_finished', toolName: 'execute_sql', status: 'denied' },
+      { type: 'run_finished', status: 'permission_denied' },
     ]);
   });
 
@@ -1085,6 +1170,12 @@ async function streamPath(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-stream-run-'));
   tempDirs.push(dir);
   return join(dir, 'agent-streams.json');
+}
+
+async function auditPath(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-audit-run-'));
+  tempDirs.push(dir);
+  return join(dir, 'agent-2026-07-07.jsonl');
 }
 
 function fixedDependencies() {

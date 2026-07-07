@@ -201,3 +201,19 @@ Agent 不直接解析 SQL，也不直接访问数据库 driver。SQL 风险判�
 `ReactAgent` 现在支持可选 `sessionStore` 依赖。传入后会在用户消息写入、assistant 回复、tool result、权限拒绝、完成、中止和异常路径保存会话。这样即使最终 UI 尚未重建，Agent 运行结果也已经具备可恢复和可导出的后端基础。
 
 当前不新增 SQLite、ORM 或数据库依赖。原因是 `core-agent` 需要保持轻量、可在测试中独立运行；本阶段 JSON 原子写入足以验证会话合同和用户场景。后续如果会话数量、并发写入或跨模块查询要求提高，应迁移到 SQLite，并补充 WAL、迁移、损坏恢复和大历史性能测试。
+
+## Agent 审计日志
+
+`packages/core-agent/src/audit-log-store.ts` 提供本地 JSONL 审计日志合同，用于记录 Agent run 的关键执行轨迹。它不是 UI 日志，也不是外部遥测；目标是让测试 Agent、诊断报告和后续官方 eval 插件能够复盘一次真实任务发生了什么。
+
+当前事件类型：
+- `run_started`：记录 session、模式、用量模式、最大迭代次数和显式允许的工具白名单。
+- `model_call_started` / `model_call_finished`：记录 provider、model、iteration、暴露给模型的工具数量、模型返回的 tool call 数量、文本长度和 usage 摘要。
+- `tool_call_started` / `tool_call_finished`：记录 tool call id、工具名、脱敏后的参数摘要、执行状态、耗时和结果摘要。
+- `run_finished`：记录最终状态、迭代次数、耗时、最终文本摘要或错误信息。
+
+审计日志写入前会复用 `redaction.ts` 做二次脱敏，并限制单个字符串最大长度，避免 API key、Bearer token、数据库 URL 密码、provider 凭证或大型结果集进入本地诊断文件。`readAll()` 读取 JSONL 时会跳过损坏行，避免一次异常退出产生的半行日志阻断后续诊断。
+
+`ReactAgent` 通过可选依赖 `auditLog` 接入该能力。未传入时行为完全保持原样；传入后会覆盖正常完成、配额拦截、用户中止、模型异常、权限拒绝、未注册工具、工具成功、工具失败和连续失败熔断路径。权限拒绝事件在工具 handler 执行前写入，方便验证危险工具没有发生副作用。
+
+本切片没有引入 OpenTelemetry、LangSmith、Langfuse 或 LangChain tracing。原因是当前需求是离线可用、可打包、可脱敏的本地 JSONL 审计；外部追踪平台会引入联网、账号、数据出境、SDK 体积和安全边界问题。后续如果需要接入外部 tracing，应先通过 adapter 转换为 DBAgent 自有审计事件，再由用户显式开启导出，不能让第三方事件类型进入 `ToolRegistry`、IPC 或稳定公共合同。

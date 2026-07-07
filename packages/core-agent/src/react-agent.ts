@@ -1,5 +1,6 @@
 import type { LlmChatRequest, LlmChatResponse, LlmRouter } from '@dbagent/core-llm';
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
+import type { AgentAuditLogWriter, AgentAuditRunStatus } from './audit-log-store.js';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import { buildAgentContext } from './context-manager.js';
 import { PermissionManager } from './permission-manager.js';
@@ -29,6 +30,7 @@ export class ReactAgent {
   private readonly checkpointStore: AgentCheckpointWriter | undefined;
   private readonly sessionStore: AgentSessionWriter | undefined;
   private readonly streamStore: AgentStreamStore | undefined;
+  private readonly auditLog: AgentAuditLogWriter | undefined;
 
   constructor(
     private readonly llmRouter: LlmRouter,
@@ -43,9 +45,11 @@ export class ReactAgent {
     this.checkpointStore = dependencies.checkpointStore;
     this.sessionStore = dependencies.sessionStore;
     this.streamStore = dependencies.streamStore;
+    this.auditLog = dependencies.auditLog;
   }
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
+    const runStartedAt = Date.now();
     const session = createAgentSession({
       id: this.createSessionId(),
       title: titleFromMessage(options.userMessage),
@@ -56,9 +60,38 @@ export class ReactAgent {
     await this.saveSession(session);
 
     const usageMode = options.usageMode ?? 'byok';
+    const maxIterations = options.maxIterations ?? 25;
+    await this.auditLog?.append({
+      type: 'run_started',
+      timestamp: this.now(),
+      sessionId: session.id,
+      mode: session.mode,
+      usageMode,
+      maxIterations,
+      ...(options.allowedTools === undefined ? {} : { allowedTools: options.allowedTools }),
+    });
+    const finishRunAudit = async (
+      status: AgentAuditRunStatus,
+      iterations: number,
+      finalTextPreview?: string,
+      errorMessage?: string,
+    ) => {
+      await this.auditLog?.append({
+        type: 'run_finished',
+        timestamp: this.now(),
+        sessionId: session.id,
+        status,
+        iterations,
+        durationMs: Math.max(0, Date.now() - runStartedAt),
+        ...(finalTextPreview === undefined ? {} : { finalTextPreview }),
+        ...(errorMessage === undefined ? {} : { errorMessage }),
+      });
+    };
+
     if (usageMode === 'subscription') {
       const quota = await this.usageTracker.getCurrentQuota('subscription');
       if (quota.exceeded) {
+        await finishRunAudit('quota_exceeded', 0, 'Usage quota exceeded.');
         return {
           status: 'quota_exceeded',
           session,
@@ -78,7 +111,6 @@ export class ReactAgent {
     };
 
     const toolExecutions: AgentToolExecutionRecord[] = [];
-    const maxIterations = options.maxIterations ?? 25;
     const maxConsecutiveToolFailures = options.maxConsecutiveToolFailures ?? 3;
     const maxToolExecutionMs = options.maxToolExecutionMs ?? 60_000;
     const maxToolResultChars = normalizePositiveInteger(
@@ -112,6 +144,7 @@ export class ReactAgent {
           await saveCheckpoint(iteration - 1, 'aborted');
           await this.saveSession(session);
           await closeRound('aborted');
+          await finishRunAudit('aborted', iteration - 1, finalText);
           return { status: 'aborted', session, finalText, iterations: iteration - 1, toolExecutions };
         }
 
@@ -127,12 +160,34 @@ export class ReactAgent {
           tools: context.tools,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
         };
+        await this.auditLog?.append({
+          type: 'model_call_started',
+          timestamp: this.now(),
+          sessionId: session.id,
+          iteration,
+          providerId: options.providerId,
+          model: options.model,
+          toolCount: context.tools.length,
+        });
+        const modelStartedAt = Date.now();
         const response = await this.callModel({
           providerId: options.providerId,
           model: options.model,
           request,
           round,
           sessionId: session.id,
+        });
+        await this.auditLog?.append({
+          type: 'model_call_finished',
+          timestamp: this.now(),
+          sessionId: session.id,
+          iteration,
+          providerId: options.providerId,
+          model: options.model,
+          durationMs: Math.max(0, Date.now() - modelStartedAt),
+          toolCallCount: response.toolCalls.length,
+          textChars: response.text.length,
+          ...(response.usage === undefined ? {} : { usage: response.usage }),
         });
         addUsage(session, response.usage);
 
@@ -148,6 +203,7 @@ export class ReactAgent {
           await saveCheckpoint(iteration, 'done');
           await this.saveSession(session);
           await closeRound('success');
+          await finishRunAudit('max_iterations_reached', iteration, finalText);
           return {
             status: 'max_iterations_reached',
             session,
@@ -162,11 +218,21 @@ export class ReactAgent {
           await saveCheckpoint(iteration, 'done');
           await this.saveSession(session);
           await closeRound('success');
+          await finishRunAudit('done', iteration, finalText);
           return { status: 'done', session, finalText, iterations: iteration, toolExecutions };
         }
 
         for (const toolCall of response.toolCalls) {
           const startedAt = Date.now();
+          await this.auditLog?.append({
+            type: 'tool_call_started',
+            timestamp: this.now(),
+            sessionId: session.id,
+            iteration,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            argumentPreview: serializeToolArguments(toolCall.arguments),
+          });
           if (allowedToolSet !== undefined && !allowedToolSet.has(toolCall.name)) {
             const record = executionRecord(
               toolCall.id,
@@ -177,6 +243,7 @@ export class ReactAgent {
               'Tool not allowed by run policy.',
             );
             toolExecutions.push(record);
+            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
             await saveCheckpoint(iteration, 'running');
             appendMessage(
               session,
@@ -194,6 +261,7 @@ export class ReactAgent {
             finalText = 'Tool is not allowed for this run.';
             await saveCheckpoint(iteration, 'done');
             await closeRound('success');
+            await finishRunAudit('permission_denied', iteration, finalText);
             return {
               status: 'permission_denied',
               session,
@@ -214,6 +282,7 @@ export class ReactAgent {
               'Tool is not registered.',
             );
             toolExecutions.push(record);
+            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
             consecutiveToolFailures += 1;
             await saveCheckpoint(iteration, 'running');
             appendMessage(
@@ -234,6 +303,7 @@ export class ReactAgent {
               finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
               await saveCheckpoint(iteration, 'failed', finalText);
               await closeRound('failed', finalText);
+              await finishRunAudit('tool_failed', iteration, finalText, finalText);
               return {
                 status: 'tool_failed',
                 session,
@@ -261,6 +331,7 @@ export class ReactAgent {
               `Permission: ${permission.decision}`,
             );
             toolExecutions.push(record);
+            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
             await saveCheckpoint(iteration, 'running');
             appendMessage(
               session,
@@ -281,6 +352,7 @@ export class ReactAgent {
               await saveCheckpoint(iteration, 'done');
               await this.saveSession(session);
               await closeRound('success');
+              await finishRunAudit('permission_denied', iteration, finalText);
               return {
                 status: 'permission_denied',
                 session,
@@ -316,9 +388,9 @@ export class ReactAgent {
               maxToolExecutionMs,
             );
             const preview = serializeToolResult(result, maxToolResultChars);
-            toolExecutions.push(
-              executionRecord(toolCall.id, tool.name, 'success', startedAt, toolCall.arguments, preview),
-            );
+            const record = executionRecord(toolCall.id, tool.name, 'success', startedAt, toolCall.arguments, preview);
+            toolExecutions.push(record);
+            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
             consecutiveToolFailures = 0;
             appendMessage(
               session,
@@ -345,6 +417,7 @@ export class ReactAgent {
               message,
             );
             toolExecutions.push(record);
+            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
             consecutiveToolFailures += 1;
             appendMessage(
               session,
@@ -365,6 +438,7 @@ export class ReactAgent {
               await saveCheckpoint(iteration, 'failed', finalText);
               await this.saveSession(session);
               await closeRound('failed', finalText);
+              await finishRunAudit('tool_failed', iteration, finalText, finalText);
               return {
                 status: 'tool_failed',
                 session,
@@ -381,6 +455,7 @@ export class ReactAgent {
       await saveCheckpoint(maxIterations, 'done');
       await this.saveSession(session);
       await closeRound('success');
+      await finishRunAudit('max_iterations_reached', maxIterations, finalText);
       return {
         status: 'max_iterations_reached',
         session,
@@ -394,6 +469,7 @@ export class ReactAgent {
       await saveCheckpoint(currentIteration, status, message);
       await this.saveSession(session);
       await closeRound(status, message);
+      await finishRunAudit(status, currentIteration, finalText, message);
       throw error;
     }
   }
@@ -511,6 +587,25 @@ function executionRecord(
   };
 }
 
+function toolFinishedAuditEvent(
+  sessionId: string,
+  iteration: number,
+  record: AgentToolExecutionRecord,
+  timestamp: string,
+) {
+  return {
+    type: 'tool_call_finished' as const,
+    timestamp,
+    sessionId,
+    iteration,
+    toolCallId: record.toolCallId,
+    toolName: record.toolName,
+    status: record.status,
+    durationMs: record.durationMs,
+    resultPreview: record.resultPreview,
+  };
+}
+
 function failureStopText(failureCount: number, lastError: string): string {
   return `连续 ${failureCount} 次工具执行失败，已停止 Agent 任务。最后一次错误：${lastError}`;
 }
@@ -567,6 +662,5 @@ function normalizePositiveInteger(value: number | undefined, fallback: number): 
 }
 
 function toolTimeoutMessage(toolName: string, timeoutMs: number): string {
-  return `工具 ${toolName} 执行超时（${timeoutMs}ms）。`;
   return `工具 ${toolName} 执行超时（${timeoutMs}ms）。`;
 }

@@ -1,5 +1,6 @@
 import type { LlmMessage, LlmTool, LlmToolCall, LlmUsage } from '@dbagent/core-llm';
 import type { UsageMode } from '@dbagent/shared';
+import type { AgentAuditLogWriter } from './audit-log-store.js';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import type { AgentSessionWriter } from './session-store.js';
 import type { AgentStreamStore } from './stream-store.js';
@@ -132,6 +133,7 @@ export type AgentRunDependencies = {
   checkpointStore?: AgentCheckpointWriter;
   sessionStore?: AgentSessionWriter;
   streamStore?: AgentStreamStore;
+  auditLog?: AgentAuditLogWriter;
 };
 
 export type AgentContextBuildResult = {

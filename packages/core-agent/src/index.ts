@@ -1,3 +1,4 @@
+export * from './audit-log-store.js';
 export * from './behavior-evaluation.js';
 export * from './checkpoint-store.js';
 export * from './context-manager.js';
