@@ -23,6 +23,12 @@
 
 结果导出 helper 放在 `shared`，原因是导出格式依赖 `QueryExecutionResult` 的稳定结构，但不需要访问 DOM、文件系统或数据库连接。CSV 面向表格工具，JSON 面向审计、复现和后续 Agent 上下文复用。JSON 导出保留 `queryId`、`rowCount`、`elapsedMs`、`columns`、`rows` 和 `safety`，并把 `Date`、`bigint`、`Buffer` 和嵌套对象规范化为可序列化值。
 
+## 2026-07-07 增量：诊断报告 IPC 合同
+
+`app:generate-diagnostic-report` 是桌面主进程生成诊断报告的 typed IPC。请求只允许传入 `retentionDays` 和 `maxEntryBytes` 这类非敏感选项；响应返回报告目录、产物类型、生成时间、文件数、总字节数和脱敏摘要，不返回报告正文。
+
+该边界保证最终 UI 可以触发诊断报告生成，但不会把配置、日志、Agent 审计事件或 crash 文本直接搬到 renderer。
+
 查询结果视图 helper 也放在 `shared`，而不是 renderer。原因是列显示、搜索、分页和导出范围都会依赖同一套规则：如果 UI、导出服务和后续 IPC 分页各自实现，会出现“屏幕上看到的数据”和“导出的数据”不一致。`createQueryResultView()` 输入完整 `QueryExecutionResult` 和可见列、搜索词、offset、limit，输出稳定的视图结构，供结果表、导出和测试复用。
 
 `exportQueryResult()` 在视图合同之上生成导出制品，返回文件名、MIME、内容、导出行数和列数。默认导出完整列；如果调用方传入 `visibleColumnNames`、`searchText`、`offset`、`limit`，则严格导出当前视图。Excel 当前实现为 SpreadsheetML XML（`.xls`），包含 `Result` 和 `Metadata` 两个 worksheet。它能被 Excel/WPS/LibreOffice 打开，且不引入 `exceljs`/`xlsx` 等依赖，避免当前阶段增加包体和 native/打包风险。后续如果产品验收明确要求原生 `.xlsx`，需要单独评估依赖许可证、包体、离线安装和 Electron 打包影响。

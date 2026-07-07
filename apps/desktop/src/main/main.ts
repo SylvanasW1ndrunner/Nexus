@@ -33,11 +33,13 @@ import { WorkspaceProjectStore } from './workspace-project-store.js';
 import { HeadlessAgentService } from './agent-service.js';
 import { registerDesktopAgentTools } from './agent-tool-bootstrap.js';
 import { DailyAgentAuditLogStore } from './agent-audit-log.js';
+import { DesktopDiagnosticReportService } from './diagnostic-report-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
 const dataDir = join(userDataDir, 'data');
 const logsDir = join(userDataDir, 'logs');
+const diagnosticReportsDir = join(userDataDir, 'diagnostic-reports');
 const credentialPath = join(dataDir, 'credentials.json');
 const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
@@ -93,6 +95,20 @@ const headlessAgentService = new HeadlessAgentService({
 const pythonEnvironmentService = new PythonEnvironmentService();
 const terminalService = new TerminalService();
 const pluginRegistry = new PluginRegistry(pluginStatePath);
+const diagnosticReportService = new DesktopDiagnosticReportService({
+  userDataDir,
+  dataDir,
+  logsDir,
+  reportsDir: diagnosticReportsDir,
+  app: {
+    name: 'DBAgent',
+    version: app.getVersion(),
+    ...(process.env.DBAGENT_COMMIT ? { commit: process.env.DBAGENT_COMMIT } : {}),
+  },
+  runtime: {
+    electronVersion: process.versions.electron,
+  },
+});
 const queryCancellations = new QueryCancellationRegistry();
 const connectionWorkflow = createConnectionWorkflow({
   connections: connectionStore,
@@ -361,6 +377,9 @@ function registerIpcHandlers(): void {
     });
     return ok(settings);
   });
+  handle(ipcChannels.app.generateDiagnosticReport, async (request) =>
+    safeResult(() => diagnosticReportService.generate(request ?? {})),
+  );
 
   handle(ipcChannels.workspace.chooseDirectory, async (request) => {
     const selection = await dialog.showOpenDialog(mainWindow!, {

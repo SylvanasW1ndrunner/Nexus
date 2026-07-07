@@ -118,3 +118,11 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 `main.ts` 在构造 `ReactAgent` 时注入 `new DailyAgentAuditLogStore(logsDir)`。因此通过 `agent:run` IPC 进入 `HeadlessAgentService` 的真实 Agent 任务，会默认写入 run/model/tool/final 状态审计事件。该日志不进入 renderer，不包含完整 prompt、完整工具结果或明文凭证；后续诊断报告和官方 eval 插件可以按需读取并再次脱敏。
 
 本切片没有引入 OpenTelemetry、LangSmith、Langfuse 或其他外部追踪依赖。原因是桌面端默认能力必须离线可用、可打包、无账号依赖，并且不能把用户数据库上下文自动发送到外部平台。后续如果支持外部 tracing，应作为显式开启的导出 adapter，而不是替代本地审计日志。
+
+## 2026-07-07 增量：诊断报告主进程服务
+
+`apps/desktop/src/main/diagnostic-report-service.ts` 负责把桌面端真实文件系统接入 `core-tools` 的诊断报告合同。它会从 Electron `userData` 下读取白名单配置、`main.log`、`logs/agent-*.jsonl` 和 crash 快照，调用 `buildDiagnosticReport()` 统一脱敏，然后写入 `diagnostic-reports/diagnostic-<timestamp>-<hash>/`。
+
+新增 IPC `app:generate-diagnostic-report`，返回报告目录、文件数、字节数和脱敏摘要。renderer 不直接接收报告内容，避免把日志和配置文本暴露到前端内存。`credentials.json` 不在收集白名单内；大日志只读取尾部，避免生成报告时拖垮应用。
+
+当前没有引入 zip 依赖。目录输出已经能满足无 UI 测试和手动反馈，zip 打包会在后续单独评估压缩库、打包体积、Windows/Linux 兼容和大文件流式写入。

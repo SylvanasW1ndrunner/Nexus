@@ -33,6 +33,7 @@ export const ipcChannels = {
     saveWorkspaceState: 'app:save-workspace-state',
     loadIdeSettings: 'app:load-ide-settings',
     saveIdeSettings: 'app:save-ide-settings',
+    generateDiagnosticReport: 'app:generate-diagnostic-report',
   },
   workspace: {
     chooseDirectory: 'workspace:choose-directory',
@@ -365,6 +366,26 @@ export type IdeSettings = {
     fontSize: number;
     scrollback: number;
     cursorBlink: boolean;
+  };
+};
+
+export type DesktopDiagnosticReportRequest = {
+  retentionDays?: number;
+  maxEntryBytes?: number;
+};
+
+export type DesktopDiagnosticReportResult = {
+  reportPath: string;
+  artifactKind: 'directory';
+  generatedAt: string;
+  fileCount: number;
+  totalBytes: number;
+  summary: {
+    configCount: number;
+    logCount: number;
+    crashSnapshotCount: number;
+    redactionCount: number;
+    omittedCount: number;
   };
 };
 
@@ -787,6 +808,7 @@ export type IpcRequestMap = {
   'app:save-workspace-state': WorkspaceState;
   'app:load-ide-settings': void;
   'app:save-ide-settings': Partial<IdeSettings>;
+  'app:generate-diagnostic-report': DesktopDiagnosticReportRequest | undefined;
   'workspace:choose-directory': { title?: string; buttonLabel?: string };
   'workspace:create': WorkspaceCreateRequest;
   'workspace:open': WorkspaceOpenRequest;
@@ -851,6 +873,7 @@ export type IpcResponseMap = {
   'app:save-workspace-state': Result<WorkspaceState>;
   'app:load-ide-settings': Result<IdeSettings>;
   'app:save-ide-settings': Result<IdeSettings>;
+  'app:generate-diagnostic-report': Result<DesktopDiagnosticReportResult>;
   'workspace:choose-directory': Result<{ path?: string }>;
   'workspace:create': Result<WorkspaceProject>;
   'workspace:open': Result<WorkspaceProject>;

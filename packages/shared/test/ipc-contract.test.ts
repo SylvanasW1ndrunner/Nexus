@@ -32,6 +32,7 @@ describe('ipc contract', () => {
       'app:save-workspace-state',
       'app:load-ide-settings',
       'app:save-ide-settings',
+      'app:generate-diagnostic-report',
       'workspace:choose-directory',
       'workspace:create',
       'workspace:open',
