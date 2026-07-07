@@ -216,6 +216,7 @@ describe('PostgresDriver runtime errors', () => {
     const pool = {
       connect() {
         return Promise.resolve({
+          processID: 1201,
           query(sql: string) {
             calls.push(sql);
             if (sql === 'BEGIN' || sql === 'COMMIT') {

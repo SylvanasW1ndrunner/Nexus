@@ -119,11 +119,16 @@ export function createQueryWorkflow({
         safety: result.data.safety,
       });
     } else {
-      cancellations?.markFailed(queryId, result.error.message);
+      const cancelled = result.error.code === 'QUERY_CANCELLED';
+      if (cancelled) {
+        cancellations?.markCancelled(queryId);
+      } else {
+        cancellations?.markFailed(queryId, result.error.message);
+      }
       await history.append({
         connectionId: request.connectionId,
         sql: request.sql,
-        status: 'failed',
+        status: cancelled ? 'cancelled' : 'failed',
         safety,
         errorMessage: result.error.message,
       });

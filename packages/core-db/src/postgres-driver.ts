@@ -42,6 +42,8 @@ export class PostgresDriver implements IDatabaseDriver {
   };
 
   private readonly pools = new Map<string, PgPool>();
+  private readonly cancelPools = new Map<string, PgPool>();
+  private readonly configs = new Map<string, DatabaseConnectionConfig>();
 
   async test(config: DatabaseConnectionConfig): Promise<Result<{ latencyMs: number }>> {
     const started = performance.now();
@@ -71,6 +73,8 @@ export class PostgresDriver implements IDatabaseDriver {
 
     const { Pool } = await import('pg');
     this.pools.set(config.id, new Pool(toPgConfig(config)));
+    this.cancelPools.set(config.id, new Pool({ ...toPgConfig(config), max: 1 }));
+    this.configs.set(config.id, { ...config });
     return ok({
       id: config.id,
       name: config.name,
@@ -92,6 +96,12 @@ export class PostgresDriver implements IDatabaseDriver {
       await pool.end();
       this.pools.delete(connectionId);
     }
+    const cancelPool = this.cancelPools.get(connectionId);
+    if (cancelPool) {
+      await cancelPool.end();
+      this.cancelPools.delete(connectionId);
+    }
+    this.configs.delete(connectionId);
     return ok(undefined);
   }
 
@@ -139,7 +149,7 @@ export class PostgresDriver implements IDatabaseDriver {
     let client: PgPoolClient | undefined;
     try {
       client = await pool.connect();
-      const backendPid = (client as PgPoolClient & { processID?: number }).processID;
+      const backendPid = await resolveBackendPid(client);
       if (backendPid) {
         observer?.onBackendPid?.({
           queryId,
@@ -177,7 +187,9 @@ export class PostgresDriver implements IDatabaseDriver {
     }
 
     const pool = this.pools.get(connection.id);
-    if (!pool) {
+    const cancelPool = this.cancelPools.get(connection.id);
+    const config = this.configs.get(connection.id);
+    if (!pool && !cancelPool && !config) {
       return err({
         code: 'CONNECTION_FAILED',
         message: 'Connection is not active.',
@@ -186,10 +198,17 @@ export class PostgresDriver implements IDatabaseDriver {
     }
 
     try {
-      const result = await pool.query<{ cancelled: boolean }>(
-        'select pg_cancel_backend($1) as cancelled',
-        [request.backendPid],
-      );
+      const result = config
+        ? cancelPool
+          ? await cancelPool.query<{ cancelled: boolean }>(
+              'select pg_cancel_backend($1) as cancelled',
+              [request.backendPid],
+            )
+          : await cancelBackendWithDedicatedClient(config, request.backendPid)
+        : await pool!.query<{ cancelled: boolean }>(
+            'select pg_cancel_backend($1) as cancelled',
+            [request.backendPid],
+          );
       if (!result.rows[0]?.cancelled) {
         return err({
           code: 'QUERY_FAILED',
@@ -534,6 +553,37 @@ async function executeInTransaction(
       // Preserve the original database error; rollback failure is secondary.
     }
     throw error;
+  }
+}
+
+async function resolveBackendPid(client: PgPoolClient): Promise<number | undefined> {
+  const processId = (client as PgPoolClient & { processID?: number }).processID;
+  if (typeof processId === 'number' && Number.isInteger(processId) && processId > 0) {
+    return processId;
+  }
+  try {
+    const result = await client.query<{ pid: number }>('select pg_backend_pid()::int as pid');
+    const pid = result.rows[0]?.pid;
+    return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function cancelBackendWithDedicatedClient(
+  config: DatabaseConnectionConfig,
+  backendPid: number,
+): Promise<PgQueryResult<{ cancelled: boolean }>> {
+  const { Client } = await import('pg');
+  const client = new Client(toPgConfig(config));
+  try {
+    await client.connect();
+    return await client.query<{ cancelled: boolean }>(
+      'select pg_cancel_backend($1) as cancelled',
+      [backendPid],
+    );
+  } finally {
+    await client.end().catch(() => undefined);
   }
 }
 

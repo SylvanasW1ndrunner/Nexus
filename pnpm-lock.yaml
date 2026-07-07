@@ -216,6 +216,12 @@ importers:
         specifier: workspace:*
         version: link:../shared
     devDependencies:
+      '@dbagent/core-llm':
+        specifier: workspace:*
+        version: link:../core-llm
+      '@dbagent/core-usage':
+        specifier: workspace:*
+        version: link:../core-usage
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.20)

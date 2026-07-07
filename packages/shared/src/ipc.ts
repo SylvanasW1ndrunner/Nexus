@@ -207,7 +207,7 @@ export type QueryHistoryItem = {
   id: string;
   connectionId: ConnectionId;
   sql: string;
-  status: 'success' | 'failed' | 'blocked';
+  status: 'success' | 'failed' | 'blocked' | 'cancelled';
   rowCount?: number;
   elapsedMs?: number;
   errorMessage?: string;

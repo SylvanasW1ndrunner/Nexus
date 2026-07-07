@@ -68,4 +68,4 @@
 - 增加 zip 写入和校验，形成用户可直接上传的单文件诊断包。
 - 把 PostgreSQL 诊断、插件健康状态、MCP 健康状态写入诊断报告。
 - 在最终 UI 重建阶段把该 IPC 接到“帮助 / 生成诊断报告”入口。
-- 下一优先级建议：补真实 PostgreSQL 查询取消端到端测试，或补真实 PostgreSQL + 真实 LLM 的 Agent/RAG 联合验收；这两项是当前测试 Agent 标出的 P0 风险。
+- 下一优先级建议：继续补真实 PostgreSQL + 真实 LLM 的 Agent/RAG 联合验收；真实 PostgreSQL 查询取消端到端测试已在后续切片补齐。

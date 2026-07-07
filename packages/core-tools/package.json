@@ -21,6 +21,8 @@
     "@dbagent/shared": "workspace:*"
   },
   "devDependencies": {
+    "@dbagent/core-llm": "workspace:*",
+    "@dbagent/core-usage": "workspace:*",
     "vitest": "^2.1.8"
   }
 }

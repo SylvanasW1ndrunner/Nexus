@@ -17,7 +17,7 @@
 
 新增功能时先判断是否跨进程。如果功能只在 renderer 内使用，不应放进 IPC 契约；如果主进程需要返回给 UI，必须先在 `domain.ts` 或 `ipc.ts` 中定义稳定结构，再由具体模块实现。
 
-查询执行合同支持调用方传入 `queryId`。未来 UI、Agent 或命令入口如果需要取消长 SQL，必须在发送 `db:execute-query` 前生成 query id，并用同一个 id 调用 `db:cancel-query`。`db:cancel-query` 当前返回取消决策：优先 backend cancel、降级断开当前连接、查询已结束或未找到。真实 PostgreSQL backend cancel 由 main/driver 后续切片执行，shared 只暴露稳定跨进程结构。
+查询执行合同支持调用方传入 `queryId`。未来 UI、Agent 或命令入口如果需要取消长 SQL，必须在发送 `db:execute-query` 前生成 query id，并用同一个 id 调用 `db:cancel-query`。`db:cancel-query` 当前返回取消决策：优先 backend cancel、降级断开当前连接、查询已结束或未找到。查询历史状态包含 `cancelled`，用于区分用户主动取消和普通 SQL 失败。真实 PostgreSQL backend cancel 由 main/driver 执行，shared 只暴露稳定跨进程结构。
 
 错误处理统一走 `Result<T>`。业务可恢复错误使用 `AppErrorCode`，例如远程连接失败、只读连接拦截、危险 SQL 需要确认。这样 renderer 可以写可测试的错误提示逻辑，而不是解析数据库驱动的原始异常文本。
 

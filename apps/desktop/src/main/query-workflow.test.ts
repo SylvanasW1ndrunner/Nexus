@@ -128,6 +128,35 @@ describe('createQueryWorkflow', () => {
     ]);
   });
 
+  it('marks user-cancelled query errors separately from failed SQL', async () => {
+    const cancellations = new QueryCancellationRegistry();
+    const harness = createHarness({
+      connection: baseConnection,
+      cancellations,
+      driverResult: err({ code: 'QUERY_CANCELLED', message: 'PostgreSQL query was cancelled.' }),
+    });
+
+    const result = await harness.execute({
+      queryId: 'query-cancelled-1',
+      connectionId: baseConnection.id,
+      sql: 'select pg_sleep(30)',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('QUERY_CANCELLED');
+    expect(cancellations.get('query-cancelled-1')).toMatchObject({
+      status: 'cancelled',
+      backendPid: 1201,
+    });
+    expect(harness.history).toEqual([
+      expect.objectContaining({
+        status: 'cancelled',
+        errorMessage: 'PostgreSQL query was cancelled.',
+      }),
+    ]);
+  });
+
   it('registers a caller-provided query id and marks it completed after execution', async () => {
     const cancellations = new QueryCancellationRegistry();
     const harness = createHarness({ connection: baseConnection, cancellations });

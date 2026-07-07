@@ -19,6 +19,9 @@ await prepareDatabases();
 await runVitest('packages/core-db/test/postgres.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
+await runVitest('apps/desktop/src/main/query-workflow.postgres.integration.test.ts', {
+  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
+});
 await runVitest('packages/core-auth/test/postgres.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_auth_test',
   DBAGENT_TEST_AUTH_DATABASE_URL: databaseUrl('dbagent_core_auth_test'),

@@ -32,4 +32,4 @@
 - 诊断报告当前输出目录，不输出 zip。
 - 暂未收集 PostgreSQL 运行诊断、MCP 健康状态和插件健康快照。
 - 最终 UI 入口尚未实现，前端仍处于冻结阶段。
-- 后续 P0 测试缺口仍包括真实 PostgreSQL 查询取消端到端，以及真实 PostgreSQL + 真实 LLM 的 Agent/RAG 联合验收。
+- 后续 P0 测试缺口仍包括真实 PostgreSQL + 真实 LLM 的 Agent/RAG 联合验收。真实 PostgreSQL 查询取消端到端已在后续切片补齐。

@@ -3,7 +3,7 @@
 ## 测试分层
 
 - 单元测试覆盖纯业务规则，例如 SQL 安全判断、PostgreSQL identifier quote、预览 SQL limit、连接校验、查询历史、CSV/JSON 导出、用量窗口、认证与会话持久化。
-- 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts`、`packages/core-auth/test/postgres.integration.test.ts` 和 `packages/core-tools/test/agent-rag-business-scenario.test.ts`。
+- 集成测试覆盖真实 PostgreSQL 行为。本地 fixture 放在 `scripts/dev-db`，自动化入口为 `pnpm test:postgres`，底层由 `scripts/run-postgres-tests.mjs` 设置 `DBAGENT_RUN_POSTGRES_TESTS=1` 后运行 `packages/core-db/test/postgres.integration.test.ts`、`apps/desktop/src/main/query-workflow.postgres.integration.test.ts`、`packages/core-auth/test/postgres.integration.test.ts` 和 `packages/core-tools/test/agent-rag-business-scenario.test.ts`。
 - 远程连接风险以可复现单测覆盖连接建立失败和连接后运行期中断分类，以真实 PostgreSQL 集成测试覆盖成功连接、查询、断连和事务回滚。弱网、VPN、云安全组和跨系统防火墙场景后续进入发布前手工 QA 矩阵。
 - E2E 测试覆盖桌面端用户路径：打开应用、创建连接、执行 SQL、查看结果表、查看查询历史、验证只读拦截、导出 CSV、重启后恢复 SQL 草稿。
 - Smoke 测试是零外部依赖的仓库健康检查，入口为 `pnpm smoke`，实现文件为 `scripts/smoke.mjs`。它检查关键文件存在、SQL 安全关键字和 IPC 契约片段。
@@ -83,6 +83,7 @@ pnpm db:down
 - `apps/desktop/src/main/credential-vault.test.ts` 覆盖密码凭证保存、读取、删除、`safeStorage` 可用路径和不可用 fallback。
 - `apps/desktop/src/main/query-confirmation.test.ts` 覆盖写操作确认握手，确保未确认 SQL 不会直接执行。
 - `apps/desktop/src/main/query-workflow.test.ts` 覆盖主进程查询业务链路：安全查询成功入历史和用量、空 SQL 在 driver 前返回校验错误、只读写操作在 driver 前拦截、可写危险 SQL 未确认时要求确认、driver 失败时写失败历史。
+- `apps/desktop/src/main/query-workflow.postgres.integration.test.ts` 覆盖真实 PostgreSQL 长查询取消：执行 `pg_sleep`、捕获 backend pid、通过 `pg_cancel_backend` 取消、写入 `cancelled` 历史、取消后连接仍可执行查询，并覆盖业务连接池 `maxClients=1` 时取消专用池不被长查询占满。
 - `apps/desktop/src/main/schema-workflow.test.ts` 覆盖 Schema 主进程业务链路：连接不存在时不触碰 driver，连接存在时按保存连接的 `engine` 路由 `listTables` 和 `describeTable`。
 - `apps/desktop/src/main/workspace-state-store.test.ts` 覆盖 SQL 草稿恢复、活动连接恢复、缺失文件、损坏 JSON 和结构不合法状态。
 - `apps/desktop/src/main/workspace-project-store.test.ts` 覆盖真实项目目录创建、标准模板 starter 文件、打开已有项目、最近项目置顶、普通目录拒绝打开、SQL 文件保存、SQL 文件读取、项目文件树刷新、非受管路径拒绝和 SQL 库路径配置。
@@ -123,6 +124,8 @@ pnpm db:up
 - `disconnect(connectionId)` 后再次 `listTables(connectionId)` 必须返回 `CONNECTION_FAILED`。
 - `disconnect(connectionId)` 后再次 `describeTable(connectionId, ...)` 必须返回 `CONNECTION_FAILED`。
 - 可写连接中批量 SQL 先插入数据、再执行错误语句时必须失败，并且前序插入后的计数仍为 `0`，证明事务已回滚。
+- 桌面查询 workflow 中执行 `select pg_sleep(30)` 后，`db:cancel-query` 等价路径必须通过 PostgreSQL backend cancel 返回 `QUERY_CANCELLED`，查询历史状态必须是 `cancelled`，取消后同一连接仍能执行 `select 1`。
+- 即使业务查询池配置为 `maxClients=1`，取消路径也必须通过独立取消连接执行，不能排队等待长查询释放业务连接。
 
 环境变量 `DBAGENT_TEST_PG_HOST`、`DBAGENT_TEST_PG_PORT`、`DBAGENT_TEST_PG_DATABASE`、`DBAGENT_TEST_PG_USER` 和 `DBAGENT_TEST_PG_PASSWORD` 可覆盖默认连接。认证模块也可单独使用 `DBAGENT_TEST_AUTH_DATABASE_URL` 指向账号测试库。CI 已把 `pnpm test:postgres` 作为独立真实数据库门禁；候选发布仍建议在目标操作系统上额外跑一次本地或远程 PostgreSQL 验证。
 
