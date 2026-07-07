@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ReactAgent, ToolRegistry } from '@dbagent/core-agent';
+import { AgentAuditLogStore, ReactAgent, ToolRegistry, type AgentAuditLogWriter } from '@dbagent/core-agent';
 import {
   LlmRouter,
   type LlmChatRequest,
@@ -11,6 +11,7 @@ import {
 } from '@dbagent/core-llm';
 import { parseSkillDefinition, type SkillDefinition } from '@dbagent/core-skills';
 import { UsageTracker } from '@dbagent/core-usage';
+import { DailyAgentAuditLogStore } from './agent-audit-log.js';
 import { HeadlessAgentService } from './agent-service.js';
 
 const tempDirs: string[] = [];
@@ -81,6 +82,66 @@ describe('HeadlessAgentService', () => {
     });
     expect(provider.requests[0]?.tools?.map((tool) => tool.name)).toEqual(['query_database']);
     expect(result.toolPolicy.allowedToolNames).toEqual(['query_database']);
+  });
+
+  it('writes a desktop Agent audit log for a real headless Agent run', async () => {
+    const logsDir = await tempDir('dbagent-agent-service-audit-');
+    const provider = scriptedProvider([
+      {
+        text: '',
+        toolCalls: [{ id: 'call_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14 },
+      },
+      {
+        text: '昨日 GMV 是 100。',
+        toolCalls: [],
+        usage: { promptTokens: 16, completionTokens: 6, totalTokens: 22 },
+      },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      auditLog: new DailyAgentAuditLogStore(logsDir),
+    });
+
+    const result = await service.run({
+      runId: 'run_daily_gmv_audit',
+      providerId: 'fake',
+      model: 'fake-model',
+      userInput: '请生成昨日 GMV 日报',
+      mode: 'readonly',
+      maxIterations: 2,
+    });
+    const auditLog = new AgentAuditLogStore(join(logsDir, 'agent-2026-06-17.jsonl'));
+    const events = await auditLog.readAll();
+
+    expect(result.status).toBe('done');
+    expect(events.map((event) => event.type)).toEqual([
+      'run_started',
+      'model_call_started',
+      'model_call_finished',
+      'tool_call_started',
+      'tool_call_finished',
+      'model_call_started',
+      'model_call_finished',
+      'run_finished',
+    ]);
+    expect(events.find((event) => event.type === 'run_started')).toMatchObject({
+      type: 'run_started',
+      sessionId: 'session_agent_service',
+      mode: 'readonly',
+    });
+    expect(events.find((event) => event.type === 'tool_call_finished')).toMatchObject({
+      type: 'tool_call_finished',
+      toolName: 'query_database',
+      status: 'success',
+    });
+    expect(events.find((event) => event.type === 'run_finished')).toMatchObject({
+      type: 'run_finished',
+      status: 'done',
+      iterations: 2,
+    });
   });
 
   it('returns missing-tool diagnostics without running Agent when a Skill cannot execute', async () => {
@@ -195,10 +256,13 @@ async function createService(input: {
   provider: LlmProvider;
   registry: ToolRegistry;
   skills: SkillDefinition[];
+  auditLog?: AgentAuditLogWriter;
 }): Promise<HeadlessAgentService> {
   const usage = new UsageTracker(await usagePath());
   const agent = new ReactAgent(new LlmRouter(usage, [input.provider]), input.registry, usage, undefined, {
+    now: () => '2026-06-17T00:00:00.000Z',
     createSessionId: () => 'session_agent_service',
+    ...(input.auditLog === undefined ? {} : { auditLog: input.auditLog }),
   });
   return new HeadlessAgentService({
     agent,
@@ -209,9 +273,13 @@ async function createService(input: {
 }
 
 async function usagePath(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-service-'));
+  return join(await tempDir('dbagent-agent-service-'), 'usage.json');
+}
+
+async function tempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
   tempDirs.push(dir);
-  return join(dir, 'usage.json');
+  return dir;
 }
 
 function registryWithQueryTools(): ToolRegistry {

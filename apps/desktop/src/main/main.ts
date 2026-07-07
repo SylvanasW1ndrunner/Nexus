@@ -32,10 +32,12 @@ import { WorkspaceStateStore } from './workspace-state-store.js';
 import { WorkspaceProjectStore } from './workspace-project-store.js';
 import { HeadlessAgentService } from './agent-service.js';
 import { registerDesktopAgentTools } from './agent-tool-bootstrap.js';
+import { DailyAgentAuditLogStore } from './agent-audit-log.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
 const dataDir = join(userDataDir, 'data');
+const logsDir = join(userDataDir, 'logs');
 const credentialPath = join(dataDir, 'credentials.json');
 const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
@@ -80,7 +82,9 @@ const desktopAgentTools = registerDesktopAgentTools({
   workspaceProjects: workspaceProjectStore,
   driverForEngine: (engine) => databaseDrivers.get(engine),
 });
-const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker);
+const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
+  auditLog: new DailyAgentAuditLogStore(logsDir),
+});
 const headlessAgentService = new HeadlessAgentService({
   agent: reactAgent,
   toolRegistry: agentToolRegistry,

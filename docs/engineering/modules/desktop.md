@@ -106,3 +106,15 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 `apps/desktop/src/main/terminal-service.ts` 在真实 PTY shell 刚创建时会先缓存早期输入，等检测到 shell 提示符后再写入 PTY；如果 shell 没有输出提示符，则通过短超时兜底写入。这样可以避免 Windows PowerShell/ConPTY 启动阶段仍在终端能力协商时吞掉用户刚输入的命令。
 
 该逻辑仍然保持真实终端语义：`terminal:write` 对调用方立即返回，session 继续保持 running；后端只调整写入 PTY 的时机，不伪造输出、不模拟 shell。测试侧使用真实 PowerShell 覆盖创建后立即写入、逐字符输入、fallback shell、指定 cwd、清空输出和输出缓冲裁剪。
+
+## 2026-07-07 增量：Agent 审计日志接入
+
+`apps/desktop/src/main/agent-audit-log.ts` 提供桌面主进程的 Agent 审计日志 adapter。它只负责根据 Agent 事件 timestamp 选择每日文件路径，实际 JSONL 写入、损坏行跳过、脱敏和长度限制继续复用 `@dbagent/core-agent/AgentAuditLogStore`。
+
+默认路径：
+- `Electron userData/logs/agent-YYYY-MM-DD.jsonl`
+- timestamp 无法解析时写入 `agent-unknown-date.jsonl`
+
+`main.ts` 在构造 `ReactAgent` 时注入 `new DailyAgentAuditLogStore(logsDir)`。因此通过 `agent:run` IPC 进入 `HeadlessAgentService` 的真实 Agent 任务，会默认写入 run/model/tool/final 状态审计事件。该日志不进入 renderer，不包含完整 prompt、完整工具结果或明文凭证；后续诊断报告和官方 eval 插件可以按需读取并再次脱敏。
+
+本切片没有引入 OpenTelemetry、LangSmith、Langfuse 或其他外部追踪依赖。原因是桌面端默认能力必须离线可用、可打包、无账号依赖，并且不能把用户数据库上下文自动发送到外部平台。后续如果支持外部 tracing，应作为显式开启的导出 adapter，而不是替代本地审计日志。
