@@ -24,13 +24,24 @@ type CredentialRepository = {
   remove(connectionId: ConnectionId): Promise<void>;
 };
 
+type SchemaRagConnectionLifecycle = {
+  clear(connectionId: ConnectionId): void | Promise<void>;
+  removeSnapshot(connectionId: ConnectionId): Promise<void>;
+};
+
 export type ConnectionWorkflowDependencies = {
   connections: ConnectionRepository;
   credentials: CredentialRepository;
   driverForEngine: (engine: DatabaseEngine) => Pick<IDatabaseDriver, 'test' | 'connect' | 'disconnect'>;
+  schemaRag?: SchemaRagConnectionLifecycle;
 };
 
-export function createConnectionWorkflow({ connections, credentials, driverForEngine }: ConnectionWorkflowDependencies) {
+export function createConnectionWorkflow({
+  connections,
+  credentials,
+  driverForEngine,
+  schemaRag,
+}: ConnectionWorkflowDependencies) {
   async function findConnection(id: ConnectionId): Promise<SavedConnection | undefined> {
     return (await connections.list()).find((connection) => connection.id === id);
   }
@@ -76,6 +87,8 @@ export function createConnectionWorkflow({ connections, credentials, driverForEn
       if (!existing) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
 
       await driverForEngine(existing.engine).disconnect(id);
+      const cleanup = await cleanupSchemaRag(schemaRag, id);
+      if (!cleanup.ok) return cleanup;
       const removed = await connections.remove(id);
       if (!removed) return err({ code: 'NOT_FOUND', message: 'Connection not found.' });
       await credentials.remove(id);
@@ -108,6 +121,25 @@ export function createConnectionWorkflow({ connections, credentials, driverForEn
       return updated ? ok(updated) : err({ code: 'NOT_FOUND', message: 'Connection not found.' });
     },
   };
+}
+
+async function cleanupSchemaRag(
+  schemaRag: SchemaRagConnectionLifecycle | undefined,
+  connectionId: ConnectionId,
+): Promise<Result<{ id: ConnectionId }>> {
+  if (!schemaRag) return ok({ id: connectionId });
+
+  try {
+    await schemaRag.removeSnapshot(connectionId);
+    await schemaRag.clear(connectionId);
+    return ok({ id: connectionId });
+  } catch (error) {
+    return err({
+      code: 'INTERNAL_ERROR',
+      message: 'Failed to remove Schema RAG snapshot for the deleted connection.',
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function toDbConfig(input: ConnectionInput): DatabaseConnectionConfig {

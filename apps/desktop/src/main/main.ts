@@ -8,6 +8,7 @@ import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, Test
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import { ReactAgent, ToolRegistry } from '@dbagent/core-agent';
+import { SchemaRagEngine, SchemaRagSnapshotStore } from '@dbagent/core-rag';
 import { SkillRegistry, registerDefaultBuiltinSkills } from '@dbagent/core-skills';
 import {
   ipcChannels,
@@ -45,6 +46,7 @@ const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
 const pluginStatePath = join(dataDir, 'plugins.json');
 const ideSettingsPath = join(dataDir, 'ide-settings.json');
+const schemaRagSnapshotDir = join(dataDir, 'schema-rag-snapshots');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
@@ -75,6 +77,8 @@ const authService = new AuthService(join(dataDir, 'auth-session.json'), authRepo
 const usageTracker = new UsageTracker(join(dataDir, 'usage-history.json'));
 const llmRouter = new LlmRouter(usageTracker);
 const databaseDrivers = createDefaultDatabaseDriverRegistry();
+const schemaRagEngine = new SchemaRagEngine();
+const schemaRagSnapshotStore = new SchemaRagSnapshotStore({ rootDir: schemaRagSnapshotDir });
 const agentToolRegistry = new ToolRegistry();
 const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
@@ -83,6 +87,7 @@ const desktopAgentTools = registerDesktopAgentTools({
   connections: connectionStore,
   workspaceProjects: workspaceProjectStore,
   driverForEngine: (engine) => databaseDrivers.get(engine),
+  rag: schemaRagEngine,
 });
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
   auditLog: new DailyAgentAuditLogStore(logsDir),
@@ -114,6 +119,10 @@ const connectionWorkflow = createConnectionWorkflow({
   connections: connectionStore,
   credentials: credentialVault,
   driverForEngine: (engine) => databaseDrivers.get(engine),
+  schemaRag: {
+    clear: (connectionId) => schemaRagEngine.clear(connectionId),
+    removeSnapshot: (connectionId) => schemaRagSnapshotStore.remove(connectionId),
+  },
 });
 const executeQuery = createQueryWorkflow({
   connections: connectionStore,

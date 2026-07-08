@@ -144,3 +144,9 @@ Mermaid 对标识符有限制，因此模块会把 `schema.table`、字段名和
 - 把 PostgreSQL catalog reader 注册为官方插件候选，权限限定为读取 schema metadata。
 - 增加索引、唯一约束、check 约束、分区、视图定义、统计信息和估算行数。
 - 给大 schema 增加后台分批、取消、checkpoint 和性能压测。
+
+## 2026-07-08 增量：桌面连接删除接入快照清理
+
+`SchemaRagSnapshotStore.remove()` 已由桌面主进程连接删除流程调用。用户删除连接时，桌面端会删除该连接的持久化快照，并调用共享 `SchemaRagEngine.clear()` 清理内存索引，保证 Agent 后续不会继续检索已删除连接的 schema。
+
+本次接线不改变 `core-rag` 的独立边界：`core-rag` 仍只提供快照存储、索引和检索能力，不依赖 Electron，也不知道连接凭据或主进程 IPC。桌面端作为组合层负责把连接生命周期事件映射到 RAG 清理操作。

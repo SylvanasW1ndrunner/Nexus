@@ -127,3 +127,11 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 新增 IPC `app:generate-diagnostic-report`，返回报告目录、文件数、字节数和脱敏摘要。renderer 不直接接收报告内容，避免把日志和配置文本暴露到前端内存。`credentials.json` 不在收集白名单内；大日志只读取尾部，避免生成报告时拖垮应用。
 
 当前没有引入 zip 依赖。目录输出已经能满足无 UI 测试和手动反馈，zip 打包会在后续单独评估压缩库、打包体积、Windows/Linux 兼容和大文件流式写入。
+
+## 2026-07-08 增量：连接删除清理 Schema RAG 快照
+
+`apps/desktop/src/main/connection-workflow.ts` 的连接删除流程现在接入 Schema RAG 生命周期清理。删除连接时，主进程会先断开数据库 driver，再删除该连接对应的 Schema RAG 快照文件，并清理共享 `SchemaRagEngine` 中的内存索引，最后才删除连接元数据和凭据。
+
+该顺序用于保证失败可恢复：如果 RAG 快照删除失败，连接元数据和凭据会保留，调用方收到 `INTERNAL_ERROR`，用户或后续自动恢复任务可以再次发起删除；如果快照已经删除但后续连接元数据删除失败，RAG 快照可以在重新连接后重建，不会造成用户数据库凭据丢失。
+
+`main.ts` 现在只创建一个共享 `SchemaRagEngine`，同时注入给 Agent 工具注册和连接删除 workflow，避免 Agent 查询使用的内存索引与连接生命周期清理不一致。持久化目录为 Electron `userData/schema-rag-snapshots`，当前无新增第三方依赖。

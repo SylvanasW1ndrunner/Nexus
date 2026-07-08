@@ -130,14 +130,58 @@ describe('createConnectionWorkflow', () => {
     expect(harness.credentials.has(baseConnection.id)).toBe(false);
     expect(harness.driverCalls).toEqual([{ type: 'disconnect', engine: 'postgres', connectionId: baseConnection.id }]);
   });
+
+  it('cleans Schema RAG memory and snapshot state before deleting connection metadata', async () => {
+    const harness = createHarness({ connections: [baseConnection], schemaRag: true });
+    harness.credentials.set(baseConnection.id, 'pg-secret');
+
+    const result = await harness.workflow.remove(baseConnection.id);
+
+    expect(result).toEqual(ok({ id: baseConnection.id }));
+    expect(harness.schemaRagCalls).toEqual([
+      { type: 'removeSnapshot', connectionId: baseConnection.id },
+      { type: 'clear', connectionId: baseConnection.id },
+    ]);
+    expect(harness.connections).toEqual([]);
+    expect(harness.credentials.has(baseConnection.id)).toBe(false);
+  });
+
+  it('keeps connection metadata and credentials when Schema RAG snapshot cleanup fails', async () => {
+    const harness = createHarness({
+      connections: [baseConnection],
+      schemaRag: true,
+      schemaRagSnapshotError: new Error('disk permission denied'),
+    });
+    harness.credentials.set(baseConnection.id, 'pg-secret');
+
+    const result = await harness.workflow.remove(baseConnection.id);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatchObject({
+      code: 'INTERNAL_ERROR',
+      message: 'Failed to remove Schema RAG snapshot for the deleted connection.',
+      detail: 'disk permission denied',
+    });
+    expect(harness.schemaRagCalls).toEqual([{ type: 'removeSnapshot', connectionId: baseConnection.id }]);
+    expect(harness.connections).toEqual([baseConnection]);
+    expect(harness.credentials.get(baseConnection.id)).toBe('pg-secret');
+    expect(harness.driverCalls).toEqual([{ type: 'disconnect', engine: 'postgres', connectionId: baseConnection.id }]);
+  });
 });
 
 function createHarness(options: {
   connections: SavedConnection[];
   connectResult?: Result<SavedConnection>;
+  schemaRag?: boolean;
+  schemaRagSnapshotError?: Error;
 }) {
   const connections = options.connections.map((connection) => ({ ...connection }));
   const credentials = new Map<string, string>();
+  const schemaRagCalls: Array<
+    | { type: 'removeSnapshot'; connectionId: string }
+    | { type: 'clear'; connectionId: string }
+  > = [];
   const driverCalls: Array<
     | { type: 'test'; engine: string; host: string }
     | { type: 'connect'; engine: string; connectionId: string; password?: string }
@@ -148,6 +192,7 @@ function createHarness(options: {
     connections,
     credentials,
     driverCalls,
+    schemaRagCalls,
     workflow: createConnectionWorkflow({
       connections: {
         list() {
@@ -234,6 +279,20 @@ function createHarness(options: {
           },
         };
       },
+      ...(options.schemaRag
+        ? {
+            schemaRag: {
+              removeSnapshot(connectionId) {
+                schemaRagCalls.push({ type: 'removeSnapshot', connectionId });
+                if (options.schemaRagSnapshotError) return Promise.reject(options.schemaRagSnapshotError);
+                return Promise.resolve();
+              },
+              clear(connectionId) {
+                schemaRagCalls.push({ type: 'clear', connectionId });
+              },
+            },
+          }
+        : {}),
     }),
   };
 }
