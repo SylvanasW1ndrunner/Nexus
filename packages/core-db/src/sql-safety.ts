@@ -27,6 +27,7 @@ export type AnalyzeSqlOptions = {
 
 export function analyzeSqlSafety(sql: string, options: AnalyzeSqlOptions): QuerySafetyReport {
   const normalized = stripSqlComments(sql).trim();
+  const statements = splitSqlStatements(normalized).map((statement) => statement.text);
   const statementKind = firstStatementKind(normalized);
   const reasons: string[] = [];
 
@@ -40,7 +41,7 @@ export function analyzeSqlSafety(sql: string, options: AnalyzeSqlOptions): Query
     };
   }
 
-  if (containsMultipleStatements(normalized)) {
+  if (statements.length > 1) {
     reasons.push('Multiple statements require review before execution.');
   }
 
@@ -70,11 +71,12 @@ export function analyzeSqlSafety(sql: string, options: AnalyzeSqlOptions): Query
     reasons.push(`${statementKind} without WHERE may affect every row in the target table.`);
   }
 
-  if (options.readOnly && (!safeKinds.has(statementKind) || wrappedWriteKind !== undefined)) {
+  const readOnlyViolationKind = findReadOnlyViolationKind(statements);
+  if (options.readOnly && readOnlyViolationKind) {
     reasons.push('Connection is read-only, so write or DDL statements are blocked.');
   }
 
-  const blocked = options.readOnly && (!safeKinds.has(statementKind) || wrappedWriteKind !== undefined);
+  const blocked = options.readOnly && readOnlyViolationKind !== undefined;
   const requiresConfirmation =
     !blocked &&
     (writeKinds.has(statementKind) ||
@@ -126,6 +128,16 @@ function findWrappedWriteKind(sql: string, statementKind: string): string | unde
   }
   if (statementKind === 'EXPLAIN' && /\bANALYZE\b/i.test(sql)) {
     return sql.match(/\b(INSERT|UPDATE|DELETE|MERGE|CALL|CREATE|ALTER|DROP|TRUNCATE)\b/i)?.[1]?.toUpperCase();
+  }
+  return undefined;
+}
+
+function findReadOnlyViolationKind(statements: string[]): string | undefined {
+  for (const statement of statements.length > 0 ? statements : ['']) {
+    const kind = firstStatementKind(statement);
+    if (!safeKinds.has(kind)) return kind;
+    const wrappedWriteKind = findWrappedWriteKind(statement, kind);
+    if (wrappedWriteKind) return wrappedWriteKind;
   }
   return undefined;
 }

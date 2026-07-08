@@ -66,6 +66,32 @@ describe('query result export contract', () => {
     expect(parsed).not.toHaveProperty('exportedRowCount');
   });
 
+  it('includes transaction metadata in JSON exports for rollback previews', () => {
+    const rollbackResult: QueryExecutionResult = {
+      ...result,
+      transaction: {
+        mode: 'rollback',
+        started: true,
+        committed: false,
+        rolledBack: true,
+        rollbackOnly: true,
+      },
+    };
+
+    expect(JSON.parse(queryResultToJson(rollbackResult))).toMatchObject({
+      transaction: {
+        mode: 'rollback',
+        rolledBack: true,
+      },
+    });
+    expect(JSON.parse(exportQueryResult(rollbackResult, { format: 'json' }).content)).toMatchObject({
+      transaction: {
+        mode: 'rollback',
+        rolledBack: true,
+      },
+    });
+  });
+
   it('exports only the filtered visible result view', () => {
     const artifact = exportQueryResult(result, {
       format: 'json',

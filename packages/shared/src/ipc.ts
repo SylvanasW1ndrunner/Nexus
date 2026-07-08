@@ -136,7 +136,10 @@ export type QueryRequest = {
   limit?: number;
   dryRun?: boolean;
   confirmed?: boolean;
+  transactionMode?: QueryTransactionMode;
 };
+
+export type QueryTransactionMode = 'auto' | 'rollback';
 
 export type QuerySafetyReport = {
   statementKind: string;
@@ -166,8 +169,17 @@ export type QueryExecutionResult = {
   rowCount: number;
   elapsedMs: number;
   safety: QuerySafetyReport;
+  transaction?: QueryTransactionReport;
   resultSets?: QueryResultSet[];
   messages?: QueryExecutionMessage[];
+};
+
+export type QueryTransactionReport = {
+  mode: QueryTransactionMode;
+  started: boolean;
+  committed: boolean;
+  rolledBack: boolean;
+  rollbackOnly: boolean;
 };
 
 export type QueryResultSet = {
@@ -213,6 +225,7 @@ export type QueryHistoryItem = {
   errorMessage?: string;
   createdAt: string;
   safety: QuerySafetyReport;
+  transaction?: QueryTransactionReport;
 };
 
 export type QueryHistoryRequest = {

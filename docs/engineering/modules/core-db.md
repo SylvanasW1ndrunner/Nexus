@@ -223,6 +223,23 @@ pnpm test:postgres
 - 在 `DatabaseDriverRegistry` 中登记新 driver 的工厂和 capability；上层只按 `engine` 选择并复用 driver，不直接依赖数据库 SDK。
 - 每个 driver 独立处理系统表查询、表结构详情、错误分类、`EXPLAIN` 语法、SSL 和连接参数。
 - 通用 SQL 安全与性能规则保留在 `core-db` 公共层；数据库方言差异通过 driver capability 暴露。
+
+## PostgreSQL 事务试运行与回滚预览
+
+`QueryRequest.transactionMode` 当前支持两种模式：
+
+- `auto`：默认模式。普通读查询不主动开启事务；需要确认的写操作由 PostgreSQL driver 使用 `BEGIN/COMMIT` 包裹，失败时回滚。
+- `rollback`：试运行模式。driver 使用 `BEGIN` 执行 SQL，然后强制 `ROLLBACK`，返回真实执行结果和 `transaction` 审计元数据，但不提交数据库变更。
+
+`dryRun: true` 兼容映射为 `transactionMode: 'rollback'`。如果调用方同时传入 `dryRun: true` 和 `transactionMode: 'auto'`，driver 返回 `VALIDATION_ERROR`，避免“看起来是试运行、实际会提交”的歧义。
+
+事务报告写入 `QueryExecutionResult.transaction`，并由主进程 query workflow 保存到 `QueryHistoryItem.transaction`。JSON 导出也会保留该字段，后续 Agent 工具证据、查询历史审计和结果快照可以明确区分“已提交写入”和“仅回滚预览”。
+
+回滚预览不会绕过确认逻辑。任何 `requiresConfirmation` 的 SQL 仍需要 `confirmed: true` 才会到达 driver。只读连接会逐条检查多语句批处理，`select 1; update ...` 这类后续写入会在执行前被阻断。
+
+当前不支持参数化多语句批处理。原因是 PostgreSQL 参数绑定作用于整条 query text，在多语句场景下审计、错误定位和未来 UI 展示都需要更明确的逐语句参数模型。单条参数化 SQL 正常支持。
+
+PostgreSQL 不允许在显式事务中运行的语句不能进入 rollback-only 模式，例如 `VACUUM`、`CREATE/DROP DATABASE`、`ALTER SYSTEM`、`CREATE/DROP TABLESPACE`、`CREATE/DROP INDEX CONCURRENTLY`。driver 会返回 `UNSUPPORTED_OPERATION`，调用方应提示用户改用普通确认执行或专门的 DDL 操作入口。
 ## SQL 预审与 Agent 权限边界
 
 本轮把 SQL 预审明确为 `core-db` 的基础安全合同，而不是 Agent 私有逻辑。所有入口，包括 SQL 编辑器、IPC workflow、Agent 工具和具体 driver，都应复用同一套 `QuerySafetyReport` / `buildSqlExecutionPlan()` 语义。

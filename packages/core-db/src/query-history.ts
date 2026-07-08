@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { QueryHistoryItem, QueryRiskLevel, QuerySafetyReport } from '@dbagent/shared';
+import type { QueryHistoryItem, QueryRiskLevel, QuerySafetyReport, QueryTransactionReport } from '@dbagent/shared';
 import { readJsonFile, writeJsonFileAtomic } from './json-file.js';
 
 export type AppendQueryHistoryInput = {
@@ -10,6 +10,7 @@ export type AppendQueryHistoryInput = {
   elapsedMs?: number;
   errorMessage?: string;
   safety: QuerySafetyReport;
+  transaction?: QueryTransactionReport;
 };
 
 export type QueryHistoryListOptions = {
@@ -46,6 +47,7 @@ export class QueryHistoryStore {
     if (input.rowCount !== undefined) item.rowCount = input.rowCount;
     if (input.elapsedMs !== undefined) item.elapsedMs = input.elapsedMs;
     if (input.errorMessage !== undefined) item.errorMessage = input.errorMessage;
+    if (input.transaction !== undefined) item.transaction = input.transaction;
     const history = await this.readAll();
     await this.save([item, ...history].slice(0, 500));
     return item;

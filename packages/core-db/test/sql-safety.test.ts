@@ -135,6 +135,21 @@ describe('analyzeSqlSafety', () => {
     expect(report.reasons.join(' ')).toContain('Multiple statements');
   });
 
+  it('blocks read-only multi-statement batches when a later statement writes data', () => {
+    const report = analyzeSqlSafety(
+      "select count(*) from users; update users set status = 'inactive' where id = 1;",
+      { readOnly: true },
+    );
+
+    expect(report).toMatchObject({
+      statementKind: 'SELECT',
+      riskLevel: 'blocked',
+      blocked: true,
+      requiresConfirmation: false,
+    });
+    expect(report.reasons.join(' ')).toContain('read-only');
+  });
+
   it('ignores comments before classifying complex CTE reads', () => {
     const report = analyzeSqlSafety(
       `

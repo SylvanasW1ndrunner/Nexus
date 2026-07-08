@@ -82,6 +82,37 @@ describe('QueryHistoryStore', () => {
     });
   });
 
+  it('stores transaction metadata so rollback previews are auditable', async () => {
+    const store = new QueryHistoryStore(await historyPath());
+
+    const item = await store.append({
+      connectionId: 'c1',
+      sql: 'update orders set status = paid',
+      status: 'success',
+      rowCount: 2,
+      elapsedMs: 18,
+      safety: dangerousDelete,
+      transaction: {
+        mode: 'rollback',
+        started: true,
+        committed: false,
+        rolledBack: true,
+        rollbackOnly: true,
+      },
+    });
+
+    expect(item.transaction).toEqual({
+      mode: 'rollback',
+      started: true,
+      committed: false,
+      rolledBack: true,
+      rollbackOnly: true,
+    });
+    await expect(store.list({ connectionId: 'c1' })).resolves.toMatchObject([
+      { transaction: { mode: 'rollback', rolledBack: true } },
+    ]);
+  });
+
   it('searches history by SQL text, error text and safety reason for user recovery', async () => {
     const store = new QueryHistoryStore(await historyPath());
     await store.append({

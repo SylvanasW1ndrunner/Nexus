@@ -70,6 +70,29 @@ describe('createQueryWorkflow', () => {
     expect(harness.history[0]?.errorMessage).toContain('read-only');
   });
 
+  it('blocks read-only multi-statement batches when a later statement writes data', async () => {
+    const harness = createHarness({ connection: baseConnection });
+
+    const result = await harness.execute({
+      connectionId: baseConnection.id,
+      sql: "select count(*) from users; update users set city = 'Hangzhou' where id = 1;",
+      confirmed: true,
+      transactionMode: 'rollback',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('READ_ONLY_VIOLATION');
+    expect(harness.driverCalls).toHaveLength(0);
+    expect(harness.usageCount).toBe(0);
+    expect(harness.history).toEqual([
+      expect.objectContaining({
+        connectionId: baseConnection.id,
+        status: 'blocked',
+      }),
+    ]);
+  });
+
   it('rejects empty SQL as validation without touching the driver or history', async () => {
     const harness = createHarness({ connection: baseConnection });
 
@@ -124,6 +147,56 @@ describe('createQueryWorkflow', () => {
         connectionId: connection.id,
         status: 'failed',
         errorMessage: 'syntax error at or near "fromm"',
+      }),
+    ]);
+  });
+
+  it('records rollback preview transaction metadata in successful query history', async () => {
+    const connection = { ...baseConnection, readOnly: false };
+    const transaction: QueryExecutionResult['transaction'] = {
+      mode: 'rollback',
+      started: true,
+      committed: false,
+      rolledBack: true,
+      rollbackOnly: true,
+    };
+    const harness = createHarness({
+      connection,
+      driverResult: ok<QueryExecutionResult>({
+        queryId: 'query-rollback-preview',
+        columns: [{ name: 'affected_rows', dataType: 'int8' }],
+        rows: [{ affected_rows: 3 }],
+        rowCount: 1,
+        elapsedMs: 18,
+        transaction,
+        safety: {
+          statementKind: 'UPDATE',
+          riskLevel: 'caution',
+          requiresConfirmation: true,
+          blocked: false,
+          reasons: ['UPDATE writes data and requires explicit confirmation.'],
+        },
+      }),
+    });
+
+    const result = await harness.execute({
+      connectionId: connection.id,
+      sql: "update users set city = 'Hangzhou' where city is null returning 1 as affected_rows",
+      confirmed: true,
+      transactionMode: 'rollback',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(harness.driverCalls).toEqual([
+      expect.objectContaining({
+        sql: "update users set city = 'Hangzhou' where city is null returning 1 as affected_rows",
+      }),
+    ]);
+    expect(harness.history).toEqual([
+      expect.objectContaining({
+        connectionId: connection.id,
+        status: 'success',
+        transaction,
       }),
     ]);
   });
@@ -303,7 +376,14 @@ function createHarness(options: {
           const item: QueryHistoryItem = {
             id: `history-${history.length + 1}`,
             createdAt: '2026-06-08T00:00:00.000Z',
-            ...input,
+            connectionId: input.connectionId,
+            sql: input.sql,
+            status: input.status,
+            safety: input.safety,
+            ...(input.rowCount === undefined ? {} : { rowCount: input.rowCount }),
+            ...(input.elapsedMs === undefined ? {} : { elapsedMs: input.elapsedMs }),
+            ...(input.errorMessage === undefined ? {} : { errorMessage: input.errorMessage }),
+            ...(input.transaction === undefined ? {} : { transaction: input.transaction }),
           };
           history.push(item);
           return Promise.resolve(item);

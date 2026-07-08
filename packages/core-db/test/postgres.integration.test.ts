@@ -178,6 +178,80 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
     }
   });
 
+  it('supports rollback-only transaction previews for complex write batches', async () => {
+    const driver = new PostgresDriver();
+    const writableConfig = {
+      ...config,
+      id: 'integration-postgres-rollback-preview',
+      readOnly: false,
+    };
+
+    const connectResult = await driver.connect(writableConfig);
+    expect(connectResult.ok).toBe(true);
+    if (!connectResult.ok) return;
+
+    const tableName = `dbagent_rollback_preview_${Date.now()}`;
+
+    try {
+      const previewResult = await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `
+            create table ${tableName} (
+              id integer primary key,
+              sku text not null,
+              amount numeric not null check (amount >= 0)
+            );
+            insert into ${tableName} (id, sku, amount)
+            values (1, 'sku-a', 12.50), (2, 'sku-b', 19.99);
+            update ${tableName}
+            set amount = amount * 1.1
+            where sku = 'sku-b';
+            select count(*)::int as row_count, round(sum(amount), 2)::text as total_amount
+            from ${tableName};
+          `,
+          confirmed: true,
+          transactionMode: 'rollback',
+        },
+        connectResult.data,
+      );
+
+      expect(previewResult.ok).toBe(true);
+      if (!previewResult.ok) return;
+      expect(previewResult.data.transaction).toEqual({
+        mode: 'rollback',
+        started: true,
+        committed: false,
+        rolledBack: true,
+        rollbackOnly: true,
+      });
+      expect(previewResult.data.rows).toEqual([
+        expect.objectContaining({ row_count: 2, total_amount: '34.49' }),
+      ]);
+
+      const tableExists = await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `select to_regclass('public.${tableName}') as table_name;`,
+        },
+        connectResult.data,
+      );
+      expect(tableExists.ok).toBe(true);
+      if (!tableExists.ok) return;
+      expect(tableExists.data.rows).toEqual([expect.objectContaining({ table_name: null })]);
+    } finally {
+      await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `drop table if exists ${tableName};`,
+          confirmed: true,
+        },
+        connectResult.data,
+      );
+      await driver.disconnect(writableConfig.id);
+    }
+  });
+
   it('describes PostgreSQL indexes, constraints, view definitions, and row estimates', async () => {
     const driver = new PostgresDriver();
     const writableConfig = {

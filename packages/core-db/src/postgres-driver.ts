@@ -7,6 +7,7 @@ import type {
   QueryExecutionResult,
   QueryRequest,
   QueryResultSet,
+  QueryTransactionReport,
   SavedConnection,
   TableConstraintSummary,
   TableDetail,
@@ -23,7 +24,8 @@ import {
   classifyPostgresConnectionError,
   classifyPostgresRuntimeError,
 } from './postgres-errors.js';
-import { analyzeSqlSafety } from './sql-safety.js';
+import { splitSqlStatements } from './sql-editor-statements.js';
+import { analyzeSqlSafety, stripSqlComments } from './sql-safety.js';
 import type {
   DatabaseConnectionConfig,
   IDatabaseDriver,
@@ -135,6 +137,23 @@ export class PostgresDriver implements IDatabaseDriver {
       });
     }
 
+    const transactionMode = resolveTransactionMode(request);
+    if (!transactionMode.ok) return transactionMode;
+
+    const parameterizedBatchError = validateParameterizedBatch(request.sql, request.params);
+    if (parameterizedBatchError) return err(parameterizedBatchError);
+
+    if (transactionMode.data === 'rollback') {
+      const unsupportedRollback = findUnsupportedRollbackStatement(request.sql);
+      if (unsupportedRollback) {
+        return err({
+          code: 'UNSUPPORTED_OPERATION',
+          message: 'This PostgreSQL statement cannot run inside a rollback preview transaction.',
+          detail: unsupportedRollback,
+        });
+      }
+    }
+
     const pool = this.pools.get(connection.id);
     if (!pool) {
       return err({
@@ -157,10 +176,11 @@ export class PostgresDriver implements IDatabaseDriver {
           backendPid,
         });
       }
-      const result = safety.requiresConfirmation
-        ? await executeInTransaction(client, request.sql, request.params)
-        : normalizePgResults(await client.query<QueryResultRow>(request.sql, request.params));
-      return ok(toQueryExecutionResult(result, safety, started, queryId));
+      const execution: { results: SafePgQueryResult[]; transaction?: QueryTransactionReport } =
+        safety.requiresConfirmation || transactionMode.data === 'rollback'
+          ? await executeInTransaction(client, request.sql, request.params, transactionMode.data === 'rollback')
+          : { results: normalizePgResults(await client.query<QueryResultRow>(request.sql, request.params)) };
+      return ok(toQueryExecutionResult(execution.results, safety, started, queryId, execution.transaction));
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
     } finally {
@@ -536,21 +556,83 @@ function normalizePgTextArray(value: string[] | string | null): string[] {
     .filter(Boolean);
 }
 
+function resolveTransactionMode(request: QueryRequest): Result<'auto' | 'rollback'> {
+  const transactionMode = request.transactionMode ?? (request.dryRun === true ? 'rollback' : 'auto');
+  if (request.dryRun === true && request.transactionMode !== undefined && request.transactionMode !== 'rollback') {
+    return err({
+      code: 'VALIDATION_ERROR',
+      message: 'dryRun=true conflicts with transactionMode=auto.',
+      detail: 'Use transactionMode=rollback for rollback previews, or remove dryRun.',
+    });
+  }
+  if (transactionMode !== 'auto' && transactionMode !== 'rollback') {
+    return err({
+      code: 'VALIDATION_ERROR',
+      message: `Unsupported transaction mode: ${String(transactionMode)}.`,
+    });
+  }
+  return ok(transactionMode);
+}
+
+function validateParameterizedBatch(sql: string, params?: unknown[]) {
+  if (!params || params.length === 0) return undefined;
+  if (splitSqlStatements(sql).length <= 1) return undefined;
+  return {
+    code: 'UNSUPPORTED_OPERATION' as const,
+    message: 'Parameterized multi-statement SQL is not supported.',
+    detail: 'Run one parameterized statement at a time, or inline-reviewed literal SQL for confirmed scripts.',
+  };
+}
+
+function findUnsupportedRollbackStatement(sql: string): string | undefined {
+  for (const statement of splitSqlStatements(stripSqlComments(sql)).map((segment) => segment.text)) {
+    const normalized = statement.trim().replace(/\s+/g, ' ').toUpperCase();
+    if (!normalized) continue;
+    if (normalized === 'VACUUM' || normalized.startsWith('VACUUM ')) return statement.trim();
+    if (/^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/.test(normalized)) return statement.trim();
+    if (/^DROP\s+INDEX\s+CONCURRENTLY\b/.test(normalized)) return statement.trim();
+    if (/^CREATE\s+DATABASE\b/.test(normalized)) return statement.trim();
+    if (/^DROP\s+DATABASE\b/.test(normalized)) return statement.trim();
+    if (/^ALTER\s+SYSTEM\b/.test(normalized)) return statement.trim();
+    if (/^CREATE\s+TABLESPACE\b/.test(normalized)) return statement.trim();
+    if (/^DROP\s+TABLESPACE\b/.test(normalized)) return statement.trim();
+  }
+  return undefined;
+}
+
 async function executeInTransaction(
   client: PgPoolClient,
   sql: string,
   params?: unknown[],
-): Promise<SafePgQueryResult[]> {
+  rollbackOnly = false,
+): Promise<{ results: SafePgQueryResult[]; transaction: QueryTransactionReport }> {
+  const transaction: QueryTransactionReport = {
+    mode: rollbackOnly ? 'rollback' : 'auto',
+    started: false,
+    committed: false,
+    rolledBack: false,
+    rollbackOnly,
+  };
   try {
     await client.query('BEGIN');
-    const result = normalizePgResults(await client.query<QueryResultRow>(sql, params));
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    try {
+    transaction.started = true;
+    const results = normalizePgResults(await client.query<QueryResultRow>(sql, params));
+    if (rollbackOnly) {
       await client.query('ROLLBACK');
-    } catch {
-      // Preserve the original database error; rollback failure is secondary.
+      transaction.rolledBack = true;
+      return { results, transaction };
+    }
+    await client.query('COMMIT');
+    transaction.committed = true;
+    return { results, transaction };
+  } catch (error) {
+    if (transaction.started && !transaction.committed && !transaction.rolledBack) {
+      try {
+        await client.query('ROLLBACK');
+        transaction.rolledBack = true;
+      } catch {
+        // Preserve the original database error; rollback failure is secondary.
+      }
     }
     throw error;
   }
@@ -608,6 +690,7 @@ function toQueryExecutionResult(
   safety: QueryExecutionResult['safety'],
   started: number,
   queryId: string,
+  transaction?: QueryTransactionReport,
 ): QueryExecutionResult {
   const resultSets = results.map(toQueryResultSet);
   const primary =
@@ -622,6 +705,7 @@ function toQueryExecutionResult(
     rowCount: primary.rowCount,
     elapsedMs: Math.round(performance.now() - started),
     safety,
+    ...(transaction === undefined ? {} : { transaction }),
   };
   if (resultSets.length > 1) result.resultSets = resultSets;
   if (messages.length > 0) result.messages = messages;

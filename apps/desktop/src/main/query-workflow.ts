@@ -26,6 +26,7 @@ type QueryHistoryWriter = {
     elapsedMs?: number;
     errorMessage?: string;
     safety: QueryHistoryItem['safety'];
+    transaction?: QueryExecutionResult['transaction'];
   }): Promise<QueryHistoryItem>;
 };
 
@@ -117,6 +118,7 @@ export function createQueryWorkflow({
         rowCount: result.data.rowCount,
         elapsedMs: result.data.elapsedMs,
         safety: result.data.safety,
+        ...(result.data.transaction === undefined ? {} : { transaction: result.data.transaction }),
       });
     } else {
       const cancelled = result.error.code === 'QUERY_CANCELLED';
