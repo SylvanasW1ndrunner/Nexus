@@ -227,3 +227,13 @@ Agent 不直接解析 SQL，也不直接访问数据库 driver。SQL 风险判�
 开源方案评估：本切片只暴露已有索引状态，不涉及检索、向量库、rerank、Agent 编排或 eval 框架，因此不新增 LangChain、LlamaIndex、Haystack、RAGAS、OpenTelemetry 等依赖。状态工具保持在 DBAgent `ToolRegistry` adapter 内，避免把第三方 runtime 类型放进 `core-agent` 稳定合同。后续如果需要 tracing 或观测面板，应在官方插件 adapter 层接入成熟项目。
 
 测试覆盖见 `packages/core-agent/test/schema-rag-tools.test.ts`：注册顺序、只读安全元数据、已索引连接的 ready 状态、未索引连接的 idle 状态，以及与数据库工具包重名跳过逻辑。
+
+## 2026-07-08 增量：Agent 恢复续跑
+
+本轮补齐 `core-agent` 的后端恢复续跑闭环。`ReactAgent.run()` 新增 `initialSession` 和 `initialIteration`，用于从历史会话继续执行并保持 checkpoint 迭代号连续；默认无 `initialSession` 时仍创建新 session，不改变正常新任务路径。`AgentRecoveryService.continue()` 通过通用 `AgentRecoveryRunner` 调用运行器，不直接依赖 `ReactAgent`，为后续 Plan-Execute 或插件化 Agent runner 预留适配空间。
+
+恢复清理语义调整为保守策略：只有续跑结果为 `done` 时，才通过 `AgentCheckpointStore.markCheckpointAbandoned()` 精确清理被接管的 checkpoint；runner 抛异常或返回 `tool_failed` 等非完成状态时，原 running checkpoint 会刷新为最新可恢复点，启动恢复仍会提示用户。
+
+同时，`AgentSessionStore` 在保存、读取和导出时复用 `redaction.ts`，覆盖 assistant tool call 参数、tool message 内容、JSON 导出和 Markdown 导出，避免 API key、Bearer token、数据库 URL 密码和 password 字段明文进入恢复上下文或用户导出文件。
+
+测试覆盖见 `packages/core-agent/test/recovery-runner.test.ts` 和 `packages/core-agent/test/session-store.test.ts`。本轮默认验证通过 `pnpm --filter @dbagent/core-agent lint`、`typecheck` 和 `test`，共 13 个测试文件、79 个用例。

@@ -51,6 +51,8 @@ export type AgentRunOptions = {
   providerId: string;
   model: string;
   userMessage: string;
+  initialSession?: AgentSession;
+  initialIteration?: number;
   allowedTools?: string[];
   usageMode?: UsageMode;
   mode?: AgentMode;

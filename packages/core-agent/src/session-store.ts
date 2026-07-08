@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { redactPersistedAgentValue } from './redaction.js';
 import type { AgentMode, AgentSession } from './types.js';
 
 export type AgentSessionSummary = {
@@ -51,7 +52,7 @@ export class AgentSessionStore implements AgentSessionWriter {
     const existingIndex = records.findIndex((record) => record.session.id === input.session.id);
     const existing = existingIndex >= 0 ? records[existingIndex] : undefined;
     const record: AgentSessionRecord = {
-      session: cloneJson(input.session),
+      session: redactPersistedAgentValue(input.session) as AgentSession,
       archived: existing?.archived ?? false,
       createdAt: existing?.createdAt ?? firstMessageAt(input.session) ?? now,
       updatedAt: now,
@@ -96,9 +97,10 @@ export class AgentSessionStore implements AgentSessionWriter {
     const index = records.findIndex((record) => record.session.id === id);
     if (index < 0) throw new Error(`Agent session not found: ${id}`);
     const current = records[index]!;
+    const session = redactPersistedAgentValue({ ...current.session, ...patch }) as AgentSession;
     const nextRecord: AgentSessionRecord = {
       ...current,
-      session: { ...current.session, ...patch },
+      session,
       updatedAt: now,
     };
     await writeJsonFileAtomic(
@@ -160,7 +162,7 @@ export class AgentSessionStore implements AgentSessionWriter {
   }
 
   private async readAll(): Promise<AgentSessionRecord[]> {
-    return readJsonFile<AgentSessionRecord[]>(this.filePath, []);
+    return redactPersistedAgentValue(await readJsonFile<AgentSessionRecord[]>(this.filePath, [])) as AgentSessionRecord[];
   }
 }
 

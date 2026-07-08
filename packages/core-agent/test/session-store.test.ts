@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -96,6 +96,60 @@ describe('AgentSessionStore', () => {
 
     await expect(store.list()).resolves.toEqual([]);
     await expect(store.load('missing')).resolves.toBeUndefined();
+  });
+
+  it('redacts secrets before persisting, loading, and exporting sessions', async () => {
+    const filePath = await sessionPath();
+    const store = new AgentSessionStore(filePath);
+    const apiKey = ['sk', 'session-secret-123456'].join('-');
+    const password = ['plain', 'password'].join('-');
+    const databaseUrl = ['postgres://tester', `${password}@127.0.0.1/orders`].join(':');
+    const session = testSession('session_secret', 'secret handling');
+    session.messages.push({
+      role: 'assistant',
+      content: `Will query with Authorization: Bearer ${apiKey}`,
+      toolCalls: [
+        {
+          id: 'call_secret',
+          name: 'query_database',
+          arguments: { apiKey, databaseUrl, password },
+        },
+      ],
+      createdAt: '2026-06-23T00:00:02.000Z',
+    });
+    session.messages.push({
+      role: 'tool',
+      toolCallId: 'call_secret',
+      toolName: 'query_database',
+      content: `failed to connect ${databaseUrl} with apiKey=${apiKey}`,
+      createdAt: '2026-06-23T00:00:03.000Z',
+    });
+
+    await store.save({ session, now: '2026-06-23T01:00:00.000Z' });
+
+    const persisted = await readFile(filePath, 'utf8');
+    const loaded = await store.load('session_secret');
+    const exportedJson = await store.export('session_secret', 'json');
+    const exportedMarkdown = await store.export('session_secret', 'markdown');
+    const combined = [persisted, JSON.stringify(loaded), exportedJson, exportedMarkdown].join('\n');
+
+    expect(combined).not.toContain(apiKey);
+    expect(combined).not.toContain(password);
+    expect(combined).not.toContain(`tester:${password}@`);
+    expect(combined).toContain('[REDACTED]');
+    expect(combined).toContain(['postgres://tester', '[REDACTED]@127.0.0.1/orders'].join(':'));
+    expect(loaded?.messages[2]).toMatchObject({
+      role: 'assistant',
+      toolCalls: [
+        {
+          arguments: {
+            apiKey: '[REDACTED]',
+            databaseUrl: '[REDACTED]',
+            password: '[REDACTED]',
+          },
+        },
+      ],
+    });
   });
 
   it('integrates with ReactAgent so completed runs are recoverable from session history', async () => {

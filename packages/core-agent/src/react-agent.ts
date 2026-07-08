@@ -11,6 +11,7 @@ import { persistAgentStreamEvents } from './stream-store.js';
 import type { AgentStreamStore } from './stream-store.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type {
+  AgentSession,
   AgentRunDependencies,
   AgentRunOptions,
   AgentRunResult,
@@ -50,12 +51,15 @@ export class ReactAgent {
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
     const runStartedAt = Date.now();
-    const session = createAgentSession({
-      id: this.createSessionId(),
-      title: titleFromMessage(options.userMessage),
-      mode: options.mode ?? 'ask',
-      now: this.now,
-    });
+    const session =
+      options.initialSession === undefined
+        ? createAgentSession({
+            id: this.createSessionId(),
+            title: titleFromMessage(options.userMessage),
+            mode: options.mode ?? 'ask',
+            now: this.now,
+          })
+        : cloneSessionForRun(options.initialSession, options.mode);
     appendMessage(session, createMessage({ role: 'user', content: options.userMessage }, this.now));
     await this.saveSession(session);
 
@@ -113,6 +117,7 @@ export class ReactAgent {
     const toolExecutions: AgentToolExecutionRecord[] = [];
     const maxConsecutiveToolFailures = options.maxConsecutiveToolFailures ?? 3;
     const maxToolExecutionMs = options.maxToolExecutionMs ?? 60_000;
+    const iterationOffset = normalizeNonNegativeInteger(options.initialIteration, 0);
     const maxToolResultChars = normalizePositiveInteger(
       options.maxToolResultChars,
       DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS,
@@ -140,15 +145,16 @@ export class ReactAgent {
     try {
       for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
         currentIteration = iteration;
+        const checkpointIteration = iterationOffset + iteration;
         if (options.signal?.aborted || session.aborted) {
-          await saveCheckpoint(iteration - 1, 'aborted');
+          await saveCheckpoint(iterationOffset + iteration - 1, 'aborted');
           await this.saveSession(session);
           await closeRound('aborted');
           await finishRunAudit('aborted', iteration - 1, finalText);
           return { status: 'aborted', session, finalText, iterations: iteration - 1, toolExecutions };
         }
 
-        await saveCheckpoint(iteration, 'running');
+        await saveCheckpoint(checkpointIteration, 'running');
         const context = buildAgentContext(session, this.toolRegistry.llmTools(options.allowedTools), {
           ...(options.contextWindowTokens === undefined ? {} : { maxPromptTokens: options.contextWindowTokens }),
           ...(options.keepRecentMessages === undefined ? {} : { keepRecentMessages: options.keepRecentMessages }),
@@ -196,11 +202,11 @@ export class ReactAgent {
           createMessage({ role: 'assistant', content: response.text, toolCalls: response.toolCalls }, this.now),
         );
         await this.saveSession(session);
-        await saveCheckpoint(iteration, 'running');
+        await saveCheckpoint(checkpointIteration, 'running');
 
         if (response.usage?.totalTokens && options.tokenBudget && session.tokenUsage.totalTokens > options.tokenBudget) {
           finalText = 'Token budget exceeded.';
-          await saveCheckpoint(iteration, 'done');
+          await saveCheckpoint(checkpointIteration, 'done');
           await this.saveSession(session);
           await closeRound('success');
           await finishRunAudit('max_iterations_reached', iteration, finalText);
@@ -215,7 +221,7 @@ export class ReactAgent {
 
         if (response.toolCalls.length === 0) {
           finalText = response.text;
-          await saveCheckpoint(iteration, 'done');
+          await saveCheckpoint(checkpointIteration, 'done');
           await this.saveSession(session);
           await closeRound('success');
           await finishRunAudit('done', iteration, finalText);
@@ -244,7 +250,7 @@ export class ReactAgent {
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
-            await saveCheckpoint(iteration, 'running');
+            await saveCheckpoint(checkpointIteration, 'running');
             appendMessage(
               session,
               createMessage(
@@ -259,7 +265,7 @@ export class ReactAgent {
             );
             await this.saveSession(session);
             finalText = 'Tool is not allowed for this run.';
-            await saveCheckpoint(iteration, 'done');
+            await saveCheckpoint(checkpointIteration, 'done');
             await closeRound('success');
             await finishRunAudit('permission_denied', iteration, finalText);
             return {
@@ -284,7 +290,7 @@ export class ReactAgent {
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
             consecutiveToolFailures += 1;
-            await saveCheckpoint(iteration, 'running');
+            await saveCheckpoint(checkpointIteration, 'running');
             appendMessage(
               session,
               createMessage(
@@ -298,10 +304,10 @@ export class ReactAgent {
               ),
             );
             await this.saveSession(session);
-            await saveCheckpoint(iteration, 'running');
+            await saveCheckpoint(checkpointIteration, 'running');
             if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
               finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
-              await saveCheckpoint(iteration, 'failed', finalText);
+              await saveCheckpoint(checkpointIteration, 'failed', finalText);
               await closeRound('failed', finalText);
               await finishRunAudit('tool_failed', iteration, finalText, finalText);
               return {
@@ -332,7 +338,7 @@ export class ReactAgent {
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
-            await saveCheckpoint(iteration, 'running');
+            await saveCheckpoint(checkpointIteration, 'running');
             appendMessage(
               session,
               createMessage(
@@ -346,10 +352,10 @@ export class ReactAgent {
               ),
             );
             await this.saveSession(session);
-            await saveCheckpoint(iteration, 'running');
+            await saveCheckpoint(checkpointIteration, 'running');
             if (permission.decision === 'deny') {
               finalText = 'Permission denied.';
-              await saveCheckpoint(iteration, 'done');
+              await saveCheckpoint(checkpointIteration, 'done');
               await this.saveSession(session);
               await closeRound('success');
               await finishRunAudit('permission_denied', iteration, finalText);
@@ -405,7 +411,7 @@ export class ReactAgent {
               ),
             );
             await this.saveSession(session);
-            await saveCheckpoint(iteration, 'running');
+            await saveCheckpoint(checkpointIteration, 'running');
           } catch (error) {
             const message = limitSerializedToolResult(error instanceof Error ? error.message : String(error), maxToolResultChars);
             const record = executionRecord(
@@ -432,10 +438,10 @@ export class ReactAgent {
               ),
             );
             await this.saveSession(session);
-            await saveCheckpoint(iteration, 'running');
+            await saveCheckpoint(checkpointIteration, 'running');
             if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
               finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
-              await saveCheckpoint(iteration, 'failed', finalText);
+              await saveCheckpoint(checkpointIteration, 'failed', finalText);
               await this.saveSession(session);
               await closeRound('failed', finalText);
               await finishRunAudit('tool_failed', iteration, finalText, finalText);
@@ -452,7 +458,7 @@ export class ReactAgent {
       }
 
       finalText = 'Max iterations reached.';
-      await saveCheckpoint(maxIterations, 'done');
+      await saveCheckpoint(iterationOffset + maxIterations, 'done');
       await this.saveSession(session);
       await closeRound('success');
       await finishRunAudit('max_iterations_reached', maxIterations, finalText);
@@ -466,7 +472,7 @@ export class ReactAgent {
     } catch (error) {
       const status = options.signal?.aborted || session.aborted ? 'aborted' : 'failed';
       const message = error instanceof Error ? error.message : String(error);
-      await saveCheckpoint(currentIteration, status, message);
+      await saveCheckpoint(iterationOffset + currentIteration, status, message);
       await this.saveSession(session);
       await closeRound(status, message);
       await finishRunAudit(status, currentIteration, finalText, message);
@@ -513,6 +519,16 @@ export class ReactAgent {
 function titleFromMessage(message: string): string {
   const trimmed = message.trim().replace(/\s+/g, ' ');
   return trimmed.length > 24 ? `${trimmed.slice(0, 24)}...` : trimmed || '新会话';
+}
+
+function cloneSessionForRun(session: AgentSession, mode: AgentRunOptions['mode']): AgentSession {
+  return {
+    ...session,
+    mode: mode ?? session.mode,
+    messages: session.messages.map((message) => ({ ...message })),
+    tokenUsage: { ...session.tokenUsage },
+    aborted: false,
+  };
 }
 
 function serializeToolResult(result: unknown, maxChars: number): string {
@@ -658,6 +674,11 @@ async function executeToolWithTimeout(
 
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
+  return Math.floor(value);
+}
+
+function normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
   return Math.floor(value);
 }
 

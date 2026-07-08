@@ -117,6 +117,24 @@ export class AgentCheckpointStore implements AgentCheckpointWriter {
     return changed;
   }
 
+  async markCheckpointAbandoned(checkpointId: string, reason: string, now = new Date().toISOString()): Promise<boolean> {
+    const checkpoints = await this.readAll();
+    let changed = false;
+    const next = checkpoints.map((checkpoint) => {
+      if (checkpoint.id !== checkpointId || checkpoint.status !== 'running') return checkpoint;
+      changed = true;
+      return {
+        ...checkpoint,
+        status: 'abandoned' as const,
+        errorMessage: redactPersistedAgentString(reason),
+        updatedAt: now,
+        finishedAt: now,
+      };
+    });
+    if (changed) await writeJsonFileAtomic(this.filePath, next);
+    return changed;
+  }
+
   private async readAll(): Promise<AgentIterationCheckpoint[]> {
     const checkpoints = await readJsonFile<AgentIterationCheckpoint[]>(this.filePath, []);
     return redactPersistedAgentValue(checkpoints) as AgentIterationCheckpoint[];

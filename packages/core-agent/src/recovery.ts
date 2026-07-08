@@ -1,5 +1,11 @@
-import type { AgentIterationCheckpoint } from './checkpoint-store.js';
-import type { AgentMessage, AgentToolExecutionRecord } from './types.js';
+import type { AgentCheckpointWriter, AgentIterationCheckpoint } from './checkpoint-store.js';
+import type {
+  AgentMessage,
+  AgentRunOptions,
+  AgentRunResult,
+  AgentRunStatus,
+  AgentToolExecutionRecord,
+} from './types.js';
 
 export type AgentRecoveryAction = 'continue' | 'restart' | 'abandon';
 
@@ -23,6 +29,23 @@ export type AgentRecoveryStore = {
   listRecoverable(): Promise<AgentIterationCheckpoint[]>;
   listBySession(sessionId: string): Promise<AgentIterationCheckpoint[]>;
   markAbandoned(sessionId: string, reason: string, now?: string): Promise<number>;
+  markCheckpointAbandoned(checkpointId: string, reason: string, now?: string): Promise<boolean>;
+} & AgentCheckpointWriter;
+
+export type AgentRecoveryRunner = {
+  run(options: AgentRunOptions): Promise<AgentRunResult>;
+};
+
+export type ContinueAgentRecoveryOptions = Omit<AgentRunOptions, 'initialIteration' | 'initialSession' | 'userMessage'> & {
+  userMessage?: string;
+  abandonReason?: string;
+  now?: string;
+};
+
+export type ContinueAgentRecoveryResult = {
+  plan: AgentRecoveryPlan;
+  result: AgentRunResult;
+  abandonedCheckpointCount: number;
 };
 
 export class AgentRecoveryService {
@@ -36,6 +59,34 @@ export class AgentRecoveryService {
 
   async abandon(sessionId: string, reason = '用户放弃恢复 Agent 任务', now?: string): Promise<number> {
     return this.store.markAbandoned(sessionId, reason, now);
+  }
+
+  async continue(
+    sessionId: string,
+    runner: AgentRecoveryRunner,
+    options: ContinueAgentRecoveryOptions,
+  ): Promise<ContinueAgentRecoveryResult> {
+    const { userMessage, abandonReason, now, ...runOptions } = options;
+    const checkpoint = await this.findRecoverableCheckpoint(sessionId);
+    const plan = await this.buildPlan(checkpoint);
+    const result = await runner.run({
+      ...runOptions,
+      userMessage: userMessage ?? plan.resumePrompt,
+      mode: options.mode ?? checkpoint.session.mode,
+      initialSession: checkpoint.session,
+      initialIteration: checkpoint.iteration,
+    });
+    if (!shouldSupersedeRecoverableCheckpoint(result.status)) {
+      await this.refreshRecoverableCheckpoint(checkpoint, now);
+      return { plan, result, abandonedCheckpointCount: 0 };
+    }
+    const abandoned = await this.store.markCheckpointAbandoned(
+      checkpoint.id,
+      abandonReason ?? '恢复续跑已接管该 Agent 任务',
+      now,
+    );
+    const abandonedCheckpointCount = abandoned ? 1 : 0;
+    return { plan, result, abandonedCheckpointCount };
   }
 
   private async buildPlan(checkpoint: AgentIterationCheckpoint): Promise<AgentRecoveryPlan> {
@@ -64,6 +115,29 @@ export class AgentRecoveryService {
     };
     return { ...plan, resumePrompt: buildResumePrompt(plan, checkpoint.toolExecutions) };
   }
+
+  private async findRecoverableCheckpoint(sessionId: string): Promise<AgentIterationCheckpoint> {
+    const checkpoint = (await this.store.listRecoverable()).find((item) => item.sessionId === sessionId);
+    if (!checkpoint) {
+      throw new Error(`No recoverable Agent checkpoint found for session ${sessionId}.`);
+    }
+    return checkpoint;
+  }
+
+  private async refreshRecoverableCheckpoint(checkpoint: AgentIterationCheckpoint, now?: string): Promise<void> {
+    await this.store.save({
+      session: checkpoint.session,
+      iteration: checkpoint.iteration,
+      status: 'running',
+      toolExecutions: checkpoint.toolExecutions,
+      finalText: checkpoint.finalText,
+      ...(now === undefined ? {} : { now }),
+    });
+  }
+}
+
+function shouldSupersedeRecoverableCheckpoint(status: AgentRunStatus): boolean {
+  return status === 'done';
 }
 
 function buildResumePrompt(plan: AgentRecoveryPlan, toolExecutions: AgentToolExecutionRecord[]): string {
