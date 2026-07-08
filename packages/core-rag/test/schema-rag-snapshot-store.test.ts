@@ -90,6 +90,88 @@ describe('SchemaRagSnapshotStore', () => {
     await expect(store.load('conn_a')).resolves.toBeUndefined();
     await expect(store.load('conn_b')).resolves.toBeDefined();
   });
+
+  it('lists snapshot summaries for startup diagnostics without loading every index into memory', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-list-'));
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    const engine = new SchemaRagEngine();
+
+    await store.save(
+      engine.index({
+        connectionId: 'production/ecommerce',
+        tables: fixtureTables(),
+        indexedAt: '2026-07-08T00:00:00.000Z',
+        glossary: [{ term: 'GMV', documentIds: ['table:public.orders'], weight: 60 }],
+      }),
+    );
+    await writeFile(path.join(rootDir, 'notes.txt'), 'not a snapshot', 'utf8');
+    await writeFile(store.getSnapshotPath('broken'), '{broken-json', 'utf8');
+
+    const summaries = await store.list();
+
+    expect(summaries).toHaveLength(2);
+    expect(summaries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: 'available',
+          connectionId: 'production/ecommerce',
+          indexedAt: '2026-07-08T00:00:00.000Z',
+          documentCount: 7,
+          tableCount: 2,
+          columnCount: 5,
+          relationCount: 0,
+          glossaryCount: 1,
+        }),
+        expect.objectContaining({
+          status: 'invalid',
+          snapshotPath: store.getSnapshotPath('broken'),
+        }),
+      ]),
+    );
+  });
+
+  it('cleans up snapshots for deleted connections and can remove invalid snapshots', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-cleanup-'));
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    const engine = new SchemaRagEngine();
+
+    await store.save(engine.index({ connectionId: 'active_connection', tables: fixtureTables() }));
+    await store.save(engine.index({ connectionId: 'deleted_connection', tables: fixtureTables() }));
+    await writeFile(store.getSnapshotPath('broken'), '{broken-json', 'utf8');
+
+    const dryCleanup = await store.cleanupInactive({
+      activeConnectionIds: ['active_connection'],
+    });
+
+    expect(dryCleanup.kept).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: 'available', connectionId: 'active_connection' }),
+        expect.objectContaining({ status: 'invalid', snapshotPath: store.getSnapshotPath('broken') }),
+      ]),
+    );
+    expect(dryCleanup.removed).toEqual([
+      expect.objectContaining({
+        reason: 'inactive_connection',
+        connectionId: 'deleted_connection',
+        snapshotPath: store.getSnapshotPath('deleted_connection'),
+      }),
+    ]);
+    await expect(store.load('active_connection')).resolves.toBeDefined();
+    await expect(store.load('deleted_connection')).resolves.toBeUndefined();
+
+    const strictCleanup = await store.cleanupInactive({
+      activeConnectionIds: ['active_connection'],
+      removeInvalid: true,
+    });
+
+    expect(strictCleanup.removed).toEqual([
+      expect.objectContaining({
+        reason: 'invalid_snapshot',
+        snapshotPath: store.getSnapshotPath('broken'),
+      }),
+    ]);
+    await expect(readdir(rootDir)).resolves.not.toContain(path.basename(store.getSnapshotPath('broken')));
+  });
 });
 
 function fixtureTables(): TableDetail[] {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { SchemaRagDocument, SchemaRagGlossaryEntry, SchemaRagIndex } from './types.js';
 
@@ -36,6 +36,34 @@ export type SchemaRagSnapshotLoadResult =
       snapshotPath: string;
       error: unknown;
     };
+
+export type SchemaRagSnapshotSummary =
+  | {
+      status: 'available';
+      connectionId: string;
+      snapshotPath: string;
+      savedAt: string;
+      indexedAt: string;
+      documentCount: number;
+      tableCount: number;
+      columnCount: number;
+      relationCount: number;
+      glossaryCount: number;
+    }
+  | {
+      status: 'invalid';
+      snapshotPath: string;
+      reason: string;
+    };
+
+export type SchemaRagSnapshotCleanupResult = {
+  kept: SchemaRagSnapshotSummary[];
+  removed: Array<{
+    snapshotPath: string;
+    reason: 'inactive_connection' | 'invalid_snapshot';
+    connectionId?: string;
+  }>;
+};
 
 export type SchemaRagSnapshotStoreOptions = {
   rootDir: string;
@@ -98,6 +126,54 @@ export class SchemaRagSnapshotStore {
     return { status: 'loaded', snapshotPath: target, index: deserialized.index };
   }
 
+  async list(): Promise<SchemaRagSnapshotSummary[]> {
+    const files = await this.snapshotFiles();
+    const summaries: SchemaRagSnapshotSummary[] = [];
+    for (const file of files) {
+      const snapshotPath = path.join(this.rootDir, file);
+      summaries.push(await readSnapshotSummary(snapshotPath));
+    }
+    return summaries.sort(compareSnapshotSummary);
+  }
+
+  async cleanupInactive(input: {
+    activeConnectionIds: Iterable<string>;
+    removeInvalid?: boolean;
+  }): Promise<SchemaRagSnapshotCleanupResult> {
+    const activeConnectionIds = new Set(
+      [...input.activeConnectionIds].map((connectionId) => validateConnectionId(connectionId)),
+    );
+    const summaries = await this.list();
+    const kept: SchemaRagSnapshotSummary[] = [];
+    const removed: SchemaRagSnapshotCleanupResult['removed'] = [];
+
+    for (const summary of summaries) {
+      if (summary.status === 'invalid') {
+        if (input.removeInvalid === true) {
+          await rm(summary.snapshotPath, { force: true });
+          removed.push({ snapshotPath: summary.snapshotPath, reason: 'invalid_snapshot' });
+        } else {
+          kept.push(summary);
+        }
+        continue;
+      }
+
+      if (!activeConnectionIds.has(summary.connectionId)) {
+        await rm(summary.snapshotPath, { force: true });
+        removed.push({
+          snapshotPath: summary.snapshotPath,
+          reason: 'inactive_connection',
+          connectionId: summary.connectionId,
+        });
+        continue;
+      }
+
+      kept.push(summary);
+    }
+
+    return { kept, removed };
+  }
+
   async remove(connectionId: string): Promise<void> {
     try {
       await rm(this.snapshotPath(connectionId), { force: true });
@@ -115,6 +191,18 @@ export class SchemaRagSnapshotStore {
     return path.join(this.rootDir, `${safeName}.schema-rag.json`);
   }
 
+  private async snapshotFiles(): Promise<string[]> {
+    try {
+      const entries = await readdir(this.rootDir, { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.schema-rag.json'))
+        .map((entry) => entry.name);
+    } catch (error) {
+      if (isNotFound(error)) return [];
+      throw error;
+    }
+  }
+
   private async invalidSnapshotResult(target: string, reason: string): Promise<SchemaRagSnapshotLoadResult> {
     const result: SchemaRagSnapshotLoadResult = { status: 'invalid', snapshotPath: target, reason };
     try {
@@ -126,6 +214,79 @@ export class SchemaRagSnapshotStore {
       return { ...result, quarantineError: error instanceof Error ? error.message : String(error) };
     }
   }
+}
+
+async function readSnapshotSummary(snapshotPath: string): Promise<SchemaRagSnapshotSummary> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(snapshotPath, 'utf8'));
+  } catch (error) {
+    return {
+      status: 'invalid',
+      snapshotPath,
+      reason: error instanceof Error ? error.message : 'Snapshot JSON is invalid.',
+    };
+  }
+
+  const result = deserializeSnapshotForSummary(parsed);
+  return result.status === 'available' ? { ...result.summary, snapshotPath } : { ...result, snapshotPath };
+}
+
+type SnapshotSummaryDeserializeResult =
+  | {
+      status: 'available';
+      summary: Omit<Extract<SchemaRagSnapshotSummary, { status: 'available' }>, 'snapshotPath'>;
+    }
+  | {
+      status: 'invalid';
+      reason: string;
+    };
+
+function deserializeSnapshotForSummary(value: unknown): SnapshotSummaryDeserializeResult {
+  if (!isRecord(value)) return { status: 'invalid', reason: 'Snapshot root must be an object.' };
+  if (value.version !== SNAPSHOT_VERSION) {
+    return { status: 'invalid', reason: `Unsupported snapshot version: ${String(value.version)}.` };
+  }
+  if (typeof value.connectionId !== 'string' || !value.connectionId.trim()) {
+    return { status: 'invalid', reason: 'Snapshot connection id is missing or invalid.' };
+  }
+  if (typeof value.savedAt !== 'string') return { status: 'invalid', reason: 'Snapshot savedAt is missing or invalid.' };
+  if (typeof value.indexedAt !== 'string') {
+    return { status: 'invalid', reason: 'Snapshot indexedAt is missing or invalid.' };
+  }
+  if (!Array.isArray(value.documents) || !Array.isArray(value.graph) || !Array.isArray(value.glossary)) {
+    return { status: 'invalid', reason: 'Snapshot documents, graph, or glossary section is missing.' };
+  }
+
+  const documents = value.documents.filter(isSchemaRagDocument);
+  if (documents.length !== value.documents.length) {
+    return { status: 'invalid', reason: 'Snapshot contains invalid schema documents.' };
+  }
+  const glossary = value.glossary.filter(isSchemaRagGlossaryEntry);
+  if (glossary.length !== value.glossary.length) {
+    return { status: 'invalid', reason: 'Snapshot contains invalid glossary entries.' };
+  }
+
+  return {
+    status: 'available',
+    summary: {
+      status: 'available',
+      connectionId: value.connectionId,
+      savedAt: value.savedAt,
+      indexedAt: value.indexedAt,
+      documentCount: documents.length,
+      tableCount: documents.filter((document) => document.kind === 'table').length,
+      columnCount: documents.filter((document) => document.kind === 'column').length,
+      relationCount: documents.filter((document) => document.kind === 'relation').length,
+      glossaryCount: glossary.length,
+    },
+  };
+}
+
+function compareSnapshotSummary(left: SchemaRagSnapshotSummary, right: SchemaRagSnapshotSummary): number {
+  const leftKey = left.status === 'available' ? left.connectionId : left.snapshotPath;
+  const rightKey = right.status === 'available' ? right.connectionId : right.snapshotPath;
+  return leftKey.localeCompare(rightKey);
 }
 
 type DeserializeSnapshotResult =

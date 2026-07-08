@@ -112,6 +112,16 @@ Mermaid 对标识符有限制，因此模块会把 `schema.table`、字段名和
 - `schema-rag-snapshot-store.test.ts`：真实临时目录读写，覆盖保存、读取、恢复后检索、损坏快照、旧版本快照、按连接删除。
 - `progressive-schema-rag-indexer.test.ts`：覆盖渐进阶段状态、快照落盘、模拟进程重启后的恢复和空连接 idle 状态。
 
+2026-07-08 增量：`SchemaRagSnapshotStore` 增加连接级快照清单和过期清理能力：
+
+- `list()`：扫描 `rootDir` 下的 `*.schema-rag.json`，返回每个快照的连接 ID、路径、保存时间、索引时间、文档/表/列/关系/glossary 数量；损坏快照以 `status: "invalid"` 返回，不会阻断应用启动。
+- `cleanupInactive({ activeConnectionIds, removeInvalid })`：由上层连接存储在启动或连接删除后调用，删除不在活跃连接集合中的快照；`removeInvalid: true` 时同时删除损坏快照。
+- 清理函数只处理 `SchemaRagSnapshotStore` 根目录下的正式快照文件，不递归、不处理临时文件、不根据外部字符串拼接删除路径。
+
+该能力用于解决用户删除数据库连接后，本地 RAG 快照长期残留的问题。它仍属于 `core-rag` 基础设施，不做成官方插件；适合插件化的是后续向量索引、reranker、RAG eval、业务术语维护等可替换能力。
+
+开源评估：本轮没有引入 SQLite、sqlite-vec、LlamaIndex、LangChain 或向量库。原因是当前需求是本地 JSON 快照生命周期管理，Node 原生 `fs/promises` 足够覆盖，新增依赖会增加 Electron 打包和离线安装风险。后续进入 SQLite/sqlite-vec 存储层时再单独做依赖、许可证、native module 和跨平台打包评估。
+
 ## 真实数据库 catalog 渐进索引入口
 
 `packages/core-rag/src/schema-catalog-indexer.ts` 提供 `SchemaCatalogReader` 和 `indexSchemaCatalogFromReader()`。这是 Schema RAG 从真实数据库元数据进入渐进索引器的标准入口：
