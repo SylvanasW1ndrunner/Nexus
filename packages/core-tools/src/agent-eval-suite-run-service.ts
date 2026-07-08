@@ -10,6 +10,11 @@ import {
   type AgentEvalSuiteRunResult,
 } from './agent-eval-suite-runner.js';
 import type { AgentEvalSuiteCatalogSource } from './agent-eval-suite-catalog.js';
+import {
+  evaluateAgentEvalGate,
+  type AgentEvalGateDecision,
+  type AgentEvalGatePolicy,
+} from './agent-eval-gate.js';
 
 export type AgentEvalSuiteRunServiceOptions = {
   agent: AgentEvalSuiteAgent;
@@ -23,11 +28,14 @@ export type AgentEvalSuiteRunServiceOptions = {
   reportRun?: AgentBehaviorEvaluationReportInput['run'];
   allowPostgresSuites?: boolean;
   allowLiveSuites?: boolean;
+  gate?: AgentEvalGatePolicy;
+  failOnGateFailure?: boolean;
 };
 
 export type AgentEvalSuiteRunServiceResult = AgentEvalSuiteRunResult & {
   catalogEntry: AgentEvalSuiteCatalogServiceEntry;
   suiteSource: NonNullable<AgentBehaviorEvaluationReportInput['suiteSource']>;
+  gate?: AgentEvalGateDecision;
 };
 
 export class AgentEvalSuiteRunService {
@@ -57,12 +65,42 @@ export class AgentEvalSuiteRunService {
       ...(options.reportRun === undefined ? {} : { reportRun: options.reportRun }),
     });
 
-    return {
+    const result: AgentEvalSuiteRunServiceResult = {
       ...output,
       catalogEntry,
       suiteSource,
     };
+    if (options.gate !== undefined) {
+      const gate = evaluateAgentEvalGate({
+        runResult: output,
+        catalogEntry,
+        suiteSource,
+        policy: options.gate,
+        effectiveReadonlyOnly: isEffectiveReadonlySuite(catalogEntry, options.baseRun.mode),
+      });
+      if (options.failOnGateFailure === true && !gate.passed) {
+        throw new AgentEvalSuiteGateError(gate);
+      }
+      result.gate = gate;
+    }
+    return result;
   }
+}
+
+export class AgentEvalSuiteGateError extends Error {
+  constructor(readonly gate: AgentEvalGateDecision) {
+    super(`Agent eval gate failed: ${gate.failures.join(' ')}`);
+    this.name = 'AgentEvalSuiteGateError';
+  }
+}
+
+function isEffectiveReadonlySuite(
+  catalogEntry: AgentEvalSuiteCatalogServiceEntry,
+  baseMode: AgentEvalSuiteRunServiceOptions['baseRun']['mode'],
+): boolean {
+  if (catalogEntry.readonlyOnly) return true;
+  if (baseMode !== 'readonly') return false;
+  return catalogEntry.runModes.every((mode) => mode === 'readonly');
 }
 
 function assertRealDependencyGate(

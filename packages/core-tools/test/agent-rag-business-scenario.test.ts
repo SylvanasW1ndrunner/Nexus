@@ -41,6 +41,7 @@ import {
   loadAgentEvalSuiteCatalog,
   registerDatabaseTools,
   runAgentBehaviorEvaluationSuite,
+  type AgentEvalGateDecision,
   type AgentEvalSuiteCatalogEntry,
 } from '../src/index.js';
 import {
@@ -527,6 +528,17 @@ describe('SiliconFlow live Agent and RAG integration', () => {
         allowLiveSuites: true,
         allowPostgresSuites: true,
         reportRun: { live: true },
+        gate: {
+          minPassRate: 1,
+          maxFailedCases: 0,
+          requireSourceKind: 'official',
+          requireLive: true,
+          requireSavedReport: true,
+          requireReadonlyOnly: true,
+          requiredToolNames: ['search_schema', 'query_database'],
+          forbiddenToolNames: ['execute_sql'],
+        },
+        failOnGateFailure: true,
         baseRun: {
           providerId: 'siliconflow',
           model,
@@ -540,6 +552,7 @@ describe('SiliconFlow live Agent and RAG integration', () => {
       expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
       expect(output.report.run.live).toBe(true);
       expect(output.suiteSource).toEqual(output.report.suiteSource);
+      expect(output.gate).toMatchObject({ passed: true, failures: [] });
       expect(result?.status).toBe('done');
       expect(result?.toolExecutions).toEqual(
         expect.arrayContaining([
@@ -548,7 +561,7 @@ describe('SiliconFlow live Agent and RAG integration', () => {
         ]),
       );
       expect(result?.finalText.length).toBeGreaterThan(0);
-      await writeLiveAgentRagReport(output.report);
+      await writeLiveAgentRagReport(output.report, output.gate);
     },
     180_000,
   );
@@ -615,6 +628,19 @@ describe('SiliconFlow live Agent and RAG integration', () => {
           allowLiveSuites: true,
           allowPostgresSuites: true,
           reportRun: { live: true, postgres: true },
+          gate: {
+            minPassRate: 1,
+            maxFailedCases: 0,
+            requireEnvironment: 'postgres',
+            requireSourceKind: 'workspace',
+            requireLive: true,
+            requirePostgres: true,
+            requireSavedReport: true,
+            requireReadonlyOnly: true,
+            requiredToolNames: ['search_schema', 'query_database'],
+            forbiddenToolNames: ['execute_sql'],
+          },
+          failOnGateFailure: true,
           baseRun: {
             providerId: 'siliconflow',
             model,
@@ -628,6 +654,7 @@ describe('SiliconFlow live Agent and RAG integration', () => {
         expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
         expect(output.report.run.live).toBe(true);
         expect(output.report.run.postgres).toBe(true);
+        expect(output.gate).toMatchObject({ passed: true, failures: [] });
         expect(output.suiteSource).toEqual({
           kind: 'workspace',
           relativePath: '.dbagent/evals/live-postgres-business.json',
@@ -641,7 +668,7 @@ describe('SiliconFlow live Agent and RAG integration', () => {
           ]),
         );
         expect(result?.finalText.length).toBeGreaterThan(0);
-        await writeLiveAgentRagReport(output.report);
+        await writeLiveAgentRagReport(output.report, output.gate);
       } finally {
         await driver.execute(
           { connectionId: config.id!, sql: businessFixtureCleanupSql(), confirmed: true },
@@ -993,14 +1020,18 @@ function liveSuiteCatalogOptions() {
   };
 }
 
-async function writeLiveAgentRagReport(report: AgentBehaviorEvaluationReport): Promise<void> {
+async function writeLiveAgentRagReport(
+  report: AgentBehaviorEvaluationReport,
+  gate?: AgentEvalGateDecision,
+): Promise<void> {
   const reportDir = process.env.DBAGENT_AGENT_RAG_REPORT_DIR;
   if (!reportDir) return;
 
   await mkdir(reportDir, { recursive: true });
-  await Promise.all(
-    report.files.map((file) => writeFile(join(reportDir, file.path), file.content, 'utf8')),
-  );
+  await Promise.all([
+    ...(gate === undefined ? [] : [writeFile(join(reportDir, 'gate.json'), `${JSON.stringify(gate, null, 2)}\n`, 'utf8')]),
+    ...report.files.map((file) => writeFile(join(reportDir, file.path), file.content, 'utf8')),
+  ]);
 }
 
 async function loadLiveAgentRagSuite(): Promise<Pick<AgentEvalSuiteCatalogEntry, 'source' | 'suite'>> {

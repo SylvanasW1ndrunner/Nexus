@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentRunOptions, AgentRunResult } from '@dbagent/core-agent';
-import { AgentEvalSuiteRunService, type AgentEvalSuiteAgent, type AgentEvalSuite } from '../src/index.js';
+import {
+  AgentEvalSuiteGateError,
+  AgentEvalSuiteRunService,
+  type AgentEvalSuiteAgent,
+  type AgentEvalSuite,
+} from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -79,6 +84,132 @@ describe('AgentEvalSuiteRunService', () => {
         userMessage: '按渠道统计 GMV、退款率和 ROI。',
       },
     ]);
+  });
+
+  it('can attach a machine-readable release gate decision to a suite run', async () => {
+    const rootPath = await tempWorkspace();
+    await writeWorkspaceManifest(rootPath, {
+      filename: 'gate.json',
+      suiteId: 'workspace.gate',
+      environment: 'postgres',
+      caseId: 'GATE-001',
+    });
+    const agent = recordingAgent([
+      runResult({
+        finalText: 'paid_search',
+        toolExecutions: [
+          toolExecution('search_schema', 'public.orders'),
+          toolExecution('query_database', 'paid_search'),
+        ],
+      }),
+    ]);
+
+    const output = await new AgentEvalSuiteRunService().run({
+      agent,
+      suiteId: 'workspace.gate',
+      catalog: { official: false, workspace: { workspaceRoot: rootPath } },
+      allowPostgresSuites: true,
+      reportRun: { postgres: true },
+      gate: {
+        minPassRate: 1,
+        maxFailedCases: 0,
+        requireEnvironment: 'postgres',
+        requireSourceKind: 'workspace',
+        requirePostgres: true,
+        requireReadonlyOnly: true,
+        requiredToolNames: ['search_schema', 'query_database'],
+      },
+      baseRun: { providerId: 'fake', model: 'fake-model', mode: 'readonly' },
+    });
+
+    expect(output.gate).toMatchObject({
+      passed: true,
+      failures: [],
+      metrics: {
+        totalCases: 1,
+        passedCases: 1,
+        failedCases: 0,
+        environment: 'postgres',
+        sourceKind: 'workspace',
+        postgres: true,
+        readonlyOnly: true,
+      },
+    });
+  });
+
+  it('treats base readonly mode as effective readonly evidence when a workspace suite does not override mode', async () => {
+    const rootPath = await tempWorkspace();
+    await writeWorkspaceManifest(rootPath, {
+      filename: 'base-readonly-gate.json',
+      suiteId: 'workspace.base-readonly-gate',
+      environment: 'postgres',
+      caseId: 'BASE-READONLY-001',
+      omitRunMode: true,
+    });
+    const agent = recordingAgent([
+      runResult({
+        finalText: 'paid_search',
+        toolExecutions: [
+          toolExecution('search_schema', 'public.orders'),
+          toolExecution('query_database', 'paid_search'),
+        ],
+      }),
+    ]);
+
+    const output = await new AgentEvalSuiteRunService().run({
+      agent,
+      suiteId: 'workspace.base-readonly-gate',
+      catalog: { official: false, workspace: { workspaceRoot: rootPath } },
+      allowPostgresSuites: true,
+      reportRun: { postgres: true },
+      gate: {
+        requireEnvironment: 'postgres',
+        requireSourceKind: 'workspace',
+        requirePostgres: true,
+        requireReadonlyOnly: true,
+        requiredToolNames: ['search_schema', 'query_database'],
+      },
+      failOnGateFailure: true,
+      baseRun: { providerId: 'fake', model: 'fake-model', mode: 'readonly' },
+    });
+
+    expect(output.catalogEntry.readonlyOnly).toBe(false);
+    expect(output.gate).toMatchObject({
+      passed: true,
+      failures: [],
+      metrics: { readonlyOnly: true },
+    });
+  });
+
+  it('throws a gate error only when the caller requests fail-fast gate behavior', async () => {
+    const rootPath = await tempWorkspace();
+    await writeWorkspaceManifest(rootPath, {
+      filename: 'gate-fail.json',
+      suiteId: 'workspace.gate.fail',
+      environment: 'integration',
+      caseId: 'GATE-FAIL-001',
+    });
+    const agent = recordingAgent([
+      runResult({
+        status: 'done',
+        finalText: 'no tool',
+        toolExecutions: [],
+      }),
+    ]);
+
+    await expect(
+      new AgentEvalSuiteRunService().run({
+        agent,
+        suiteId: 'workspace.gate.fail',
+        catalog: { official: false, workspace: { workspaceRoot: rootPath } },
+        gate: {
+          requireEnvironment: 'postgres',
+          requiredToolNames: ['query_database'],
+        },
+        failOnGateFailure: true,
+        baseRun: { providerId: 'fake', model: 'fake-model', mode: 'readonly' },
+      }),
+    ).rejects.toThrow(AgentEvalSuiteGateError);
   });
 
   it('rejects PostgreSQL suites unless the caller explicitly enables real PostgreSQL execution', async () => {
@@ -226,6 +357,7 @@ async function writeWorkspaceManifest(
     suiteName?: string;
     environment: NonNullable<AgentEvalSuite['environment']>;
     caseId: string;
+    omitRunMode?: boolean;
   },
 ): Promise<void> {
   await mkdir(join(rootPath, '.dbagent', 'evals'), { recursive: true });
@@ -260,7 +392,7 @@ async function writeWorkspaceManifest(
               finalTextExcludes: ['password', 'secret', 'api_key'],
               run: {
                 allowedTools: ['search_schema', 'query_database'],
-                mode: 'readonly',
+                ...(input.omitRunMode === true ? {} : { mode: 'readonly' }),
                 maxIterations: 5,
               },
             },
