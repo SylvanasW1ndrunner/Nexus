@@ -392,7 +392,7 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     category: 'rag',
     description: '基于本地索引检索数据库 schema、业务术语和关系上下文。',
     enabledByDefault: true,
-    capabilities: ['schema-search', 'relation-context', 'context-builder'],
+    capabilities: ['schema-rag-status', 'schema-search', 'relation-context', 'context-builder'],
     permissions: [
       permission('rag.schema.read', '读取本地 Schema 索引', '读取本地 RAG 索引中的 schema 文档和关系上下文。', 'safe', true, {
         resourceScopes: ['rag.index'],
@@ -404,6 +404,7 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
       }),
     ],
     tools: [
+      tool('get_schema_rag_status', '读取 Schema RAG 状态', '读取本地 Schema RAG 索引阶段、ready 状态和文档计数。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
       tool('search_schema', '检索 Schema', '按业务问题检索 schema 文档。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
       tool('get_relations', '读取关系上下文', '读取单表一跳关系上下文。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
       tool('build_schema_context', '构建 Schema 上下文', '构建供 Agent 使用的紧凑 schema 上下文。', 'safe', true, ['rag.schema.read'], ['schema-rag']),

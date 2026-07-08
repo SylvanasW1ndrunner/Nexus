@@ -128,6 +128,7 @@ export class TerminalService {
           ...runtime.staleInputEchoNeedles,
           ...runtime.recentInputEchoNeedles,
         ]);
+        runtime.output = redactStaleInputEchoes(runtime.output, runtime.staleInputEchoNeedles);
       }
       runtime.recentInputEchoNeedles = boundedUnique([
         ...runtime.recentInputEchoNeedles,

@@ -1,5 +1,6 @@
 import type {
   SchemaRagContextRequest,
+  SchemaRagIndexStatus,
   SchemaRagListTablesRequest,
   SchemaRagRelationsResult,
   SchemaRagSearchRequest,
@@ -13,6 +14,7 @@ import type { ToolRegistry } from './tool-registry.js';
 export type AgentSchemaRagService = {
   search(request: SchemaRagSearchRequest): SchemaRagSearchResult[];
   buildContext(request: SchemaRagContextRequest): { text: string; truncated: boolean; documents: SchemaRagSearchResult[] };
+  getIndexStatus(connectionId: string): SchemaRagIndexStatus;
   listTables(request: SchemaRagListTablesRequest): SchemaRagTableSummary[];
   describeTable(request: SchemaRagTableRef): SchemaRagTableDescription;
   getRelations(request: SchemaRagTableRef): SchemaRagRelationsResult;
@@ -26,6 +28,7 @@ export type RegisterSchemaRagToolsOptions = {
 };
 
 export const SCHEMA_RAG_TOOL_NAMES = {
+  getSchemaRagStatus: 'get_schema_rag_status',
   searchSchema: 'search_schema',
   describeTable: 'describe_table',
   listTables: 'list_tables',
@@ -37,6 +40,24 @@ export function registerSchemaRagTools(
   rag: AgentSchemaRagService,
   options: RegisterSchemaRagToolsOptions = {},
 ): void {
+  registerRagTool(
+    registry,
+    options,
+    {
+      name: SCHEMA_RAG_TOOL_NAMES.getSchemaRagStatus,
+      description: 'Return Schema RAG index readiness, stage, and document counts for one connection.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          connectionId: { type: 'string' },
+        },
+      },
+      dangerLevel: 'safe',
+      readonly: true,
+    },
+    (args) => rag.getIndexStatus(resolveConnectionId(args, options)),
+  );
+
   registerRagTool(
     registry,
     options,

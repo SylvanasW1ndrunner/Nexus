@@ -108,6 +108,12 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 
 该逻辑仍然保持真实终端语义：`terminal:write` 对调用方立即返回，session 继续保持 running；后端只调整写入 PTY 的时机，不伪造输出、不模拟 shell。测试侧使用真实 PowerShell 覆盖创建后立即写入、逐字符输入、fallback shell、指定 cwd、清空输出和输出缓冲裁剪。
 
+## 2026-07-08 增量：终端滚动窗口旧输入回显清理
+
+`TerminalService` 在输出超过 `maxOutputChars` 后会裁剪旧缓冲并维护绝对 cursor。Windows PowerShell/ConPTY 会把用户输入和行编辑控制序列回显到 PTY 输出中；当旧命令已经处于保留窗口内、随后又被标记为 stale input echo 时，后端现在会同时清理当前保留缓冲和后续新增数据，避免用户从新 cursor 读取时再次看到已滚出窗口的旧命令片段。
+
+该修复不改变真实 shell 执行语义，不模拟终端输出，只清理已经被后端判定为 stale 的输入回显。测试仍使用真实 PTY，覆盖输出上限、cursor 单调递增和后续读取不包含旧命令片段。
+
 ## 2026-07-07 增量：Agent 审计日志接入
 
 `apps/desktop/src/main/agent-audit-log.ts` 提供桌面主进程的 Agent 审计日志 adapter。它只负责根据 Agent 事件 timestamp 选择每日文件路径，实际 JSONL 写入、损坏行跳过、脱敏和长度限制继续复用 `@dbagent/core-agent/AgentAuditLogStore`。

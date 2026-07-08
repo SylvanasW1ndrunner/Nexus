@@ -217,3 +217,13 @@ Agent 不直接解析 SQL，也不直接访问数据库 driver。SQL 风险判�
 `ReactAgent` 通过可选依赖 `auditLog` 接入该能力。未传入时行为完全保持原样；传入后会覆盖正常完成、配额拦截、用户中止、模型异常、权限拒绝、未注册工具、工具成功、工具失败和连续失败熔断路径。权限拒绝事件在工具 handler 执行前写入，方便验证危险工具没有发生副作用。
 
 本切片没有引入 OpenTelemetry、LangSmith、Langfuse 或 LangChain tracing。原因是当前需求是离线可用、可打包、可脱敏的本地 JSONL 审计；外部追踪平台会引入联网、账号、数据出境、SDK 体积和安全边界问题。后续如果需要接入外部 tracing，应先通过 adapter 转换为 DBAgent 自有审计事件，再由用户显式开启导出，不能让第三方事件类型进入 `ToolRegistry`、IPC 或稳定公共合同。
+
+## 2026-07-08 增量：Schema RAG 状态工具
+
+`packages/core-agent/src/schema-rag-tools.ts` 新增 `get_schema_rag_status`。该工具为安全只读工具，输入为可选 `connectionId`，未传入时使用注册时的 `defaultConnectionId`；输出直接来自 `core-rag` 的 `SchemaRagIndexStatus`，包含 `stage`、`ready`、文档/表/列/关系/术语数量和阶段明细。
+
+这个工具解决的是 Agent 可观测性问题：桌面主进程启动后会恢复活跃连接的 Schema RAG 快照，但 Agent 之前只能在调用 `search_schema` 失败或返回空结果后间接判断索引是否可用。现在 Agent、Skill runner、发布前 eval 和后续无 UI 调试入口可以先读取状态，再决定是否触发 catalog 索引、提示用户等待或降级使用实时 schema 工具。
+
+开源方案评估：本切片只暴露已有索引状态，不涉及检索、向量库、rerank、Agent 编排或 eval 框架，因此不新增 LangChain、LlamaIndex、Haystack、RAGAS、OpenTelemetry 等依赖。状态工具保持在 DBAgent `ToolRegistry` adapter 内，避免把第三方 runtime 类型放进 `core-agent` 稳定合同。后续如果需要 tracing 或观测面板，应在官方插件 adapter 层接入成熟项目。
+
+测试覆盖见 `packages/core-agent/test/schema-rag-tools.test.ts`：注册顺序、只读安全元数据、已索引连接的 ready 状态、未索引连接的 idle 状态，以及与数据库工具包重名跳过逻辑。

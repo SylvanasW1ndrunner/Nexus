@@ -31,6 +31,7 @@ describe('schema RAG Agent tools', () => {
     registerSchemaRagTools(registry, indexedRag(), { defaultConnectionId: 'conn_1' });
 
     expect(registry.llmTools().map((tool) => tool.name)).toEqual([
+      SCHEMA_RAG_TOOL_NAMES.getSchemaRagStatus,
       SCHEMA_RAG_TOOL_NAMES.searchSchema,
       SCHEMA_RAG_TOOL_NAMES.describeTable,
       SCHEMA_RAG_TOOL_NAMES.listTables,
@@ -40,6 +41,46 @@ describe('schema RAG Agent tools', () => {
       dangerLevel: 'safe',
       readonly: true,
       inputSchema: { required: ['query'] },
+    });
+    expect(registry.get(SCHEMA_RAG_TOOL_NAMES.getSchemaRagStatus)).toMatchObject({
+      dangerLevel: 'safe',
+      readonly: true,
+    });
+  });
+
+  it('reports ready Schema RAG status for an indexed connection', async () => {
+    const registry = new ToolRegistry();
+    registerSchemaRagTools(registry, indexedRag(), { defaultConnectionId: 'conn_1' });
+
+    const result = await registry
+      .get(SCHEMA_RAG_TOOL_NAMES.getSchemaRagStatus)
+      ?.handler({}, { session: minimalSession() });
+
+    expect(result).toMatchObject({
+      connectionId: 'conn_1',
+      stage: 'ready',
+      ready: true,
+      tableCount: 3,
+      glossaryCount: 1,
+    });
+    expect(result).toHaveProperty('documentCount');
+    expect(result).toHaveProperty('updatedAt');
+  });
+
+  it('reports idle Schema RAG status without forcing a search failure', async () => {
+    const registry = new ToolRegistry();
+    registerSchemaRagTools(registry, new SchemaRagEngine());
+
+    const result = await registry
+      .get(SCHEMA_RAG_TOOL_NAMES.getSchemaRagStatus)
+      ?.handler({ connectionId: 'missing_conn' }, { session: minimalSession() });
+
+    expect(result).toMatchObject({
+      connectionId: 'missing_conn',
+      stage: 'idle',
+      ready: false,
+      documentCount: 0,
+      tableCount: 0,
     });
   });
 
@@ -97,6 +138,7 @@ describe('schema RAG Agent tools', () => {
     );
     expect(registry.has(SCHEMA_RAG_TOOL_NAMES.searchSchema)).toBe(true);
     expect(registry.has(SCHEMA_RAG_TOOL_NAMES.getRelations)).toBe(true);
+    expect(registry.has(SCHEMA_RAG_TOOL_NAMES.getSchemaRagStatus)).toBe(true);
   });
 
   it('exposes catalog metadata through describe_table for Agent reasoning', async () => {

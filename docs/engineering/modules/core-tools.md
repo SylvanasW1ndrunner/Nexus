@@ -252,3 +252,13 @@ Registry 会拒绝重复 plugin id、单个 manifest 内重复 tool、跨 manife
 - `execute_sql`：等待最新连接，并继续校验只读策略、确认参数和 approval provenance。
 
 该变更不改变工具名称、风险等级或返回结构。测试需要使用 Promise 断言验证 `audit_sql`，避免同步假设掩盖连接读取问题。
+
+## 2026-07-08 增量：官方 Schema RAG 状态工具声明
+
+`packages/core-tools/src/official-plugin-registry.ts` 的 `official.schema-rag` manifest 新增能力 `schema-rag-status`，并声明静态工具 `get_schema_rag_status`。该工具使用既有 `rag.schema.read` 权限，风险等级为 `safe`，`readonly: true`，不访问网络、不启动进程、不读取密钥。
+
+该变更让官方插件策略、Skill allowedTools 过滤和 runtime tool policy 能识别 Schema RAG 状态检查工具。后续 Agent 在执行真实业务任务前，可以通过插件白名单获得 `get_schema_rag_status`，先判断本地索引是否已恢复或是否处于 idle，再决定使用 `search_schema`、实时 catalog 工具或触发索引流程。
+
+插件化判断：状态检查属于 `official.schema-rag` 的官方能力，不作为独立插件。它没有新的第三方依赖，也不引入新的权限类别；适合后续单独插件化的是向量索引、embedding provider、reranker、RAG eval 面板和业务术语管理等可替换能力。
+
+测试覆盖见 `packages/core-tools/test/official-plugin-registry.test.ts`：默认静态工具清单、权限 allow list 过滤，以及现有 runtime 工具策略回归。

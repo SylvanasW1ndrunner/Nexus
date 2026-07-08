@@ -122,10 +122,20 @@ describe('registerDatabaseTools', () => {
       'audit_sql',
       'query_database',
       'execute_sql',
+      'get_schema_rag_status',
       'search_schema',
       'get_relations',
       'build_schema_context',
     ]);
+    await expect(
+      Promise.resolve().then(() =>
+        registry.get('get_schema_rag_status')?.handler({ connectionId: 'conn_1' }, toolContext()),
+      ),
+    ).resolves.toMatchObject({
+      connectionId: 'conn_1',
+      ready: true,
+      stage: 'ready',
+    });
     await expect(
       Promise.resolve().then(() =>
         registry

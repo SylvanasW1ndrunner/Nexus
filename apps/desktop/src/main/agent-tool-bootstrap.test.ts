@@ -42,6 +42,7 @@ describe('registerDesktopAgentTools', () => {
       'describe_table',
       'execute_sql',
       'get_relations',
+      'get_schema_rag_status',
       'list_schemas',
       'list_tables',
       'list_workspace_dir',

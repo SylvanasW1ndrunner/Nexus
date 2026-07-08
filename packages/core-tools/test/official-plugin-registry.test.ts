@@ -27,6 +27,7 @@ describe('OfficialPluginRegistry', () => {
       'audit_sql',
       'query_database',
       'execute_sql',
+      'get_schema_rag_status',
       'search_schema',
       'get_relations',
       'build_schema_context',
@@ -88,7 +89,15 @@ describe('OfficialPluginRegistry', () => {
       registry.resolveToolContributions({
         allowedPermissions: ['database.schema.read', 'rag.schema.read'],
       }).toolNames,
-    ).toEqual(['list_schemas', 'list_tables', 'describe_table', 'search_schema', 'get_relations', 'build_schema_context']);
+    ).toEqual([
+      'list_schemas',
+      'list_tables',
+      'describe_table',
+      'get_schema_rag_status',
+      'search_schema',
+      'get_relations',
+      'build_schema_context',
+    ]);
 
     expect(registry.resolveToolContributions({ maxDangerLevel: 'medium' }).toolNames).not.toContain('execute_sql');
   });
