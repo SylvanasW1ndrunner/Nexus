@@ -135,3 +135,16 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 该顺序用于保证失败可恢复：如果 RAG 快照删除失败，连接元数据和凭据会保留，调用方收到 `INTERNAL_ERROR`，用户或后续自动恢复任务可以再次发起删除；如果快照已经删除但后续连接元数据删除失败，RAG 快照可以在重新连接后重建，不会造成用户数据库凭据丢失。
 
 `main.ts` 现在只创建一个共享 `SchemaRagEngine`，同时注入给 Agent 工具注册和连接删除 workflow，避免 Agent 查询使用的内存索引与连接生命周期清理不一致。持久化目录为 Electron `userData/schema-rag-snapshots`，当前无新增第三方依赖。
+
+## 2026-07-08 增量：启动期清理无主 Schema RAG 快照
+
+`apps/desktop/src/main/schema-rag-startup-cleanup.ts` 负责应用启动期的 Schema RAG 快照清理。它只依赖两个接口：当前连接清单和快照清理器；`main.ts` 在 `app.whenReady()` 后、创建窗口前调用该服务。
+
+清理策略：
+
+- 读取 `ConnectionStore.list()` 作为活跃连接集合。
+- 调用 `SchemaRagSnapshotStore.cleanupInactive({ removeInvalid: true })` 删除无主快照和损坏快照。
+- 只把计数摘要写入 `main.log`，不把快照文件内容、数据库凭据或 API key 写入日志。
+- 如果连接清单读取失败，则跳过快照清理并记录错误，避免在无法确认活跃连接集合时误删用户仍可能需要的索引。
+
+该能力属于桌面主进程组合层，不改变 `core-rag` 合同，也不引入 UI 或新依赖。

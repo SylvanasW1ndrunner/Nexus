@@ -35,6 +35,7 @@ import { HeadlessAgentService } from './agent-service.js';
 import { registerDesktopAgentTools } from './agent-tool-bootstrap.js';
 import { DailyAgentAuditLogStore } from './agent-audit-log.js';
 import { DesktopDiagnosticReportService } from './diagnostic-report-service.js';
+import { cleanupSchemaRagSnapshotsAtStartup } from './schema-rag-startup-cleanup.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
@@ -157,6 +158,21 @@ async function refreshAgentWorkspaceScriptTools(): Promise<void> {
     await desktopAgentTools.refreshWorkspaceScriptTools();
   } catch (error) {
     logMain('agent:workspace-script-tools-refresh:error', error);
+  }
+}
+
+async function cleanupStartupSchemaRagSnapshots(): Promise<void> {
+  try {
+    const summary = await cleanupSchemaRagSnapshotsAtStartup({
+      connections: connectionStore,
+      snapshots: schemaRagSnapshotStore,
+      removeInvalid: true,
+    });
+    if (summary.removedCount > 0 || summary.invalidKeptCount > 0) {
+      logMain('schema-rag:startup-cleanup', summary);
+    }
+  } catch (error) {
+    logMain('schema-rag:startup-cleanup:error', error);
   }
 }
 
@@ -538,6 +554,7 @@ void app.whenReady().then(async () => {
   logMain('app:ready');
   installApplicationMenu();
   registerIpcHandlers();
+  await cleanupStartupSchemaRagSnapshots();
   await refreshAgentWorkspaceScriptTools();
   void llmRouter;
   void createWindow().catch((error) => {
