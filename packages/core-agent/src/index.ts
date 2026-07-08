@@ -10,5 +10,7 @@ export * from './schema-rag-tools.js';
 export * from './session.js';
 export * from './session-store.js';
 export * from './stream-store.js';
+export * from './task-safety.js';
+export * from './tool-failure-classifier.js';
 export * from './tool-registry.js';
 export * from './types.js';

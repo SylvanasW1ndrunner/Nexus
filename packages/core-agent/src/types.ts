@@ -36,6 +36,7 @@ export type AgentRunStatus =
   | 'aborted'
   | 'max_iterations_reached'
   | 'permission_denied'
+  | 'safety_blocked'
   | 'tool_failed'
   | 'quota_exceeded';
 
@@ -63,8 +64,18 @@ export type AgentRunOptions = {
   maxToolResultChars?: number;
   maxConsecutiveToolFailures?: number;
   maxToolExecutionMs?: number;
+  taskSafety?: AgentTaskSafetyPolicy;
   signal?: AbortSignal;
 };
+
+export type AgentTaskSafetyPolicy =
+  | false
+  | {
+      pii?: 'block' | 'allow';
+      blockedFinalText?: string;
+      extraSensitiveTerms?: string[];
+      extraExtractionVerbs?: string[];
+    };
 
 export type ToolDangerLevel = 'safe' | 'medium' | 'high' | 'critical';
 
@@ -119,7 +130,18 @@ export type AgentToolExecutionRecord = {
   durationMs: number;
   argumentPreview?: string;
   resultPreview: string;
+  failureKind?: AgentToolFailureKind;
+  retryable?: boolean;
 };
+
+export type AgentToolFailureKind =
+  | 'sql_repairable'
+  | 'timeout'
+  | 'transient_dependency'
+  | 'permission'
+  | 'tool_unavailable'
+  | 'validation'
+  | 'unknown';
 
 export type PermissionRequest = {
   mode: AgentMode;

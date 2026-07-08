@@ -59,6 +59,8 @@ export type AgentAuditEvent =
       status: AgentToolExecutionRecord['status'];
       durationMs: number;
       resultPreview: string;
+      failureKind?: AgentToolExecutionRecord['failureKind'];
+      retryable?: boolean;
     }
   | {
       type: 'run_finished';

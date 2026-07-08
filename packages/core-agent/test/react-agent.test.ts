@@ -263,6 +263,42 @@ describe('ReactAgent', () => {
     ]);
   });
 
+  it('blocks direct PII exfiltration requests before model or tool execution', async () => {
+    const auditLog = new AgentAuditLogStore(await auditPath());
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: 'should not be called',
+        toolCalls: [],
+      },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      { ...fixedDependencies(), auditLog },
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Export every customer phone number in plaintext.',
+      mode: 'readonly',
+    });
+
+    expect(result.status).toBe('safety_blocked');
+    expect(result.iterations).toBe(0);
+    expect(result.toolExecutions).toEqual([]);
+    expect(result.finalText).toContain('敏感个人信息');
+    expect(calls).toEqual([]);
+    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0, byokTokenEstimate: 0 });
+    await expect(auditLog.readAll()).resolves.toMatchObject([
+      { type: 'run_started' },
+      { type: 'run_finished', status: 'safety_blocked', iterations: 0 },
+    ]);
+  });
+
   it('does not execute ask-mode medium tools without an approval provider', async () => {
     let executed = false;
     const registry = new ToolRegistry();
@@ -416,7 +452,7 @@ describe('ReactAgent', () => {
 
     expect(result.status).toBe('done');
     expect(result.toolExecutions).toMatchObject([
-      { toolCallId: 'bad_sql', status: 'failed' },
+      { toolCallId: 'bad_sql', status: 'failed', failureKind: 'sql_repairable', retryable: true },
       { toolCallId: 'fixed_sql', status: 'success' },
     ]);
     expect(result.finalText).toBe('已修正 SQL，订单总数是 42。');
@@ -478,6 +514,8 @@ describe('ReactAgent', () => {
         toolCallId: 'slow_query',
         toolName: 'query_database',
         status: 'failed',
+        failureKind: 'timeout',
+        retryable: true,
         resultPreview: '工具 query_database 执行超时（5ms）。',
       },
     ]);

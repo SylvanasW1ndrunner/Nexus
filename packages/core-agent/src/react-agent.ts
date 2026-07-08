@@ -9,6 +9,8 @@ import { redactPersistedAgentValue } from './redaction.js';
 import type { AgentSessionWriter } from './session-store.js';
 import { persistAgentStreamEvents } from './stream-store.js';
 import type { AgentStreamStore } from './stream-store.js';
+import { assessAgentTaskSafety } from './task-safety.js';
+import { classifyAgentToolFailure } from './tool-failure-classifier.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type {
   AgentSession,
@@ -91,6 +93,8 @@ export class ReactAgent {
         ...(errorMessage === undefined ? {} : { errorMessage }),
       });
     };
+    const toolExecutions: AgentToolExecutionRecord[] = [];
+    let finalText = '';
 
     if (usageMode === 'subscription') {
       const quota = await this.usageTracker.getCurrentQuota('subscription');
@@ -106,6 +110,21 @@ export class ReactAgent {
       }
     }
 
+    const safety = assessAgentTaskSafety(options.userMessage, options.taskSafety);
+    if (safety.blocked) {
+      finalText = safety.finalText ?? 'Request blocked by Agent safety policy.';
+      appendMessage(session, createMessage({ role: 'assistant', content: finalText }, this.now));
+      await this.saveSession(session);
+      await finishRunAudit('safety_blocked', 0, finalText, safety.reason);
+      return {
+        status: 'safety_blocked',
+        session,
+        finalText,
+        iterations: 0,
+        toolExecutions: [],
+      };
+    }
+
     const round = await this.usageTracker.startConversationRound(session.id, usageMode);
     let roundClosed = false;
     const closeRound = async (status: 'success' | 'aborted' | 'failed', errorMessage?: string) => {
@@ -114,7 +133,6 @@ export class ReactAgent {
       await this.usageTracker.endConversationRound(round, status, errorMessage);
     };
 
-    const toolExecutions: AgentToolExecutionRecord[] = [];
     const maxConsecutiveToolFailures = options.maxConsecutiveToolFailures ?? 3;
     const maxToolExecutionMs = options.maxToolExecutionMs ?? 60_000;
     const iterationOffset = normalizeNonNegativeInteger(options.initialIteration, 0);
@@ -123,7 +141,6 @@ export class ReactAgent {
       DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS,
     );
     const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
-    let finalText = '';
     let currentIteration = 0;
     let consecutiveToolFailures = 0;
     const saveCheckpoint = async (
@@ -247,6 +264,7 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               'Tool not allowed by run policy.',
+              classifyAgentToolFailure('Tool not allowed by run policy.'),
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -286,6 +304,7 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               'Tool is not registered.',
+              classifyAgentToolFailure('Tool is not registered.'),
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -335,6 +354,7 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               `Permission: ${permission.decision}`,
+              classifyAgentToolFailure(`Permission: ${permission.decision}`),
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -421,6 +441,7 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               message,
+              classifyAgentToolFailure(message),
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -591,6 +612,7 @@ function executionRecord(
   startedAt: number,
   args: Record<string, unknown>,
   resultPreview: string,
+  failure?: { failureKind: NonNullable<AgentToolExecutionRecord['failureKind']>; retryable: boolean },
 ): AgentToolExecutionRecord {
   const argumentPreview = serializeToolArguments(args);
   return {
@@ -600,6 +622,7 @@ function executionRecord(
     durationMs: Math.max(0, Date.now() - startedAt),
     ...(argumentPreview === '{}' ? {} : { argumentPreview }),
     resultPreview,
+    ...(failure === undefined ? {} : { failureKind: failure.failureKind, retryable: failure.retryable }),
   };
 }
 
@@ -619,6 +642,8 @@ function toolFinishedAuditEvent(
     status: record.status,
     durationMs: record.durationMs,
     resultPreview: record.resultPreview,
+    ...(record.failureKind === undefined ? {} : { failureKind: record.failureKind }),
+    ...(record.retryable === undefined ? {} : { retryable: record.retryable }),
   };
 }
 
