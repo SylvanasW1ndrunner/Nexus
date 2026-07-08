@@ -82,6 +82,45 @@ describe('QuerySnapshotStore', () => {
     });
   });
 
+  it('preserves result truncation metadata for pinned large query results', async () => {
+    const store = new QuerySnapshotStore(await snapshotPath());
+
+    const created = await store.create({
+      connectionId: 'prod-pg',
+      sql: 'select * from traffic_events order by event_time desc',
+      result: result({
+        rows: [
+          { id: 1, created_at: null, payload: { event: 'page_view' }, raw: null },
+          { id: 2, created_at: null, payload: { event: 'checkout' }, raw: null },
+        ],
+        rowCount: 50_000,
+        returnedRowCount: 2,
+        rowLimit: 2,
+        hasMore: true,
+        truncated: true,
+      }),
+    });
+
+    const loaded = await store.get(created.id);
+    expect(loaded).toMatchObject({
+      rowCount: 50_000,
+      returnedRowCount: 2,
+      rowLimit: 2,
+      hasMore: true,
+      truncated: true,
+    });
+    expect(loaded?.rows).toHaveLength(2);
+
+    const summaries = await store.list();
+    expect(summaries[0]).toMatchObject({
+      rowCount: 50_000,
+      returnedRowCount: 2,
+      rowLimit: 2,
+      hasMore: true,
+      truncated: true,
+    });
+  });
+
   it('lists snapshots newest-first with connection filtering, search, and row previews', async () => {
     const store = new QuerySnapshotStore(await snapshotPath());
     await store.create({

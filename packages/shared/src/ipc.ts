@@ -167,6 +167,10 @@ export type QueryExecutionResult = {
   columns: Array<{ name: string; dataType?: string }>;
   rows: QueryResultRow[];
   rowCount: number;
+  returnedRowCount?: number;
+  rowLimit?: number;
+  hasMore?: boolean;
+  truncated?: boolean;
   elapsedMs: number;
   safety: QuerySafetyReport;
   transaction?: QueryTransactionReport;
@@ -188,6 +192,10 @@ export type QueryResultSet = {
   columns: Array<{ name: string; dataType?: string }>;
   rows: QueryResultRow[];
   rowCount: number;
+  returnedRowCount?: number;
+  rowLimit?: number;
+  hasMore?: boolean;
+  truncated?: boolean;
 };
 
 export type QueryExecutionMessage = {
@@ -221,6 +229,10 @@ export type QueryHistoryItem = {
   sql: string;
   status: 'success' | 'failed' | 'blocked' | 'cancelled';
   rowCount?: number;
+  returnedRowCount?: number;
+  rowLimit?: number;
+  hasMore?: boolean;
+  truncated?: boolean;
   elapsedMs?: number;
   errorMessage?: string;
   createdAt: string;

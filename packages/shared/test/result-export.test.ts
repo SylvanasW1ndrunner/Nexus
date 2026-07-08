@@ -92,6 +92,41 @@ describe('query result export contract', () => {
     });
   });
 
+  it('includes truncation metadata in JSON and Excel-compatible exports', () => {
+    const truncatedResult: QueryExecutionResult = {
+      ...result,
+      rows: result.rows.slice(0, 2),
+      rowCount: 3,
+      returnedRowCount: 2,
+      rowLimit: 2,
+      hasMore: true,
+      truncated: true,
+    };
+
+    expect(JSON.parse(queryResultToJson(truncatedResult))).toMatchObject({
+      rowCount: 3,
+      returnedRowCount: 2,
+      rowLimit: 2,
+      hasMore: true,
+      truncated: true,
+    });
+
+    expect(JSON.parse(exportQueryResult(truncatedResult, { format: 'json' }).content)).toMatchObject({
+      rowCount: 3,
+      returnedRowCount: 2,
+      exportedRowCount: 2,
+      rowLimit: 2,
+      hasMore: true,
+      truncated: true,
+    });
+
+    const workbook = exportQueryResult(truncatedResult, { format: 'excel-xml' }).content;
+    expect(workbook).toContain('returnedRowCount');
+    expect(workbook).toContain('rowLimit');
+    expect(workbook).toContain('hasMore');
+    expect(workbook).toContain('truncated');
+  });
+
   it('exports only the filtered visible result view', () => {
     const artifact = exportQueryResult(result, {
       format: 'json',

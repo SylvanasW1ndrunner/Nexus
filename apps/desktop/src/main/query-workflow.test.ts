@@ -26,17 +26,23 @@ const baseConnection: SavedConnection = {
 };
 
 describe('createQueryWorkflow', () => {
-  it('executes a safe query, records usage, and writes success history', async () => {
+  it('executes a safe query, passes row limits, records usage, and writes success history', async () => {
     const harness = createHarness({ connection: baseConnection });
 
     const result = await harness.execute({
       connectionId: baseConnection.id,
       sql: 'select city from users order by city limit 10',
+      limit: 25,
     });
 
     expect(result.ok).toBe(true);
     expect(harness.resolvedEngines).toEqual(['postgres']);
-    expect(harness.driverCalls).toHaveLength(1);
+    expect(harness.driverCalls).toEqual([
+      expect.objectContaining({
+        sql: 'select city from users order by city limit 10',
+        limit: 25,
+      }),
+    ]);
     expect(harness.usageCount).toBe(1);
     expect(harness.history).toEqual([
       expect.objectContaining({
@@ -44,6 +50,10 @@ describe('createQueryWorkflow', () => {
         sql: 'select city from users order by city limit 10',
         status: 'success',
         rowCount: 2,
+        returnedRowCount: 2,
+        rowLimit: 25,
+        hasMore: false,
+        truncated: false,
         elapsedMs: 12,
       }),
     ]);
@@ -338,7 +348,7 @@ function createHarness(options: {
   cancellations?: QueryCancellationRegistry;
 }) {
   const history: QueryHistoryItem[] = [];
-  const driverCalls: Array<{ queryId: string | undefined; sql: string; connection: SavedConnection }> = [];
+  const driverCalls: Array<{ queryId: string | undefined; sql: string; limit: number | undefined; connection: SavedConnection }> = [];
   const resolvedEngines: string[] = [];
   let usageCount = 0;
   const driverResult =
@@ -348,6 +358,10 @@ function createHarness(options: {
       columns: [{ name: 'city', dataType: 'text' }],
       rows: [{ city: 'Beijing' }, { city: 'Shanghai' }],
       rowCount: 2,
+      returnedRowCount: 2,
+      rowLimit: 25,
+      hasMore: false,
+      truncated: false,
       elapsedMs: 12,
       safety: {
         statementKind: 'SELECT',
@@ -381,6 +395,10 @@ function createHarness(options: {
             status: input.status,
             safety: input.safety,
             ...(input.rowCount === undefined ? {} : { rowCount: input.rowCount }),
+            ...(input.returnedRowCount === undefined ? {} : { returnedRowCount: input.returnedRowCount }),
+            ...(input.rowLimit === undefined ? {} : { rowLimit: input.rowLimit }),
+            ...(input.hasMore === undefined ? {} : { hasMore: input.hasMore }),
+            ...(input.truncated === undefined ? {} : { truncated: input.truncated }),
             ...(input.elapsedMs === undefined ? {} : { elapsedMs: input.elapsedMs }),
             ...(input.errorMessage === undefined ? {} : { errorMessage: input.errorMessage }),
             ...(input.transaction === undefined ? {} : { transaction: input.transaction }),
@@ -399,7 +417,7 @@ function createHarness(options: {
         resolvedEngines.push(engine);
         return {
           execute(request, connection, observer) {
-            driverCalls.push({ queryId: request.queryId, sql: request.sql, connection });
+            driverCalls.push({ queryId: request.queryId, sql: request.sql, limit: request.limit, connection });
             if (request.queryId) {
               observer?.onBackendPid?.({
                 queryId: request.queryId,

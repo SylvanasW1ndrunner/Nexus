@@ -252,6 +252,51 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
     }
   });
 
+  it('uses cursor pagination for large read queries without materializing the full result', async () => {
+    const driver = new PostgresDriver();
+
+    const connectResult = await driver.connect(config);
+    expect(connectResult.ok).toBe(true);
+    if (!connectResult.ok) return;
+
+    try {
+      const result = await driver.execute(
+        {
+          connectionId: config.id,
+          sql: `
+            select
+              value::int as event_id,
+              ('tenant-' || (value % 7)) as tenant_key,
+              jsonb_build_object('event', 'page_view', 'value', value) as payload
+            from generate_series(1, 15005) as value
+            order by value
+          `,
+          limit: 25,
+        },
+        connectResult.data,
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.data.rows).toHaveLength(25);
+      expect(result.data.rows[0]).toMatchObject({ event_id: 1, tenant_key: 'tenant-1' });
+      expect(result.data.rows[24]).toMatchObject({ event_id: 25 });
+      expect(result.data.returnedRowCount).toBe(25);
+      expect(result.data.rowLimit).toBe(25);
+      expect(result.data.hasMore).toBe(true);
+      expect(result.data.truncated).toBe(true);
+      expect(result.data.rowCount).toBe(26);
+      expect(result.data.messages).toEqual([
+        expect.objectContaining({
+          level: 'warning',
+          message: 'Statement 1 returned 26 row(s); only 25 row(s) are included because of the row limit.',
+        }),
+      ]);
+    } finally {
+      await driver.disconnect(config.id);
+    }
+  });
+
   it('describes PostgreSQL indexes, constraints, view definitions, and row estimates', async () => {
     const driver = new PostgresDriver();
     const writableConfig = {

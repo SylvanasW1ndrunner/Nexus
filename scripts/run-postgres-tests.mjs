@@ -117,10 +117,14 @@ function databaseUrl(database) {
 }
 
 function runVitest(testFile, env) {
-  const args = hasLocalVitest ? [localVitest, 'run', testFile] : ['exec', 'vitest', 'run', testFile];
+  const cwd = resolveTestCwd(testFile);
+  const relativeTestFile = testFile.slice(cwd.relative.length + 1).replaceAll('\\', '/');
+  const args = hasLocalVitest
+    ? [localVitest, 'run', relativeTestFile, '--pool=forks']
+    : ['exec', 'vitest', 'run', relativeTestFile, '--pool=forks'];
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      cwd: root,
+      cwd: cwd.absolute,
       env: {
         ...process.env,
         ...env,
@@ -143,4 +147,17 @@ function runVitest(testFile, env) {
       reject(new Error(`${testFile} failed with exit code ${code ?? 1}`));
     });
   });
+}
+
+function resolveTestCwd(testFile) {
+  const normalized = testFile.replaceAll('\\', '/');
+  const parts = normalized.split('/');
+  if (parts.length < 3 || (parts[0] !== 'packages' && parts[0] !== 'apps')) {
+    return { relative: '.', absolute: root };
+  }
+  const relative = `${parts[0]}/${parts[1]}`;
+  return {
+    relative,
+    absolute: join(root, parts[0], parts[1]),
+  };
 }

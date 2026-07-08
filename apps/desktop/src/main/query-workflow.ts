@@ -23,6 +23,10 @@ type QueryHistoryWriter = {
     sql: string;
     status: QueryHistoryItem['status'];
     rowCount?: number;
+    returnedRowCount?: number;
+    rowLimit?: number;
+    hasMore?: boolean;
+    truncated?: boolean;
     elapsedMs?: number;
     errorMessage?: string;
     safety: QueryHistoryItem['safety'];
@@ -116,6 +120,10 @@ export function createQueryWorkflow({
         sql: request.sql,
         status: 'success',
         rowCount: result.data.rowCount,
+        ...(result.data.returnedRowCount === undefined ? {} : { returnedRowCount: result.data.returnedRowCount }),
+        ...(result.data.rowLimit === undefined ? {} : { rowLimit: result.data.rowLimit }),
+        ...(result.data.hasMore === undefined ? {} : { hasMore: result.data.hasMore }),
+        ...(result.data.truncated === undefined ? {} : { truncated: result.data.truncated }),
         elapsedMs: result.data.elapsedMs,
         safety: result.data.safety,
         ...(result.data.transaction === undefined ? {} : { transaction: result.data.transaction }),

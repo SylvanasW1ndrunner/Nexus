@@ -127,7 +127,11 @@ describe('PostgresDriver runtime errors', () => {
 
     expect(result.ok).toBe(true);
     expect(calls).toEqual([
-      ['select email from users where email like $1 limit 10', ["%' OR 1=1 --"]],
+      ['BEGIN READ ONLY'],
+      [expect.stringMatching(/^DECLARE dbagent_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select email from users where email like \$1 limit 10$/), ["%' OR 1=1 --"]],
+      [expect.stringMatching(/^FETCH FORWARD 10001 FROM dbagent_cursor_[a-f0-9]+$/)],
+      [expect.stringMatching(/^CLOSE dbagent_cursor_[a-f0-9]+$/)],
+      ['COMMIT'],
     ]);
   });
 
@@ -167,6 +171,53 @@ describe('PostgresDriver runtime errors', () => {
         queryId: 'query-caller-1',
       },
     });
+  });
+
+  it('limits returned rows and reports truncation metadata before results cross IPC boundaries', async () => {
+    const driver = new PostgresDriver();
+    const pool = {
+      connect() {
+        return Promise.resolve({
+          processID: 1201,
+          query() {
+            return Promise.resolve({
+              command: 'SELECT',
+              rowCount: 4,
+              oid: 0,
+              fields: [{ name: 'id', dataTypeID: 23 }],
+              rows: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }],
+            });
+          },
+          release() {},
+        });
+      },
+    };
+    (driver as unknown as { pools: Map<string, unknown> }).pools.set(connection.id, pool);
+
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: 'select id from large_events order by id',
+        limit: 2,
+      },
+      connection,
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data).toMatchObject({
+      rowCount: 4,
+      returnedRowCount: 2,
+      rowLimit: 2,
+      truncated: true,
+      rows: [{ id: 1 }, { id: 2 }],
+    });
+    expect(result.data.messages).toEqual([
+      expect.objectContaining({
+        level: 'warning',
+        message: 'Statement 1 returned 4 row(s); only 2 row(s) are included because of the row limit.',
+      }),
+    ]);
   });
 
   it('executes rollback transaction mode without committing changes', async () => {
@@ -527,6 +578,82 @@ describe('PostgresDriver runtime errors', () => {
       'Statement 1 returned 1 row(s).',
       'Statement 2 completed with command UPDATE and affected 2 row(s).',
       'Statement 3 returned 1 row(s).',
+    ]);
+  });
+
+  it('applies row limits independently to every multi-statement result set', async () => {
+    const driver = new PostgresDriver();
+    const multiResult = [
+      {
+        command: 'SELECT',
+        rowCount: 3,
+        oid: 0,
+        fields: [{ name: 'first_id', dataTypeID: 23 }],
+        rows: [{ first_id: 1 }, { first_id: 2 }, { first_id: 3 }],
+      },
+      {
+        command: 'SELECT',
+        rowCount: 4,
+        oid: 0,
+        fields: [{ name: 'second_id', dataTypeID: 23 }],
+        rows: [{ second_id: 10 }, { second_id: 11 }, { second_id: 12 }, { second_id: 13 }],
+      },
+    ];
+    const pool = {
+      connect() {
+        return Promise.resolve({
+          processID: 1201,
+          query(sql: string) {
+            if (sql === 'BEGIN' || sql === 'COMMIT') {
+              return Promise.resolve({
+                command: sql,
+                rowCount: null,
+                oid: 0,
+                fields: [],
+                rows: [],
+              });
+            }
+            return Promise.resolve(multiResult);
+          },
+          release() {},
+        });
+      },
+    };
+    (driver as unknown as { pools: Map<string, unknown> }).pools.set(connection.id, pool);
+
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: 'select first_id from first_table; select second_id from second_table;',
+        confirmed: true,
+        limit: 2,
+      },
+      { ...connection, readOnly: false },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.resultSets).toEqual([
+      expect.objectContaining({
+        rowCount: 3,
+        returnedRowCount: 2,
+        rowLimit: 2,
+        truncated: true,
+        rows: [{ first_id: 1 }, { first_id: 2 }],
+      }),
+      expect.objectContaining({
+        rowCount: 4,
+        returnedRowCount: 2,
+        rowLimit: 2,
+        truncated: true,
+        rows: [{ second_id: 10 }, { second_id: 11 }],
+      }),
+    ]);
+    expect(result.data.messages).toEqual([
+      expect.objectContaining({ level: 'warning', statementIndex: 0 }),
+      expect.objectContaining({ level: 'warning', statementIndex: 1 }),
+      expect.objectContaining({ level: 'info', statementIndex: 0 }),
+      expect.objectContaining({ level: 'info', statementIndex: 1 }),
     ]);
   });
 

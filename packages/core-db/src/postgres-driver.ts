@@ -34,6 +34,8 @@ import type {
 } from './types.js';
 
 type SafePgQueryResult = PgQueryResult<QueryResultRow>;
+const DEFAULT_QUERY_ROW_LIMIT = 10_000;
+const MAX_QUERY_ROW_LIMIT = 100_000;
 
 export class PostgresDriver implements IDatabaseDriver {
   readonly capabilities = {
@@ -176,11 +178,15 @@ export class PostgresDriver implements IDatabaseDriver {
           backendPid,
         });
       }
+      const rowLimit = normalizeQueryRowLimit(request.limit);
+      const pagedSql = resolvePageableReadSql(request.sql, safety, transactionMode.data);
       const execution: { results: SafePgQueryResult[]; transaction?: QueryTransactionReport } =
-        safety.requiresConfirmation || transactionMode.data === 'rollback'
+        pagedSql !== undefined
+          ? { results: await executePagedRead(client, pagedSql, request.params, rowLimit) }
+          : safety.requiresConfirmation || transactionMode.data === 'rollback'
           ? await executeInTransaction(client, request.sql, request.params, transactionMode.data === 'rollback')
           : { results: normalizePgResults(await client.query<QueryResultRow>(request.sql, request.params)) };
-      return ok(toQueryExecutionResult(execution.results, safety, started, queryId, execution.transaction));
+      return ok(toQueryExecutionResult(execution.results, safety, started, queryId, rowLimit, execution.transaction));
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
     } finally {
@@ -600,6 +606,45 @@ function findUnsupportedRollbackStatement(sql: string): string | undefined {
   return undefined;
 }
 
+function resolvePageableReadSql(
+  sql: string,
+  safety: QueryExecutionResult['safety'],
+  transactionMode: 'auto' | 'rollback',
+): string | undefined {
+  if (transactionMode !== 'auto') return undefined;
+  if (safety.requiresConfirmation || safety.blocked) return undefined;
+  const statements = splitSqlStatements(sql);
+  if (statements.length !== 1) return undefined;
+  const statement = statements[0]!;
+  if (!['SELECT', 'WITH', 'VALUES'].includes(statement.statementKind)) return undefined;
+  return statement.text;
+}
+
+async function executePagedRead(
+  client: PgPoolClient,
+  sql: string,
+  params: unknown[] | undefined,
+  rowLimit: number,
+): Promise<SafePgQueryResult[]> {
+  const cursorName = `dbagent_cursor_${randomUUID().replace(/-/g, '')}`;
+  const fetchCount = rowLimit + 1;
+  try {
+    await client.query('BEGIN READ ONLY');
+    await client.query(`DECLARE ${cursorName} NO SCROLL CURSOR FOR ${sql}`, params);
+    const result = await client.query<QueryResultRow>(`FETCH FORWARD ${fetchCount} FROM ${cursorName}`);
+    await client.query(`CLOSE ${cursorName}`);
+    await client.query('COMMIT');
+    return normalizePgResults(result);
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Preserve the original query error; rollback failure is secondary.
+    }
+    throw error;
+  }
+}
+
 async function executeInTransaction(
   client: PgPoolClient,
   sql: string,
@@ -690,19 +735,28 @@ function toQueryExecutionResult(
   safety: QueryExecutionResult['safety'],
   started: number,
   queryId: string,
+  rowLimit: number,
   transaction?: QueryTransactionReport,
 ): QueryExecutionResult {
-  const resultSets = results.map(toQueryResultSet);
+  const resultSets = results.map((result, index) => toQueryResultSet(result, index, rowLimit));
   const primary =
     resultSets.find((set) => set.columns.length > 0) ??
     resultSets.at(-1) ??
-    toQueryResultSet(emptyPgResult(), 0);
+    toQueryResultSet(emptyPgResult(), 0, rowLimit);
   const messages = buildQueryMessages(resultSets);
+  const returnedRowCount = primary.returnedRowCount ?? primary.rows.length;
+  const primaryRowLimit = primary.rowLimit ?? rowLimit;
+  const hasMore = primary.hasMore ?? false;
+  const truncated = primary.truncated ?? false;
   const result: QueryExecutionResult = {
     queryId,
     columns: primary.columns,
     rows: primary.rows,
     rowCount: primary.rowCount,
+    returnedRowCount,
+    rowLimit: primaryRowLimit,
+    hasMore,
+    truncated,
     elapsedMs: Math.round(performance.now() - started),
     safety,
     ...(transaction === undefined ? {} : { transaction }),
@@ -712,7 +766,11 @@ function toQueryExecutionResult(
   return result;
 }
 
-function toQueryResultSet(result: SafePgQueryResult, index: number): QueryResultSet {
+function toQueryResultSet(result: SafePgQueryResult, index: number, rowLimit: number): QueryResultSet {
+  const sourceRowCount = result.rowCount ?? result.rows.length;
+  const truncated = result.rows.length > rowLimit;
+  const hasMore = truncated;
+  const rows = truncated ? result.rows.slice(0, rowLimit) : result.rows;
   return {
     index,
     command: result.command,
@@ -720,21 +778,44 @@ function toQueryResultSet(result: SafePgQueryResult, index: number): QueryResult
       name: field.name,
       dataType: String(field.dataTypeID),
     })),
-    rows: result.rows,
-    rowCount: result.rowCount ?? result.rows.length,
+    rows,
+    rowCount: sourceRowCount,
+    returnedRowCount: rows.length,
+    rowLimit,
+    hasMore,
+    truncated,
   };
 }
 
 function buildQueryMessages(resultSets: QueryResultSet[]): QueryExecutionMessage[] {
-  if (resultSets.length <= 1) return [];
-  return resultSets.map((set) => ({
-    level: 'info',
+  const messages: QueryExecutionMessage[] = [];
+  for (const set of resultSets) {
+    if (set.truncated) {
+      messages.push({
+        level: 'warning' as const,
+        statementIndex: set.index,
+        message: `Statement ${set.index + 1} returned ${set.rowCount} row(s); only ${set.returnedRowCount ?? set.rows.length} row(s) are included because of the row limit.`,
+      });
+    }
+  }
+  if (resultSets.length <= 1) return messages;
+  messages.push(...resultSets.map((set) => ({
+    level: 'info' as const,
     statementIndex: set.index,
     message:
       set.columns.length > 0
         ? `Statement ${set.index + 1} returned ${set.rowCount} row(s).`
         : `Statement ${set.index + 1} completed with command ${set.command || 'UNKNOWN'} and affected ${set.rowCount} row(s).`,
-  }));
+  })));
+  return messages;
+}
+
+function normalizeQueryRowLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_ROW_LIMIT;
+  const floored = Math.floor(limit);
+  if (floored < 1) return 1;
+  if (floored > MAX_QUERY_ROW_LIMIT) return MAX_QUERY_ROW_LIMIT;
+  return floored;
 }
 
 function toPgConfig(config: DatabaseConnectionConfig) {

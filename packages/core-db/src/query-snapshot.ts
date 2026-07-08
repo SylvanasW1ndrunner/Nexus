@@ -28,6 +28,10 @@ export type QuerySnapshot = {
   columns: QueryExecutionResult['columns'];
   rows: QuerySnapshotRow[];
   rowCount: number;
+  returnedRowCount?: number;
+  rowLimit?: number;
+  hasMore?: boolean;
+  truncated?: boolean;
   elapsedMs: number;
   safety: QuerySafetyReport;
   tags: string[];
@@ -76,6 +80,10 @@ export class QuerySnapshotStore {
       columns: input.result.columns,
       rows: input.result.rows.map(normalizeRow),
       rowCount: input.result.rowCount,
+      ...(input.result.returnedRowCount === undefined ? {} : { returnedRowCount: input.result.returnedRowCount }),
+      ...(input.result.rowLimit === undefined ? {} : { rowLimit: input.result.rowLimit }),
+      ...(input.result.hasMore === undefined ? {} : { hasMore: input.result.hasMore }),
+      ...(input.result.truncated === undefined ? {} : { truncated: input.result.truncated }),
       elapsedMs: input.result.elapsedMs,
       safety: input.result.safety,
       tags: normalizeTags(input.tags),

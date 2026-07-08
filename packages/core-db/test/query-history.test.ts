@@ -113,6 +113,40 @@ describe('QueryHistoryStore', () => {
     ]);
   });
 
+  it('stores truncation metadata so large result history remains understandable', async () => {
+    const store = new QueryHistoryStore(await historyPath());
+
+    const item = await store.append({
+      connectionId: 'analytics',
+      sql: 'select * from traffic_events order by event_time desc',
+      status: 'success',
+      rowCount: 10_001,
+      returnedRowCount: 10_000,
+      rowLimit: 10_000,
+      hasMore: true,
+      truncated: true,
+      elapsedMs: 240,
+      safety: safeSelect,
+    });
+
+    expect(item).toMatchObject({
+      rowCount: 10_001,
+      returnedRowCount: 10_000,
+      rowLimit: 10_000,
+      hasMore: true,
+      truncated: true,
+    });
+    await expect(store.list({ connectionId: 'analytics' })).resolves.toMatchObject([
+      {
+        rowCount: 10_001,
+        returnedRowCount: 10_000,
+        rowLimit: 10_000,
+        hasMore: true,
+        truncated: true,
+      },
+    ]);
+  });
+
   it('searches history by SQL text, error text and safety reason for user recovery', async () => {
     const store = new QueryHistoryStore(await historyPath());
     await store.append({

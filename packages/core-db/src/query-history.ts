@@ -7,6 +7,10 @@ export type AppendQueryHistoryInput = {
   sql: string;
   status: QueryHistoryItem['status'];
   rowCount?: number;
+  returnedRowCount?: number;
+  rowLimit?: number;
+  hasMore?: boolean;
+  truncated?: boolean;
   elapsedMs?: number;
   errorMessage?: string;
   safety: QuerySafetyReport;
@@ -45,6 +49,10 @@ export class QueryHistoryStore {
       createdAt: new Date().toISOString(),
     };
     if (input.rowCount !== undefined) item.rowCount = input.rowCount;
+    if (input.returnedRowCount !== undefined) item.returnedRowCount = input.returnedRowCount;
+    if (input.rowLimit !== undefined) item.rowLimit = input.rowLimit;
+    if (input.hasMore !== undefined) item.hasMore = input.hasMore;
+    if (input.truncated !== undefined) item.truncated = input.truncated;
     if (input.elapsedMs !== undefined) item.elapsedMs = input.elapsedMs;
     if (input.errorMessage !== undefined) item.errorMessage = input.errorMessage;
     if (input.transaction !== undefined) item.transaction = input.transaction;
