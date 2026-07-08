@@ -148,3 +148,16 @@ Renderer 在 BetaV0.1.1 改为 Cursor 风格三栏工作台：左侧管理项目
 - 如果连接清单读取失败，则跳过快照清理并记录错误，避免在无法确认活跃连接集合时误删用户仍可能需要的索引。
 
 该能力属于桌面主进程组合层，不改变 `core-rag` 合同，也不引入 UI 或新依赖。
+
+## 2026-07-08 增量：启动期恢复活跃 Schema RAG 快照
+
+启动期 Schema RAG 维护现在不只清理无主快照，还会把活跃连接的可用快照 hydrate 回共享 `SchemaRagEngine`。`main.ts` 调用 `recoverSchemaRagSnapshotsAtStartup()`，服务流程为：
+
+- 读取当前连接清单。
+- 清理无主快照和损坏快照。
+- 对每个活跃连接调用 `SchemaRagSnapshotStore.loadDetailed(connectionId)`。
+- `loaded` 快照通过 `SchemaRagEngine.loadIndex()` 进入共享内存索引。
+- `missing` 视为正常冷启动，后续重新索引即可。
+- `invalid` / `error` 只计入摘要和日志，不阻塞窗口启动，也不影响其他连接恢复。
+
+清理阶段失败时，服务会记录 `cleanupError` 并继续尝试加载活跃连接快照。连接清单读取失败时仍然整体跳过恢复，避免无法确认活跃连接集合时误删或误加载。

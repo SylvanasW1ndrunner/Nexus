@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { SchemaRagSnapshotCleanupResult, SchemaRagSnapshotSummary } from '@dbagent/core-rag';
-import { cleanupSchemaRagSnapshotsAtStartup } from './schema-rag-startup-cleanup.js';
+import type { SchemaRagIndex, SchemaRagSnapshotCleanupResult, SchemaRagSnapshotSummary } from '@dbagent/core-rag';
+import { cleanupSchemaRagSnapshotsAtStartup, recoverSchemaRagSnapshotsAtStartup } from './schema-rag-startup-cleanup.js';
 
 describe('cleanupSchemaRagSnapshotsAtStartup', () => {
   it('cleans snapshots that do not belong to active connections and removes invalid snapshots by default', async () => {
@@ -84,6 +84,120 @@ describe('cleanupSchemaRagSnapshotsAtStartup', () => {
   });
 });
 
+describe('recoverSchemaRagSnapshotsAtStartup', () => {
+  it('loads active connection snapshots into the shared Schema RAG engine after cleanup', async () => {
+    const loadedConnectionIds: string[] = [];
+
+    const summary = await recoverSchemaRagSnapshotsAtStartup({
+      connections: {
+        list: () => Promise.resolve([{ id: 'active-a' }, { id: 'active-b' }]),
+      },
+      snapshots: {
+        cleanupInactive: (input) =>
+          Promise.resolve(cleanupResult({
+            kept: [...input.activeConnectionIds].map((connectionId) => availableSnapshot(connectionId)),
+            removed: [],
+          })),
+        loadDetailed: (connectionId) => Promise.resolve({
+          status: 'loaded',
+          snapshotPath: `${connectionId}.schema-rag.json`,
+          index: schemaRagIndex(connectionId),
+        }),
+      },
+      rag: {
+        loadIndex(index) {
+          loadedConnectionIds.push(index.connectionId);
+        },
+      },
+    });
+
+    expect(loadedConnectionIds).toEqual(['active-a', 'active-b']);
+    expect(summary).toMatchObject({
+      activeConnectionCount: 2,
+      keptCount: 2,
+      loadedCount: 2,
+      missingCount: 0,
+      invalidCount: 0,
+      errorCount: 0,
+      failedConnectionIds: [],
+    });
+  });
+
+  it('continues restoring other active snapshots when one active snapshot is missing or invalid', async () => {
+    const loadedConnectionIds: string[] = [];
+
+    const summary = await recoverSchemaRagSnapshotsAtStartup({
+      connections: {
+        list: () => Promise.resolve([{ id: 'ready' }, { id: 'missing' }, { id: 'broken' }]),
+      },
+      snapshots: {
+        cleanupInactive: () => Promise.resolve(cleanupResult({ kept: [], removed: [] })),
+        loadDetailed: (connectionId) => {
+          if (connectionId === 'ready') {
+            return Promise.resolve({
+              status: 'loaded',
+              snapshotPath: 'ready.schema-rag.json',
+              index: schemaRagIndex('ready'),
+            });
+          }
+          if (connectionId === 'missing') {
+            return Promise.resolve({ status: 'missing', snapshotPath: 'missing.schema-rag.json' });
+          }
+          return Promise.resolve({
+            status: 'invalid',
+            snapshotPath: 'broken.schema-rag.json',
+            reason: 'Snapshot JSON is invalid.',
+          });
+        },
+      },
+      rag: {
+        loadIndex(index) {
+          loadedConnectionIds.push(index.connectionId);
+        },
+      },
+    });
+
+    expect(loadedConnectionIds).toEqual(['ready']);
+    expect(summary).toMatchObject({
+      loadedCount: 1,
+      missingCount: 1,
+      invalidCount: 1,
+      errorCount: 0,
+      failedConnectionIds: ['broken'],
+    });
+  });
+
+  it('records cleanup failure but still attempts to hydrate active snapshots', async () => {
+    const loadedConnectionIds: string[] = [];
+
+    const summary = await recoverSchemaRagSnapshotsAtStartup({
+      connections: {
+        list: () => Promise.resolve([{ id: 'active-a' }]),
+      },
+      snapshots: {
+        cleanupInactive: () => Promise.reject(new Error('snapshot directory is temporarily locked')),
+        loadDetailed: (connectionId) => Promise.resolve({
+          status: 'loaded',
+          snapshotPath: `${connectionId}.schema-rag.json`,
+          index: schemaRagIndex(connectionId),
+        }),
+      },
+      rag: {
+        loadIndex(index) {
+          loadedConnectionIds.push(index.connectionId);
+        },
+      },
+    });
+
+    expect(loadedConnectionIds).toEqual(['active-a']);
+    expect(summary).toMatchObject({
+      activeConnectionCount: 1,
+      loadedCount: 1,
+      cleanupError: 'snapshot directory is temporarily locked',
+    });
+  });
+});
+
 function cleanupResult(input: SchemaRagSnapshotCleanupResult): SchemaRagSnapshotCleanupResult {
   return input;
 }
@@ -108,5 +222,15 @@ function invalidSnapshot(snapshotPath: string): SchemaRagSnapshotSummary {
     status: 'invalid',
     snapshotPath,
     reason: 'Snapshot JSON is invalid.',
+  };
+}
+
+function schemaRagIndex(connectionId: string): SchemaRagIndex {
+  return {
+    connectionId,
+    documents: [],
+    graph: new Map(),
+    glossary: [],
+    indexedAt: '2026-07-08T00:00:00.000Z',
   };
 }
