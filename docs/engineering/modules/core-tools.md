@@ -114,6 +114,15 @@
 
 2026-06-24 复验记录：使用本机 `.env` 中的测试专用 SiliconFlow 环境变量运行 `scripts/run-agent-rag-live-tests.mjs`，结果为 5 passed、1 skipped；live case 再次确认模型真实调用 `search_schema` 和 `query_database`，不是普通文本回答。
 
+2026-07-08 增量：`scripts/run-agent-rag-live-tests.mjs` 支持 `DBAGENT_RUN_AGENT_RAG_LIVE_POSTGRES=1`。开启后会先重建 `dbagent_core_tools_test`，再执行真实 PostgreSQL + 真实 SiliconFlow 的组合验收。新增用例不会改变默认测试行为；它只在显式开启时运行，并验证：
+
+- `PostgresDriver` 创建真实业务 fixture，`indexSchemaCatalogFromReader()` 从真实 catalog 建立 RAG 索引。
+- `ReactAgent` 使用真实 SiliconFlow provider，白名单只开放 `search_schema` 和 `query_database`。
+- `query_database` 仍在工具 handler 内强制只读 SQL 审计，即使连接本身是可写 fixture 连接也不能执行写操作。
+- `AgentEvalSuiteRunService` 的报告中同时记录 `live: true` 与 `postgres: true`，用于发布前区分“真实模型 + fake DB”和“真实模型 + 真实 DB”两类验收。
+
+本轮没有引入新的 eval 平台依赖。当前判断是：RAGAS、LangSmith、LangChain eval、promptfoo 等项目适合后续做 LLM judge、回归面板或云端观测，但 DBAgent 当前更需要本地、可脱敏、可提交报告的工具证据断言，因此继续在官方 `official.agent-rag-eval` 插件能力下维护轻量 runner。
+
 ## Agent 数据库工具安全合同
 
 数据库工具现在按“先预审、再只读查询、最后确认执行”的顺序暴露给 Agent：

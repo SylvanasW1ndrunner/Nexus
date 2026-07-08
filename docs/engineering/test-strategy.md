@@ -164,6 +164,30 @@ pnpm db:down
 ```
 
 如果跳过 `pnpm test:postgres`，候选发布记录中必须明确原因和替代验证方式。
+
+## 2026-07-08 增量：Agent/RAG live + PostgreSQL 组合门禁
+
+`pnpm test:agent-rag-live` 默认只验证真实 SiliconFlow 模型能通过 Agent 调用 `search_schema` 和 `query_database`，数据库侧仍使用测试内存 driver，用于降低日常 live 验证成本。
+
+当需要发布前强验收真实依赖闭环时，额外设置：
+
+```powershell
+$env:DBAGENT_RUN_AGENT_RAG_LIVE_POSTGRES='1'
+$env:TEST_SILICONFLOW_API_KEY='<本机临时测试密钥>'
+$env:TEST_SILICONFLOW_MODEL='deepseek-ai/DeepSeek-V4-Pro'
+pnpm test:agent-rag-live
+```
+
+该入口会由 `scripts/run-agent-rag-live-tests.mjs` 自动重建 `dbagent_core_tools_test` 测试库，再运行 `packages/core-tools/test/agent-rag-business-scenario.test.ts` 中的组合用例。组合用例必须同时满足：
+
+- 真实 PostgreSQL 中创建电商和流量分析业务表，写入样例数据。
+- 从真实 PostgreSQL catalog 抽取 schema metadata，并索引到 Schema RAG。
+- 真实 SiliconFlow `deepseek-ai/DeepSeek-V4-Pro` 通过 Agent 调用 `search_schema`。
+- Agent 再通过 `query_database` 对真实 PostgreSQL 执行单条只读 SELECT。
+- 报告 metadata 同时标记 `live: true` 与 `postgres: true`。
+- API key 只能来自环境变量，不写入代码、文档、日志或报告。
+
+该门禁是 opt-in，不进入默认 `pnpm test`，原因是它同时依赖本机 PostgreSQL、外部网络、模型服务额度和模型 tool-calling 稳定性。发布前如跳过该门禁，release 记录必须说明原因。
 ## 2026-06-08 增量：EXPLAIN 安全测试
 
 本轮补充 `apps/desktop/src/main/explain-workflow.test.ts`，用于覆盖“解释执行计划”这一真实业务路径。重点不是只验证字符串拼接，而是验证 EXPLAIN 不能成为危险 SQL 的绕行入口：

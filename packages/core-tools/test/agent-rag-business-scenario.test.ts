@@ -491,6 +491,7 @@ describe.skipIf(process.env.DBAGENT_RUN_POSTGRES_TESTS !== '1')(
 
 describe('SiliconFlow live Agent and RAG integration', () => {
   const runLive = process.env.DBAGENT_RUN_AGENT_RAG_LIVE === '1';
+  const runLivePostgres = process.env.DBAGENT_RUN_AGENT_RAG_LIVE_POSTGRES === '1';
   const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
   const model = process.env.TEST_SILICONFLOW_MODEL ?? 'deepseek-ai/DeepSeek-V4-Pro';
 
@@ -550,6 +551,106 @@ describe('SiliconFlow live Agent and RAG integration', () => {
       await writeLiveAgentRagReport(output.report);
     },
     180_000,
+  );
+
+  it.skipIf(!runLive || !runLivePostgres || !apiKey)(
+    'uses the real DeepSeek-V4-Pro model against a real PostgreSQL business fixture',
+    async () => {
+      const driver = new PostgresDriver();
+      const config = postgresConfig({ readOnly: false });
+      const connected = await driver.connect(config);
+      expect(connected.ok).toBe(true);
+      if (!connected.ok) return;
+
+      try {
+        await expectOk(
+          driver.execute(
+            { connectionId: config.id!, sql: businessFixtureSql(), confirmed: true },
+            connected.data,
+          ),
+        );
+
+        const rag = new SchemaRagEngine();
+        const catalogIndex = await indexSchemaCatalogFromReader({
+          connectionId: config.id!,
+          reader: driver,
+          indexer: new ProgressiveSchemaRagIndexer({ engine: rag }),
+          includeSchemas: ['public', 'analytics'],
+          glossary: businessGlossary(),
+          hotTableLimit: 4,
+          continueOnTableError: false,
+        });
+        expect(catalogIndex.ok).toBe(true);
+        if (!catalogIndex.ok) throw new Error(catalogIndex.error.message);
+
+        const registry = new ToolRegistry();
+        registerDatabaseTools({
+          registry,
+          driver,
+          rag,
+          getConnection: (connectionId) =>
+            connectionId === config.id ? connected.data : undefined,
+        });
+
+        const usage = new UsageTracker(await usagePath());
+        const agent = new ReactAgent(
+          new LlmRouter(usage, [
+            createSiliconFlowProvider({ apiKey: apiKey!, timeoutMs: 120_000, maxRetries: 1 }),
+          ]),
+          registry,
+          usage,
+          undefined,
+          fixedDependencies(),
+        );
+
+        const evalWorkspace = await tempDir();
+        await writeLivePostgresAgentRagSuiteManifest(evalWorkspace);
+
+        const output = await new AgentEvalSuiteRunService().run({
+          agent,
+          suiteId: 'agent-rag-business-live-postgres',
+          catalog: { official: false, workspace: { workspaceRoot: evalWorkspace } },
+          reportStorePath: reportStorePath() ?? join(await tempDir(), 'reports.json'),
+          stopOnFirstFailure: true,
+          allowLiveSuites: true,
+          allowPostgresSuites: true,
+          reportRun: { live: true, postgres: true },
+          baseRun: {
+            providerId: 'siliconflow',
+            model,
+            mode: 'readonly',
+            allowedTools: ['search_schema', 'query_database'],
+            maxIterations: 5,
+          },
+        });
+        const result = output.caseResults[0]?.result;
+
+        expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
+        expect(output.report.run.live).toBe(true);
+        expect(output.report.run.postgres).toBe(true);
+        expect(output.suiteSource).toEqual({
+          kind: 'workspace',
+          relativePath: '.dbagent/evals/live-postgres-business.json',
+        });
+        expect(output.suiteSource).toEqual(output.report.suiteSource);
+        expect(result?.status).toBe('done');
+        expect(result?.toolExecutions).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ toolName: 'search_schema', status: 'success' }),
+            expect.objectContaining({ toolName: 'query_database', status: 'success' }),
+          ]),
+        );
+        expect(result?.finalText.length).toBeGreaterThan(0);
+        await writeLiveAgentRagReport(output.report);
+      } finally {
+        await driver.execute(
+          { connectionId: config.id!, sql: businessFixtureCleanupSql(), confirmed: true },
+          connected.data,
+        );
+        await driver.disconnect(config.id!);
+      }
+    },
+    240_000,
   );
 });
 
@@ -792,6 +893,68 @@ async function writePostgresAgentRagSuiteManifest(workspaceRoot: string): Promis
                 },
               ],
               finalTextIncludes: ['GMV'],
+              finalTextExcludes: ['password', 'apiKey'],
+              minIterations: 2,
+              maxIterations: 5,
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+}
+
+async function writeLivePostgresAgentRagSuiteManifest(workspaceRoot: string): Promise<void> {
+  await mkdir(join(workspaceRoot, '.dbagent', 'evals'), { recursive: true });
+  await writeFile(
+    join(workspaceRoot, '.dbagent', 'evals', 'live-postgres-business.json'),
+    JSON.stringify(
+      {
+        version: 1,
+        suite: {
+          suiteId: 'agent-rag-business-live-postgres',
+          suiteName: 'Agent/RAG live PostgreSQL acceptance',
+          environment: 'postgres',
+          notes: [
+            'This suite uses a real SiliconFlow model and a real PostgreSQL business fixture. It is opt-in only.',
+          ],
+          cases: [
+            {
+              id: 'BUS-AGENT-LIVE-PG-001',
+              userTask: [
+                'Use connectionId business_fixture.',
+                'First call search_schema to find the schema for GMV, refund rate, ROI, traffic sessions, orders, refunds, and campaign spend.',
+                'Then call query_database with one readonly SELECT that joins analytics.traffic_sessions, public.orders, public.refunds, and analytics.campaign_spend.',
+                'Return a short answer that includes the paid_search row and GMV.',
+              ].join(' '),
+              expectedStatus: 'done',
+              requiredToolCalls: ['search_schema', 'query_database'],
+              requiredToolStatuses: [
+                { toolName: 'search_schema', status: 'success' },
+                { toolName: 'query_database', status: 'success' },
+              ],
+              toolExpectations: [
+                {
+                  toolName: 'search_schema',
+                  status: 'success',
+                  minCalls: 1,
+                  maxCalls: 1,
+                  argumentIncludes: ['GMV', 'ROI'],
+                  resultIncludes: ['public.orders', 'analytics.campaign_spend'],
+                },
+                {
+                  toolName: 'query_database',
+                  status: 'success',
+                  minCalls: 1,
+                  maxCalls: 1,
+                  argumentIncludes: ['analytics.traffic_sessions', 'public.orders', 'public.refunds'],
+                  resultIncludes: ['paid_search'],
+                },
+              ],
+              finalTextIncludes: ['paid_search'],
               finalTextExcludes: ['password', 'apiKey'],
               minIterations: 2,
               maxIterations: 5,
