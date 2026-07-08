@@ -8,6 +8,7 @@ import type {
   AgentBehaviorToolExpectation,
   AgentRunResult,
 } from './types.js';
+import { sanitizeAgentOutputValue } from './output-safety.js';
 import { redactPersistedAgentValue } from './redaction.js';
 
 export function evaluateAgentBehavior(input: {
@@ -40,6 +41,8 @@ function evaluateCase(
     status: execution.status,
     ...(execution.argumentPreview === undefined ? {} : { argumentPreview: execution.argumentPreview }),
     resultPreview: execution.resultPreview,
+    ...(execution.redacted === undefined ? {} : { redacted: execution.redacted }),
+    ...(execution.redactionReasons === undefined ? {} : { redactionReasons: execution.redactionReasons }),
   }));
 
   if (testCase.expectedStatus !== undefined && result.status !== testCase.expectedStatus) {
@@ -238,7 +241,9 @@ export function buildAgentBehaviorEvaluationReport(
 function redactReportInput(
   input: AgentBehaviorEvaluationReportInput,
 ): AgentBehaviorEvaluationReportInput {
-  return redactPersistedAgentValue(input) as AgentBehaviorEvaluationReportInput;
+  return sanitizeAgentOutputValue(
+    redactPersistedAgentValue(input) as AgentBehaviorEvaluationReportInput,
+  ).value;
 }
 
 function buildManifest(

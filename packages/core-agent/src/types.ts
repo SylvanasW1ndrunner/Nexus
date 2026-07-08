@@ -65,6 +65,7 @@ export type AgentRunOptions = {
   maxConsecutiveToolFailures?: number;
   maxToolExecutionMs?: number;
   taskSafety?: AgentTaskSafetyPolicy;
+  outputSafety?: AgentOutputSafetyPolicy;
   signal?: AbortSignal;
 };
 
@@ -75,6 +76,14 @@ export type AgentTaskSafetyPolicy =
       blockedFinalText?: string;
       extraSensitiveTerms?: string[];
       extraExtractionVerbs?: string[];
+    };
+
+export type AgentOutputSafetyPolicy =
+  | false
+  | {
+      pii?: 'redact' | 'allow';
+      replacementText?: string;
+      extraSensitiveKeys?: string[];
     };
 
 export type ToolDangerLevel = 'safe' | 'medium' | 'high' | 'critical';
@@ -132,7 +141,16 @@ export type AgentToolExecutionRecord = {
   resultPreview: string;
   failureKind?: AgentToolFailureKind;
   retryable?: boolean;
+  redacted?: boolean;
+  redactionReasons?: AgentOutputRedactionReason[];
 };
+
+export type AgentOutputRedactionReason =
+  | 'sensitive_key'
+  | 'email'
+  | 'phone'
+  | 'id_card'
+  | 'secret';
 
 export type AgentToolFailureKind =
   | 'sql_repairable'
@@ -212,6 +230,8 @@ export type AgentBehaviorObservedTool = {
   status: AgentToolExecutionRecord['status'];
   argumentPreview?: string;
   resultPreview: string;
+  redacted?: boolean;
+  redactionReasons?: AgentOutputRedactionReason[];
 };
 
 export type AgentBehaviorEvaluationSummary = {

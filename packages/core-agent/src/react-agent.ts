@@ -3,6 +3,7 @@ import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
 import type { AgentAuditLogWriter, AgentAuditRunStatus } from './audit-log-store.js';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import { buildAgentContext } from './context-manager.js';
+import { sanitizeAgentOutputText, sanitizeAgentOutputValue } from './output-safety.js';
 import { PermissionManager } from './permission-manager.js';
 import { addUsage, appendMessage, createAgentSession, createMessage } from './session.js';
 import { redactPersistedAgentValue } from './redaction.js';
@@ -20,6 +21,7 @@ import type {
   AgentToolContext,
   AgentToolExecutionRecord,
   AgentToolHandler,
+  AgentOutputRedactionReason,
   ApprovalProvider,
 } from './types.js';
 
@@ -200,6 +202,8 @@ export class ReactAgent {
           round,
           sessionId: session.id,
         });
+        const safeResponseText = sanitizeAgentOutputText(response.text, options.outputSafety);
+        const safeToolCalls = sanitizeAgentOutputValue(response.toolCalls, options.outputSafety).value;
         await this.auditLog?.append({
           type: 'model_call_finished',
           timestamp: this.now(),
@@ -209,14 +213,14 @@ export class ReactAgent {
           model: options.model,
           durationMs: Math.max(0, Date.now() - modelStartedAt),
           toolCallCount: response.toolCalls.length,
-          textChars: response.text.length,
+          textChars: safeResponseText.value.length,
           ...(response.usage === undefined ? {} : { usage: response.usage }),
         });
         addUsage(session, response.usage);
 
         appendMessage(
           session,
-          createMessage({ role: 'assistant', content: response.text, toolCalls: response.toolCalls }, this.now),
+          createMessage({ role: 'assistant', content: safeResponseText.value, toolCalls: safeToolCalls }, this.now),
         );
         await this.saveSession(session);
         await saveCheckpoint(checkpointIteration, 'running');
@@ -237,7 +241,7 @@ export class ReactAgent {
         }
 
         if (response.toolCalls.length === 0) {
-          finalText = response.text;
+          finalText = safeResponseText.value;
           await saveCheckpoint(checkpointIteration, 'done');
           await this.saveSession(session);
           await closeRound('success');
@@ -254,7 +258,7 @@ export class ReactAgent {
             iteration,
             toolCallId: toolCall.id,
             toolName: toolCall.name,
-            argumentPreview: serializeToolArguments(toolCall.arguments),
+            argumentPreview: serializeToolArguments(toolCall.arguments, options.outputSafety),
           });
           if (allowedToolSet !== undefined && !allowedToolSet.has(toolCall.name)) {
             const record = executionRecord(
@@ -264,7 +268,7 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               'Tool not allowed by run policy.',
-              classifyAgentToolFailure('Tool not allowed by run policy.'),
+              { failure: classifyAgentToolFailure('Tool not allowed by run policy.'), outputSafety: options.outputSafety },
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -304,7 +308,7 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               'Tool is not registered.',
-              classifyAgentToolFailure('Tool is not registered.'),
+              { failure: classifyAgentToolFailure('Tool is not registered.'), outputSafety: options.outputSafety },
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -354,7 +358,7 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               `Permission: ${permission.decision}`,
-              classifyAgentToolFailure(`Permission: ${permission.decision}`),
+              { failure: classifyAgentToolFailure(`Permission: ${permission.decision}`), outputSafety: options.outputSafety },
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -413,8 +417,13 @@ export class ReactAgent {
               context,
               maxToolExecutionMs,
             );
-            const preview = serializeToolResult(result, maxToolResultChars);
-            const record = executionRecord(toolCall.id, tool.name, 'success', startedAt, toolCall.arguments, preview);
+            const safeResult = sanitizeAgentOutputValue(result, options.outputSafety);
+            const preview = serializeToolResult(safeResult.value, maxToolResultChars);
+            const record = executionRecord(toolCall.id, tool.name, 'success', startedAt, toolCall.arguments, preview, {
+              outputSafety: options.outputSafety,
+              redacted: safeResult.redacted,
+              redactionReasons: safeResult.reasons,
+            });
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
             consecutiveToolFailures = 0;
@@ -441,7 +450,7 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               message,
-              classifyAgentToolFailure(message),
+              { failure: classifyAgentToolFailure(message), outputSafety: options.outputSafety },
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -556,9 +565,9 @@ function serializeToolResult(result: unknown, maxChars: number): string {
   return limitSerializedToolResult(stringifyToolResult(result), maxChars);
 }
 
-function serializeToolArguments(args: Record<string, unknown>): string {
+function serializeToolArguments(args: Record<string, unknown>, outputSafety?: AgentRunOptions['outputSafety']): string {
   return limitSerializedToolResult(
-    stringifyToolResult(redactPersistedAgentValue(args)),
+    stringifyToolResult(sanitizeAgentOutputValue(redactPersistedAgentValue(args), outputSafety).value),
     DEFAULT_MAX_PERSISTED_TOOL_ARGUMENT_CHARS,
   );
 }
@@ -612,9 +621,9 @@ function executionRecord(
   startedAt: number,
   args: Record<string, unknown>,
   resultPreview: string,
-  failure?: { failureKind: NonNullable<AgentToolExecutionRecord['failureKind']>; retryable: boolean },
+  metadata: ExecutionRecordMetadata = {},
 ): AgentToolExecutionRecord {
-  const argumentPreview = serializeToolArguments(args);
+  const argumentPreview = serializeToolArguments(args, metadata.outputSafety);
   return {
     toolCallId,
     toolName,
@@ -622,9 +631,22 @@ function executionRecord(
     durationMs: Math.max(0, Date.now() - startedAt),
     ...(argumentPreview === '{}' ? {} : { argumentPreview }),
     resultPreview,
-    ...(failure === undefined ? {} : { failureKind: failure.failureKind, retryable: failure.retryable }),
+    ...(metadata.failure === undefined
+      ? {}
+      : { failureKind: metadata.failure.failureKind, retryable: metadata.failure.retryable }),
+    ...(metadata.redacted === true ? { redacted: true } : {}),
+    ...(metadata.redactionReasons && metadata.redactionReasons.length > 0
+      ? { redactionReasons: metadata.redactionReasons }
+      : {}),
   };
 }
+
+type ExecutionRecordMetadata = {
+  failure?: { failureKind: NonNullable<AgentToolExecutionRecord['failureKind']>; retryable: boolean };
+  outputSafety?: AgentRunOptions['outputSafety'];
+  redacted?: boolean;
+  redactionReasons?: AgentOutputRedactionReason[];
+};
 
 function toolFinishedAuditEvent(
   sessionId: string,
@@ -644,6 +666,8 @@ function toolFinishedAuditEvent(
     resultPreview: record.resultPreview,
     ...(record.failureKind === undefined ? {} : { failureKind: record.failureKind }),
     ...(record.retryable === undefined ? {} : { retryable: record.retryable }),
+    ...(record.redacted === undefined ? {} : { redacted: record.redacted }),
+    ...(record.redactionReasons === undefined ? {} : { redactionReasons: record.redactionReasons }),
   };
 }
 

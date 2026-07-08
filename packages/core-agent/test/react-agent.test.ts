@@ -126,11 +126,108 @@ describe('ReactAgent', () => {
     });
     const argumentPreview = result.toolExecutions[0]?.argumentPreview ?? '';
     expect(argumentPreview).toContain('select count(*) as order_count from orders');
-    expect(argumentPreview).toContain('"apiKey":"[REDACTED]"');
+    expect(argumentPreview).toContain('"redacted_secret"');
     expect(argumentPreview).toContain('"databaseUrl":"[REDACTED]"');
     const serialized = JSON.stringify(result.toolExecutions);
     expect(serialized).not.toContain(apiKey);
     expect(serialized).not.toContain('tester:secret@');
+  });
+
+  it('redacts tool result PII before session persistence, model context, and final output', async () => {
+    const auditLog = new AgentAuditLogStore(await auditPath());
+    const checkpointStore = new AgentCheckpointStore(await checkpointPath());
+    const usage = new UsageTracker(await usagePath());
+    const rawEmail = 'alice@example.test';
+    const rawPhone = '+8613800138000';
+    const rawCipher = 'ciphertext-phone-value';
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_pii_query',
+            name: 'query_database',
+            arguments: { sql: 'select city, email, phone, phone_enc, customer_count from customers' },
+          },
+        ],
+      },
+      {
+        text: `上海客户数 12。泄漏样例 ${rawEmail} ${rawPhone} phone_enc=${rawCipher}`,
+        toolCalls: [],
+      },
+    ]);
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => ({
+        rows: [
+          {
+            city: 'Shanghai',
+            email: rawEmail,
+            phone: rawPhone,
+            phone_enc: rawCipher,
+            customer_count: 12,
+            email_domain: 'example.test',
+            phone_prefix_masked: '138****',
+          },
+        ],
+      }),
+    );
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      { ...fixedDependencies(), auditLog, checkpointStore },
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '按城市统计客户数，输出脱敏后的汇总。',
+      mode: 'readonly',
+      maxIterations: 2,
+    });
+    const serializedSession = JSON.stringify(result.session);
+    const secondCallContext = JSON.stringify(calls[1]?.messages ?? []);
+    const auditEvents = await auditLog.readAll();
+    const checkpoints = await checkpointStore.listBySession('session_test');
+    const persistedEvidence = JSON.stringify({ auditEvents, checkpoints });
+
+    expect(result.status).toBe('done');
+    expect(result.finalText).toContain('上海客户数 12');
+    expect(result.finalText).toContain('[REDACTED_PII]');
+    expect(result.finalText).not.toContain(rawEmail);
+    expect(result.finalText).not.toContain(rawPhone);
+    expect(result.finalText).not.toContain(rawCipher);
+    expect(result.finalText).not.toContain('phone_enc');
+    expect(result.toolExecutions[0]).toMatchObject({
+      toolCallId: 'call_pii_query',
+      toolName: 'query_database',
+      status: 'success',
+      redacted: true,
+    });
+    expect(result.toolExecutions[0]?.redactionReasons).toEqual(
+      expect.arrayContaining(['email', 'phone', 'sensitive_key']),
+    );
+    expect(result.toolExecutions[0]?.resultPreview).toContain('Shanghai');
+    expect(result.toolExecutions[0]?.resultPreview).toContain('"customer_count":12');
+    expect(result.toolExecutions[0]?.resultPreview).toContain('"email_domain":"example.test"');
+    expect(result.toolExecutions[0]?.resultPreview).toContain('"phone_prefix_masked":"138****"');
+    for (const serialized of [serializedSession, secondCallContext, persistedEvidence, JSON.stringify(result.toolExecutions)]) {
+      expect(serialized).not.toContain(rawEmail);
+      expect(serialized).not.toContain(rawPhone);
+      expect(serialized).not.toContain(rawCipher);
+      expect(serialized).not.toContain('phone_enc');
+    }
+    expect(secondCallContext).toContain('[REDACTED_PII]');
+    expect(persistedEvidence).toContain('"redacted":true');
   });
 
   it('writes a redacted Agent audit trail for model and tool execution replay', async () => {
@@ -204,7 +301,7 @@ describe('ReactAgent', () => {
     ]);
     const toolStarted = events.find((event) => event.type === 'tool_call_started');
     expect(toolStarted).toMatchObject({ type: 'tool_call_started', toolName: 'query_database' });
-    expect(toolStarted?.argumentPreview).toContain('"apiKey":"[REDACTED]"');
+    expect(toolStarted?.argumentPreview).toContain('"redacted_secret"');
     expect(serialized).not.toContain(apiKey);
   });
 

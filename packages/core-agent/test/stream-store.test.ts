@@ -129,6 +129,44 @@ describe('AgentStreamStore', () => {
     expect(serialized).toContain('[REDACTED]');
   });
 
+  it('redacts PII from persisted text deltas and final stream responses', async () => {
+    const store = new AgentStreamStore(await streamPath());
+    await store.start({
+      id: 'stream_pii_redacted',
+      sessionId: 'session_stream',
+      providerId: 'siliconflow',
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      now: '2026-06-23T11:00:00.000Z',
+    });
+    await store.appendEvent(
+      'stream_pii_redacted',
+      { type: 'text-delta', text: '客户 alice@example.test 的手机号是 +8613800138000。' },
+      '2026-06-23T11:00:01.000Z',
+    );
+    await store.appendEvent(
+      'stream_pii_redacted',
+      {
+        type: 'finish',
+        response: {
+          text: 'phone_enc=ciphertext-phone-value, city=Shanghai',
+          toolCalls: [],
+        },
+        reason: 'stop',
+      },
+      '2026-06-23T11:00:02.000Z',
+    );
+
+    const serialized = JSON.stringify(await store.load('stream_pii_redacted'));
+
+    expect(serialized).toContain('[REDACTED_PII]');
+    expect(serialized).toContain('redacted_encrypted');
+    expect(serialized).toContain('Shanghai');
+    expect(serialized).not.toContain('alice@example.test');
+    expect(serialized).not.toContain('+8613800138000');
+    expect(serialized).not.toContain('ciphertext-phone-value');
+    expect(serialized).not.toContain('phone_enc');
+  });
+
   it('treats corrupt stream JSON as empty so startup can continue', async () => {
     const filePath = await streamPath();
     await mkdir(dirname(filePath), { recursive: true });

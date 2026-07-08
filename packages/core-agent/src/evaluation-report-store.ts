@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { sanitizeAgentOutputValue } from './output-safety.js';
 import { redactPersistedAgentValue } from './redaction.js';
 import type { AgentBehaviorEvaluationReport } from './types.js';
 
@@ -31,7 +32,7 @@ export class AgentBehaviorEvaluationReportStore {
     now = new Date().toISOString(),
   ): Promise<AgentBehaviorEvaluationReportSummary> {
     const records = await this.readAll();
-    const redacted = redactPersistedAgentValue(report) as AgentBehaviorEvaluationReport;
+    const redacted = sanitizePersistedReport(report);
     const existingIndex = records.findIndex(
       (record) => record.report.reportId === redacted.reportId,
     );
@@ -59,10 +60,18 @@ export class AgentBehaviorEvaluationReportStore {
   }
 
   private async readAll(): Promise<AgentBehaviorEvaluationReportRecord[]> {
-    return redactPersistedAgentValue(
-      await readJsonFile<AgentBehaviorEvaluationReportRecord[]>(this.filePath, []),
-    ) as AgentBehaviorEvaluationReportRecord[];
+    return sanitizeAgentOutputValue(
+      redactPersistedAgentValue(
+        await readJsonFile<AgentBehaviorEvaluationReportRecord[]>(this.filePath, []),
+      ) as AgentBehaviorEvaluationReportRecord[],
+    ).value;
   }
+}
+
+function sanitizePersistedReport(report: AgentBehaviorEvaluationReport): AgentBehaviorEvaluationReport {
+  return sanitizeAgentOutputValue(
+    redactPersistedAgentValue(report) as AgentBehaviorEvaluationReport,
+  ).value;
 }
 
 function summarize(

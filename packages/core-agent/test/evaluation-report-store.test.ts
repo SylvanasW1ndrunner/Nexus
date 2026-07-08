@@ -6,6 +6,7 @@ import {
   AgentBehaviorEvaluationReportStore,
   buildAgentBehaviorEvaluationReport,
   evaluateAgentBehavior,
+  type AgentBehaviorEvaluationReport,
   type AgentRunResult,
 } from '../src/index.js';
 
@@ -50,6 +51,41 @@ describe('AgentBehaviorEvaluationReportStore', () => {
     await writeFile(filePath, '{broken json', 'utf8');
     await expect(store.list()).resolves.toEqual([]);
     await expect(store.load('missing')).resolves.toBeUndefined();
+  });
+
+  it('redacts raw PII from reports before persisting them', async () => {
+    const store = new AgentBehaviorEvaluationReportStore(join(await tempDir(), 'reports.json'));
+    const rawEmail = 'alice@example.test';
+    const rawPhone = '+8613800138000';
+    const rawCipher = 'ciphertext-phone-value';
+    const unsafeReport: AgentBehaviorEvaluationReport = {
+      reportId: 'unsafe-pii-report',
+      suiteId: 'agent-pii-store',
+      suiteName: 'PII Store Safety',
+      generatedAt: '2026-07-08T00:00:00.000Z',
+      environment: 'integration',
+      run: {},
+      summary: { totalCases: 1, passedCases: 0, failedCases: 1, passRate: 0 },
+      files: [
+        {
+          path: 'results.json',
+          content: `{"email":"${rawEmail}","phone":"${rawPhone}","phone_enc":"${rawCipher}","customer_count":12}`,
+          bytes: 1,
+        },
+      ],
+    };
+
+    await store.save(unsafeReport);
+    const loaded = await store.load('unsafe-pii-report');
+    const serialized = JSON.stringify(loaded);
+
+    expect(serialized).toContain('[REDACTED_PII]');
+    expect(serialized).toContain('redacted_encrypted');
+    expect(serialized).toContain('customer_count');
+    expect(serialized).not.toContain(rawEmail);
+    expect(serialized).not.toContain(rawPhone);
+    expect(serialized).not.toContain(rawCipher);
+    expect(serialized).not.toContain('phone_enc');
   });
 });
 

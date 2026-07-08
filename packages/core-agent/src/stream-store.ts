@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { LlmChatResponse, LlmChatStreamEvent, LlmToolCall, LlmUsage } from '@dbagent/core-llm';
+import { sanitizeAgentOutputValue } from './output-safety.js';
 import { redactPersistedAgentString, redactPersistedAgentValue } from './redaction.js';
 
 export type AgentStreamStatus = 'streaming' | 'complete' | 'incomplete' | 'failed' | 'aborted';
@@ -68,7 +69,9 @@ export class AgentStreamStore {
     if (index < 0) throw new Error(`Agent stream does not exist: ${streamId}`);
 
     const current = records[index]!;
-    const redactedEvent = redactPersistedAgentValue(event) as LlmChatStreamEvent;
+    const redactedEvent = sanitizeAgentOutputValue(
+      redactPersistedAgentValue(event) as LlmChatStreamEvent,
+    ).value;
     const next = applyEvent(current, redactedEvent, now);
     await writeJsonFileAtomic(this.filePath, records.map((item, itemIndex) => (itemIndex === index ? next : item)));
     return next;
