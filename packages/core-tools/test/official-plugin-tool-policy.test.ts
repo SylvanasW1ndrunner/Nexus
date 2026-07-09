@@ -52,7 +52,34 @@ describe('official plugin Agent tool policy', () => {
       'orders_server__list_orders',
       'missing_tool',
     ]);
+    expect(policy.blockedByPluginToolDetails).toMatchObject([
+      {
+        toolName: 'execute_sql',
+        blockedBy: 'plugin',
+        reason: 'runtime-tool-missing',
+      },
+      {
+        toolName: 'orders_server__list_orders',
+        blockedBy: 'plugin',
+        reason: 'plugin-disabled',
+        pluginId: 'official.mcp-client',
+      },
+      {
+        toolName: 'missing_tool',
+        blockedBy: 'plugin',
+        reason: 'runtime-tool-missing',
+      },
+    ]);
     expect(policy.blockedBySkillToolNames).toEqual(['read_workspace_file']);
+    expect(policy.blockedBySkillToolDetails).toEqual([
+      {
+        toolName: 'read_workspace_file',
+        blockedBy: 'skill',
+        reason: 'skill-tool-not-allowed',
+        message:
+          'Tool read_workspace_file is available from official plugins but is not declared by the selected Skill.',
+      },
+    ]);
     expect(policy.toolPermissions).toMatchObject([
       {
         toolName: 'workspace_script:summarize_orders',
@@ -106,6 +133,14 @@ describe('official plugin Agent tool policy', () => {
 
     expect(policy.agentAllowedToolNames).toEqual([]);
     expect(policy.blockedByPluginToolNames).toEqual(['query_database']);
+    expect(policy.blockedByPluginToolDetails).toMatchObject([
+      {
+        toolName: 'query_database',
+        blockedBy: 'plugin',
+        reason: 'static-tool-source-mismatch',
+        pluginId: 'official.database-postgres',
+      },
+    ]);
     expect(policy.runtimeResolution.blockedToolNames).toEqual(['query_database']);
     expect(policy.toolPermissions).toEqual([]);
   });

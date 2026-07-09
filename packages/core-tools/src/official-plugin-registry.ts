@@ -121,10 +121,52 @@ export type OfficialPluginRuntimeToolResolutionOptions = OfficialPluginToolResol
 export type OfficialPluginRuntimeToolResolution = {
   allowedToolNames: string[];
   blockedToolNames: string[];
+  blockedToolDetails: OfficialPluginRuntimeToolBlockDetail[];
   staticToolNames: string[];
   dynamicToolNames: string[];
   missingStaticToolNames: string[];
+  missingStaticToolDetails: OfficialPluginMissingStaticToolDetail[];
   dynamicContributions: OfficialPluginToolContribution[];
+};
+
+export type OfficialPluginRuntimeToolBlockReason =
+  | 'plugin-disabled'
+  | 'static-tool-source-mismatch'
+  | 'readonly-required'
+  | 'danger-level-exceeds-limit'
+  | 'permission-not-allowed'
+  | 'no-plugin-contribution';
+
+export type OfficialPluginRuntimeToolBlockDetail = {
+  toolName: string;
+  reason: OfficialPluginRuntimeToolBlockReason;
+  message: string;
+  runtime: {
+    dangerLevel: ToolDangerLevel;
+    readonly?: boolean;
+    source?: string;
+    sourceId?: string;
+    originalName?: string;
+  };
+  pluginId?: string;
+  pluginName?: string;
+  contributionName?: string;
+  dynamic?: boolean;
+  contributionDangerLevel?: ToolDangerLevel;
+  contributionReadonly?: boolean;
+  requiredPermissions?: string[];
+  allowedPermissions?: string[];
+  maxDangerLevel?: ToolDangerLevel;
+};
+
+export type OfficialPluginMissingStaticToolDetail = {
+  toolName: string;
+  pluginId: string;
+  pluginName: string;
+  contributionName: string;
+  requiredPermissions: string[];
+  dangerLevel: ToolDangerLevel;
+  readonly: boolean;
 };
 
 export type OfficialPluginEvalSuiteResolutionOptions = Pick<
@@ -236,6 +278,7 @@ export class OfficialPluginRegistry {
     const runtimeToolNames = new Set<string>();
     const allowedToolNames: string[] = [];
     const blockedToolNames: string[] = [];
+    const blockedToolDetails: OfficialPluginRuntimeToolBlockDetail[] = [];
     const staticToolNames: string[] = [];
     const dynamicToolNames: string[] = [];
 
@@ -261,16 +304,89 @@ export class OfficialPluginRegistry {
         if (dynamicAllowed && !staticAllowed) dynamicToolNames.push(runtimeTool.name);
       } else {
         blockedToolNames.push(runtimeTool.name);
+        blockedToolDetails.push(this.explainRuntimeToolBlock(runtimeTool, options));
       }
     }
+    const missingStaticToolDetails = resolved.staticTools
+      .filter((tool) => !staticToolNames.includes(tool.name))
+      .map((tool) => this.describeMissingStaticTool(tool, options));
 
     return {
       allowedToolNames,
       blockedToolNames,
+      blockedToolDetails,
       staticToolNames,
       dynamicToolNames,
-      missingStaticToolNames: resolved.toolNames.filter((name) => !staticToolNames.includes(name)),
+      missingStaticToolNames: missingStaticToolDetails.map((detail) => detail.toolName),
+      missingStaticToolDetails,
       dynamicContributions: resolved.dynamicTools,
+    };
+  }
+
+  private explainRuntimeToolBlock(
+    runtimeTool: OfficialPluginRuntimeToolDescriptor,
+    options: OfficialPluginRuntimeToolResolutionOptions,
+  ): OfficialPluginRuntimeToolBlockDetail {
+    const allStaticMatch = findStaticContributionByName(this.list(), runtimeTool.name);
+    if (allStaticMatch) {
+      const { manifest, contribution } = allStaticMatch;
+      if (!isPluginEnabled(manifest, options)) {
+        return contributionBlockDetail(runtimeTool, manifest, contribution, 'plugin-disabled', options);
+      }
+      const filterReason = contributionResolutionBlockReason(contribution, options);
+      if (filterReason) {
+        return contributionBlockDetail(runtimeTool, manifest, contribution, filterReason, options);
+      }
+      if (!staticContributionMatchesRuntimeTool(contribution, runtimeTool)) {
+        return contributionBlockDetail(
+          runtimeTool,
+          manifest,
+          contribution,
+          'static-tool-source-mismatch',
+          options,
+        );
+      }
+      const runtimeReason = runtimeToolResolutionBlockReason(runtimeTool, options);
+      if (runtimeReason) {
+        return contributionBlockDetail(runtimeTool, manifest, contribution, runtimeReason, options);
+      }
+    }
+
+    const dynamicMatch = findDynamicContributionMatch(this.list(), runtimeTool);
+    if (dynamicMatch) {
+      const { manifest, contribution } = dynamicMatch;
+      if (!isPluginEnabled(manifest, options)) {
+        return contributionBlockDetail(runtimeTool, manifest, contribution, 'plugin-disabled', options);
+      }
+      const filterReason = contributionResolutionBlockReason(contribution, options);
+      if (filterReason) {
+        return contributionBlockDetail(runtimeTool, manifest, contribution, filterReason, options);
+      }
+      const runtimeReason = runtimeToolResolutionBlockReason(runtimeTool, options);
+      if (runtimeReason) {
+        return contributionBlockDetail(runtimeTool, manifest, contribution, runtimeReason, options);
+      }
+    }
+
+    return runtimeBlockDetail(runtimeTool, 'no-plugin-contribution', options);
+  }
+
+  private describeMissingStaticTool(
+    contribution: OfficialPluginToolContribution,
+    options: OfficialPluginRuntimeToolResolutionOptions,
+  ): OfficialPluginMissingStaticToolDetail {
+    const match = findStaticContributionByName(this.listEnabled(options), contribution.name);
+    if (!match) {
+      throw new Error(`Resolved static tool contribution is missing from enabled plugins: ${contribution.name}`);
+    }
+    return {
+      toolName: contribution.name,
+      pluginId: match.manifest.id,
+      pluginName: match.manifest.name,
+      contributionName: contribution.name,
+      requiredPermissions: [...contribution.permissions],
+      dangerLevel: contribution.dangerLevel,
+      readonly: contribution.readonly,
     };
   }
 
@@ -1107,6 +1223,139 @@ function runtimeToolPassesResolutionOptions(
   )
     return false;
   return true;
+}
+
+function runtimeToolResolutionBlockReason(
+  runtimeTool: OfficialPluginRuntimeToolDescriptor,
+  options: Pick<OfficialPluginToolResolutionOptions, 'readonlyOnly' | 'maxDangerLevel'>,
+): OfficialPluginRuntimeToolBlockReason | undefined {
+  if (options.readonlyOnly === true && runtimeTool.readonly !== true) return 'readonly-required';
+  if (
+    options.maxDangerLevel &&
+    dangerRank[runtimeTool.dangerLevel] > dangerRank[options.maxDangerLevel]
+  ) {
+    return 'danger-level-exceeds-limit';
+  }
+  return undefined;
+}
+
+function contributionResolutionBlockReason(
+  contribution: OfficialPluginToolContribution,
+  options: OfficialPluginToolResolutionOptions,
+): OfficialPluginRuntimeToolBlockReason | undefined {
+  if (options.readonlyOnly === true && !contribution.readonly) return 'readonly-required';
+  if (
+    options.maxDangerLevel &&
+    dangerRank[contribution.dangerLevel] > dangerRank[options.maxDangerLevel]
+  ) {
+    return 'danger-level-exceeds-limit';
+  }
+  if (
+    options.allowedPermissions !== undefined &&
+    !contribution.permissions.every((permission) => options.allowedPermissions!.includes(permission))
+  ) {
+    return 'permission-not-allowed';
+  }
+  return undefined;
+}
+
+function findStaticContributionByName(
+  manifests: OfficialPluginManifest[],
+  toolName: string,
+): { manifest: OfficialPluginManifest; contribution: OfficialPluginToolContribution } | undefined {
+  for (const manifest of manifests) {
+    for (const contribution of manifest.tools) {
+      if (!contribution.dynamic && contribution.name === toolName) return { manifest, contribution };
+    }
+  }
+  return undefined;
+}
+
+function findDynamicContributionMatch(
+  manifests: OfficialPluginManifest[],
+  runtimeTool: OfficialPluginRuntimeToolDescriptor,
+): { manifest: OfficialPluginManifest; contribution: OfficialPluginToolContribution } | undefined {
+  for (const manifest of manifests) {
+    for (const contribution of manifest.tools) {
+      if (dynamicContributionMatchesRuntimeTool(contribution, runtimeTool)) {
+        return { manifest, contribution };
+      }
+    }
+  }
+  return undefined;
+}
+
+function runtimeBlockDetail(
+  runtimeTool: OfficialPluginRuntimeToolDescriptor,
+  reason: OfficialPluginRuntimeToolBlockReason,
+  options: OfficialPluginRuntimeToolResolutionOptions,
+): OfficialPluginRuntimeToolBlockDetail {
+  return {
+    toolName: runtimeTool.name,
+    reason,
+    message: runtimeToolBlockMessage(reason, runtimeTool.name),
+    runtime: runtimeSnapshot(runtimeTool),
+    ...(options.allowedPermissions === undefined
+      ? {}
+      : { allowedPermissions: [...options.allowedPermissions] }),
+    ...(options.maxDangerLevel === undefined ? {} : { maxDangerLevel: options.maxDangerLevel }),
+  };
+}
+
+function contributionBlockDetail(
+  runtimeTool: OfficialPluginRuntimeToolDescriptor,
+  manifest: OfficialPluginManifest,
+  contribution: OfficialPluginToolContribution,
+  reason: OfficialPluginRuntimeToolBlockReason,
+  options: OfficialPluginRuntimeToolResolutionOptions,
+): OfficialPluginRuntimeToolBlockDetail {
+  return {
+    toolName: runtimeTool.name,
+    reason,
+    message: runtimeToolBlockMessage(reason, runtimeTool.name),
+    runtime: runtimeSnapshot(runtimeTool),
+    pluginId: manifest.id,
+    pluginName: manifest.name,
+    contributionName: contribution.name,
+    dynamic: contribution.dynamic === true,
+    contributionDangerLevel: contribution.dangerLevel,
+    contributionReadonly: contribution.readonly,
+    requiredPermissions: [...contribution.permissions],
+    ...(options.allowedPermissions === undefined
+      ? {}
+      : { allowedPermissions: [...options.allowedPermissions] }),
+    ...(options.maxDangerLevel === undefined ? {} : { maxDangerLevel: options.maxDangerLevel }),
+  };
+}
+
+function runtimeSnapshot(runtimeTool: OfficialPluginRuntimeToolDescriptor): OfficialPluginRuntimeToolBlockDetail['runtime'] {
+  return {
+    dangerLevel: runtimeTool.dangerLevel,
+    ...(runtimeTool.readonly === undefined ? {} : { readonly: runtimeTool.readonly }),
+    ...(runtimeTool.source === undefined ? {} : { source: runtimeTool.source }),
+    ...(runtimeTool.sourceId === undefined ? {} : { sourceId: runtimeTool.sourceId }),
+    ...(runtimeTool.originalName === undefined ? {} : { originalName: runtimeTool.originalName }),
+  };
+}
+
+function runtimeToolBlockMessage(
+  reason: OfficialPluginRuntimeToolBlockReason,
+  toolName: string,
+): string {
+  switch (reason) {
+    case 'plugin-disabled':
+      return `Tool ${toolName} is contributed by a disabled official plugin.`;
+    case 'static-tool-source-mismatch':
+      return `Tool ${toolName} uses a protected official tool name from a non-official runtime source.`;
+    case 'readonly-required':
+      return `Tool ${toolName} is not allowed because the current policy requires readonly tools.`;
+    case 'danger-level-exceeds-limit':
+      return `Tool ${toolName} exceeds the current maximum danger level.`;
+    case 'permission-not-allowed':
+      return `Tool ${toolName} requires permissions outside the current allow list.`;
+    case 'no-plugin-contribution':
+      return `Tool ${toolName} is not contributed by any enabled official plugin.`;
+  }
 }
 
 function staticContributionMatchesRuntimeTool(

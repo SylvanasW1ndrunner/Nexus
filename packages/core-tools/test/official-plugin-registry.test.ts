@@ -189,8 +189,26 @@ describe('OfficialPluginRegistry', () => {
 
     expect(resolved.allowedToolNames).toEqual([]);
     expect(resolved.blockedToolNames).toEqual(['query_database']);
+    expect(resolved.blockedToolDetails).toMatchObject([
+      {
+        toolName: 'query_database',
+        reason: 'static-tool-source-mismatch',
+        pluginId: 'official.database-postgres',
+        contributionName: 'query_database',
+        runtime: { source: 'user-mcp', sourceId: 'orders_server', originalName: 'query_database' },
+      },
+    ]);
     expect(resolved.staticToolNames).toEqual([]);
     expect(resolved.missingStaticToolNames).toContain('query_database');
+    expect(resolved.missingStaticToolDetails).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: 'query_database',
+          pluginId: 'official.database-postgres',
+          requiredPermissions: ['database.query.read'],
+        }),
+      ]),
+    );
   });
 
   it('applies plugin, readonly, and danger filters to runtime tool allow lists', () => {
@@ -229,6 +247,73 @@ describe('OfficialPluginRegistry', () => {
     expect(
       registry.resolveRuntimeTools({ runtimeTools, maxDangerLevel: 'medium' }).allowedToolNames,
     ).toEqual(['query_database', 'workspace_script:summarize_orders']);
+  });
+
+  it('explains runtime tool blocks from plugin, readonly, danger, permission, and unknown-policy filters', () => {
+    const registry = createDefaultOfficialPluginRegistry();
+    const runtimeTools = [
+      runtimeTool('query_database', 'medium', true, 'database'),
+      runtimeTool('execute_sql', 'high', false, 'database'),
+      runtimeTool(
+        'orders_server__list_orders',
+        'safe',
+        true,
+        'user-mcp',
+        'orders_server',
+        'list_orders',
+      ),
+      runtimeTool('custom_unlisted_tool', 'safe', true, 'skill'),
+    ];
+
+    expect(
+      registry.resolveRuntimeTools({
+        runtimeTools,
+        disabledPluginIds: ['official.database-postgres', 'official.mcp-client'],
+      }).blockedToolDetails,
+    ).toMatchObject([
+      { toolName: 'query_database', reason: 'plugin-disabled', pluginId: 'official.database-postgres' },
+      { toolName: 'execute_sql', reason: 'plugin-disabled', pluginId: 'official.database-postgres' },
+      { toolName: 'orders_server__list_orders', reason: 'plugin-disabled', pluginId: 'official.mcp-client' },
+      { toolName: 'custom_unlisted_tool', reason: 'no-plugin-contribution' },
+    ]);
+
+    expect(
+      registry.resolveRuntimeTools({
+        runtimeTools,
+        readonlyOnly: true,
+      }).blockedToolDetails.map((detail) => ({ toolName: detail.toolName, reason: detail.reason })),
+    ).toEqual([
+      { toolName: 'execute_sql', reason: 'readonly-required' },
+      { toolName: 'orders_server__list_orders', reason: 'readonly-required' },
+      { toolName: 'custom_unlisted_tool', reason: 'no-plugin-contribution' },
+    ]);
+
+    expect(
+      registry.resolveRuntimeTools({
+        runtimeTools,
+        maxDangerLevel: 'medium',
+      }).blockedToolDetails.map((detail) => ({ toolName: detail.toolName, reason: detail.reason })),
+    ).toEqual([
+      { toolName: 'execute_sql', reason: 'danger-level-exceeds-limit' },
+      { toolName: 'orders_server__list_orders', reason: 'danger-level-exceeds-limit' },
+      { toolName: 'custom_unlisted_tool', reason: 'no-plugin-contribution' },
+    ]);
+
+    expect(
+      registry.resolveRuntimeTools({
+        runtimeTools,
+        allowedPermissions: ['database.schema.read'],
+      }).blockedToolDetails,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: 'query_database',
+          reason: 'permission-not-allowed',
+          requiredPermissions: ['database.query.read'],
+          allowedPermissions: ['database.schema.read'],
+        }),
+      ]),
+    );
   });
 
   it('enables an official plugin that is disabled by default only when explicitly requested', () => {

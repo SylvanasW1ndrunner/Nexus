@@ -567,10 +567,57 @@ export type AgentToolPolicyRequest = {
 export type AgentToolPolicyPreview = {
   allowedToolNames: string[];
   blockedToolNames: string[];
+  blockedToolDetails: AgentToolPolicyBlockPreview[];
   staticToolNames: string[];
   dynamicToolNames: string[];
   missingStaticToolNames: string[];
+  missingStaticToolDetails: AgentMissingStaticToolPreview[];
+  blockedByPluginToolDetails: AgentToolPolicyBlockPreview[];
+  blockedBySkillToolDetails: AgentToolPolicyBlockPreview[];
   toolPermissions: AgentToolPermissionPreview[];
+};
+
+export type AgentToolPolicyBlockReason =
+  | 'plugin-disabled'
+  | 'static-tool-source-mismatch'
+  | 'readonly-required'
+  | 'danger-level-exceeds-limit'
+  | 'permission-not-allowed'
+  | 'no-plugin-contribution'
+  | 'runtime-tool-missing'
+  | 'skill-tool-not-allowed';
+
+export type AgentToolPolicyBlockPreview = {
+  toolName: string;
+  blockedBy?: 'plugin' | 'skill';
+  reason: AgentToolPolicyBlockReason;
+  message: string;
+  runtime?: {
+    dangerLevel: AgentToolDangerLevel;
+    readonly?: boolean;
+    source?: string;
+    sourceId?: string;
+    originalName?: string;
+  };
+  pluginId?: string;
+  pluginName?: string;
+  contributionName?: string;
+  dynamic?: boolean;
+  contributionDangerLevel?: AgentToolDangerLevel;
+  contributionReadonly?: boolean;
+  requiredPermissions?: string[];
+  allowedPermissions?: string[];
+  maxDangerLevel?: AgentToolDangerLevel;
+};
+
+export type AgentMissingStaticToolPreview = {
+  toolName: string;
+  pluginId: string;
+  pluginName: string;
+  contributionName: string;
+  requiredPermissions: string[];
+  dangerLevel: AgentToolDangerLevel;
+  readonly: boolean;
 };
 
 export type AgentToolPermissionPreview = {

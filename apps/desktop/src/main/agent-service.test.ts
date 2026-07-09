@@ -64,6 +64,64 @@ describe('HeadlessAgentService', () => {
     });
   });
 
+  it('previews structured official tool policy diagnostics without calling the model', async () => {
+    const provider = scriptedProvider([]);
+    const registry = registryWithQueryTools();
+    registry.register(
+      {
+        name: 'execute_sql',
+        description: 'Execute SQL with writes',
+        inputSchema: { type: 'object', properties: {} },
+        dangerLevel: 'high',
+        readonly: false,
+      },
+      () => ({ ok: true }),
+    );
+    registry.register(
+      {
+        name: 'custom_unlisted_tool',
+        description: 'Tool that is not contributed by official plugins',
+        inputSchema: { type: 'object', properties: {} },
+        dangerLevel: 'safe',
+        readonly: true,
+        source: 'skill',
+      },
+      () => ({ ok: true }),
+    );
+    const service = await createService({
+      provider,
+      registry,
+      skills: [dailyGmvSkill()],
+    });
+
+    const preview = service.previewToolPolicy({ mode: 'readonly' });
+
+    expect(provider.requests).toEqual([]);
+    expect(preview.allowedToolNames).toEqual(['list_tables', 'describe_table', 'query_database']);
+    expect(preview.blockedToolDetails).toMatchObject([
+      {
+        toolName: 'execute_sql',
+        reason: 'readonly-required',
+        pluginId: 'official.database-postgres',
+        contributionName: 'execute_sql',
+      },
+      {
+        toolName: 'custom_unlisted_tool',
+        reason: 'no-plugin-contribution',
+        runtime: { source: 'skill' },
+      },
+    ]);
+    expect(preview.missingStaticToolDetails).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: 'audit_sql',
+          pluginId: 'official.database-postgres',
+          requiredPermissions: ['database.query.read'],
+        }),
+      ]),
+    );
+  });
+
   it('runs a matched Skill through ReactAgent and exposes only the Skill tool intersection', async () => {
     const provider = scriptedProvider([
       {

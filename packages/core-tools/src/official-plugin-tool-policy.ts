@@ -9,6 +9,8 @@ import {
   type OfficialPluginProcessAccess,
   type OfficialPluginRegistry,
   type OfficialPluginResourceScope,
+  type OfficialPluginRuntimeToolBlockDetail,
+  type OfficialPluginRuntimeToolBlockReason,
   type OfficialPluginRuntimeToolDescriptor,
   type OfficialPluginRuntimeToolResolution,
   type OfficialPluginRuntimeToolSource,
@@ -28,9 +30,39 @@ export type OfficialPluginAgentToolPolicy = {
   agentAllowedToolNames: string[];
   pluginAllowedToolNames: string[];
   blockedByPluginToolNames: string[];
+  blockedByPluginToolDetails: OfficialPluginAgentToolBlockDetail[];
   blockedBySkillToolNames: string[];
+  blockedBySkillToolDetails: OfficialPluginAgentToolBlockDetail[];
   toolPermissions: OfficialPluginAgentToolPermission[];
   runtimeResolution: OfficialPluginRuntimeToolResolution;
+};
+
+export type OfficialPluginAgentToolBlockReason =
+  | OfficialPluginRuntimeToolBlockReason
+  | 'runtime-tool-missing'
+  | 'skill-tool-not-allowed';
+
+export type OfficialPluginAgentToolBlockDetail = {
+  toolName: string;
+  blockedBy: 'plugin' | 'skill';
+  reason: OfficialPluginAgentToolBlockReason;
+  message: string;
+  runtime?: {
+    dangerLevel: ToolDangerLevel;
+    readonly?: boolean;
+    source?: string;
+    sourceId?: string;
+    originalName?: string;
+  };
+  pluginId?: string;
+  pluginName?: string;
+  contributionName?: string;
+  dynamic?: boolean;
+  contributionDangerLevel?: ToolDangerLevel;
+  contributionReadonly?: boolean;
+  requiredPermissions?: string[];
+  allowedPermissions?: string[];
+  maxDangerLevel?: ToolDangerLevel;
 };
 
 export type OfficialPluginAgentToolPermission = {
@@ -83,7 +115,9 @@ export function resolveOfficialPluginAgentTools(
       agentAllowedToolNames,
       pluginAllowedToolNames,
       blockedByPluginToolNames: [],
+      blockedByPluginToolDetails: [],
       blockedBySkillToolNames: [],
+      blockedBySkillToolDetails: [],
       toolPermissions: buildAgentToolPermissions(registry, descriptors, agentAllowedToolNames, resolutionOptions),
       runtimeResolution,
     };
@@ -99,7 +133,20 @@ export function resolveOfficialPluginAgentTools(
     agentAllowedToolNames,
     pluginAllowedToolNames,
     blockedByPluginToolNames: skillAllowedTools.filter((toolName) => !pluginAllowed.has(toolName)),
+    blockedByPluginToolDetails: buildBlockedByPluginDetails(
+      skillAllowedTools.filter((toolName) => !pluginAllowed.has(toolName)),
+      descriptors,
+      runtimeResolution.blockedToolDetails,
+    ),
     blockedBySkillToolNames: pluginAllowedToolNames.filter((toolName) => !skillAllowed.has(toolName)),
+    blockedBySkillToolDetails: pluginAllowedToolNames
+      .filter((toolName) => !skillAllowed.has(toolName))
+      .map((toolName) => ({
+        toolName,
+        blockedBy: 'skill',
+        reason: 'skill-tool-not-allowed',
+        message: `Tool ${toolName} is available from official plugins but is not declared by the selected Skill.`,
+      })),
     toolPermissions: buildAgentToolPermissions(registry, descriptors, agentAllowedToolNames, resolutionOptions),
     runtimeResolution,
   };
@@ -139,6 +186,63 @@ function assertUniqueNames(values: string[], label: string): void {
     if (seen.has(value)) throw new Error(`Duplicate ${label}: ${value}`);
     seen.add(value);
   }
+}
+
+function buildBlockedByPluginDetails(
+  toolNames: string[],
+  runtimeTools: OfficialPluginRuntimeToolDescriptor[],
+  runtimeBlockedDetails: OfficialPluginRuntimeToolBlockDetail[],
+): OfficialPluginAgentToolBlockDetail[] {
+  const runtimeToolNames = new Set(runtimeTools.map((tool) => tool.name));
+  const runtimeBlockedByName = new Map(runtimeBlockedDetails.map((detail) => [detail.toolName, detail]));
+  return toolNames.map((toolName) => {
+    const runtimeBlocked = runtimeBlockedByName.get(toolName);
+    if (runtimeBlocked) return toAgentBlockDetail(runtimeBlocked, 'plugin');
+    if (!runtimeToolNames.has(toolName)) {
+      return {
+        toolName,
+        blockedBy: 'plugin',
+        reason: 'runtime-tool-missing',
+        message: `Tool ${toolName} is declared by the selected Skill but is not registered in the runtime.`,
+      };
+    }
+    return {
+      toolName,
+      blockedBy: 'plugin',
+      reason: 'no-plugin-contribution',
+      message: `Tool ${toolName} is registered in the runtime but is not allowed by official plugin policy.`,
+    };
+  });
+}
+
+function toAgentBlockDetail(
+  detail: OfficialPluginRuntimeToolBlockDetail,
+  blockedBy: 'plugin' | 'skill',
+): OfficialPluginAgentToolBlockDetail {
+  return {
+    toolName: detail.toolName,
+    blockedBy,
+    reason: detail.reason,
+    message: detail.message,
+    runtime: { ...detail.runtime },
+    ...(detail.pluginId === undefined ? {} : { pluginId: detail.pluginId }),
+    ...(detail.pluginName === undefined ? {} : { pluginName: detail.pluginName }),
+    ...(detail.contributionName === undefined ? {} : { contributionName: detail.contributionName }),
+    ...(detail.dynamic === undefined ? {} : { dynamic: detail.dynamic }),
+    ...(detail.contributionDangerLevel === undefined
+      ? {}
+      : { contributionDangerLevel: detail.contributionDangerLevel }),
+    ...(detail.contributionReadonly === undefined
+      ? {}
+      : { contributionReadonly: detail.contributionReadonly }),
+    ...(detail.requiredPermissions === undefined
+      ? {}
+      : { requiredPermissions: [...detail.requiredPermissions] }),
+    ...(detail.allowedPermissions === undefined
+      ? {}
+      : { allowedPermissions: [...detail.allowedPermissions] }),
+    ...(detail.maxDangerLevel === undefined ? {} : { maxDangerLevel: detail.maxDangerLevel }),
+  };
 }
 
 const dangerRank: Record<ToolDangerLevel, number> = {

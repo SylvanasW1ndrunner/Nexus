@@ -837,9 +837,43 @@ function toSharedToolPolicy(policy: OfficialPluginAgentToolPolicy): AgentToolPol
   return {
     allowedToolNames: policy.agentAllowedToolNames,
     blockedToolNames: policy.runtimeResolution.blockedToolNames,
+    blockedToolDetails: policy.runtimeResolution.blockedToolDetails.map((detail) => ({
+      ...detail,
+      runtime: { ...detail.runtime },
+      ...(detail.requiredPermissions === undefined
+        ? {}
+        : { requiredPermissions: [...detail.requiredPermissions] }),
+      ...(detail.allowedPermissions === undefined
+        ? {}
+        : { allowedPermissions: [...detail.allowedPermissions] }),
+    })),
     staticToolNames: policy.runtimeResolution.staticToolNames,
     dynamicToolNames: policy.runtimeResolution.dynamicToolNames,
     missingStaticToolNames: policy.runtimeResolution.missingStaticToolNames,
+    missingStaticToolDetails: policy.runtimeResolution.missingStaticToolDetails.map((detail) => ({
+      ...detail,
+      requiredPermissions: [...detail.requiredPermissions],
+    })),
+    blockedByPluginToolDetails: policy.blockedByPluginToolDetails.map((detail) => ({
+      ...detail,
+      ...(detail.runtime === undefined ? {} : { runtime: { ...detail.runtime } }),
+      ...(detail.requiredPermissions === undefined
+        ? {}
+        : { requiredPermissions: [...detail.requiredPermissions] }),
+      ...(detail.allowedPermissions === undefined
+        ? {}
+        : { allowedPermissions: [...detail.allowedPermissions] }),
+    })),
+    blockedBySkillToolDetails: policy.blockedBySkillToolDetails.map((detail) => ({
+      ...detail,
+      ...(detail.runtime === undefined ? {} : { runtime: { ...detail.runtime } }),
+      ...(detail.requiredPermissions === undefined
+        ? {}
+        : { requiredPermissions: [...detail.requiredPermissions] }),
+      ...(detail.allowedPermissions === undefined
+        ? {}
+        : { allowedPermissions: [...detail.allowedPermissions] }),
+    })),
     toolPermissions: policy.toolPermissions.map((permission) => ({
       toolName: permission.toolName,
       pluginId: permission.pluginId,
