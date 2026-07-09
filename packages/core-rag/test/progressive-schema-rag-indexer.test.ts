@@ -154,6 +154,79 @@ describe('ProgressiveSchemaRagIndexer', () => {
     expect(indexer.getStatus('traffic_warehouse').stage).toBe('failed');
     expect(engine.hasIndex('traffic_warehouse')).toBe(false);
   });
+
+  it('restores all available snapshots on startup and reports invalid snapshots', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-restore-all-'));
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    await new ProgressiveSchemaRagIndexer({
+      engine: new SchemaRagEngine(),
+      snapshotStore: store,
+    }).index({
+      connectionId: 'traffic_warehouse',
+      tables: fixtureTables(),
+      indexedAt: '2026-06-24T01:00:00.000Z',
+    });
+    await new ProgressiveSchemaRagIndexer({
+      engine: new SchemaRagEngine(),
+      snapshotStore: store,
+    }).index({
+      connectionId: 'commerce_warehouse',
+      tables: [commerceOrdersTable()],
+      indexedAt: '2026-06-24T02:00:00.000Z',
+    });
+    await writeFile(path.join(rootDir, 'broken.schema-rag.json'), '{not-json', 'utf8');
+    const engine = new SchemaRagEngine();
+    const indexer = new ProgressiveSchemaRagIndexer({ engine, snapshotStore: store });
+
+    const result = await indexer.restoreAll();
+
+    expect(result.failed).toEqual([]);
+    expect(result.invalidSnapshots).toEqual([
+      expect.objectContaining({ snapshotPath: path.join(rootDir, 'broken.schema-rag.json') }),
+    ]);
+    expect(result.restored.map((status) => status.connectionId).sort()).toEqual([
+      'commerce_warehouse',
+      'traffic_warehouse',
+    ]);
+    expect(engine.hasIndex('traffic_warehouse')).toBe(true);
+    expect(engine.hasIndex('commerce_warehouse')).toBe(true);
+    expect(
+      engine
+        .search({ connectionId: 'commerce_warehouse', query: 'refund orders', limit: 3 })
+        .map((item) => item.document.id),
+    ).toContain('table:public.orders');
+  });
+
+  it('restores only selected connection snapshots when a startup filter is provided', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-restore-filtered-'));
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    await new ProgressiveSchemaRagIndexer({
+      engine: new SchemaRagEngine(),
+      snapshotStore: store,
+    }).index({ connectionId: 'traffic_warehouse', tables: fixtureTables() });
+    await new ProgressiveSchemaRagIndexer({
+      engine: new SchemaRagEngine(),
+      snapshotStore: store,
+    }).index({ connectionId: 'commerce_warehouse', tables: [commerceOrdersTable()] });
+    const engine = new SchemaRagEngine();
+    const indexer = new ProgressiveSchemaRagIndexer({ engine, snapshotStore: store });
+
+    const result = await indexer.restoreAll({ connectionIds: ['commerce_warehouse'] });
+
+    expect(result.restored.map((status) => status.connectionId)).toEqual(['commerce_warehouse']);
+    expect(engine.hasIndex('commerce_warehouse')).toBe(true);
+    expect(engine.hasIndex('traffic_warehouse')).toBe(false);
+  });
+
+  it('returns an empty startup restore result when no snapshot store is configured', async () => {
+    const indexer = new ProgressiveSchemaRagIndexer({ engine: new SchemaRagEngine() });
+
+    await expect(indexer.restoreAll()).resolves.toEqual({
+      restored: [],
+      invalidSnapshots: [],
+      failed: [],
+    });
+  });
 });
 
 function fixtureTables(): TableDetail[] {
@@ -199,5 +272,20 @@ function column(
     nullable,
     comment,
     isPrimaryKey,
+  };
+}
+
+function commerceOrdersTable(): TableDetail {
+  return {
+    schema: 'public',
+    name: 'orders',
+    type: 'table',
+    comment: 'commerce orders with refund and payment status',
+    primaryKey: ['order_id'],
+    columns: [
+      column('order_id', 1, 'uuid', false, 'order id', true),
+      column('customer_id', 2, 'uuid', false, 'customer id'),
+      column('refund_status', 3, 'text', true, 'refund status'),
+    ],
   };
 }

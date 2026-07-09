@@ -1,5 +1,8 @@
 import type { SchemaRagEngine } from './schema-rag-engine.js';
-import type { SchemaRagSnapshotStore } from './schema-rag-snapshot-store.js';
+import type {
+  SchemaRagSnapshotStore,
+  SchemaRagSnapshotSummary,
+} from './schema-rag-snapshot-store.js';
 import type {
   SchemaRagIndex,
   SchemaRagIndexInput,
@@ -17,6 +20,19 @@ export type ProgressiveSchemaRagIndexerOptions = {
 export type ProgressiveSchemaRagIndexResult = {
   index: SchemaRagIndex;
   status: SchemaRagIndexStatus;
+};
+
+export type SchemaRagRestoreAllResult = {
+  restored: SchemaRagIndexStatus[];
+  invalidSnapshots: Array<{
+    snapshotPath: string;
+    reason: string;
+  }>;
+  failed: Array<{
+    connectionId?: string;
+    snapshotPath?: string;
+    error: string;
+  }>;
 };
 
 export class ProgressiveSchemaRagIndexer {
@@ -117,6 +133,53 @@ export class ProgressiveSchemaRagIndexer {
       this.statuses.set(connectionId, status);
       return status;
     }
+  }
+
+  async restoreAll(
+    options: { connectionIds?: Iterable<string> } = {},
+  ): Promise<SchemaRagRestoreAllResult> {
+    if (!this.snapshotStore) return { restored: [], invalidSnapshots: [], failed: [] };
+    const allowedConnectionIds =
+      options.connectionIds === undefined ? undefined : new Set([...options.connectionIds]);
+    const result: SchemaRagRestoreAllResult = {
+      restored: [],
+      invalidSnapshots: [],
+      failed: [],
+    };
+
+    let summaries: SchemaRagSnapshotSummary[];
+    try {
+      summaries = await this.snapshotStore.list();
+    } catch (error) {
+      return {
+        restored: [],
+        invalidSnapshots: [],
+        failed: [{ error: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+
+    for (const summary of summaries) {
+      if (summary.status === 'invalid') {
+        result.invalidSnapshots.push({
+          snapshotPath: summary.snapshotPath,
+          reason: summary.reason,
+        });
+        continue;
+      }
+      if (allowedConnectionIds && !allowedConnectionIds.has(summary.connectionId)) continue;
+      try {
+        const status = await this.restore(summary.connectionId);
+        if (status) result.restored.push(status);
+      } catch (error) {
+        result.failed.push({
+          connectionId: summary.connectionId,
+          snapshotPath: summary.snapshotPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return result;
   }
 
   getStatus(connectionId: string): SchemaRagIndexStatus {
