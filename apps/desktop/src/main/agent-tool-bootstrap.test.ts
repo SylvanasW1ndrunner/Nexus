@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  AgentCheckpointStore,
   AgentPlanExecutionStore,
+  AgentRecoveryService,
   AgentSessionStore,
   AgentStreamStore,
   PlanExecuteRecoveryService,
@@ -523,6 +525,150 @@ describe('registerDesktopAgentTools', () => {
       ]),
     );
   });
+
+  it('exposes persisted ReAct Agent checkpoints as official readonly tools', async () => {
+    const registry = new ToolRegistry();
+    const checkpointStore = new AgentCheckpointStore(await checkpointStorePath());
+    const recoveryService = new AgentRecoveryService(checkpointStore);
+    const session = agentSession('session_checkpoint_recovery', '订单查询恢复');
+    session.messages.push({
+      role: 'assistant',
+      content: '我已经完成订单表查询，下一步分析退款。',
+      createdAt: '2026-07-09T12:00:01.000Z',
+    });
+    await checkpointStore.save({
+      session,
+      iteration: 1,
+      status: 'done',
+      finalText: '已完成订单表查询。',
+      toolExecutions: [
+        {
+          toolCallId: 'call_orders',
+          toolName: 'query_database',
+          status: 'success',
+          durationMs: 9,
+          resultPreview: '{"rows":[{"order_count":42}]}',
+        },
+      ],
+      now: '2026-07-09T12:00:02.000Z',
+    });
+    await checkpointStore.save({
+      session,
+      iteration: 2,
+      status: 'running',
+      finalText: '正在分析退款表，需要继续。',
+      toolExecutions: [
+        {
+          toolCallId: 'call_orders',
+          toolName: 'query_database',
+          status: 'success',
+          durationMs: 9,
+          resultPreview: '{"rows":[{"order_count":42}]}',
+        },
+        {
+          toolCallId: 'call_refunds',
+          toolName: 'query_database',
+          status: 'failed',
+          durationMs: 14,
+          resultPreview: 'relation refunds_2026 does not exist',
+          failureKind: 'sql_repairable',
+          retryable: true,
+        },
+      ],
+      now: '2026-07-09T12:01:00.000Z',
+    });
+
+    registerDesktopAgentTools({
+      registry,
+      connections: connectionReader([connectedConnection()]),
+      workspaceProjects: workspaceReader(),
+      driverForEngine: () => fakeDriver(),
+      agentCheckpoints: checkpointStore,
+      agentCheckpointRecovery: recoveryService,
+    });
+
+    await expect(
+      registry
+        .get('list_recoverable_agent_checkpoints')
+        ?.handler({ query: '退款', limit: 5 }, toolContext()),
+    ).resolves.toMatchObject({
+      checkpoints: [
+        {
+          sessionId: 'session_checkpoint_recovery',
+          interruptedIteration: 2,
+          completedToolCount: 1,
+          failedToolCount: 1,
+          actions: ['continue', 'restart', 'abandon'],
+        },
+      ],
+    });
+    await expect(
+      registry
+        .get('list_agent_checkpoints')
+        ?.handler({ sessionId: 'session_checkpoint_recovery', limit: 10 }, toolContext()),
+    ).resolves.toMatchObject({
+      checkpoints: [
+        { iteration: 1, status: 'done', completedToolCount: 1 },
+        { iteration: 2, status: 'running', completedToolCount: 1, failedToolCount: 1 },
+      ],
+    });
+    await expect(
+      registry.get('read_agent_checkpoint')?.handler(
+        {
+          sessionId: 'session_checkpoint_recovery',
+          iteration: 2,
+          maxToolExecutions: 1,
+          maxFinalTextChars: 6,
+          includeSessionMessages: true,
+          maxSessionMessages: 1,
+        },
+        toolContext(),
+      ),
+    ).resolves.toMatchObject({
+      sessionId: 'session_checkpoint_recovery',
+      iteration: 2,
+      finalText: '正在分析退款',
+      finalTextTruncated: true,
+      returnedToolExecutionCount: 1,
+      omittedToolExecutionCount: 1,
+      toolExecutions: [{ toolName: 'query_database', status: 'failed' }],
+      session: {
+        id: 'session_checkpoint_recovery',
+        returnedMessageCount: 1,
+        omittedMessageCount: 3,
+        messages: [{ role: 'assistant' }],
+      },
+    });
+
+    const policy = resolveOfficialPluginAgentTools({
+      toolRegistry: registry,
+      readonlyOnly: true,
+      skillAllowedTools: [
+        'list_recoverable_agent_checkpoints',
+        'list_agent_checkpoints',
+        'read_agent_checkpoint',
+      ],
+    });
+    expect(policy.agentAllowedToolNames.sort()).toEqual([
+      'list_agent_checkpoints',
+      'list_recoverable_agent_checkpoints',
+      'read_agent_checkpoint',
+    ]);
+    expect(policy.toolPermissions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: 'read_agent_checkpoint',
+          pluginId: 'official.agent-checkpoint-recovery',
+          permissions: [
+            expect.objectContaining({
+              id: 'agent.checkpoint.read',
+              resourceScopes: ['agent.checkpoint', 'agent.session'],
+            }),
+          ],
+        }),
+      ]),
+    );
+  });
 });
 
 function connectionReader(connections: SavedConnection[]) {
@@ -600,6 +746,12 @@ async function planStorePath(): Promise<string> {
   const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-plan-tools-'));
   tempDirs.push(rootPath);
   return join(rootPath, 'agent-plan-executions.json');
+}
+
+async function checkpointStorePath(): Promise<string> {
+  const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-checkpoint-tools-'));
+  tempDirs.push(rootPath);
+  return join(rootPath, 'agent-checkpoints.json');
 }
 
 function agentPlan(id: string, title: string): AgentPlan {

@@ -1,4 +1,6 @@
 import type {
+  AgentIterationCheckpoint,
+  AgentRecoveryPlan,
   AgentPlanExecutionSnapshot,
   AgentPlanRecoveryPlan,
   AgentSession,
@@ -67,6 +69,15 @@ type AgentPlanRecoveryReader = {
   listRecoverablePlans(): Promise<AgentPlanRecoveryPlan[]>;
 };
 
+type AgentCheckpointReader = {
+  listBySession(sessionId: string): Promise<AgentIterationCheckpoint[]>;
+  listRecoverable(): Promise<AgentIterationCheckpoint[]>;
+};
+
+type AgentCheckpointRecoveryReader = {
+  listRecoverablePlans(): Promise<AgentRecoveryPlan[]>;
+};
+
 export type AgentToolBootstrapDependencies = {
   registry: ToolRegistry;
   connections: ConnectionReader;
@@ -79,6 +90,8 @@ export type AgentToolBootstrapDependencies = {
   agentStreams?: AgentStreamHistoryReader;
   agentPlans?: AgentPlanExecutionReader;
   agentPlanRecovery?: AgentPlanRecoveryReader;
+  agentCheckpoints?: AgentCheckpointReader;
+  agentCheckpointRecovery?: AgentCheckpointRecoveryReader;
 };
 
 export type DesktopAgentToolRegistration = {
@@ -143,6 +156,13 @@ function registerAgentHistoryTools(dependencies: AgentToolBootstrapDependencies)
       dependencies.registry,
       dependencies.agentPlans,
       dependencies.agentPlanRecovery,
+    );
+  }
+  if (dependencies.agentCheckpoints || dependencies.agentCheckpointRecovery) {
+    registerAgentCheckpointHistoryTools(
+      dependencies.registry,
+      dependencies.agentCheckpoints,
+      dependencies.agentCheckpointRecovery,
     );
   }
 }
@@ -238,6 +258,112 @@ function registerAgentSessionHistoryTools(
         truncated,
         content: truncated ? content.slice(0, maxChars) : content,
       };
+    },
+  );
+}
+
+function registerAgentCheckpointHistoryTools(
+  registry: ToolRegistry,
+  checkpoints: AgentCheckpointReader | undefined,
+  recovery: AgentCheckpointRecoveryReader | undefined,
+): void {
+  if (recovery) {
+    registry.register(
+      {
+        name: 'list_recoverable_agent_checkpoints',
+        description:
+          'List recoverable ReAct Agent checkpoints from interrupted or still-running sessions.',
+        inputSchema: objectSchema({
+          sessionId: { type: 'string' },
+          query: { type: 'string' },
+          limit: { type: 'number' },
+        }),
+        dangerLevel: 'safe',
+        readonly: true,
+        source: 'official',
+        sourceId: 'official.agent-checkpoint-recovery',
+        originalName: 'list_recoverable_agent_checkpoints',
+      },
+      async (args) => {
+        const sessionId = optionalTrimmedString(args, 'sessionId');
+        const query = optionalTrimmedString(args, 'query')?.toLowerCase();
+        const limit = optionalBoundedInteger(args, 'limit', 20, 1, 100);
+        const plans = await recovery.listRecoverablePlans();
+        return {
+          checkpoints: plans
+            .filter((plan) => sessionId === undefined || plan.sessionId === sessionId)
+            .filter((plan) => {
+              if (query === undefined) return true;
+              return [plan.title, plan.userMessage, plan.lastAssistantText, plan.lastToolError]
+                .filter(Boolean)
+                .join('\n')
+                .toLowerCase()
+                .includes(query);
+            })
+            .slice(0, limit),
+        };
+      },
+    );
+  }
+
+  if (!checkpoints) return;
+
+  registry.register(
+    {
+      name: 'list_agent_checkpoints',
+      description:
+        'List persisted ReAct Agent iteration checkpoints for one session, including status and tool evidence counts.',
+      inputSchema: objectSchema({
+        sessionId: { type: 'string' },
+        limit: { type: 'number' },
+      }),
+      dangerLevel: 'safe',
+      readonly: true,
+      source: 'official',
+      sourceId: 'official.agent-checkpoint-recovery',
+      originalName: 'list_agent_checkpoints',
+    },
+    async (args) => {
+      const sessionId = requireString(args, 'sessionId');
+      const limit = optionalBoundedInteger(args, 'limit', 50, 1, 200);
+      return {
+        checkpoints: (await checkpoints.listBySession(sessionId))
+          .slice(-limit)
+          .map(checkpointSummary),
+      };
+    },
+  );
+
+  registry.register(
+    {
+      name: 'read_agent_checkpoint',
+      description:
+        'Read a persisted ReAct Agent checkpoint by session id and iteration with bounded messages, final text, and tool evidence.',
+      inputSchema: objectSchema({
+        sessionId: { type: 'string' },
+        iteration: { type: 'number' },
+        maxToolExecutions: { type: 'number' },
+        maxFinalTextChars: { type: 'number' },
+        includeSessionMessages: { type: 'boolean' },
+        maxSessionMessages: { type: 'number' },
+      }),
+      dangerLevel: 'safe',
+      readonly: true,
+      source: 'official',
+      sourceId: 'official.agent-checkpoint-recovery',
+      originalName: 'read_agent_checkpoint',
+    },
+    async (args) => {
+      const sessionId = requireString(args, 'sessionId');
+      const iteration = optionalBoundedInteger(args, 'iteration', -1, 0, 1_000_000);
+      if (iteration < 0) throw new Error('iteration is required.');
+      const checkpoint = (await checkpoints.listBySession(sessionId)).find(
+        (item) => item.iteration === iteration,
+      );
+      if (!checkpoint) {
+        throw new Error(`Agent checkpoint not found: ${sessionId} iteration ${iteration}`);
+      }
+      return checkpointDetail(checkpoint, args);
     },
   );
 }
@@ -608,6 +734,79 @@ function planExecutionSummary(snapshot: AgentPlanExecutionSnapshot): {
     updatedAt: snapshot.updatedAt,
     ...(snapshot.finishedAt === undefined ? {} : { finishedAt: snapshot.finishedAt }),
     ...(snapshot.errorMessage === undefined ? {} : { errorMessage: snapshot.errorMessage }),
+  };
+}
+
+function checkpointSummary(checkpoint: AgentIterationCheckpoint): {
+  id: string;
+  sessionId: string;
+  iteration: number;
+  status: AgentIterationCheckpoint['status'];
+  title: string;
+  mode: AgentSession['mode'];
+  strategy: AgentSession['strategy'];
+  messageCount: number;
+  completedToolCount: number;
+  failedToolCount: number;
+  deniedToolCount: number;
+  finalTextChars: number;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  errorMessage?: string;
+} {
+  return {
+    id: checkpoint.id,
+    sessionId: checkpoint.sessionId,
+    iteration: checkpoint.iteration,
+    status: checkpoint.status,
+    title: checkpoint.session.title,
+    mode: checkpoint.session.mode,
+    strategy: checkpoint.session.strategy,
+    messageCount: checkpoint.session.messages.length,
+    completedToolCount: checkpoint.toolExecutions.filter((tool) => tool.status === 'success')
+      .length,
+    failedToolCount: checkpoint.toolExecutions.filter((tool) => tool.status === 'failed').length,
+    deniedToolCount: checkpoint.toolExecutions.filter((tool) => tool.status === 'denied').length,
+    finalTextChars: checkpoint.finalText.length,
+    startedAt: checkpoint.startedAt,
+    updatedAt: checkpoint.updatedAt,
+    ...(checkpoint.finishedAt === undefined ? {} : { finishedAt: checkpoint.finishedAt }),
+    ...(checkpoint.errorMessage === undefined ? {} : { errorMessage: checkpoint.errorMessage }),
+  };
+}
+
+function checkpointDetail(
+  checkpoint: AgentIterationCheckpoint,
+  args: Record<string, unknown>,
+): ReturnType<typeof checkpointSummary> & {
+  finalText: string;
+  finalTextCharCount: number;
+  finalTextTruncated: boolean;
+  returnedToolExecutionCount: number;
+  omittedToolExecutionCount: number;
+  toolExecutions: AgentIterationCheckpoint['toolExecutions'];
+  session: ReturnType<typeof sessionSnapshot>;
+} {
+  const maxToolExecutions = optionalBoundedInteger(args, 'maxToolExecutions', 50, 1, 500);
+  const maxFinalTextChars = optionalBoundedInteger(args, 'maxFinalTextChars', 8_000, 1, 100_000);
+  const includeSessionMessages = optionalBoolean(args, 'includeSessionMessages') ?? false;
+  const maxSessionMessages = optionalBoundedInteger(args, 'maxSessionMessages', 50, 1, 500);
+  const finalTextTruncated = checkpoint.finalText.length > maxFinalTextChars;
+  const toolExecutions = checkpoint.toolExecutions.slice(
+    Math.max(0, checkpoint.toolExecutions.length - maxToolExecutions),
+  );
+  return {
+    ...checkpointSummary(checkpoint),
+    finalText: finalTextTruncated
+      ? checkpoint.finalText.slice(0, maxFinalTextChars)
+      : checkpoint.finalText,
+    finalTextCharCount: checkpoint.finalText.length,
+    finalTextTruncated,
+    returnedToolExecutionCount: toolExecutions.length,
+    omittedToolExecutionCount: checkpoint.toolExecutions.length - toolExecutions.length,
+    toolExecutions,
+    session: sessionSnapshot(checkpoint.session, includeSessionMessages, maxSessionMessages),
   };
 }
 

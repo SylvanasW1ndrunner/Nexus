@@ -39,6 +39,7 @@ export type OfficialPluginResourceScope =
   | 'workspace.process'
   | 'mcp.server'
   | 'skill.source'
+  | 'agent.checkpoint'
   | 'agent.session'
   | 'agent.plan'
   | 'eval.report';
@@ -678,6 +679,64 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
         runtimeSources: ['workspace-script'],
         namePattern: '工作区脚本声明的工具名',
       },
+    ],
+  },
+  {
+    id: 'official.agent-checkpoint-recovery',
+    name: 'Agent Checkpoint Recovery',
+    version: '0.1.0',
+    publisher: 'DBAgent',
+    source: 'official',
+    category: 'agent',
+    description:
+      'Expose persisted ReAct Agent checkpoints as readonly official tools for recovery review and audit.',
+    enabledByDefault: true,
+    capabilities: ['agent-checkpoint-list', 'agent-checkpoint-read', 'agent-checkpoint-recovery'],
+    permissions: [
+      permission(
+        'agent.checkpoint.read',
+        'Read Agent checkpoints',
+        'Read redacted local ReAct checkpoint snapshots and recovery metadata.',
+        'safe',
+        true,
+        {
+          resourceScopes: ['agent.checkpoint', 'agent.session'],
+          approvalPolicy: 'never',
+          networkAccess: 'none',
+          processAccess: 'none',
+          secretKinds: ['none'],
+          auditLevel: 'metadata',
+        },
+      ),
+    ],
+    tools: [
+      tool(
+        'list_recoverable_agent_checkpoints',
+        'List recoverable Agent checkpoints',
+        'List interrupted ReAct Agent checkpoints that can be recovered.',
+        'safe',
+        true,
+        ['agent.checkpoint.read'],
+        ['official'],
+      ),
+      tool(
+        'list_agent_checkpoints',
+        'List Agent checkpoints',
+        'List ReAct Agent iteration checkpoints for one session.',
+        'safe',
+        true,
+        ['agent.checkpoint.read'],
+        ['official'],
+      ),
+      tool(
+        'read_agent_checkpoint',
+        'Read Agent checkpoint',
+        'Read a persisted ReAct Agent checkpoint with bounded evidence.',
+        'safe',
+        true,
+        ['agent.checkpoint.read'],
+        ['official'],
+      ),
     ],
   },
   {

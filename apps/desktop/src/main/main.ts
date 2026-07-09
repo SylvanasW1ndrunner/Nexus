@@ -26,7 +26,9 @@ import {
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import {
+  AgentCheckpointStore,
   AgentPlanExecutionStore,
+  AgentRecoveryService,
   AgentSessionStore,
   AgentStreamStore,
   PlanExecuteAgent,
@@ -74,6 +76,7 @@ const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
 const pluginStatePath = join(dataDir, 'plugins.json');
 const ideSettingsPath = join(dataDir, 'ide-settings.json');
 const schemaRagSnapshotDir = join(dataDir, 'schema-rag-snapshots');
+const agentCheckpointPath = join(dataDir, 'agent-checkpoints.json');
 const agentPlanExecutionPath = join(dataDir, 'agent-plan-executions.json');
 const agentSessionPath = join(dataDir, 'agent-sessions.json');
 const agentStreamPath = join(dataDir, 'agent-streams.json');
@@ -114,6 +117,8 @@ const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
 const agentSessionStore = new AgentSessionStore(agentSessionPath);
 const agentStreamStore = new AgentStreamStore(agentStreamPath);
+const agentCheckpointStore = new AgentCheckpointStore(agentCheckpointPath);
+const agentRecoveryService = new AgentRecoveryService(agentCheckpointStore);
 const agentPlanExecutionStore = new AgentPlanExecutionStore(agentPlanExecutionPath);
 const planExecuteRecoveryService = new PlanExecuteRecoveryService(agentPlanExecutionStore);
 const desktopAgentTools = registerDesktopAgentTools({
@@ -126,8 +131,11 @@ const desktopAgentTools = registerDesktopAgentTools({
   agentStreams: agentStreamStore,
   agentPlans: agentPlanExecutionStore,
   agentPlanRecovery: planExecuteRecoveryService,
+  agentCheckpoints: agentCheckpointStore,
+  agentCheckpointRecovery: agentRecoveryService,
 });
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
+  checkpointStore: agentCheckpointStore,
   sessionStore: agentSessionStore,
   streamStore: agentStreamStore,
   auditLog: new DailyAgentAuditLogStore(logsDir),
