@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { ToolRegistry, type AgentRunResult } from '@dbagent/core-agent';
-import { renderSkillAgentUserMessage, runSkillAgent, type SkillAgent, type SkillAgentRunOptionsForAgent } from '../src/index.js';
+import {
+  ToolRegistry,
+  type AgentPlanExecuteResult,
+  type AgentRunResult,
+  type AgentToolSource,
+} from '@dbagent/core-agent';
+import {
+  renderSkillAgentUserMessage,
+  runSkillAgent,
+  type SkillAgent,
+  type SkillAgentRunOptionsForAgent,
+  type SkillPlanExecuteAgent,
+  type SkillPlanExecuteRunOptionsForAgent,
+} from '../src/index.js';
 
 describe('Skill Agent runner', () => {
   it('runs an Agent with the intersection of Skill allowed tools and official plugin policy', async () => {
@@ -103,6 +115,50 @@ describe('Skill Agent runner', () => {
     });
   });
 
+  it('runs a Plan & Execute Agent with the same Skill and official plugin tool policy', async () => {
+    const registry = new ToolRegistry();
+    registerTool(registry, 'search_schema', 'safe', true);
+    registerTool(registry, 'query_database', 'medium', true);
+    registerTool(registry, 'execute_sql', 'high', false);
+
+    const agent = recordingPlanExecuteAgent();
+    const output = await runSkillAgent(agent, {
+      strategy: 'plan-execute',
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'auto',
+      maxPlanSteps: 6,
+      stopOnStepFailure: false,
+      initialTotalIterations: 2,
+      skillPlan: {
+        userInput: 'Analyze GMV drop and provide a step-by-step verification plan',
+        allowedTools: ['search_schema', 'query_database', 'execute_sql'],
+        steps: ['inspect schema', 'query GMV', 'summarize findings'],
+      },
+      toolPolicy: {
+        toolRegistry: registry,
+        readonlyOnly: true,
+      },
+    });
+
+    expect(output.strategy).toBe('plan-execute');
+    expect(agent.calls).toHaveLength(1);
+    expect(agent.calls[0]).toMatchObject({
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'auto',
+      allowedTools: ['search_schema', 'query_database'],
+      maxPlanSteps: 6,
+      stopOnStepFailure: false,
+      initialTotalIterations: 2,
+    });
+    expect(agent.calls[0]?.userMessage).toContain(
+      '用户任务:\nAnalyze GMV drop and provide a step-by-step verification plan',
+    );
+    expect(output.result.status).toBe('done');
+    expect(output.toolPolicy.blockedByPluginToolNames).toEqual(['execute_sql']);
+  });
+
   it('renders a deterministic Skill Agent user message', () => {
     expect(
       renderSkillAgentUserMessage(
@@ -158,7 +214,7 @@ function registerTool(
   name: string,
   dangerLevel: 'safe' | 'medium' | 'high' | 'critical',
   readonly: boolean,
-  metadata: { source?: string; sourceId?: string; originalName?: string } = {},
+  metadata: { source?: AgentToolSource; sourceId?: string; originalName?: string } = {},
 ): void {
   registry.register(
     {
@@ -197,6 +253,38 @@ function recordingAgent(error?: Error): SkillAgent & { calls: SkillAgentRunOptio
         iterations: 1,
         toolExecutions: [],
       } satisfies AgentRunResult);
+    },
+  };
+}
+
+function recordingPlanExecuteAgent(): SkillPlanExecuteAgent & { calls: SkillPlanExecuteRunOptionsForAgent[] } {
+  const calls: SkillPlanExecuteRunOptionsForAgent[] = [];
+  return {
+    calls,
+    run(options) {
+      calls.push(options);
+      return Promise.resolve({
+        status: 'done',
+        plan: {
+          id: 'plan_skill_agent',
+          title: 'skill plan',
+          goal: options.userMessage,
+          createdAt: '2026-07-09T00:00:00.000Z',
+          plannerModelText: '{"steps":[]}',
+          steps: [
+            {
+              id: 'step_1',
+              title: 'inspect schema',
+              instruction: 'inspect schema',
+              status: 'done',
+            },
+          ],
+        },
+        finalText: 'done',
+        executedSteps: 1,
+        totalIterations: options.initialTotalIterations ?? 0,
+        toolExecutions: [],
+      } satisfies AgentPlanExecuteResult);
     },
   };
 }

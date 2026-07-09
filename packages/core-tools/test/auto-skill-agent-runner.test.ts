@@ -1,12 +1,18 @@
 import { parseSkillDefinition } from '@dbagent/core-skills';
 import { describe, expect, it } from 'vitest';
-import { type AgentRunResult, ToolRegistry } from '@dbagent/core-agent';
+import {
+  type AgentPlanExecuteResult,
+  type AgentRunResult,
+  type AgentToolSource,
+  ToolRegistry,
+} from '@dbagent/core-agent';
 import {
   runAutoSkillAgent,
   selectAutoSkillPlan,
   type SkillAgent,
   type SkillAgentRunOptionsForAgent,
-  type NoMatchingSkillError,
+  type SkillPlanExecuteAgent,
+  type SkillPlanExecuteRunOptionsForAgent,
 } from '../src/index.js';
 
 describe('Auto Skill Agent runner', () => {
@@ -89,6 +95,42 @@ describe('Auto Skill Agent runner', () => {
     ]);
   });
 
+  it('runs an auto-selected Skill through the Plan & Execute strategy when requested', async () => {
+    const registry = new ToolRegistry();
+    registerTool(registry, 'search_schema', 'safe', true);
+    registerTool(registry, 'query_database', 'medium', true);
+    registerTool(registry, 'write_workspace_file', 'medium', false, { source: 'workspace' });
+
+    const agent = recordingPlanExecuteAgent();
+    const output = await runAutoSkillAgent(agent, {
+      strategy: 'plan-execute',
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'auto',
+      userInput: 'daily_gmv_report: Generate a daily GMV report',
+      skills: [dailyReportSkill(), dataAnalysisSkill()],
+      toolPolicy: {
+        toolRegistry: registry,
+      },
+      maxPlanSteps: 4,
+      stopOnStepFailure: true,
+    });
+
+    expect(output.strategy).toBe('plan-execute');
+    expect(output.autoPlan.candidate.skill.name).toBe('daily_gmv_report');
+    expect(agent.calls).toHaveLength(1);
+    expect(agent.calls[0]).toMatchObject({
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'auto',
+      allowedTools: ['search_schema', 'query_database', 'write_workspace_file'],
+      maxPlanSteps: 4,
+      stopOnStepFailure: true,
+    });
+    expect(agent.calls[0]?.userMessage).toContain('daily_gmv_report: Generate a daily GMV report');
+    expect(output.result.status).toBe('done');
+  });
+
   it('does not run the Agent when the matching Skill is blocked by missing runtime tools', async () => {
     const agent = recordingAgent();
 
@@ -116,7 +158,7 @@ describe('Auto Skill Agent runner', () => {
         },
       ],
       pluginAllowedToolNames: ['search_schema', 'query_database'],
-    } satisfies Partial<NoMatchingSkillError>);
+    });
 
     expect(agent.calls).toEqual([]);
   });
@@ -160,7 +202,7 @@ function registerTool(
   name: string,
   dangerLevel: 'safe' | 'medium' | 'high' | 'critical',
   readonly: boolean,
-  metadata: { source?: string; sourceId?: string; originalName?: string } = {},
+  metadata: { source?: AgentToolSource; sourceId?: string; originalName?: string } = {},
 ): void {
   registry.register(
     {
@@ -199,6 +241,38 @@ function recordingAgent(error?: Error): SkillAgent & { calls: SkillAgentRunOptio
         iterations: 1,
         toolExecutions: [],
       } satisfies AgentRunResult);
+    },
+  };
+}
+
+function recordingPlanExecuteAgent(): SkillPlanExecuteAgent & { calls: SkillPlanExecuteRunOptionsForAgent[] } {
+  const calls: SkillPlanExecuteRunOptionsForAgent[] = [];
+  return {
+    calls,
+    run(options) {
+      calls.push(options);
+      return Promise.resolve({
+        status: 'done',
+        plan: {
+          id: 'plan_auto_skill_agent',
+          title: 'auto skill plan',
+          goal: options.userMessage,
+          createdAt: '2026-07-09T00:00:00.000Z',
+          plannerModelText: '{"steps":[]}',
+          steps: [
+            {
+              id: 'step_1',
+              title: 'inspect schema',
+              instruction: 'inspect schema',
+              status: 'done',
+            },
+          ],
+        },
+        finalText: 'done',
+        executedSteps: 1,
+        totalIterations: 1,
+        toolExecutions: [],
+      } satisfies AgentPlanExecuteResult);
     },
   };
 }

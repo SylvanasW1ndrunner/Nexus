@@ -15,8 +15,12 @@ import {
   runSkillAgent,
   type SkillAgent,
   type SkillAgentPlan,
+  type SkillAgentRunOptions,
   type SkillAgentRunOptionsForAgent,
   type SkillAgentRunResult,
+  type SkillPlanExecuteAgent,
+  type SkillPlanExecuteRunOptionsForAgent,
+  type SkillPlanExecuteRunResult,
 } from './skill-agent-runner.js';
 
 export type AutoSkillMatchOptions = Omit<SkillMatchOptions, 'userInput' | 'availableTools' | 'maxResults'> & {
@@ -29,6 +33,19 @@ export type AutoSkillAgentRunOptions = Omit<SkillAgentRunOptionsForAgent, 'userM
   toolPolicy: Omit<OfficialPluginAgentToolPolicyOptions, 'skillAllowedTools'>;
   match?: AutoSkillMatchOptions;
   userMessagePrefix?: string;
+  strategy?: 'react';
+};
+
+export type AutoSkillPlanExecuteRunOptions = Omit<
+  SkillPlanExecuteRunOptionsForAgent,
+  'userMessage' | 'allowedTools'
+> & {
+  skills: SkillDefinition[];
+  userInput: string;
+  toolPolicy: Omit<OfficialPluginAgentToolPolicyOptions, 'skillAllowedTools'>;
+  match?: AutoSkillMatchOptions;
+  userMessagePrefix?: string;
+  strategy: 'plan-execute';
 };
 
 export type AutoSkillAgentRunResult = SkillAgentRunResult & {
@@ -36,6 +53,16 @@ export type AutoSkillAgentRunResult = SkillAgentRunResult & {
   candidates: SkillMatchCandidate[];
   preflightToolPolicy: OfficialPluginAgentToolPolicy;
 };
+
+export type AutoSkillPlanExecuteRunResult = SkillPlanExecuteRunResult & {
+  autoPlan: SkillAutoExecutionPlan;
+  candidates: SkillMatchCandidate[];
+  preflightToolPolicy: OfficialPluginAgentToolPolicy;
+};
+
+export type AutoSkillStrategyRunOptions = AutoSkillAgentRunOptions | AutoSkillPlanExecuteRunOptions;
+
+export type AutoSkillStrategyRunResult = AutoSkillAgentRunResult | AutoSkillPlanExecuteRunResult;
 
 export class NoMatchingSkillError extends Error {
   readonly code = 'skill.no_matching_skill';
@@ -50,32 +77,38 @@ export class NoMatchingSkillError extends Error {
   }
 }
 
+export function runAutoSkillAgent(agent: SkillAgent, options: AutoSkillAgentRunOptions): Promise<AutoSkillAgentRunResult>;
+export function runAutoSkillAgent(
+  agent: SkillPlanExecuteAgent,
+  options: AutoSkillPlanExecuteRunOptions,
+): Promise<AutoSkillPlanExecuteRunResult>;
 export async function runAutoSkillAgent(
-  agent: SkillAgent,
-  options: AutoSkillAgentRunOptions,
-): Promise<AutoSkillAgentRunResult> {
+  agent: SkillAgent | SkillPlanExecuteAgent,
+  options: AutoSkillStrategyRunOptions,
+): Promise<AutoSkillStrategyRunResult> {
   const preflightToolPolicy = resolveOfficialPluginAgentTools(options.toolPolicy);
   const candidates = buildDiagnosticCandidates(options, preflightToolPolicy);
   const autoPlan = selectAutoSkillPlan(options, preflightToolPolicy, candidates);
-  const output = await runSkillAgent(agent, {
-    providerId: options.providerId,
-    model: options.model,
-    skillPlan: toSkillAgentPlan(autoPlan),
-    toolPolicy: options.toolPolicy,
-    ...(options.userMessagePrefix === undefined ? {} : { userMessagePrefix: options.userMessagePrefix }),
-    ...(options.usageMode === undefined ? {} : { usageMode: options.usageMode }),
-    ...(options.mode === undefined ? {} : { mode: options.mode }),
-    ...(options.maxIterations === undefined ? {} : { maxIterations: options.maxIterations }),
-    ...(options.tokenBudget === undefined ? {} : { tokenBudget: options.tokenBudget }),
-    ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens }),
-    ...(options.keepRecentMessages === undefined ? {} : { keepRecentMessages: options.keepRecentMessages }),
-    ...(options.maxToolResultChars === undefined ? {} : { maxToolResultChars: options.maxToolResultChars }),
-    ...(options.maxConsecutiveToolFailures === undefined
-      ? {}
-      : { maxConsecutiveToolFailures: options.maxConsecutiveToolFailures }),
-    ...(options.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: options.maxToolExecutionMs }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  });
+  if (options.strategy === 'plan-execute') {
+    const output = await runSkillAgent(agent as SkillPlanExecuteAgent, {
+      ...buildCommonSkillAgentOptions(options, autoPlan),
+      strategy: 'plan-execute',
+      ...(options.maxPlanSteps === undefined ? {} : { maxPlanSteps: options.maxPlanSteps }),
+      ...(options.stopOnStepFailure === undefined ? {} : { stopOnStepFailure: options.stopOnStepFailure }),
+      ...(options.initialPlan === undefined ? {} : { initialPlan: options.initialPlan }),
+      ...(options.initialExecutedSteps === undefined ? {} : { initialExecutedSteps: options.initialExecutedSteps }),
+      ...(options.initialTotalIterations === undefined ? {} : { initialTotalIterations: options.initialTotalIterations }),
+    });
+
+    return {
+      ...output,
+      autoPlan,
+      candidates,
+      preflightToolPolicy,
+    };
+  }
+
+  const output = await runSkillAgent(agent as SkillAgent, buildCommonSkillAgentOptions(options, autoPlan));
 
   return {
     ...output,
@@ -86,7 +119,7 @@ export async function runAutoSkillAgent(
 }
 
 export function selectAutoSkillPlan(
-  options: AutoSkillAgentRunOptions,
+  options: AutoSkillStrategyRunOptions,
   preflightToolPolicy = resolveOfficialPluginAgentTools(options.toolPolicy),
   candidates = buildDiagnosticCandidates(options, preflightToolPolicy),
 ): SkillAutoExecutionPlan {
@@ -110,7 +143,7 @@ export function selectAutoSkillPlan(
 }
 
 function buildDiagnosticCandidates(
-  options: AutoSkillAgentRunOptions,
+  options: AutoSkillStrategyRunOptions,
   preflightToolPolicy: OfficialPluginAgentToolPolicy,
 ): SkillMatchCandidate[] {
   return findMatchingSkills(options.skills, {
@@ -122,6 +155,35 @@ function buildDiagnosticCandidates(
     ...(options.match?.inferSignals === undefined ? {} : { inferSignals: options.match.inferSignals }),
     ...(options.match?.minScore === undefined ? {} : { minScore: options.match.minScore }),
   });
+}
+
+function buildCommonSkillAgentOptions(
+  options: AutoSkillStrategyRunOptions,
+  autoPlan: SkillAutoExecutionPlan,
+): Omit<SkillAgentRunOptions, 'strategy'> {
+  return {
+    providerId: options.providerId,
+    model: options.model,
+    skillPlan: toSkillAgentPlan(autoPlan),
+    toolPolicy: options.toolPolicy,
+    ...(options.userMessagePrefix === undefined ? {} : { userMessagePrefix: options.userMessagePrefix }),
+    ...(options.initialSession === undefined ? {} : { initialSession: options.initialSession }),
+    ...(options.initialIteration === undefined ? {} : { initialIteration: options.initialIteration }),
+    ...(options.usageMode === undefined ? {} : { usageMode: options.usageMode }),
+    ...(options.mode === undefined ? {} : { mode: options.mode }),
+    ...(options.maxIterations === undefined ? {} : { maxIterations: options.maxIterations }),
+    ...(options.tokenBudget === undefined ? {} : { tokenBudget: options.tokenBudget }),
+    ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens }),
+    ...(options.keepRecentMessages === undefined ? {} : { keepRecentMessages: options.keepRecentMessages }),
+    ...(options.maxToolResultChars === undefined ? {} : { maxToolResultChars: options.maxToolResultChars }),
+    ...(options.maxConsecutiveToolFailures === undefined
+      ? {}
+      : { maxConsecutiveToolFailures: options.maxConsecutiveToolFailures }),
+    ...(options.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: options.maxToolExecutionMs }),
+    ...(options.taskSafety === undefined ? {} : { taskSafety: options.taskSafety }),
+    ...(options.outputSafety === undefined ? {} : { outputSafety: options.outputSafety }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  };
 }
 
 function toSkillAgentPlan(autoPlan: SkillAutoExecutionPlan): SkillAgentPlan {

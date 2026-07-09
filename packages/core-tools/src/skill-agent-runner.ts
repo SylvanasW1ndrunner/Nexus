@@ -1,4 +1,10 @@
-import type { AgentRunOptions, AgentRunResult } from '@dbagent/core-agent';
+import type {
+  AgentPlanExecuteOptions,
+  AgentPlanExecuteResult,
+  AgentRunOptions,
+  AgentRunResult,
+  AgentStrategy,
+} from '@dbagent/core-agent';
 import {
   resolveOfficialPluginAgentTools,
   type OfficialPluginAgentToolPolicy,
@@ -23,33 +29,113 @@ export type SkillAgentRunOptionsForAgent = AgentRunOptions & {
   maxToolExecutionMs?: number;
 };
 
+export type SkillPlanExecuteRunOptionsForAgent = AgentPlanExecuteOptions & {
+  maxConsecutiveToolFailures?: number;
+  maxToolExecutionMs?: number;
+};
+
 export type SkillAgent = {
   run(options: SkillAgentRunOptionsForAgent): Promise<AgentRunResult>;
 };
+
+export type SkillPlanExecuteAgent = {
+  run(options: SkillPlanExecuteRunOptionsForAgent): Promise<AgentPlanExecuteResult>;
+};
+
+export type SkillAgentRunStrategy = AgentStrategy;
 
 export type SkillAgentRunOptions = Omit<SkillAgentRunOptionsForAgent, 'userMessage' | 'allowedTools'> & {
   skillPlan: SkillAgentPlan;
   toolPolicy: Omit<OfficialPluginAgentToolPolicyOptions, 'skillAllowedTools'>;
   userMessagePrefix?: string;
+  strategy?: 'react';
+};
+
+export type SkillPlanExecuteRunOptions = Omit<SkillPlanExecuteRunOptionsForAgent, 'userMessage' | 'allowedTools'> & {
+  skillPlan: SkillAgentPlan;
+  toolPolicy: Omit<OfficialPluginAgentToolPolicyOptions, 'skillAllowedTools'>;
+  userMessagePrefix?: string;
+  strategy: 'plan-execute';
 };
 
 export type SkillAgentRunResult = {
+  strategy: 'react';
   result: AgentRunResult;
   toolPolicy: OfficialPluginAgentToolPolicy;
   renderedUserMessage: string;
 };
 
-export async function runSkillAgent(agent: SkillAgent, options: SkillAgentRunOptions): Promise<SkillAgentRunResult> {
+export type SkillPlanExecuteRunResult = {
+  strategy: 'plan-execute';
+  result: AgentPlanExecuteResult;
+  toolPolicy: OfficialPluginAgentToolPolicy;
+  renderedUserMessage: string;
+};
+
+export type SkillAgentStrategyRunOptions = SkillAgentRunOptions | SkillPlanExecuteRunOptions;
+
+export type SkillAgentStrategyRunResult = SkillAgentRunResult | SkillPlanExecuteRunResult;
+
+export function runSkillAgent(agent: SkillAgent, options: SkillAgentRunOptions): Promise<SkillAgentRunResult>;
+export function runSkillAgent(
+  agent: SkillPlanExecuteAgent,
+  options: SkillPlanExecuteRunOptions,
+): Promise<SkillPlanExecuteRunResult>;
+export async function runSkillAgent(
+  agent: SkillAgent | SkillPlanExecuteAgent,
+  options: SkillAgentStrategyRunOptions,
+): Promise<SkillAgentStrategyRunResult> {
   const toolPolicy = resolveOfficialPluginAgentTools({
     ...options.toolPolicy,
     skillAllowedTools: options.skillPlan.allowedTools,
   });
   const renderedUserMessage = renderSkillAgentUserMessage(options.skillPlan, options.userMessagePrefix);
-  const agentRunOptions: SkillAgentRunOptionsForAgent = {
+  if (options.strategy === 'plan-execute') {
+    const agentRunOptions: SkillPlanExecuteRunOptionsForAgent = {
+      ...buildCommonAgentRunOptions(options, renderedUserMessage, toolPolicy.agentAllowedToolNames),
+      ...(options.maxPlanSteps === undefined ? {} : { maxPlanSteps: options.maxPlanSteps }),
+      ...(options.stopOnStepFailure === undefined ? {} : { stopOnStepFailure: options.stopOnStepFailure }),
+      ...(options.initialPlan === undefined ? {} : { initialPlan: options.initialPlan }),
+      ...(options.initialExecutedSteps === undefined ? {} : { initialExecutedSteps: options.initialExecutedSteps }),
+      ...(options.initialTotalIterations === undefined ? {} : { initialTotalIterations: options.initialTotalIterations }),
+    };
+    const result = await (agent as SkillPlanExecuteAgent).run(agentRunOptions);
+
+    return {
+      strategy: 'plan-execute',
+      result,
+      toolPolicy,
+      renderedUserMessage,
+    };
+  }
+
+  const agentRunOptions: SkillAgentRunOptionsForAgent = buildCommonAgentRunOptions(
+    options,
+    renderedUserMessage,
+    toolPolicy.agentAllowedToolNames,
+  );
+  const result = await (agent as SkillAgent).run(agentRunOptions);
+
+  return {
+    strategy: 'react',
+    result,
+    toolPolicy,
+    renderedUserMessage,
+  };
+}
+
+function buildCommonAgentRunOptions(
+  options: SkillAgentStrategyRunOptions,
+  renderedUserMessage: string,
+  allowedTools: string[],
+): SkillAgentRunOptionsForAgent {
+  return {
     providerId: options.providerId,
     model: options.model,
     userMessage: renderedUserMessage,
-    allowedTools: toolPolicy.agentAllowedToolNames,
+    allowedTools,
+    ...(options.initialSession === undefined ? {} : { initialSession: options.initialSession }),
+    ...(options.initialIteration === undefined ? {} : { initialIteration: options.initialIteration }),
     ...(options.usageMode === undefined ? {} : { usageMode: options.usageMode }),
     ...(options.mode === undefined ? {} : { mode: options.mode }),
     ...(options.maxIterations === undefined ? {} : { maxIterations: options.maxIterations }),
@@ -61,14 +147,9 @@ export async function runSkillAgent(agent: SkillAgent, options: SkillAgentRunOpt
       ? {}
       : { maxConsecutiveToolFailures: options.maxConsecutiveToolFailures }),
     ...(options.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: options.maxToolExecutionMs }),
+    ...(options.taskSafety === undefined ? {} : { taskSafety: options.taskSafety }),
+    ...(options.outputSafety === undefined ? {} : { outputSafety: options.outputSafety }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
-  };
-  const result = await agent.run(agentRunOptions);
-
-  return {
-    result,
-    toolPolicy,
-    renderedUserMessage,
   };
 }
 
