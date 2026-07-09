@@ -1,4 +1,6 @@
 import type {
+  AgentPlanExecutionSnapshot,
+  AgentPlanRecoveryPlan,
   AgentSession,
   AgentSessionExportFormat,
   AgentSessionListFilter,
@@ -55,6 +57,16 @@ type AgentStreamHistoryReader = {
   listRecoverable(): Promise<AgentStreamRecord[]>;
 };
 
+type AgentPlanExecutionReader = {
+  listBySession(sessionId: string): Promise<AgentPlanExecutionSnapshot[]>;
+  load(planId: string): Promise<AgentPlanExecutionSnapshot | undefined>;
+  listRecoverable(): Promise<AgentPlanExecutionSnapshot[]>;
+};
+
+type AgentPlanRecoveryReader = {
+  listRecoverablePlans(): Promise<AgentPlanRecoveryPlan[]>;
+};
+
 export type AgentToolBootstrapDependencies = {
   registry: ToolRegistry;
   connections: ConnectionReader;
@@ -65,6 +77,8 @@ export type AgentToolBootstrapDependencies = {
   scriptRunner?: WorkspaceScriptRunner;
   agentSessions?: AgentSessionHistoryReader;
   agentStreams?: AgentStreamHistoryReader;
+  agentPlans?: AgentPlanExecutionReader;
+  agentPlanRecovery?: AgentPlanRecoveryReader;
 };
 
 export type DesktopAgentToolRegistration = {
@@ -123,6 +137,13 @@ function registerAgentHistoryTools(dependencies: AgentToolBootstrapDependencies)
   }
   if (dependencies.agentStreams) {
     registerAgentStreamHistoryTools(dependencies.registry, dependencies.agentStreams);
+  }
+  if (dependencies.agentPlans || dependencies.agentPlanRecovery) {
+    registerAgentPlanHistoryTools(
+      dependencies.registry,
+      dependencies.agentPlans,
+      dependencies.agentPlanRecovery,
+    );
   }
 }
 
@@ -217,6 +238,109 @@ function registerAgentSessionHistoryTools(
         truncated,
         content: truncated ? content.slice(0, maxChars) : content,
       };
+    },
+  );
+}
+
+function registerAgentPlanHistoryTools(
+  registry: ToolRegistry,
+  plans: AgentPlanExecutionReader | undefined,
+  recovery: AgentPlanRecoveryReader | undefined,
+): void {
+  if (recovery) {
+    registry.register(
+      {
+        name: 'list_recoverable_agent_plans',
+        description:
+          'List recoverable Plan & Execute tasks that were interrupted before completion.',
+        inputSchema: objectSchema({
+          sessionId: { type: 'string' },
+          query: { type: 'string' },
+          limit: { type: 'number' },
+        }),
+        dangerLevel: 'safe',
+        readonly: true,
+        source: 'official',
+        sourceId: 'official.agent-plan-recovery',
+        originalName: 'list_recoverable_agent_plans',
+      },
+      async (args) => {
+        const sessionId = optionalTrimmedString(args, 'sessionId');
+        const query = optionalTrimmedString(args, 'query')?.toLowerCase();
+        const limit = optionalBoundedInteger(args, 'limit', 20, 1, 100);
+        const recoverablePlans = await recovery.listRecoverablePlans();
+        return {
+          plans: recoverablePlans
+            .filter((plan) => sessionId === undefined || plan.sessionId === sessionId)
+            .filter((plan) => {
+              if (query === undefined) return true;
+              return [
+                plan.title,
+                plan.goal,
+                plan.interruptedStepTitle,
+                plan.lastResultText,
+                plan.lastToolError,
+              ]
+                .filter(Boolean)
+                .join('\n')
+                .toLowerCase()
+                .includes(query);
+            })
+            .slice(0, limit),
+        };
+      },
+    );
+  }
+
+  if (!plans) return;
+
+  registry.register(
+    {
+      name: 'list_agent_plan_executions',
+      description:
+        'List Plan & Execute snapshots for one Agent session, including completed, failed, and recoverable plans.',
+      inputSchema: objectSchema({
+        sessionId: { type: 'string' },
+        limit: { type: 'number' },
+      }),
+      dangerLevel: 'safe',
+      readonly: true,
+      source: 'official',
+      sourceId: 'official.agent-plan-recovery',
+      originalName: 'list_agent_plan_executions',
+    },
+    async (args) => {
+      const sessionId = requireString(args, 'sessionId');
+      const limit = optionalBoundedInteger(args, 'limit', 20, 1, 100);
+      return {
+        plans: (await plans.listBySession(sessionId)).slice(0, limit).map(planExecutionSummary),
+      };
+    },
+  );
+
+  registry.register(
+    {
+      name: 'read_agent_plan_execution',
+      description:
+        'Read a persisted Plan & Execute snapshot with bounded final text and recent tool execution evidence.',
+      inputSchema: objectSchema({
+        planId: { type: 'string' },
+        maxToolExecutions: { type: 'number' },
+        maxFinalTextChars: { type: 'number' },
+        includeSessionMessages: { type: 'boolean' },
+        maxSessionMessages: { type: 'number' },
+      }),
+      dangerLevel: 'safe',
+      readonly: true,
+      source: 'official',
+      sourceId: 'official.agent-plan-recovery',
+      originalName: 'read_agent_plan_execution',
+    },
+    async (args) => {
+      const planId = requireString(args, 'planId');
+      const snapshot = await plans.load(planId);
+      if (!snapshot) throw new Error(`Agent plan execution not found: ${planId}`);
+      return planExecutionDetail(snapshot, args);
     },
   );
 }
@@ -444,6 +568,134 @@ function buildSessionListFilter(args: Record<string, unknown>): AgentSessionList
     ...(query === undefined ? {} : { query }),
     limit: optionalBoundedInteger(args, 'limit', 20, 1, 100),
     offset: optionalBoundedInteger(args, 'offset', 0, 0, 10_000),
+  };
+}
+
+function planExecutionSummary(snapshot: AgentPlanExecutionSnapshot): {
+  planId: string;
+  status: AgentPlanExecutionSnapshot['status'];
+  title: string;
+  goal: string;
+  sessionId?: string;
+  completedStepCount: number;
+  failedStepCount: number;
+  skippedStepCount: number;
+  pendingStepCount: number;
+  runningStepCount: number;
+  executedSteps: number;
+  totalIterations: number;
+  toolExecutionCount: number;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  errorMessage?: string;
+} {
+  return {
+    planId: snapshot.planId,
+    status: snapshot.status,
+    title: snapshot.plan.title,
+    goal: snapshot.plan.goal,
+    ...(snapshot.session?.id === undefined ? {} : { sessionId: snapshot.session.id }),
+    completedStepCount: snapshot.plan.steps.filter((step) => step.status === 'done').length,
+    failedStepCount: snapshot.plan.steps.filter((step) => step.status === 'failed').length,
+    skippedStepCount: snapshot.plan.steps.filter((step) => step.status === 'skipped').length,
+    pendingStepCount: snapshot.plan.steps.filter((step) => step.status === 'pending').length,
+    runningStepCount: snapshot.plan.steps.filter((step) => step.status === 'running').length,
+    executedSteps: snapshot.executedSteps,
+    totalIterations: snapshot.totalIterations,
+    toolExecutionCount: snapshot.toolExecutions.length,
+    createdAt: snapshot.createdAt,
+    updatedAt: snapshot.updatedAt,
+    ...(snapshot.finishedAt === undefined ? {} : { finishedAt: snapshot.finishedAt }),
+    ...(snapshot.errorMessage === undefined ? {} : { errorMessage: snapshot.errorMessage }),
+  };
+}
+
+function planExecutionDetail(
+  snapshot: AgentPlanExecutionSnapshot,
+  args: Record<string, unknown>,
+): ReturnType<typeof planExecutionSummary> & {
+  plan: AgentPlanExecutionSnapshot['plan'];
+  finalText: string;
+  finalTextCharCount: number;
+  finalTextTruncated: boolean;
+  returnedToolExecutionCount: number;
+  omittedToolExecutionCount: number;
+  toolExecutions: AgentPlanExecutionSnapshot['toolExecutions'];
+  contextCompression?: AgentPlanExecutionSnapshot['contextCompression'];
+  session?: {
+    id: string;
+    title: string;
+    mode: AgentSession['mode'];
+    strategy: AgentSession['strategy'];
+    messageCount: number;
+    tokenUsage: AgentSession['tokenUsage'];
+    aborted: boolean;
+    returnedMessageCount?: number;
+    omittedMessageCount?: number;
+    messages?: AgentSession['messages'];
+  };
+} {
+  const maxToolExecutions = optionalBoundedInteger(args, 'maxToolExecutions', 50, 1, 500);
+  const maxFinalTextChars = optionalBoundedInteger(args, 'maxFinalTextChars', 8_000, 1, 100_000);
+  const includeSessionMessages = optionalBoolean(args, 'includeSessionMessages') ?? false;
+  const maxSessionMessages = optionalBoundedInteger(args, 'maxSessionMessages', 50, 1, 500);
+  const finalTextTruncated = snapshot.finalText.length > maxFinalTextChars;
+  const toolExecutions = snapshot.toolExecutions.slice(
+    Math.max(0, snapshot.toolExecutions.length - maxToolExecutions),
+  );
+  return {
+    ...planExecutionSummary(snapshot),
+    plan: snapshot.plan,
+    finalText: finalTextTruncated
+      ? snapshot.finalText.slice(0, maxFinalTextChars)
+      : snapshot.finalText,
+    finalTextCharCount: snapshot.finalText.length,
+    finalTextTruncated,
+    returnedToolExecutionCount: toolExecutions.length,
+    omittedToolExecutionCount: snapshot.toolExecutions.length - toolExecutions.length,
+    toolExecutions,
+    ...(snapshot.contextCompression === undefined
+      ? {}
+      : { contextCompression: snapshot.contextCompression }),
+    ...(snapshot.session === undefined
+      ? {}
+      : { session: sessionSnapshot(snapshot.session, includeSessionMessages, maxSessionMessages) }),
+  };
+}
+
+function sessionSnapshot(
+  session: AgentSession,
+  includeMessages: boolean,
+  maxMessages: number,
+): {
+  id: string;
+  title: string;
+  mode: AgentSession['mode'];
+  strategy: AgentSession['strategy'];
+  messageCount: number;
+  tokenUsage: AgentSession['tokenUsage'];
+  aborted: boolean;
+  returnedMessageCount?: number;
+  omittedMessageCount?: number;
+  messages?: AgentSession['messages'];
+} {
+  const base = {
+    id: session.id,
+    title: session.title,
+    mode: session.mode,
+    strategy: session.strategy,
+    messageCount: session.messages.length,
+    tokenUsage: session.tokenUsage,
+    aborted: session.aborted,
+  };
+  if (!includeMessages) return base;
+  const messages = session.messages.slice(Math.max(0, session.messages.length - maxMessages));
+  return {
+    ...base,
+    returnedMessageCount: messages.length,
+    omittedMessageCount: session.messages.length - messages.length,
+    messages,
   };
 }
 

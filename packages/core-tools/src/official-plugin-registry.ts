@@ -40,6 +40,7 @@ export type OfficialPluginResourceScope =
   | 'mcp.server'
   | 'skill.source'
   | 'agent.session'
+  | 'agent.plan'
   | 'eval.report';
 export type OfficialPluginSecretKind =
   | 'database-password'
@@ -677,6 +678,64 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
         runtimeSources: ['workspace-script'],
         namePattern: '工作区脚本声明的工具名',
       },
+    ],
+  },
+  {
+    id: 'official.agent-plan-recovery',
+    name: 'Agent Plan Recovery',
+    version: '0.1.0',
+    publisher: 'DBAgent',
+    source: 'official',
+    category: 'agent',
+    description:
+      'Expose persisted Plan & Execute snapshots as readonly official tools for recovery review and audit.',
+    enabledByDefault: true,
+    capabilities: ['agent-plan-list', 'agent-plan-read', 'agent-plan-recovery'],
+    permissions: [
+      permission(
+        'agent.plan.read',
+        'Read Agent plan history',
+        'Read redacted local Plan & Execute snapshots and recovery metadata.',
+        'safe',
+        true,
+        {
+          resourceScopes: ['agent.plan', 'agent.session'],
+          approvalPolicy: 'never',
+          networkAccess: 'none',
+          processAccess: 'none',
+          secretKinds: ['none'],
+          auditLevel: 'metadata',
+        },
+      ),
+    ],
+    tools: [
+      tool(
+        'list_recoverable_agent_plans',
+        'List recoverable Agent plans',
+        'List interrupted Plan & Execute tasks that can be recovered.',
+        'safe',
+        true,
+        ['agent.plan.read'],
+        ['official'],
+      ),
+      tool(
+        'list_agent_plan_executions',
+        'List Agent plan executions',
+        'List Plan & Execute snapshots for one Agent session.',
+        'safe',
+        true,
+        ['agent.plan.read'],
+        ['official'],
+      ),
+      tool(
+        'read_agent_plan_execution',
+        'Read Agent plan execution',
+        'Read a persisted Plan & Execute snapshot with bounded evidence.',
+        'safe',
+        true,
+        ['agent.plan.read'],
+        ['official'],
+      ),
     ],
   },
   {

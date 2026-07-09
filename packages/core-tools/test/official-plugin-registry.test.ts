@@ -13,6 +13,7 @@ describe('OfficialPluginRegistry', () => {
     const registry = createDefaultOfficialPluginRegistry();
 
     expect(registry.list().map((plugin) => plugin.id)).toEqual([
+      'official.agent-plan-recovery',
       'official.agent-rag-eval',
       'official.agent-session-history',
       'official.database-postgres',
@@ -22,6 +23,9 @@ describe('OfficialPluginRegistry', () => {
       'official.workspace-python',
     ]);
     expect(registry.resolveToolContributions().toolNames).toEqual([
+      'list_recoverable_agent_plans',
+      'list_agent_plan_executions',
+      'read_agent_plan_execution',
       'list_agent_sessions',
       'read_agent_session',
       'export_agent_session',

@@ -3,9 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  AgentPlanExecutionStore,
   AgentSessionStore,
   AgentStreamStore,
+  PlanExecuteRecoveryService,
   ToolRegistry,
+  type AgentPlan,
   type AgentSession,
   type AgentToolContext,
 } from '@dbagent/core-agent';
@@ -389,6 +392,137 @@ describe('registerDesktopAgentTools', () => {
       ]),
     );
   });
+
+  it('exposes recoverable Plan & Execute snapshots as official readonly tools', async () => {
+    const registry = new ToolRegistry();
+    const planStore = new AgentPlanExecutionStore(await planStorePath());
+    const recoveryService = new PlanExecuteRecoveryService(planStore);
+    const plan = agentPlan('plan_refund_recovery', '退款异常分析');
+    plan.steps[0]!.status = 'done';
+    plan.steps[0]!.resultSummary = '已确认 orders 和 refunds 表关系';
+    plan.steps[1]!.status = 'running';
+    await planStore.save({
+      plan,
+      status: 'running',
+      session: agentSession('session_refund_recovery', '退款分析'),
+      finalText: '已完成 schema 检查，正在分析退款率。',
+      executedSteps: 1,
+      totalIterations: 3,
+      toolExecutions: [
+        {
+          toolCallId: 'call_schema',
+          toolName: 'search_schema',
+          status: 'success',
+          durationMs: 8,
+          resultPreview: 'orders, refunds',
+        },
+        {
+          toolCallId: 'call_refund',
+          toolName: 'query_database',
+          status: 'failed',
+          durationMs: 12,
+          resultPreview: 'relation refunds_2026 does not exist',
+          failureKind: 'sql_repairable',
+          retryable: true,
+        },
+      ],
+      now: '2026-07-09T11:00:00.000Z',
+    });
+
+    registerDesktopAgentTools({
+      registry,
+      connections: connectionReader([connectedConnection()]),
+      workspaceProjects: workspaceReader(),
+      driverForEngine: () => fakeDriver(),
+      agentPlans: planStore,
+      agentPlanRecovery: recoveryService,
+    });
+
+    await expect(
+      registry
+        .get('list_recoverable_agent_plans')
+        ?.handler({ query: '退款', limit: 5 }, toolContext()),
+    ).resolves.toMatchObject({
+      plans: [
+        {
+          planId: 'plan_refund_recovery',
+          sessionId: 'session_refund_recovery',
+          completedStepCount: 1,
+          pendingStepCount: 1,
+          actions: ['continue', 'restart', 'abandon'],
+        },
+      ],
+    });
+    await expect(
+      registry
+        .get('list_agent_plan_executions')
+        ?.handler({ sessionId: 'session_refund_recovery', limit: 5 }, toolContext()),
+    ).resolves.toMatchObject({
+      plans: [
+        {
+          planId: 'plan_refund_recovery',
+          status: 'running',
+          completedStepCount: 1,
+          runningStepCount: 1,
+          toolExecutionCount: 2,
+        },
+      ],
+    });
+    await expect(
+      registry.get('read_agent_plan_execution')?.handler(
+        {
+          planId: 'plan_refund_recovery',
+          maxToolExecutions: 1,
+          maxFinalTextChars: 8,
+          includeSessionMessages: true,
+          maxSessionMessages: 1,
+        },
+        toolContext(),
+      ),
+    ).resolves.toMatchObject({
+      planId: 'plan_refund_recovery',
+      finalText: '已完成 sche',
+      finalTextTruncated: true,
+      returnedToolExecutionCount: 1,
+      omittedToolExecutionCount: 1,
+      toolExecutions: [{ toolName: 'query_database', status: 'failed' }],
+      session: {
+        id: 'session_refund_recovery',
+        returnedMessageCount: 1,
+        omittedMessageCount: 2,
+        messages: [{ role: 'tool' }],
+      },
+    });
+
+    const policy = resolveOfficialPluginAgentTools({
+      toolRegistry: registry,
+      readonlyOnly: true,
+      skillAllowedTools: [
+        'list_recoverable_agent_plans',
+        'list_agent_plan_executions',
+        'read_agent_plan_execution',
+      ],
+    });
+    expect(policy.agentAllowedToolNames.sort()).toEqual([
+      'list_agent_plan_executions',
+      'list_recoverable_agent_plans',
+      'read_agent_plan_execution',
+    ]);
+    expect(policy.toolPermissions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: 'read_agent_plan_execution',
+          pluginId: 'official.agent-plan-recovery',
+          permissions: [
+            expect.objectContaining({
+              id: 'agent.plan.read',
+              resourceScopes: ['agent.plan', 'agent.session'],
+            }),
+          ],
+        }),
+      ]),
+    );
+  });
 });
 
 function connectionReader(connections: SavedConnection[]) {
@@ -460,6 +594,37 @@ async function streamStorePath(): Promise<string> {
   const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-stream-tools-'));
   tempDirs.push(rootPath);
   return join(rootPath, 'agent-streams.json');
+}
+
+async function planStorePath(): Promise<string> {
+  const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-plan-tools-'));
+  tempDirs.push(rootPath);
+  return join(rootPath, 'agent-plan-executions.json');
+}
+
+function agentPlan(id: string, title: string): AgentPlan {
+  return {
+    id,
+    title,
+    goal: '定位退款异常并给出业务解释。',
+    createdAt: '2026-07-09T10:59:00.000Z',
+    plannerModelText: 'Plan refund analysis.',
+    steps: [
+      {
+        id: 'step_schema',
+        title: '检查订单和退款表',
+        instruction: '使用 Schema RAG 查找订单和退款相关表。',
+        status: 'pending',
+      },
+      {
+        id: 'step_query',
+        title: '查询退款率',
+        instruction: '执行只读 SQL 计算退款率。',
+        status: 'pending',
+        dependsOn: ['step_schema'],
+      },
+    ],
+  };
 }
 
 function agentSession(id: string, title: string): AgentSession {

@@ -114,6 +114,8 @@ const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
 const agentSessionStore = new AgentSessionStore(agentSessionPath);
 const agentStreamStore = new AgentStreamStore(agentStreamPath);
+const agentPlanExecutionStore = new AgentPlanExecutionStore(agentPlanExecutionPath);
+const planExecuteRecoveryService = new PlanExecuteRecoveryService(agentPlanExecutionStore);
 const desktopAgentTools = registerDesktopAgentTools({
   registry: agentToolRegistry,
   connections: connectionStore,
@@ -122,17 +124,17 @@ const desktopAgentTools = registerDesktopAgentTools({
   rag: schemaRagEngine,
   agentSessions: agentSessionStore,
   agentStreams: agentStreamStore,
+  agentPlans: agentPlanExecutionStore,
+  agentPlanRecovery: planExecuteRecoveryService,
 });
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
   sessionStore: agentSessionStore,
   streamStore: agentStreamStore,
   auditLog: new DailyAgentAuditLogStore(logsDir),
 });
-const agentPlanExecutionStore = new AgentPlanExecutionStore(agentPlanExecutionPath);
 const planExecuteAgent = new PlanExecuteAgent(llmRouter, reactAgent, {
   planStore: agentPlanExecutionStore,
 });
-const planExecuteRecoveryService = new PlanExecuteRecoveryService(agentPlanExecutionStore);
 const headlessAgentService = new HeadlessAgentService({
   agent: reactAgent,
   planExecuteAgent,
