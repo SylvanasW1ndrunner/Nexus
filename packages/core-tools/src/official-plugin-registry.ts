@@ -540,6 +540,15 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
         ['schema-rag'],
       ),
       tool(
+        'get_schema_rag_startup_recovery',
+        '读取 Schema RAG 启动恢复摘要',
+        '读取本地 Schema RAG snapshot 启动恢复诊断，包括已恢复、缺失、损坏和失败项。',
+        'safe',
+        true,
+        ['rag.schema.read'],
+        ['schema-rag'],
+      ),
+      tool(
         'search_schema',
         '检索 Schema',
         '按业务问题检索 schema 文档。',

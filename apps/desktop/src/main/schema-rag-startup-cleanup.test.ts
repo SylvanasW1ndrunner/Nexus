@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { SchemaRagIndex, SchemaRagSnapshotCleanupResult, SchemaRagSnapshotSummary } from '@dbagent/core-rag';
-import { cleanupSchemaRagSnapshotsAtStartup, recoverSchemaRagSnapshotsAtStartup } from './schema-rag-startup-cleanup.js';
+import type {
+  SchemaRagRestoreAllResult,
+  SchemaRagSnapshotCleanupResult,
+  SchemaRagSnapshotSummary,
+} from '@dbagent/core-rag';
+import {
+  cleanupSchemaRagSnapshotsAtStartup,
+  recoverSchemaRagSnapshotsAtStartup,
+} from './schema-rag-startup-cleanup.js';
 
 describe('cleanupSchemaRagSnapshotsAtStartup', () => {
   it('cleans snapshots that do not belong to active connections and removes invalid snapshots by default', async () => {
@@ -16,13 +23,19 @@ describe('cleanupSchemaRagSnapshotsAtStartup', () => {
             activeConnectionIds: [...input.activeConnectionIds],
             ...(input.removeInvalid === undefined ? {} : { removeInvalid: input.removeInvalid }),
           });
-          return Promise.resolve(cleanupResult({
-            kept: [availableSnapshot('active-a')],
-            removed: [
-              { snapshotPath: 'inactive.schema-rag.json', reason: 'inactive_connection', connectionId: 'old-connection' },
-              { snapshotPath: 'invalid.schema-rag.json', reason: 'invalid_snapshot' },
-            ],
-          }));
+          return Promise.resolve(
+            cleanupResult({
+              kept: [availableSnapshot('active-a')],
+              removed: [
+                {
+                  snapshotPath: 'inactive.schema-rag.json',
+                  reason: 'inactive_connection',
+                  connectionId: 'old-connection',
+                },
+                { snapshotPath: 'invalid.schema-rag.json', reason: 'invalid_snapshot' },
+              ],
+            }),
+          );
         },
       },
     });
@@ -47,10 +60,12 @@ describe('cleanupSchemaRagSnapshotsAtStartup', () => {
         cleanupInactive: (input) => {
           expect([...input.activeConnectionIds]).toEqual(['active-a']);
           expect(input.removeInvalid).toBe(false);
-          return Promise.resolve(cleanupResult({
-            kept: [availableSnapshot('active-a'), invalidSnapshot('broken.schema-rag.json')],
-            removed: [],
-          }));
+          return Promise.resolve(
+            cleanupResult({
+              kept: [availableSnapshot('active-a'), invalidSnapshot('broken.schema-rag.json')],
+              removed: [],
+            }),
+          );
         },
       },
       removeInvalid: false,
@@ -85,8 +100,8 @@ describe('cleanupSchemaRagSnapshotsAtStartup', () => {
 });
 
 describe('recoverSchemaRagSnapshotsAtStartup', () => {
-  it('loads active connection snapshots into the shared Schema RAG engine after cleanup', async () => {
-    const loadedConnectionIds: string[] = [];
+  it('restores active connection snapshots through the shared progressive indexer after cleanup', async () => {
+    const restoreCalls: string[][] = [];
 
     const summary = await recoverSchemaRagSnapshotsAtStartup({
       connections: {
@@ -94,24 +109,28 @@ describe('recoverSchemaRagSnapshotsAtStartup', () => {
       },
       snapshots: {
         cleanupInactive: (input) =>
-          Promise.resolve(cleanupResult({
-            kept: [...input.activeConnectionIds].map((connectionId) => availableSnapshot(connectionId)),
-            removed: [],
-          })),
-        loadDetailed: (connectionId) => Promise.resolve({
-          status: 'loaded',
-          snapshotPath: `${connectionId}.schema-rag.json`,
-          index: schemaRagIndex(connectionId),
-        }),
+          Promise.resolve(
+            cleanupResult({
+              kept: [...input.activeConnectionIds].map((connectionId) =>
+                availableSnapshot(connectionId),
+              ),
+              removed: [],
+            }),
+          ),
       },
-      rag: {
-        loadIndex(index) {
-          loadedConnectionIds.push(index.connectionId);
+      indexer: {
+        restoreAll(input) {
+          restoreCalls.push([...(input?.connectionIds ?? [])]);
+          return Promise.resolve(
+            restoreAllResult({
+              restoredConnectionIds: ['active-a', 'active-b'],
+            }),
+          );
         },
       },
     });
 
-    expect(loadedConnectionIds).toEqual(['active-a', 'active-b']);
+    expect(restoreCalls).toEqual([['active-a', 'active-b']]);
     expect(summary).toMatchObject({
       activeConnectionCount: 2,
       keptCount: 2,
@@ -120,76 +139,69 @@ describe('recoverSchemaRagSnapshotsAtStartup', () => {
       invalidCount: 0,
       errorCount: 0,
       failedConnectionIds: [],
+      restoredConnectionIds: ['active-a', 'active-b'],
     });
   });
 
-  it('continues restoring other active snapshots when one active snapshot is missing or invalid', async () => {
-    const loadedConnectionIds: string[] = [];
-
+  it('continues startup when some snapshots are missing, invalid, or failed', async () => {
     const summary = await recoverSchemaRagSnapshotsAtStartup({
       connections: {
-        list: () => Promise.resolve([{ id: 'ready' }, { id: 'missing' }, { id: 'broken' }]),
+        list: () => Promise.resolve([{ id: 'ready' }, { id: 'missing' }, { id: 'failed' }]),
       },
       snapshots: {
         cleanupInactive: () => Promise.resolve(cleanupResult({ kept: [], removed: [] })),
-        loadDetailed: (connectionId) => {
-          if (connectionId === 'ready') {
-            return Promise.resolve({
-              status: 'loaded',
-              snapshotPath: 'ready.schema-rag.json',
-              index: schemaRagIndex('ready'),
-            });
-          }
-          if (connectionId === 'missing') {
-            return Promise.resolve({ status: 'missing', snapshotPath: 'missing.schema-rag.json' });
-          }
-          return Promise.resolve({
-            status: 'invalid',
-            snapshotPath: 'broken.schema-rag.json',
-            reason: 'Snapshot JSON is invalid.',
-          });
-        },
       },
-      rag: {
-        loadIndex(index) {
-          loadedConnectionIds.push(index.connectionId);
-        },
+      indexer: {
+        restoreAll: () =>
+          Promise.resolve(
+            restoreAllResult({
+              restoredConnectionIds: ['ready'],
+              invalidSnapshots: [
+                { snapshotPath: 'broken.schema-rag.json', reason: 'Snapshot JSON is invalid.' },
+              ],
+              failed: [
+                {
+                  connectionId: 'failed',
+                  snapshotPath: 'failed.schema-rag.json',
+                  error: 'disk read failed',
+                },
+              ],
+            }),
+          ),
       },
     });
 
-    expect(loadedConnectionIds).toEqual(['ready']);
     expect(summary).toMatchObject({
       loadedCount: 1,
       missingCount: 1,
       invalidCount: 1,
-      errorCount: 0,
-      failedConnectionIds: ['broken'],
+      errorCount: 1,
+      failedConnectionIds: ['failed'],
+      restoredConnectionIds: ['ready'],
+      invalidSnapshotPaths: ['broken.schema-rag.json'],
     });
   });
 
-  it('records cleanup failure but still attempts to hydrate active snapshots', async () => {
-    const loadedConnectionIds: string[] = [];
+  it('records cleanup failure but still attempts to restore active snapshots', async () => {
+    const restoreCalls: string[][] = [];
 
     const summary = await recoverSchemaRagSnapshotsAtStartup({
       connections: {
         list: () => Promise.resolve([{ id: 'active-a' }]),
       },
       snapshots: {
-        cleanupInactive: () => Promise.reject(new Error('snapshot directory is temporarily locked')),
-        loadDetailed: (connectionId) => Promise.resolve({
-          status: 'loaded',
-          snapshotPath: `${connectionId}.schema-rag.json`,
-          index: schemaRagIndex(connectionId),
-        }),
+        cleanupInactive: () =>
+          Promise.reject(new Error('snapshot directory is temporarily locked')),
       },
-      rag: {
-        loadIndex(index) {
-          loadedConnectionIds.push(index.connectionId);
+      indexer: {
+        restoreAll(input) {
+          restoreCalls.push([...(input?.connectionIds ?? [])]);
+          return Promise.resolve(restoreAllResult({ restoredConnectionIds: ['active-a'] }));
         },
       },
     });
 
-    expect(loadedConnectionIds).toEqual(['active-a']);
+    expect(restoreCalls).toEqual([['active-a']]);
     expect(summary).toMatchObject({
       activeConnectionCount: 1,
       loadedCount: 1,
@@ -225,12 +237,26 @@ function invalidSnapshot(snapshotPath: string): SchemaRagSnapshotSummary {
   };
 }
 
-function schemaRagIndex(connectionId: string): SchemaRagIndex {
+function restoreAllResult(input: {
+  restoredConnectionIds?: string[];
+  invalidSnapshots?: SchemaRagRestoreAllResult['invalidSnapshots'];
+  failed?: SchemaRagRestoreAllResult['failed'];
+}): SchemaRagRestoreAllResult {
   return {
-    connectionId,
-    documents: [],
-    graph: new Map(),
-    glossary: [],
-    indexedAt: '2026-07-08T00:00:00.000Z',
+    restored: (input.restoredConnectionIds ?? []).map((connectionId) => ({
+      connectionId,
+      stage: 'ready',
+      ready: true,
+      documentCount: 1,
+      tableCount: 1,
+      columnCount: 0,
+      relationCount: 0,
+      glossaryCount: 0,
+      indexedAt: '2026-07-08T00:00:00.000Z',
+      updatedAt: '2026-07-08T00:00:00.000Z',
+      stages: [],
+    })),
+    invalidSnapshots: input.invalidSnapshots ?? [],
+    failed: input.failed ?? [],
   };
 }

@@ -111,6 +111,48 @@ describe('registerDesktopAgentTools', () => {
     expect(routedEngines).toEqual(['postgres']);
   });
 
+  it('exposes the latest Schema RAG startup recovery summary as an official readonly tool', () => {
+    const registry = new ToolRegistry();
+
+    registerDesktopAgentTools({
+      registry,
+      connections: connectionReader([connectedConnection()]),
+      workspaceProjects: workspaceReader(),
+      driverForEngine: () => fakeDriver(),
+      schemaRagStartupRecovery: {
+        latestSummary: () => ({
+          activeConnectionCount: 2,
+          loadedCount: 1,
+          missingCount: 1,
+          invalidCount: 0,
+          errorCount: 0,
+          restoredConnectionIds: ['conn_desktop'],
+          failedConnectionIds: [],
+          invalidSnapshotPaths: [],
+        }),
+      },
+    });
+
+    expect(registry.get('get_schema_rag_startup_recovery')?.handler({}, toolContext())).toEqual({
+      available: true,
+      summary: {
+        activeConnectionCount: 2,
+        loadedCount: 1,
+        missingCount: 1,
+        invalidCount: 0,
+        errorCount: 0,
+        restoredConnectionIds: ['conn_desktop'],
+        failedConnectionIds: [],
+        invalidSnapshotPaths: [],
+      },
+    });
+    expect(registry.get('get_schema_rag_startup_recovery')).toMatchObject({
+      source: 'official',
+      sourceId: 'official.schema-rag',
+      readonly: true,
+    });
+  });
+
   it('rejects SQL tools when the requested connection is not currently connected', async () => {
     const registry = new ToolRegistry();
     const driver = fakeDriver();

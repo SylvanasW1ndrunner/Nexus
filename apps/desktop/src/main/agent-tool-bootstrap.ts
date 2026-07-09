@@ -78,6 +78,10 @@ type AgentCheckpointRecoveryReader = {
   listRecoverablePlans(): Promise<AgentRecoveryPlan[]>;
 };
 
+type SchemaRagStartupRecoveryReader = {
+  latestSummary(): object | undefined;
+};
+
 export type AgentToolBootstrapDependencies = {
   registry: ToolRegistry;
   connections: ConnectionReader;
@@ -92,6 +96,7 @@ export type AgentToolBootstrapDependencies = {
   agentPlanRecovery?: AgentPlanRecoveryReader;
   agentCheckpoints?: AgentCheckpointReader;
   agentCheckpointRecovery?: AgentCheckpointRecoveryReader;
+  schemaRagStartupRecovery?: SchemaRagStartupRecoveryReader;
 };
 
 export type DesktopAgentToolRegistration = {
@@ -165,6 +170,38 @@ function registerAgentHistoryTools(dependencies: AgentToolBootstrapDependencies)
       dependencies.agentCheckpointRecovery,
     );
   }
+  if (dependencies.schemaRagStartupRecovery) {
+    registerSchemaRagStartupRecoveryTools(
+      dependencies.registry,
+      dependencies.schemaRagStartupRecovery,
+    );
+  }
+}
+
+function registerSchemaRagStartupRecoveryTools(
+  registry: ToolRegistry,
+  startupRecovery: SchemaRagStartupRecoveryReader,
+): void {
+  registry.register(
+    {
+      name: 'get_schema_rag_startup_recovery',
+      description:
+        'Return the latest desktop startup Schema RAG snapshot recovery summary, including restored, missing, invalid, and failed snapshots.',
+      inputSchema: objectSchema({}),
+      dangerLevel: 'safe',
+      readonly: true,
+      source: 'official',
+      sourceId: 'official.schema-rag',
+      originalName: 'get_schema_rag_startup_recovery',
+    },
+    () => {
+      const summary = startupRecovery.latestSummary();
+      return {
+        available: summary !== undefined,
+        summary: summary ?? null,
+      };
+    },
+  );
 }
 
 function registerAgentSessionHistoryTools(

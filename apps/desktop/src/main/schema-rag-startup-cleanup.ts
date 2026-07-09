@@ -1,8 +1,4 @@
-import type {
-  SchemaRagIndex,
-  SchemaRagSnapshotCleanupResult,
-  SchemaRagSnapshotLoadResult,
-} from '@dbagent/core-rag';
+import type { SchemaRagRestoreAllResult, SchemaRagSnapshotCleanupResult } from '@dbagent/core-rag';
 
 type ConnectionListReader = {
   list(): Promise<Array<{ id: string }>>;
@@ -13,11 +9,10 @@ type SchemaRagSnapshotStoreLifecycle = {
     activeConnectionIds: Iterable<string>;
     removeInvalid?: boolean;
   }): Promise<SchemaRagSnapshotCleanupResult>;
-  loadDetailed(connectionId: string): Promise<SchemaRagSnapshotLoadResult>;
 };
 
-type SchemaRagIndexHydrator = {
-  loadIndex(index: SchemaRagIndex): unknown;
+type SchemaRagStartupRestorer = {
+  restoreAll(input?: { connectionIds?: Iterable<string> }): Promise<SchemaRagRestoreAllResult>;
 };
 
 export type SchemaRagStartupCleanupOptions = {
@@ -37,8 +32,8 @@ export type SchemaRagStartupCleanupSummary = {
 
 export type SchemaRagStartupRecoveryOptions = {
   connections: ConnectionListReader;
-  snapshots: SchemaRagSnapshotStoreLifecycle;
-  rag: SchemaRagIndexHydrator;
+  snapshots: Pick<SchemaRagSnapshotStoreLifecycle, 'cleanupInactive'>;
+  indexer: SchemaRagStartupRestorer;
   removeInvalid?: boolean;
 };
 
@@ -48,6 +43,8 @@ export type SchemaRagStartupRecoverySummary = SchemaRagStartupCleanupSummary & {
   invalidCount: number;
   errorCount: number;
   failedConnectionIds: string[];
+  restoredConnectionIds: string[];
+  invalidSnapshotPaths: string[];
   cleanupError?: string;
 };
 
@@ -88,25 +85,30 @@ export async function recoverSchemaRagSnapshotsAtStartup(
     invalidCount: 0,
     errorCount: 0,
     failedConnectionIds: [] as string[],
+    restoredConnectionIds: [] as string[],
+    invalidSnapshotPaths: [] as string[],
   };
 
-  for (const connection of connections) {
-    const result = await loadSnapshotForConnection(options, connection.id);
-    if (result.status === 'loaded') {
-      recovery.loadedCount += 1;
-      continue;
-    }
-    if (result.status === 'missing') {
-      recovery.missingCount += 1;
-      continue;
-    }
-    if (result.status === 'invalid') {
-      recovery.invalidCount += 1;
-      recovery.failedConnectionIds.push(connection.id);
-      continue;
-    }
-    recovery.errorCount += 1;
-    recovery.failedConnectionIds.push(connection.id);
+  try {
+    const restoreAll = await options.indexer.restoreAll({ connectionIds: activeConnectionIds });
+    recovery.loadedCount = restoreAll.restored.length;
+    recovery.restoredConnectionIds = restoreAll.restored
+      .map((status) => status.connectionId)
+      .sort();
+    recovery.invalidCount = restoreAll.invalidSnapshots.length;
+    recovery.invalidSnapshotPaths = restoreAll.invalidSnapshots
+      .map((snapshot) => snapshot.snapshotPath)
+      .sort();
+    recovery.errorCount = restoreAll.failed.length;
+    recovery.failedConnectionIds = restoreAll.failed
+      .map((failure) => failure.connectionId)
+      .filter((connectionId): connectionId is string => connectionId !== undefined)
+      .sort();
+    recovery.missingCount = countMissingConnections(activeConnectionIds, restoreAll);
+  } catch (error) {
+    recovery.errorCount = activeConnectionIds.length || 1;
+    recovery.failedConnectionIds = activeConnectionIds;
+    if (!cleanupError) cleanupError = errorMessage(error);
   }
 
   return {
@@ -114,28 +116,6 @@ export async function recoverSchemaRagSnapshotsAtStartup(
     ...recovery,
     ...(cleanupError ? { cleanupError } : {}),
   };
-}
-
-type LoadSnapshotForConnectionResult = {
-  status: 'loaded' | 'missing' | 'invalid' | 'error';
-};
-
-async function loadSnapshotForConnection(
-  options: Pick<SchemaRagStartupRecoveryOptions, 'snapshots' | 'rag'>,
-  connectionId: string,
-): Promise<LoadSnapshotForConnectionResult> {
-  try {
-    const result = await options.snapshots.loadDetailed(connectionId);
-    if (result.status === 'loaded') {
-      options.rag.loadIndex(result.index);
-      return { status: 'loaded' };
-    }
-    if (result.status === 'missing') return { status: 'missing' };
-    if (result.status === 'invalid') return { status: 'invalid' };
-    return { status: 'error' };
-  } catch {
-    return { status: 'error' };
-  }
 }
 
 function summarizeCleanup(
@@ -147,9 +127,24 @@ function summarizeCleanup(
     keptCount: cleanup.kept.length,
     invalidKeptCount: cleanup.kept.filter((summary) => summary.status === 'invalid').length,
     removedCount: cleanup.removed.length,
-    removedInactiveCount: cleanup.removed.filter((summary) => summary.reason === 'inactive_connection').length,
-    removedInvalidCount: cleanup.removed.filter((summary) => summary.reason === 'invalid_snapshot').length,
+    removedInactiveCount: cleanup.removed.filter(
+      (summary) => summary.reason === 'inactive_connection',
+    ).length,
+    removedInvalidCount: cleanup.removed.filter((summary) => summary.reason === 'invalid_snapshot')
+      .length,
   };
+}
+
+function countMissingConnections(
+  activeConnectionIds: string[],
+  restoreAll: SchemaRagRestoreAllResult,
+): number {
+  const knownConnectionIds = new Set<string>();
+  for (const status of restoreAll.restored) knownConnectionIds.add(status.connectionId);
+  for (const failure of restoreAll.failed) {
+    if (failure.connectionId) knownConnectionIds.add(failure.connectionId);
+  }
+  return activeConnectionIds.filter((connectionId) => !knownConnectionIds.has(connectionId)).length;
 }
 
 function emptyCleanupSummary(activeConnectionCount: number): SchemaRagStartupCleanupSummary {

@@ -36,7 +36,11 @@ import {
   ReactAgent,
   ToolRegistry,
 } from '@dbagent/core-agent';
-import { SchemaRagEngine, SchemaRagSnapshotStore } from '@dbagent/core-rag';
+import {
+  ProgressiveSchemaRagIndexer,
+  SchemaRagEngine,
+  SchemaRagSnapshotStore,
+} from '@dbagent/core-rag';
 import { SkillRegistry, registerDefaultBuiltinSkills } from '@dbagent/core-skills';
 import {
   ipcChannels,
@@ -63,7 +67,10 @@ import { HeadlessAgentService } from './agent-service.js';
 import { registerDesktopAgentTools } from './agent-tool-bootstrap.js';
 import { DailyAgentAuditLogStore } from './agent-audit-log.js';
 import { DesktopDiagnosticReportService } from './diagnostic-report-service.js';
-import { recoverSchemaRagSnapshotsAtStartup } from './schema-rag-startup-cleanup.js';
+import {
+  recoverSchemaRagSnapshotsAtStartup,
+  type SchemaRagStartupRecoverySummary,
+} from './schema-rag-startup-cleanup.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const userDataDir = app.getPath('userData');
@@ -112,9 +119,14 @@ const llmRouter = new LlmRouter(usageTracker);
 const databaseDrivers = createDefaultDatabaseDriverRegistry();
 const schemaRagEngine = new SchemaRagEngine();
 const schemaRagSnapshotStore = new SchemaRagSnapshotStore({ rootDir: schemaRagSnapshotDir });
+const schemaRagIndexer = new ProgressiveSchemaRagIndexer({
+  engine: schemaRagEngine,
+  snapshotStore: schemaRagSnapshotStore,
+});
 const agentToolRegistry = new ToolRegistry();
 const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
+let latestSchemaRagStartupRecovery: SchemaRagStartupRecoverySummary | undefined;
 const agentSessionStore = new AgentSessionStore(agentSessionPath);
 const agentStreamStore = new AgentStreamStore(agentStreamPath);
 const agentCheckpointStore = new AgentCheckpointStore(agentCheckpointPath);
@@ -133,6 +145,9 @@ const desktopAgentTools = registerDesktopAgentTools({
   agentPlanRecovery: planExecuteRecoveryService,
   agentCheckpoints: agentCheckpointStore,
   agentCheckpointRecovery: agentRecoveryService,
+  schemaRagStartupRecovery: {
+    latestSummary: () => latestSchemaRagStartupRecovery,
+  },
 });
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
   checkpointStore: agentCheckpointStore,
@@ -221,9 +236,10 @@ async function recoverStartupSchemaRagSnapshots(): Promise<void> {
     const summary = await recoverSchemaRagSnapshotsAtStartup({
       connections: connectionStore,
       snapshots: schemaRagSnapshotStore,
-      rag: schemaRagEngine,
+      indexer: schemaRagIndexer,
       removeInvalid: true,
     });
+    latestSchemaRagStartupRecovery = summary;
     if (
       summary.loadedCount > 0 ||
       summary.removedCount > 0 ||
