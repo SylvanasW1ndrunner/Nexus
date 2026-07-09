@@ -2,9 +2,9 @@
 
 ## 目标
 
-`AgentPlanRecoveryService` 是 Plan & Execute 快照之上的恢复编排层。它不执行工具、不接 UI、不绑定 Electron，只负责把 `AgentPlanExecutionStore` 中的 running 快照转换成可恢复计划，并在用户选择继续或放弃时调用上层 runner。
+`AgentPlanRecoveryService` 是 Plan & Execute 快照之上的恢复编排层。它不执行工具、不接 UI、不绑定 Electron，只负责把 `AgentPlanExecutionStore` 中的 running 快照转换成可恢复计划，并在用户选择继续、重启或放弃时调用上层 runner。
 
-为保持命名稳定，模块同时导出 `PlanExecuteRecoveryService` 作为别名；后续主进程或服务层可以优先使用该别名。
+为保持命名稳定，模块同时导出 `PlanExecuteRecoveryService` 作为别名；主进程或服务层可以优先使用该别名。
 
 ## 代码入口
 
@@ -13,6 +13,7 @@
   - `PlanExecuteRecoveryService`
   - `AgentPlanRecoveryPlan`
   - `ContinueAgentPlanRecoveryOptions`
+  - `RestartAgentPlanRecoveryOptions`
 - `packages/core-agent/src/plan-execute-store.ts`
   - `AgentPlanExecutionStore`
 - `packages/core-agent/test/plan-execute-recovery.test.ts`
@@ -32,24 +33,38 @@
 - `resumePrompt`
 - 可选动作：`continue`、`restart`、`abandon`
 
-其中 `restart` 只是给上层 UI/主进程的动作提示，不代表本服务已经实现 restart 编排。restart 后续应由上层重新发起一次新的 Plan & Execute run。
-
 ### `continue(planId, runner, options)`
 
 从 recoverable 快照恢复执行：
 
-- 从快照注入 `initialPlan`
-- 从快照注入 `initialSession`
-- 从快照注入 `initialExecutedSteps`
-- 从快照注入 `initialTotalIterations`
-- 如果调用方未指定 `mode`，则继承快照 session 的 mode
-- 如果调用方未指定 `userMessage`，则使用服务生成的 `resumePrompt`
+- 注入 `initialPlan`
+- 注入 `initialSession`
+- 注入 `initialExecutedSteps`
+- 注入 `initialTotalIterations`
+- 调用方未指定 `mode` 时继承快照 session 的 mode
+- 调用方未指定 `userMessage` 时使用服务生成的 `resumePrompt`
 
 当 runner 返回 `done` 时，服务把同一个 plan 快照更新为完成态，`listRecoverablePlans()` 不再返回它。
 
 当 runner 返回 `failed`、`aborted`、`planning_failed` 等非完成状态时，服务刷新原 running 快照的更新时间，但不覆盖原计划进度，确保启动后仍可恢复。
 
-当 runner 抛异常时，服务同样刷新原 running 快照并原样抛出错误，不把异常误写成完成态。
+当 runner 抛异常时，服务同样刷新原 running 快照并原样抛出错误，不把异常写成完成态。
+
+### `restart(planId, runner, options)`
+
+从 recoverable 快照重新开始执行：
+
+- 不注入旧 `initialPlan`
+- 不注入旧 `initialSession`
+- 不注入旧执行步数或 iteration
+- 调用方未指定 `mode` 时继承快照 session 的 mode
+- 调用方未指定 `userMessage` 时，服务生成重启 prompt，包含原始目标、旧步骤状态和旧工具摘要
+
+当 runner 返回 `done` 时，服务保存新 plan 的完成快照，并把旧 plan 标记为 abandoned。
+
+当 runner 返回 `failed`、`aborted`、`planning_failed` 等非完成状态时，服务保留旧 running 快照，不保存失败的新 plan 结果，避免用户失去原恢复点。
+
+当 runner 抛异常时，服务刷新原 running 快照并原样抛出错误。
 
 ### `abandon(planId, reason, now)`
 
@@ -65,7 +80,7 @@
 
 本切片不新增第三方依赖。
 
-- Temporal、BullMQ、LangGraph checkpoint 等方案适合更复杂的分布式工作流或图执行，但会引入额外运行时、队列/数据库依赖和打包成本。
+- Temporal、BullMQ、LangGraph checkpoint 等方案适合更复杂的分布式工作流或图执行，但会引入额外运行时、队列、数据库依赖和打包成本。
 - 当前 beta 阶段需要的是本地快照恢复服务，沿用 core-agent 自有 store/runner 抽象更轻，并能保证不把外部工作流类型泄漏到稳定合同。
 
 ## 测试覆盖
@@ -75,11 +90,12 @@
 - runner 返回 `done` 后清理 recoverable。
 - runner 返回 `failed`、`aborted`、`planning_failed` 时保留原 running 快照。
 - runner 抛异常时保留原 running 快照。
+- restart 成功时重新规划新 plan、保存新完成快照、旧快照 abandoned。
+- restart 失败时旧快照仍可恢复，失败的新计划不替换旧恢复点。
 - abandon running 快照。
-- resume prompt 和摘要不泄漏 secret。
+- resume prompt 和摘要不泄露 secret。
 
 ## 已知限制
 
-- `restart` 只是动作枚举，尚未有 core 层实现。
-- 当前不会保留续跑失败结果的独立历史，只刷新原 running 快照；详细失败证据由 runner 自身 checkpoint/audit 负责。
-- 当前未接入 desktop IPC 和最终 UI。
+- 当前不会保留 restart 失败结果的独立历史，只刷新原 running 快照；详细失败证据由 runner 自身 checkpoint/audit 负责。
+- desktop IPC 已接入 continue/restart/abandon，但最终 UI 仍处于冻结状态。

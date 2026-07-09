@@ -24,6 +24,8 @@ import type {
   AgentContinuePlanResponse,
   AgentPlanRecoverySummary,
   AgentRecoverablePlansResponse,
+  AgentRestartPlanRequest,
+  AgentRestartPlanResponse,
   AgentRunPlanSummary,
   AgentRunStrategy,
   AgentRunRequest,
@@ -39,7 +41,7 @@ import type {
 export type HeadlessAgentServiceDependencies = {
   agent: SkillAgent;
   planExecuteAgent?: SkillPlanExecuteAgent;
-  planRecoveryService?: Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'abandon'>;
+  planRecoveryService?: Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'>;
   toolRegistry: Pick<ToolRegistry, 'list'>;
   loadSkills: () => Promise<SkillDefinition[]> | SkillDefinition[];
   createRunId?: () => string;
@@ -234,6 +236,79 @@ export class HeadlessAgentService {
     }
   }
 
+  async restartPlan(request: AgentRestartPlanRequest): Promise<AgentRestartPlanResponse> {
+    const runId = request.runId?.trim() || this.createRunId();
+    const controller = new AbortController();
+    const toolPolicy = this.resolveToolPolicy(request);
+    this.activeRuns.set(runId, controller);
+
+    try {
+      const restarted = await this.requirePlanRecoveryService().restart(request.planId, this.requirePlanExecuteAgent(), {
+        providerId: request.providerId,
+        model: request.model,
+        ...(request.userMessage === undefined ? {} : { userMessage: request.userMessage }),
+        allowedTools: toolPolicy.agentAllowedToolNames,
+        ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
+        ...(request.mode === undefined ? {} : { mode: request.mode }),
+        ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
+        ...(request.maxPlanSteps === undefined ? {} : { maxPlanSteps: request.maxPlanSteps }),
+        ...(request.stopOnStepFailure === undefined ? {} : { stopOnStepFailure: request.stopOnStepFailure }),
+        ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
+        ...(request.contextWindowTokens === undefined ? {} : { contextWindowTokens: request.contextWindowTokens }),
+        ...(request.keepRecentMessages === undefined ? {} : { keepRecentMessages: request.keepRecentMessages }),
+        ...(request.maxToolResultChars === undefined ? {} : { maxToolResultChars: request.maxToolResultChars }),
+        ...(request.maxConsecutiveToolFailures === undefined
+          ? {}
+          : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
+        ...(request.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: request.maxToolExecutionMs }),
+        signal: controller.signal,
+      });
+
+      return {
+        runId,
+        strategy: 'plan-execute',
+        status: normalizeAgentStatus(restarted.result.status),
+        ...sessionIdPart(restarted.result),
+        finalText: restarted.result.finalText,
+        iterations: resultIterations(restarted.result),
+        ...planResultPart(restarted.result),
+        toolExecutions: restarted.result.toolExecutions,
+        toolPolicy: toSharedToolPolicy(toolPolicy),
+        candidates: [],
+        recoveryPlan: toSharedRecoveryPlan(restarted.plan),
+        abandonedSnapshot: restarted.abandonedSnapshot,
+      };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return {
+          runId,
+          strategy: 'plan-execute',
+          status: 'aborted',
+          finalText: 'Agent plan restart was aborted.',
+          iterations: 0,
+          toolExecutions: [],
+          toolPolicy: toSharedToolPolicy(toolPolicy),
+          candidates: [],
+          abandonedSnapshot: false,
+        };
+      }
+      return {
+        runId,
+        strategy: 'plan-execute',
+        status: 'failed',
+        finalText: 'Agent plan restart failed.',
+        iterations: 0,
+        toolExecutions: [],
+        toolPolicy: toSharedToolPolicy(toolPolicy),
+        candidates: [],
+        abandonedSnapshot: false,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      this.activeRuns.delete(runId);
+    }
+  }
+
   abort(request: AgentAbortRequest): AgentAbortResponse {
     const controller = this.activeRuns.get(request.runId);
     if (!controller) {
@@ -279,7 +354,7 @@ export class HeadlessAgentService {
     return this.dependencies.planExecuteAgent;
   }
 
-  private requirePlanRecoveryService(): Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'abandon'> {
+  private requirePlanRecoveryService(): Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'> {
     if (!this.dependencies.planRecoveryService) {
       throw new Error('Plan & Execute recovery service is not configured for the desktop Agent service.');
     }

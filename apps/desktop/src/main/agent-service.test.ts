@@ -386,6 +386,95 @@ describe('HeadlessAgentService', () => {
     });
   });
 
+  it('restarts a recoverable Plan & Execute snapshot through desktop service', async () => {
+    const planStore = new AgentPlanExecutionStore(await planStorePath());
+    await planStore.save({
+      plan: recoverablePlan('plan_restart_desktop'),
+      status: 'running',
+      session: testAgentSession('session_restart_desktop'),
+      finalText: 'schema inspected',
+      executedSteps: 1,
+      totalIterations: 1,
+      toolExecutions: [],
+      now: '2026-06-17T00:05:00.000Z',
+    });
+    const provider = scriptedProvider([
+      {
+        text: JSON.stringify({
+          title: 'Restarted GMV investigation',
+          steps: [
+            {
+              id: 'rerun_query',
+              title: 'Rerun GMV query',
+              instruction: 'Verify current GMV from scratch.',
+            },
+          ],
+        }),
+        toolCalls: [],
+      },
+      {
+        text: '',
+        toolCalls: [{ id: 'call_restart_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        usage: { promptTokens: 20, completionTokens: 4, totalTokens: 24 },
+      },
+      {
+        text: 'Restarted plan completed.',
+        toolCalls: [],
+        usage: { promptTokens: 24, completionTokens: 5, totalTokens: 29 },
+      },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      planStore,
+    });
+
+    const result = await service.restartPlan({
+      planId: 'plan_restart_desktop',
+      runId: 'run_restart_desktop',
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'readonly',
+      maxIterations: 2,
+      maxPlanSteps: 2,
+    });
+
+    expect(result).toMatchObject({
+      runId: 'run_restart_desktop',
+      strategy: 'plan-execute',
+      status: 'done',
+      finalText: 'Restarted plan completed.',
+      abandonedSnapshot: true,
+      recoveryPlan: { planId: 'plan_restart_desktop' },
+      plan: {
+        id: 'plan_agent_service',
+        title: 'Restarted GMV investigation',
+        steps: [{ id: 'rerun_query', status: 'done', runStatus: 'done' }],
+      },
+      toolExecutions: [{ toolCallId: 'call_restart_query', toolName: 'query_database', status: 'success' }],
+    });
+    expect(provider.requests).toHaveLength(3);
+    expect(provider.requests[0]?.tools).toBeUndefined();
+    expect(provider.requests[0]?.messages.at(-1)?.content).toContain('Restart the interrupted Plan & Execute task');
+    expect(provider.requests[1]?.tools?.map((tool) => tool.name)).toEqual([
+      'list_tables',
+      'describe_table',
+      'query_database',
+    ]);
+    await expect(service.listRecoverablePlans()).resolves.toEqual({ plans: [] });
+    await expect(planStore.load('plan_restart_desktop')).resolves.toMatchObject({
+      status: 'abandoned',
+      errorMessage: 'Restarted Plan & Execute task completed successfully.',
+    });
+    await expect(planStore.load('plan_agent_service')).resolves.toMatchObject({
+      status: 'done',
+      finalText: 'Restarted plan completed.',
+      executedSteps: 1,
+      totalIterations: 2,
+    });
+  });
+
   it('abandons a recoverable Plan & Execute snapshot through desktop service', async () => {
     const planStore = new AgentPlanExecutionStore(await planStorePath());
     await planStore.save({

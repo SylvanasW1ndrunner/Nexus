@@ -60,11 +60,21 @@ export type ContinueAgentPlanRecoveryOptions = Omit<
   now?: string;
 };
 
+export type RestartAgentPlanRecoveryOptions = Omit<
+  AgentPlanExecuteOptions,
+  'initialPlan' | 'initialSession' | 'initialExecutedSteps' | 'initialTotalIterations' | 'userMessage'
+> & {
+  userMessage?: string;
+  now?: string;
+};
+
 export type ContinueAgentPlanRecoveryResult = {
   plan: AgentPlanRecoveryPlan;
   result: AgentPlanExecuteResult;
   abandonedSnapshot: boolean;
 };
+
+export type RestartAgentPlanRecoveryResult = ContinueAgentPlanRecoveryResult;
 
 export class AgentPlanRecoveryService {
   constructor(private readonly store: AgentPlanRecoveryStore) {}
@@ -118,6 +128,46 @@ export class AgentPlanRecoveryService {
         contextCompression: result.contextCompression ?? [],
         ...(now === undefined ? {} : { now }),
       });
+      return { plan, result, abandonedSnapshot: true };
+    } catch (error) {
+      await this.refreshRecoverableSnapshot(snapshot, now);
+      throw error;
+    }
+  }
+
+  async restart(
+    planId: string,
+    runner: AgentPlanRecoveryRunner,
+    options: RestartAgentPlanRecoveryOptions,
+  ): Promise<RestartAgentPlanRecoveryResult> {
+    const { userMessage, now, ...runOptions } = options;
+    const snapshot = await this.findRecoverableSnapshot(planId);
+    const plan = buildRecoveryPlan(snapshot);
+    const restartMode = options.mode ?? snapshot.session?.mode;
+    try {
+      const result = await runner.run({
+        ...runOptions,
+        userMessage: userMessage ?? buildRestartPrompt(plan, snapshot.plan, snapshot.toolExecutions),
+        ...(restartMode === undefined ? {} : { mode: restartMode }),
+      });
+
+      if (!shouldSupersedeRecoverablePlan(result.status)) {
+        await this.refreshRecoverableSnapshot(snapshot, now);
+        return { plan, result, abandonedSnapshot: false };
+      }
+
+      await this.store.save({
+        plan: result.plan,
+        status: result.status,
+        ...(result.session === undefined ? {} : { session: result.session }),
+        finalText: result.finalText,
+        executedSteps: result.executedSteps,
+        totalIterations: result.totalIterations,
+        toolExecutions: result.toolExecutions,
+        contextCompression: result.contextCompression ?? [],
+        ...(now === undefined ? {} : { now }),
+      });
+      await this.store.markAbandoned(planId, 'Restarted Plan & Execute task completed successfully.', now);
       return { plan, result, abandonedSnapshot: true };
     } catch (error) {
       await this.refreshRecoverableSnapshot(snapshot, now);
@@ -221,6 +271,37 @@ function buildResumePrompt(
   ].join('\n');
 }
 
+function buildRestartPrompt(
+  recoveryPlan: AgentPlanRecoveryPlan,
+  plan: AgentPlan,
+  toolExecutions: AgentToolExecutionRecord[],
+): string {
+  const previousSteps = plan.steps
+    .map((step, index) => {
+      const result = step.resultSummary ? `; result summary: ${truncateForPrompt(step.resultSummary, 500)}` : '';
+      const failure = step.failureReason ? `; failure reason: ${truncateForPrompt(step.failureReason, 500)}` : '';
+      return `- ${index + 1}. ${step.title} / ${step.status}${result}${failure}`;
+    })
+    .join('\n');
+  const previousTools =
+    toolExecutions.length === 0
+      ? '- No completed tool calls before the interruption.'
+      : toolExecutions
+          .map((tool, index) => `${index + 1}. ${tool.toolName} / ${tool.status}: ${truncateForPrompt(tool.resultPreview, 600)}`)
+          .join('\n');
+  return [
+    'Restart the interrupted Plan & Execute task from a clean plan.',
+    `Original goal: ${recoveryPlan.goal}`,
+    'Use the previous interrupted work only as context. Do not assume previous steps are complete unless you verify them again.',
+    `Interrupted plan: ${recoveryPlan.title}`,
+    'Previous plan state:',
+    previousSteps || '- No previous plan steps.',
+    'Previous tool summary:',
+    previousTools,
+    'Requirement: create a fresh bounded plan, avoid repeating known mistakes, and continue with the current tool permissions.',
+  ].join('\n');
+}
+
 function lastFailedTool(toolExecutions: AgentToolExecutionRecord[]): AgentToolExecutionRecord | undefined {
   for (let index = toolExecutions.length - 1; index >= 0; index -= 1) {
     const record = toolExecutions[index];
@@ -242,4 +323,6 @@ export type {
   AgentPlanRecoveryStore as PlanExecuteRecoveryStore,
   ContinueAgentPlanRecoveryOptions as ContinuePlanExecuteRecoveryOptions,
   ContinueAgentPlanRecoveryResult as ContinuePlanExecuteRecoveryResult,
+  RestartAgentPlanRecoveryOptions as RestartPlanExecuteRecoveryOptions,
+  RestartAgentPlanRecoveryResult as RestartPlanExecuteRecoveryResult,
 };

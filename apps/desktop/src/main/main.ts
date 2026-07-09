@@ -396,6 +396,7 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.agent.abort, (request) => safeResult(() => Promise.resolve(headlessAgentService.abort(request))));
   handle(ipcChannels.agent.recoverablePlans, async () => safeResult(() => headlessAgentService.listRecoverablePlans()));
   handle(ipcChannels.agent.continuePlan, async (request) => safeResult(() => headlessAgentService.continuePlan(request)));
+  handle(ipcChannels.agent.restartPlan, async (request) => safeResult(() => headlessAgentService.restartPlan(request)));
   handle(ipcChannels.agent.abandonPlan, async (request) => safeResult(() => headlessAgentService.abandonPlan(request)));
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));

@@ -248,6 +248,95 @@ describe('AgentPlanRecoveryService', () => {
     ]);
   });
 
+  it('restarts a recoverable plan from the original goal and abandons the old snapshot after success', async () => {
+    const store = new AgentPlanExecutionStore(await storePath());
+    const recovery = new AgentPlanRecoveryService(store);
+    await store.save({
+      plan: recoveredPlan('plan_restart_success'),
+      status: 'running',
+      session: testSession('session_restart_success'),
+      finalText: 'schema inspected',
+      executedSteps: 1,
+      totalIterations: 3,
+      now: '2026-07-09T01:00:00.000Z',
+    });
+    const runner = scriptedPlanRunner([
+      successfulPlanResult(continuedPlan('plan_restart_new'), testSession('session_restart_new')),
+    ]);
+
+    const restarted = await recovery.restart('plan_restart_success', runner, {
+      providerId: 'fake',
+      model: 'fake-model',
+      allowedTools: ['query_database'],
+      now: '2026-07-09T01:30:00.000Z',
+    });
+
+    expect(restarted.result.status).toBe('done');
+    expect(restarted.abandonedSnapshot).toBe(true);
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]).toMatchObject({
+      providerId: 'fake',
+      model: 'fake-model',
+      allowedTools: ['query_database'],
+      mode: 'readonly',
+    });
+    expect(runner.calls[0]?.initialPlan).toBeUndefined();
+    expect(runner.calls[0]?.initialSession).toBeUndefined();
+    expect(runner.calls[0]?.initialExecutedSteps).toBeUndefined();
+    expect(runner.calls[0]?.initialTotalIterations).toBeUndefined();
+    expect(runner.calls[0]?.userMessage).toContain('Restart the interrupted Plan & Execute task from a clean plan.');
+    expect(runner.calls[0]?.userMessage).toContain('Original goal: Analyze refunds after crash.');
+    await expect(store.load('plan_restart_success')).resolves.toMatchObject({
+      status: 'abandoned',
+      errorMessage: 'Restarted Plan & Execute task completed successfully.',
+      finishedAt: '2026-07-09T01:30:00.000Z',
+    });
+    await expect(store.load('plan_restart_new')).resolves.toMatchObject({
+      status: 'done',
+      finalText: 'refund spike verified',
+      executedSteps: 2,
+      totalIterations: 5,
+    });
+    await expect(recovery.listRecoverablePlans()).resolves.toEqual([]);
+  });
+
+  it('keeps the original snapshot recoverable when restart returns a failed status', async () => {
+    const store = new AgentPlanExecutionStore(await storePath());
+    const recovery = new AgentPlanRecoveryService(store);
+    await store.save({
+      plan: recoveredPlan('plan_restart_failed'),
+      status: 'running',
+      session: testSession('session_restart_failed'),
+      finalText: 'schema inspected',
+      executedSteps: 1,
+      totalIterations: 3,
+      now: '2026-07-09T01:00:00.000Z',
+    });
+    const failedPlan = recoveredPlan('plan_restart_new_failed');
+    failedPlan.steps[0]!.status = 'failed';
+    const runner = scriptedPlanRunner([failedPlanResult(failedPlan, testSession('session_restart_new_failed'))]);
+
+    const restarted = await recovery.restart('plan_restart_failed', runner, {
+      providerId: 'fake',
+      model: 'fake-model',
+      now: '2026-07-09T01:35:00.000Z',
+    });
+
+    expect(restarted.result.status).toBe('failed');
+    expect(restarted.abandonedSnapshot).toBe(false);
+    await expect(store.load('plan_restart_failed')).resolves.toMatchObject({
+      status: 'running',
+      finalText: 'schema inspected',
+      executedSteps: 1,
+      totalIterations: 3,
+      updatedAt: '2026-07-09T01:35:00.000Z',
+    });
+    await expect(store.load('plan_restart_new_failed')).resolves.toBeUndefined();
+    await expect(recovery.listRecoverablePlans()).resolves.toMatchObject([
+      { planId: 'plan_restart_failed', executedSteps: 1, totalIterations: 3 },
+    ]);
+  });
+
   it('abandons a recoverable plan snapshot', async () => {
     const store = new AgentPlanExecutionStore(await storePath());
     const recovery = new AgentPlanRecoveryService(store);

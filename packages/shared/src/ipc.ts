@@ -92,6 +92,7 @@ export const ipcChannels = {
     abort: 'agent:abort',
     recoverablePlans: 'agent:recoverable-plans',
     continuePlan: 'agent:continue-plan',
+    restartPlan: 'agent:restart-plan',
     abandonPlan: 'agent:abandon-plan',
   },
   usage: {
@@ -750,6 +751,10 @@ export type AgentContinuePlanResponse = AgentRunResponse & {
   abandonedSnapshot: boolean;
 };
 
+export type AgentRestartPlanRequest = AgentContinuePlanRequest;
+
+export type AgentRestartPlanResponse = AgentContinuePlanResponse;
+
 export type AgentAbortRequest = {
   runId: string;
 };
@@ -923,6 +928,7 @@ export type IpcRequestMap = {
   'agent:abort': AgentAbortRequest;
   'agent:recoverable-plans': void;
   'agent:continue-plan': AgentContinuePlanRequest;
+  'agent:restart-plan': AgentRestartPlanRequest;
   'agent:abandon-plan': AgentAbandonPlanRequest;
   'usage:current-quota': void;
   'usage:history': { limit?: number };
@@ -991,6 +997,7 @@ export type IpcResponseMap = {
   'agent:abort': Result<AgentAbortResponse>;
   'agent:recoverable-plans': Result<AgentRecoverablePlansResponse>;
   'agent:continue-plan': Result<AgentContinuePlanResponse>;
+  'agent:restart-plan': Result<AgentRestartPlanResponse>;
   'agent:abandon-plan': Result<AgentAbandonPlanResponse>;
   'usage:current-quota': Result<UsageSnapshot>;
   'usage:history': Result<UsageSnapshot[]>;
