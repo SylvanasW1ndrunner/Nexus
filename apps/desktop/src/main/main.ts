@@ -147,6 +147,7 @@ const headlessAgentService = new HeadlessAgentService({
   agent: reactAgent,
   planExecuteAgent,
   planRecoveryService: planExecuteRecoveryService,
+  agentRecoveryService,
   sessionStore: agentSessionStore,
   streamStore: agentStreamStore,
   toolRegistry: agentToolRegistry,
@@ -545,6 +546,15 @@ function registerIpcHandlers(): void {
   );
   handle(ipcChannels.agent.abandonPlan, async (request) =>
     safeResult(() => headlessAgentService.abandonPlan(request)),
+  );
+  handle(ipcChannels.agent.recoverableCheckpoints, async () =>
+    safeResult(() => headlessAgentService.listRecoverableCheckpoints()),
+  );
+  handle(ipcChannels.agent.continueCheckpoint, async (request) =>
+    safeResult(() => headlessAgentService.continueCheckpoint(request)),
+  );
+  handle(ipcChannels.agent.abandonCheckpoint, async (request) =>
+    safeResult(() => headlessAgentService.abandonCheckpoint(request)),
   );
   handle(ipcChannels.agent.sessions, async (request) =>
     safeResult(() => headlessAgentService.listSessions(request ?? {})),

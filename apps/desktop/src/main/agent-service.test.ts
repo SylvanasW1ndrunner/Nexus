@@ -4,8 +4,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   AgentAuditLogStore,
+  AgentCheckpointStore,
   AgentPlanExecutionStore,
   AgentPlanRecoveryService,
+  AgentRecoveryService,
   AgentSessionStore,
   AgentStreamStore,
   createAgentSession,
@@ -47,10 +49,16 @@ describe('HeadlessAgentService', () => {
     });
 
     expect(provider.requests).toEqual([]);
-    expect(match.toolPolicy.allowedToolNames).toEqual(['list_tables', 'describe_table', 'query_database']);
+    expect(match.toolPolicy.allowedToolNames).toEqual([
+      'list_tables',
+      'describe_table',
+      'query_database',
+    ]);
     expect(match.selectedSkill?.skill.name).toBe('daily_gmv_report');
     expect(match.selectedSkill?.availableTools).toEqual(['query_database']);
-    expect(match.candidates.find((candidate) => candidate.skill.name === 'daily_gmv_report')).toMatchObject({
+    expect(
+      match.candidates.find((candidate) => candidate.skill.name === 'daily_gmv_report'),
+    ).toMatchObject({
       eligible: true,
       missingTools: [],
     });
@@ -60,7 +68,9 @@ describe('HeadlessAgentService', () => {
     const provider = scriptedProvider([
       {
         text: '',
-        toolCalls: [{ id: 'call_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        toolCalls: [
+          { id: 'call_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } },
+        ],
         usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14 },
       },
       {
@@ -114,7 +124,9 @@ describe('HeadlessAgentService', () => {
       },
       {
         text: '',
-        toolCalls: [{ id: 'call_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        toolCalls: [
+          { id: 'call_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } },
+        ],
         usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25 },
       },
       {
@@ -260,7 +272,13 @@ describe('HeadlessAgentService', () => {
     const provider = scriptedProvider([
       {
         text: '',
-        toolCalls: [{ id: 'call_query_after_recovery', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        toolCalls: [
+          {
+            id: 'call_query_after_recovery',
+            name: 'query_database',
+            arguments: { sql: 'select 100 as gmv' },
+          },
+        ],
         usage: { promptTokens: 20, completionTokens: 4, totalTokens: 24 },
       },
       {
@@ -303,7 +321,9 @@ describe('HeadlessAgentService', () => {
           { id: 'run_query', status: 'done', runStatus: 'done' },
         ],
       },
-      toolExecutions: [{ toolCallId: 'call_query_after_recovery', toolName: 'query_database', status: 'success' }],
+      toolExecutions: [
+        { toolCallId: 'call_query_after_recovery', toolName: 'query_database', status: 'success' },
+      ],
     });
     expect(provider.requests).toHaveLength(2);
     expect(provider.requests[0]?.tools?.map((tool) => tool.name)).toEqual([
@@ -311,7 +331,11 @@ describe('HeadlessAgentService', () => {
       'describe_table',
       'query_database',
     ]);
-    expect(result.toolPolicy.allowedToolNames).toEqual(['list_tables', 'describe_table', 'query_database']);
+    expect(result.toolPolicy.allowedToolNames).toEqual([
+      'list_tables',
+      'describe_table',
+      'query_database',
+    ]);
     await expect(service.listRecoverablePlans()).resolves.toEqual({ plans: [] });
     await expect(planStore.load('plan_continue_desktop')).resolves.toMatchObject({
       status: 'done',
@@ -343,7 +367,9 @@ describe('HeadlessAgentService', () => {
       },
       () => ({ ok: true }),
     );
-    const provider = scriptedProvider([{ text: '', toolCalls: [{ id: 'call_hidden', name: 'execute_sql', arguments: {} }] }]);
+    const provider = scriptedProvider([
+      { text: '', toolCalls: [{ id: 'call_hidden', name: 'execute_sql', arguments: {} }] },
+    ]);
     const service = await createService({
       provider,
       registry,
@@ -416,7 +442,13 @@ describe('HeadlessAgentService', () => {
       },
       {
         text: '',
-        toolCalls: [{ id: 'call_restart_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        toolCalls: [
+          {
+            id: 'call_restart_query',
+            name: 'query_database',
+            arguments: { sql: 'select 100 as gmv' },
+          },
+        ],
         usage: { promptTokens: 20, completionTokens: 4, totalTokens: 24 },
       },
       {
@@ -454,11 +486,15 @@ describe('HeadlessAgentService', () => {
         title: 'Restarted GMV investigation',
         steps: [{ id: 'rerun_query', status: 'done', runStatus: 'done' }],
       },
-      toolExecutions: [{ toolCallId: 'call_restart_query', toolName: 'query_database', status: 'success' }],
+      toolExecutions: [
+        { toolCallId: 'call_restart_query', toolName: 'query_database', status: 'success' },
+      ],
     });
     expect(provider.requests).toHaveLength(3);
     expect(provider.requests[0]?.tools).toBeUndefined();
-    expect(provider.requests[0]?.messages.at(-1)?.content).toContain('Restart the interrupted Plan & Execute task');
+    expect(provider.requests[0]?.messages.at(-1)?.content).toContain(
+      'Restart the interrupted Plan & Execute task',
+    );
     expect(provider.requests[1]?.tools?.map((tool) => tool.name)).toEqual([
       'list_tables',
       'describe_table',
@@ -493,7 +529,10 @@ describe('HeadlessAgentService', () => {
     });
 
     await expect(
-      service.abandonPlan({ planId: 'plan_abandon_desktop', reason: 'user chose to discard stale work' }),
+      service.abandonPlan({
+        planId: 'plan_abandon_desktop',
+        reason: 'user chose to discard stale work',
+      }),
     ).resolves.toEqual({
       planId: 'plan_abandon_desktop',
       abandoned: true,
@@ -506,12 +545,169 @@ describe('HeadlessAgentService', () => {
     });
   });
 
+  it('lists recoverable ReAct checkpoints through desktop service', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointStorePath());
+    await checkpointStore.save({
+      session: interruptedReactSession('session_checkpoint_list'),
+      iteration: 2,
+      status: 'running',
+      toolExecutions: [
+        {
+          toolCallId: 'call_orders',
+          toolName: 'query_database',
+          status: 'success',
+          durationMs: 12,
+          resultPreview: '{"rows":[{"order_count":42}]}',
+        },
+      ],
+      now: '2026-06-17T00:06:00.000Z',
+    });
+    const service = await createService({
+      provider: scriptedProvider([]),
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      checkpointStore,
+    });
+
+    const result = await service.listRecoverableCheckpoints();
+
+    expect(result.checkpoints).toMatchObject([
+      {
+        sessionId: 'session_checkpoint_list',
+        title: 'Interrupted GMV investigation',
+        userMessage: 'Analyze the weekly GMV drop.',
+        interruptedIteration: 2,
+        completedToolCount: 1,
+        failedToolCount: 0,
+        deniedToolCount: 0,
+        actions: ['continue', 'restart', 'abandon'],
+      },
+    ]);
+    expect(result.checkpoints[0]?.resumePrompt).toContain('Agent');
+  });
+
+  it('continues a recoverable ReAct checkpoint through desktop service', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointStorePath());
+    await checkpointStore.save({
+      session: interruptedReactSession('session_checkpoint_continue'),
+      iteration: 2,
+      status: 'running',
+      toolExecutions: [
+        {
+          toolCallId: 'call_orders',
+          toolName: 'query_database',
+          status: 'success',
+          durationMs: 12,
+          resultPreview: '{"rows":[{"order_count":42}]}',
+        },
+      ],
+      now: '2026-06-17T00:06:00.000Z',
+    });
+    const provider = scriptedProvider([
+      {
+        text: 'Recovered ReAct run completed from saved context.',
+        toolCalls: [],
+        usage: { promptTokens: 18, completionTokens: 7, totalTokens: 25 },
+      },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      checkpointStore,
+    });
+
+    const result = await service.continueCheckpoint({
+      sessionId: 'session_checkpoint_continue',
+      runId: 'run_checkpoint_continue',
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'readonly',
+      maxIterations: 1,
+    });
+
+    expect(result).toMatchObject({
+      runId: 'run_checkpoint_continue',
+      strategy: 'react',
+      status: 'done',
+      sessionId: 'session_checkpoint_continue',
+      finalText: 'Recovered ReAct run completed from saved context.',
+      iterations: 1,
+      recoveryCheckpoint: {
+        sessionId: 'session_checkpoint_continue',
+        interruptedIteration: 2,
+      },
+      abandonedCheckpointCount: 1,
+      toolPolicy: {
+        allowedToolNames: ['list_tables', 'describe_table', 'query_database'],
+      },
+    });
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests[0]?.tools?.map((tool) => tool.name)).toEqual([
+      'list_tables',
+      'describe_table',
+      'query_database',
+    ]);
+    expect(provider.requests[0]?.messages.map((message) => message.content)).toEqual([
+      'Analyze the weekly GMV drop.',
+      'I already queried order volume and will continue with refund analysis.',
+      '{"rows":[{"order_count":42}]}',
+      result.recoveryCheckpoint?.resumePrompt,
+    ]);
+    await expect(service.listRecoverableCheckpoints()).resolves.toEqual({ checkpoints: [] });
+    await expect(checkpointStore.listBySession('session_checkpoint_continue')).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ iteration: 2, status: 'abandoned' }),
+        expect.objectContaining({ iteration: 3, status: 'done' }),
+      ]),
+    );
+  });
+
+  it('abandons recoverable ReAct checkpoints through desktop service', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointStorePath());
+    await checkpointStore.save({
+      session: interruptedReactSession('session_checkpoint_abandon'),
+      iteration: 1,
+      status: 'running',
+      toolExecutions: [],
+      now: '2026-06-17T00:06:00.000Z',
+    });
+    const service = await createService({
+      provider: scriptedProvider([]),
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      checkpointStore,
+    });
+
+    await expect(
+      service.abandonCheckpoint({
+        sessionId: 'session_checkpoint_abandon',
+        reason: 'user discarded stale checkpoint',
+      }),
+    ).resolves.toEqual({
+      sessionId: 'session_checkpoint_abandon',
+      abandonedCheckpointCount: 1,
+      message: 'Recoverable Agent checkpoints were abandoned.',
+    });
+    await expect(service.listRecoverableCheckpoints()).resolves.toEqual({ checkpoints: [] });
+    await expect(checkpointStore.listBySession('session_checkpoint_abandon')).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: 'abandoned',
+          errorMessage: 'user discarded stale checkpoint',
+        }),
+      ]),
+    );
+  });
+
   it('writes a desktop Agent audit log for a real headless Agent run', async () => {
     const logsDir = await tempDir('dbagent-agent-service-audit-');
     const provider = scriptedProvider([
       {
         text: '',
-        toolCalls: [{ id: 'call_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        toolCalls: [
+          { id: 'call_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } },
+        ],
         usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14 },
       },
       {
@@ -571,7 +767,13 @@ describe('HeadlessAgentService', () => {
     const provider = scriptedProvider([
       {
         text: '',
-        toolCalls: [{ id: 'call_query_history', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        toolCalls: [
+          {
+            id: 'call_query_history',
+            name: 'query_database',
+            arguments: { sql: 'select 100 as gmv' },
+          },
+        ],
         usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14 },
       },
       {
@@ -620,7 +822,9 @@ describe('HeadlessAgentService', () => {
         { role: 'assistant', content: 'History run completed.' },
       ],
     });
-    expect(detail.messages[0]?.content).toContain('daily_gmv_report: save this run in session history');
+    expect(detail.messages[0]?.content).toContain(
+      'daily_gmv_report: save this run in session history',
+    );
     expect(exported).toMatchObject({
       sessionId: 'session_agent_service',
       format: 'markdown',
@@ -637,7 +841,10 @@ describe('HeadlessAgentService', () => {
       skills: [dailyGmvSkill()],
       sessionStore,
     });
-    await sessionStore.save({ session: persistedSession('session_manage'), now: '2026-06-17T00:05:00.000Z' });
+    await sessionStore.save({
+      session: persistedSession('session_manage'),
+      now: '2026-06-17T00:05:00.000Z',
+    });
 
     await expect(
       service.updateSession({
@@ -649,7 +856,9 @@ describe('HeadlessAgentService', () => {
       title: 'Managed GMV session',
       archived: false,
     });
-    await expect(service.archiveSession({ sessionId: 'session_manage', archived: true })).resolves.toMatchObject({
+    await expect(
+      service.archiveSession({ sessionId: 'session_manage', archived: true }),
+    ).resolves.toMatchObject({
       id: 'session_manage',
       archived: true,
     });
@@ -671,7 +880,9 @@ describe('HeadlessAgentService', () => {
       messageCount: 1,
       messages: [{ role: 'user', content: 'Analyze GMV history' }],
     });
-    await expect(service.archiveSession({ sessionId: 'session_manage', archived: false })).resolves.toMatchObject({
+    await expect(
+      service.archiveSession({ sessionId: 'session_manage', archived: false }),
+    ).resolves.toMatchObject({
       archived: false,
     });
     await expect(service.deleteSession({ sessionId: 'session_manage' })).resolves.toEqual({
@@ -762,7 +973,11 @@ describe('HeadlessAgentService', () => {
       model: 'fake-model',
       now: '2026-06-17T00:00:00.000Z',
     });
-    await streamStore.appendEvent(stream.id, { type: 'text-delta', text: 'partial output' }, '2026-06-17T00:00:01.000Z');
+    await streamStore.appendEvent(
+      stream.id,
+      { type: 'text-delta', text: 'partial output' },
+      '2026-06-17T00:00:01.000Z',
+    );
 
     await expect(service.listRecoverableStreams()).resolves.toMatchObject({
       streams: [
@@ -821,7 +1036,13 @@ describe('HeadlessAgentService', () => {
     const provider = scriptedProvider([
       {
         text: '',
-        toolCalls: [{ id: 'call_hidden_write', name: 'execute_sql', arguments: { sql: 'delete from orders' } }],
+        toolCalls: [
+          {
+            id: 'call_hidden_write',
+            name: 'execute_sql',
+            arguments: { sql: 'delete from orders' },
+          },
+        ],
       },
     ]);
     const service = await createService({ provider, registry, skills: [dailyGmvSkill()] });
@@ -852,7 +1073,9 @@ describe('HeadlessAgentService', () => {
       startedResolve();
       return new Promise<LlmChatResponse>((_resolve, reject) => {
         rejectOnAbort = reject;
-        request.signal?.addEventListener('abort', () => reject(new Error('aborted by test')), { once: true });
+        request.signal?.addEventListener('abort', () => reject(new Error('aborted by test')), {
+          once: true,
+        });
       });
     });
     const service = await createService({
@@ -891,6 +1114,7 @@ async function createService(input: {
   skills: SkillDefinition[];
   auditLog?: AgentAuditLogWriter;
   planStore?: AgentPlanExecutionStore;
+  checkpointStore?: AgentCheckpointStore;
   sessionStore?: AgentSessionStore;
   streamStore?: AgentStreamStore;
 }): Promise<HeadlessAgentService> {
@@ -899,6 +1123,7 @@ async function createService(input: {
   const agent = new ReactAgent(llmRouter, input.registry, usage, undefined, {
     now: () => '2026-06-17T00:00:00.000Z',
     createSessionId: () => 'session_agent_service',
+    ...(input.checkpointStore === undefined ? {} : { checkpointStore: input.checkpointStore }),
     ...(input.sessionStore === undefined ? {} : { sessionStore: input.sessionStore }),
     ...(input.streamStore === undefined ? {} : { streamStore: input.streamStore }),
     ...(input.auditLog === undefined ? {} : { auditLog: input.auditLog }),
@@ -911,7 +1136,12 @@ async function createService(input: {
   return new HeadlessAgentService({
     agent,
     planExecuteAgent,
-    ...(input.planStore === undefined ? {} : { planRecoveryService: new AgentPlanRecoveryService(input.planStore) }),
+    ...(input.planStore === undefined
+      ? {}
+      : { planRecoveryService: new AgentPlanRecoveryService(input.planStore) }),
+    ...(input.checkpointStore === undefined
+      ? {}
+      : { agentRecoveryService: new AgentRecoveryService(input.checkpointStore) }),
     ...(input.sessionStore === undefined ? {} : { sessionStore: input.sessionStore }),
     ...(input.streamStore === undefined ? {} : { streamStore: input.streamStore }),
     toolRegistry: input.registry,
@@ -926,6 +1156,10 @@ async function usagePath(): Promise<string> {
 
 async function planStorePath(): Promise<string> {
   return join(await tempDir('dbagent-agent-plan-store-'), 'plans.json');
+}
+
+async function checkpointStorePath(): Promise<string> {
+  return join(await tempDir('dbagent-agent-checkpoint-store-'), 'checkpoints.json');
 }
 
 async function sessionStorePath(): Promise<string> {
@@ -950,6 +1184,42 @@ function testAgentSession(id: string) {
     now: () => '2026-06-17T00:00:00.000Z',
   });
   session.strategy = 'plan-execute';
+  return session;
+}
+
+function interruptedReactSession(id: string) {
+  const session = createAgentSession({
+    id,
+    title: 'Interrupted GMV investigation',
+    mode: 'readonly',
+    now: () => '2026-06-17T00:00:00.000Z',
+  });
+  session.messages.push(
+    {
+      role: 'user',
+      content: 'Analyze the weekly GMV drop.',
+      createdAt: '2026-06-17T00:00:00.000Z',
+    },
+    {
+      role: 'assistant',
+      content: 'I already queried order volume and will continue with refund analysis.',
+      toolCalls: [
+        {
+          id: 'call_orders',
+          name: 'query_database',
+          arguments: { sql: 'select count(*) from orders' },
+        },
+      ],
+      createdAt: '2026-06-17T00:01:00.000Z',
+    },
+    {
+      role: 'tool',
+      toolCallId: 'call_orders',
+      toolName: 'query_database',
+      content: '{"rows":[{"order_count":42}]}',
+      createdAt: '2026-06-17T00:01:01.000Z',
+    },
+  );
   return session;
 }
 
@@ -987,8 +1257,16 @@ function persistedSession(id: string) {
     mode: 'readonly' as const,
     strategy: 'react' as const,
     messages: [
-      { role: 'user' as const, content: 'Analyze GMV history', createdAt: '2026-06-17T00:00:00.000Z' },
-      { role: 'assistant' as const, content: 'Use query_database.', createdAt: '2026-06-17T00:00:01.000Z' },
+      {
+        role: 'user' as const,
+        content: 'Analyze GMV history',
+        createdAt: '2026-06-17T00:00:00.000Z',
+      },
+      {
+        role: 'assistant' as const,
+        content: 'Use query_database.',
+        createdAt: '2026-06-17T00:00:01.000Z',
+      },
     ],
     tokenUsage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
     aborted: false,
@@ -1061,7 +1339,9 @@ function pythonAnalysisSkill(): SkillDefinition {
   );
 }
 
-function scriptedProvider(responses: LlmChatResponse[]): LlmProvider & { requests: LlmChatRequest[] } {
+function scriptedProvider(
+  responses: LlmChatResponse[],
+): LlmProvider & { requests: LlmChatRequest[] } {
   const requests: LlmChatRequest[] = [];
   return {
     id: 'fake',
@@ -1080,7 +1360,9 @@ function scriptedProvider(responses: LlmChatResponse[]): LlmProvider & { request
   };
 }
 
-function streamingProvider(events: LlmProviderStreamEvent[]): LlmProvider & { requests: LlmChatRequest[] } {
+function streamingProvider(
+  events: LlmProviderStreamEvent[],
+): LlmProvider & { requests: LlmChatRequest[] } {
   const requests: LlmChatRequest[] = [];
   return {
     id: 'fake',
@@ -1103,11 +1385,10 @@ function streamingProvider(events: LlmProviderStreamEvent[]): LlmProvider & { re
   };
 }
 
-type LlmProviderStreamEvent = NonNullable<LlmProvider['stream']> extends (
-  request: LlmChatRequest,
-) => AsyncIterable<infer Event>
-  ? Event
-  : never;
+type LlmProviderStreamEvent =
+  NonNullable<LlmProvider['stream']> extends (request: LlmChatRequest) => AsyncIterable<infer Event>
+    ? Event
+    : never;
 
 function blockingProvider(
   handler: (request: LlmChatRequest) => Promise<LlmChatResponse>,

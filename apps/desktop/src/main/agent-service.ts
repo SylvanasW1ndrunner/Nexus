@@ -2,6 +2,8 @@ import type {
   AgentPlan,
   AgentPlanExecuteResult,
   AgentPlanRecoveryPlan,
+  AgentRecoveryPlan,
+  AgentRecoveryService,
   AgentRunResult,
   AgentSession,
   AgentSessionStore,
@@ -11,7 +13,11 @@ import type {
   PlanExecuteRecoveryService,
   ToolRegistry,
 } from '@dbagent/core-agent';
-import { findMatchingSkills, type SkillDefinition, type SkillMatchCandidate } from '@dbagent/core-skills';
+import {
+  findMatchingSkills,
+  type SkillDefinition,
+  type SkillMatchCandidate,
+} from '@dbagent/core-skills';
 import {
   NoMatchingSkillError,
   resolveOfficialPluginAgentTools,
@@ -23,11 +29,17 @@ import {
 import type {
   AgentAbortRequest,
   AgentAbortResponse,
+  AgentAbandonCheckpointRequest,
+  AgentAbandonCheckpointResponse,
   AgentAbandonPlanRequest,
   AgentAbandonPlanResponse,
+  AgentCheckpointRecoverySummary,
+  AgentContinueCheckpointRequest,
+  AgentContinueCheckpointResponse,
   AgentContinuePlanRequest,
   AgentContinuePlanResponse,
   AgentPlanRecoverySummary,
+  AgentRecoverableCheckpointsResponse,
   AgentRecoverablePlansResponse,
   AgentArchiveSessionRequest,
   AgentDeleteSessionResponse,
@@ -62,8 +74,18 @@ import type {
 export type HeadlessAgentServiceDependencies = {
   agent: SkillAgent;
   planExecuteAgent?: SkillPlanExecuteAgent;
-  planRecoveryService?: Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'>;
-  sessionStore?: Pick<AgentSessionStore, 'list' | 'load' | 'update' | 'archive' | 'delete' | 'fork' | 'export'>;
+  planRecoveryService?: Pick<
+    PlanExecuteRecoveryService,
+    'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'
+  >;
+  agentRecoveryService?: Pick<
+    AgentRecoveryService,
+    'listRecoverablePlans' | 'continue' | 'abandon'
+  >;
+  sessionStore?: Pick<
+    AgentSessionStore,
+    'list' | 'load' | 'update' | 'archive' | 'delete' | 'fork' | 'export'
+  >;
   streamStore?: Pick<AgentStreamStore, 'listBySession' | 'load' | 'listRecoverable'>;
   toolRegistry: Pick<ToolRegistry, 'list'>;
   loadSkills: () => Promise<SkillDefinition[]> | SkillDefinition[];
@@ -120,7 +142,9 @@ export class HeadlessAgentService {
               ...autoSkillRunOptions,
               strategy: 'plan-execute',
               ...(request.maxPlanSteps === undefined ? {} : { maxPlanSteps: request.maxPlanSteps }),
-              ...(request.stopOnStepFailure === undefined ? {} : { stopOnStepFailure: request.stopOnStepFailure }),
+              ...(request.stopOnStepFailure === undefined
+                ? {}
+                : { stopOnStepFailure: request.stopOnStepFailure }),
             })
           : await runAutoSkillAgent(this.dependencies.agent, autoSkillRunOptions);
 
@@ -182,7 +206,17 @@ export class HeadlessAgentService {
 
   async listRecoverablePlans(): Promise<AgentRecoverablePlansResponse> {
     return {
-      plans: (await this.requirePlanRecoveryService().listRecoverablePlans()).map(toSharedRecoveryPlan),
+      plans: (await this.requirePlanRecoveryService().listRecoverablePlans()).map(
+        toSharedRecoveryPlan,
+      ),
+    };
+  }
+
+  async listRecoverableCheckpoints(): Promise<AgentRecoverableCheckpointsResponse> {
+    return {
+      checkpoints: (await this.requireAgentRecoveryService().listRecoverablePlans()).map(
+        toSharedCheckpointRecovery,
+      ),
     };
   }
 
@@ -193,26 +227,40 @@ export class HeadlessAgentService {
     this.activeRuns.set(runId, controller);
 
     try {
-      const continued = await this.requirePlanRecoveryService().continue(request.planId, this.requirePlanExecuteAgent(), {
-        providerId: request.providerId,
-        model: request.model,
-        ...(request.userMessage === undefined ? {} : { userMessage: request.userMessage }),
-        allowedTools: toolPolicy.agentAllowedToolNames,
-        ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
-        ...(request.mode === undefined ? {} : { mode: request.mode }),
-        ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
-        ...(request.maxPlanSteps === undefined ? {} : { maxPlanSteps: request.maxPlanSteps }),
-        ...(request.stopOnStepFailure === undefined ? {} : { stopOnStepFailure: request.stopOnStepFailure }),
-        ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
-        ...(request.contextWindowTokens === undefined ? {} : { contextWindowTokens: request.contextWindowTokens }),
-        ...(request.keepRecentMessages === undefined ? {} : { keepRecentMessages: request.keepRecentMessages }),
-        ...(request.maxToolResultChars === undefined ? {} : { maxToolResultChars: request.maxToolResultChars }),
-        ...(request.maxConsecutiveToolFailures === undefined
-          ? {}
-          : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
-        ...(request.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: request.maxToolExecutionMs }),
-        signal: controller.signal,
-      });
+      const continued = await this.requirePlanRecoveryService().continue(
+        request.planId,
+        this.requirePlanExecuteAgent(),
+        {
+          providerId: request.providerId,
+          model: request.model,
+          ...(request.userMessage === undefined ? {} : { userMessage: request.userMessage }),
+          allowedTools: toolPolicy.agentAllowedToolNames,
+          ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
+          ...(request.mode === undefined ? {} : { mode: request.mode }),
+          ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
+          ...(request.maxPlanSteps === undefined ? {} : { maxPlanSteps: request.maxPlanSteps }),
+          ...(request.stopOnStepFailure === undefined
+            ? {}
+            : { stopOnStepFailure: request.stopOnStepFailure }),
+          ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
+          ...(request.contextWindowTokens === undefined
+            ? {}
+            : { contextWindowTokens: request.contextWindowTokens }),
+          ...(request.keepRecentMessages === undefined
+            ? {}
+            : { keepRecentMessages: request.keepRecentMessages }),
+          ...(request.maxToolResultChars === undefined
+            ? {}
+            : { maxToolResultChars: request.maxToolResultChars }),
+          ...(request.maxConsecutiveToolFailures === undefined
+            ? {}
+            : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
+          ...(request.maxToolExecutionMs === undefined
+            ? {}
+            : { maxToolExecutionMs: request.maxToolExecutionMs }),
+          signal: controller.signal,
+        },
+      );
 
       return {
         runId,
@@ -266,26 +314,40 @@ export class HeadlessAgentService {
     this.activeRuns.set(runId, controller);
 
     try {
-      const restarted = await this.requirePlanRecoveryService().restart(request.planId, this.requirePlanExecuteAgent(), {
-        providerId: request.providerId,
-        model: request.model,
-        ...(request.userMessage === undefined ? {} : { userMessage: request.userMessage }),
-        allowedTools: toolPolicy.agentAllowedToolNames,
-        ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
-        ...(request.mode === undefined ? {} : { mode: request.mode }),
-        ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
-        ...(request.maxPlanSteps === undefined ? {} : { maxPlanSteps: request.maxPlanSteps }),
-        ...(request.stopOnStepFailure === undefined ? {} : { stopOnStepFailure: request.stopOnStepFailure }),
-        ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
-        ...(request.contextWindowTokens === undefined ? {} : { contextWindowTokens: request.contextWindowTokens }),
-        ...(request.keepRecentMessages === undefined ? {} : { keepRecentMessages: request.keepRecentMessages }),
-        ...(request.maxToolResultChars === undefined ? {} : { maxToolResultChars: request.maxToolResultChars }),
-        ...(request.maxConsecutiveToolFailures === undefined
-          ? {}
-          : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
-        ...(request.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: request.maxToolExecutionMs }),
-        signal: controller.signal,
-      });
+      const restarted = await this.requirePlanRecoveryService().restart(
+        request.planId,
+        this.requirePlanExecuteAgent(),
+        {
+          providerId: request.providerId,
+          model: request.model,
+          ...(request.userMessage === undefined ? {} : { userMessage: request.userMessage }),
+          allowedTools: toolPolicy.agentAllowedToolNames,
+          ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
+          ...(request.mode === undefined ? {} : { mode: request.mode }),
+          ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
+          ...(request.maxPlanSteps === undefined ? {} : { maxPlanSteps: request.maxPlanSteps }),
+          ...(request.stopOnStepFailure === undefined
+            ? {}
+            : { stopOnStepFailure: request.stopOnStepFailure }),
+          ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
+          ...(request.contextWindowTokens === undefined
+            ? {}
+            : { contextWindowTokens: request.contextWindowTokens }),
+          ...(request.keepRecentMessages === undefined
+            ? {}
+            : { keepRecentMessages: request.keepRecentMessages }),
+          ...(request.maxToolResultChars === undefined
+            ? {}
+            : { maxToolResultChars: request.maxToolResultChars }),
+          ...(request.maxConsecutiveToolFailures === undefined
+            ? {}
+            : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
+          ...(request.maxToolExecutionMs === undefined
+            ? {}
+            : { maxToolExecutionMs: request.maxToolExecutionMs }),
+          signal: controller.signal,
+        },
+      );
 
       return {
         runId,
@@ -350,11 +412,117 @@ export class HeadlessAgentService {
   }
 
   async abandonPlan(request: AgentAbandonPlanRequest): Promise<AgentAbandonPlanResponse> {
-    const abandoned = await this.requirePlanRecoveryService().abandon(request.planId, request.reason);
+    const abandoned = await this.requirePlanRecoveryService().abandon(
+      request.planId,
+      request.reason,
+    );
     return {
       planId: request.planId,
       abandoned,
-      message: abandoned ? 'Recoverable Agent plan was abandoned.' : 'Recoverable Agent plan was not found.',
+      message: abandoned
+        ? 'Recoverable Agent plan was abandoned.'
+        : 'Recoverable Agent plan was not found.',
+    };
+  }
+
+  async continueCheckpoint(
+    request: AgentContinueCheckpointRequest,
+  ): Promise<AgentContinueCheckpointResponse> {
+    const runId = request.runId?.trim() || this.createRunId();
+    const controller = new AbortController();
+    const toolPolicy = this.resolveToolPolicy(request);
+    this.activeRuns.set(runId, controller);
+
+    try {
+      const continued = await this.requireAgentRecoveryService().continue(
+        request.sessionId,
+        this.dependencies.agent,
+        {
+          providerId: request.providerId,
+          model: request.model,
+          ...(request.userMessage === undefined ? {} : { userMessage: request.userMessage }),
+          allowedTools: toolPolicy.agentAllowedToolNames,
+          ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
+          ...(request.mode === undefined ? {} : { mode: request.mode }),
+          ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
+          ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
+          ...(request.contextWindowTokens === undefined
+            ? {}
+            : { contextWindowTokens: request.contextWindowTokens }),
+          ...(request.keepRecentMessages === undefined
+            ? {}
+            : { keepRecentMessages: request.keepRecentMessages }),
+          ...(request.maxToolResultChars === undefined
+            ? {}
+            : { maxToolResultChars: request.maxToolResultChars }),
+          ...(request.maxConsecutiveToolFailures === undefined
+            ? {}
+            : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
+          ...(request.maxToolExecutionMs === undefined
+            ? {}
+            : { maxToolExecutionMs: request.maxToolExecutionMs }),
+          signal: controller.signal,
+        },
+      );
+
+      return {
+        runId,
+        strategy: 'react',
+        status: normalizeAgentStatus(continued.result.status),
+        ...sessionIdPart(continued.result),
+        finalText: continued.result.finalText,
+        iterations: resultIterations(continued.result),
+        toolExecutions: continued.result.toolExecutions,
+        toolPolicy: toSharedToolPolicy(toolPolicy),
+        candidates: [],
+        recoveryCheckpoint: toSharedCheckpointRecovery(continued.plan),
+        abandonedCheckpointCount: continued.abandonedCheckpointCount,
+      };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return {
+          runId,
+          strategy: 'react',
+          status: 'aborted',
+          finalText: 'Agent checkpoint continuation was aborted.',
+          iterations: 0,
+          toolExecutions: [],
+          toolPolicy: toSharedToolPolicy(toolPolicy),
+          candidates: [],
+          abandonedCheckpointCount: 0,
+        };
+      }
+      return {
+        runId,
+        strategy: 'react',
+        status: 'failed',
+        finalText: 'Agent checkpoint continuation failed.',
+        iterations: 0,
+        toolExecutions: [],
+        toolPolicy: toSharedToolPolicy(toolPolicy),
+        candidates: [],
+        abandonedCheckpointCount: 0,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      this.activeRuns.delete(runId);
+    }
+  }
+
+  async abandonCheckpoint(
+    request: AgentAbandonCheckpointRequest,
+  ): Promise<AgentAbandonCheckpointResponse> {
+    const abandonedCheckpointCount = await this.requireAgentRecoveryService().abandon(
+      request.sessionId,
+      request.reason,
+    );
+    return {
+      sessionId: request.sessionId,
+      abandonedCheckpointCount,
+      message:
+        abandonedCheckpointCount > 0
+          ? 'Recoverable Agent checkpoints were abandoned.'
+          : 'Recoverable Agent checkpoints were not found.',
     };
   }
 
@@ -377,11 +545,15 @@ export class HeadlessAgentService {
       ...(request.mode === undefined ? {} : { mode: request.mode }),
       ...(request.aborted === undefined ? {} : { aborted: request.aborted }),
     };
-    return toSharedSessionSummary(await this.requireSessionStore().update(request.sessionId, patch));
+    return toSharedSessionSummary(
+      await this.requireSessionStore().update(request.sessionId, patch),
+    );
   }
 
   async archiveSession(request: AgentArchiveSessionRequest): Promise<AgentSessionSummary> {
-    return toSharedSessionSummary(await this.requireSessionStore().archive(request.sessionId, request.archived ?? true));
+    return toSharedSessionSummary(
+      await this.requireSessionStore().archive(request.sessionId, request.archived ?? true),
+    );
   }
 
   async deleteSession(request: AgentSessionRequest): Promise<AgentDeleteSessionResponse> {
@@ -413,7 +585,9 @@ export class HeadlessAgentService {
 
   async listStreams(request: AgentStreamsRequest): Promise<AgentStreamsResponse> {
     return {
-      streams: (await this.requireStreamStore().listBySession(request.sessionId)).map(toSharedStreamSummary),
+      streams: (await this.requireStreamStore().listBySession(request.sessionId)).map(
+        toSharedStreamSummary,
+      ),
     };
   }
 
@@ -437,7 +611,8 @@ export class HeadlessAgentService {
   }
 
   private resolveStrategy(request: AgentRunRequest): Exclude<AgentRunStrategy, 'auto'> {
-    if (request.strategy === 'react' || request.strategy === 'plan-execute') return request.strategy;
+    if (request.strategy === 'react' || request.strategy === 'plan-execute')
+      return request.strategy;
     return this.dependencies.selectStrategy?.(request) ?? selectDefaultAgentStrategy(request);
   }
 
@@ -448,21 +623,44 @@ export class HeadlessAgentService {
     return this.dependencies.planExecuteAgent;
   }
 
-  private requirePlanRecoveryService(): Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'> {
+  private requirePlanRecoveryService(): Pick<
+    PlanExecuteRecoveryService,
+    'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'
+  > {
     if (!this.dependencies.planRecoveryService) {
-      throw new Error('Plan & Execute recovery service is not configured for the desktop Agent service.');
+      throw new Error(
+        'Plan & Execute recovery service is not configured for the desktop Agent service.',
+      );
     }
     return this.dependencies.planRecoveryService;
   }
 
-  private requireSessionStore(): Pick<AgentSessionStore, 'list' | 'load' | 'update' | 'archive' | 'delete' | 'fork' | 'export'> {
+  private requireAgentRecoveryService(): Pick<
+    AgentRecoveryService,
+    'listRecoverablePlans' | 'continue' | 'abandon'
+  > {
+    if (!this.dependencies.agentRecoveryService) {
+      throw new Error(
+        'Agent checkpoint recovery service is not configured for the desktop Agent service.',
+      );
+    }
+    return this.dependencies.agentRecoveryService;
+  }
+
+  private requireSessionStore(): Pick<
+    AgentSessionStore,
+    'list' | 'load' | 'update' | 'archive' | 'delete' | 'fork' | 'export'
+  > {
     if (!this.dependencies.sessionStore) {
       throw new Error('Agent session store is not configured for the desktop Agent service.');
     }
     return this.dependencies.sessionStore;
   }
 
-  private requireStreamStore(): Pick<AgentStreamStore, 'listBySession' | 'load' | 'listRecoverable'> {
+  private requireStreamStore(): Pick<
+    AgentStreamStore,
+    'listBySession' | 'load' | 'listRecoverable'
+  > {
     if (!this.dependencies.streamStore) {
       throw new Error('Agent stream store is not configured for the desktop Agent service.');
     }
@@ -477,7 +675,10 @@ export class HeadlessAgentService {
       store.list({ limit: 10_000 }),
       store.list({ archived: true, limit: 10_000 }),
     ]);
-    return [...active, ...archived].find((summary) => summary.id === session.id) ?? summarizeLoadedSession(session);
+    return (
+      [...active, ...archived].find((summary) => summary.id === session.id) ??
+      summarizeLoadedSession(session)
+    );
   }
 
   private buildAutoSkillRunOptions(
@@ -495,24 +696,36 @@ export class HeadlessAgentService {
         ...toToolPolicyOptions(request),
       },
       match: {
-        ...(request.includeIneligible === undefined ? {} : { includeIneligible: request.includeIneligible }),
+        ...(request.includeIneligible === undefined
+          ? {}
+          : { includeIneligible: request.includeIneligible }),
         ...(request.signals === undefined ? {} : { signals: request.signals }),
         ...(request.inferSignals === undefined ? {} : { inferSignals: request.inferSignals }),
         ...(request.maxResults === undefined ? {} : { diagnosticMaxResults: request.maxResults }),
         ...(request.minScore === undefined ? {} : { minScore: request.minScore }),
       },
-      ...(request.userMessagePrefix === undefined ? {} : { userMessagePrefix: request.userMessagePrefix }),
+      ...(request.userMessagePrefix === undefined
+        ? {}
+        : { userMessagePrefix: request.userMessagePrefix }),
       ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
       ...(request.mode === undefined ? {} : { mode: request.mode }),
       ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
       ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
-      ...(request.contextWindowTokens === undefined ? {} : { contextWindowTokens: request.contextWindowTokens }),
-      ...(request.keepRecentMessages === undefined ? {} : { keepRecentMessages: request.keepRecentMessages }),
-      ...(request.maxToolResultChars === undefined ? {} : { maxToolResultChars: request.maxToolResultChars }),
+      ...(request.contextWindowTokens === undefined
+        ? {}
+        : { contextWindowTokens: request.contextWindowTokens }),
+      ...(request.keepRecentMessages === undefined
+        ? {}
+        : { keepRecentMessages: request.keepRecentMessages }),
+      ...(request.maxToolResultChars === undefined
+        ? {}
+        : { maxToolResultChars: request.maxToolResultChars }),
       ...(request.maxConsecutiveToolFailures === undefined
         ? {}
         : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
-      ...(request.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: request.maxToolExecutionMs }),
+      ...(request.maxToolExecutionMs === undefined
+        ? {}
+        : { maxToolExecutionMs: request.maxToolExecutionMs }),
       signal: controller.signal,
     };
   }
@@ -520,10 +733,16 @@ export class HeadlessAgentService {
 
 function toToolPolicyOptions(request: AgentToolPolicyRequest) {
   return {
-    ...(request.enabledPluginIds === undefined ? {} : { enabledPluginIds: request.enabledPluginIds }),
-    ...(request.disabledPluginIds === undefined ? {} : { disabledPluginIds: request.disabledPluginIds }),
+    ...(request.enabledPluginIds === undefined
+      ? {}
+      : { enabledPluginIds: request.enabledPluginIds }),
+    ...(request.disabledPluginIds === undefined
+      ? {}
+      : { disabledPluginIds: request.disabledPluginIds }),
     readonlyOnly: request.readonlyOnly ?? request.mode === 'readonly',
-    ...(request.allowedPermissions === undefined ? {} : { allowedPermissions: request.allowedPermissions }),
+    ...(request.allowedPermissions === undefined
+      ? {}
+      : { allowedPermissions: request.allowedPermissions }),
     ...(request.maxDangerLevel === undefined ? {} : { maxDangerLevel: request.maxDangerLevel }),
   };
 }
@@ -620,11 +839,15 @@ function selectDefaultAgentStrategy(request: AgentRunRequest): Exclude<AgentRunS
   return planTerms.some((term) => text.includes(term)) ? 'plan-execute' : 'react';
 }
 
-function normalizeAgentStatus(status: AgentRunResult['status'] | AgentPlanExecuteResult['status']): AgentRunResponse['status'] {
+function normalizeAgentStatus(
+  status: AgentRunResult['status'] | AgentPlanExecuteResult['status'],
+): AgentRunResponse['status'] {
   return status === 'planning_failed' ? 'planning_failed' : status;
 }
 
-function sessionIdPart(result: AgentRunResult | AgentPlanExecuteResult): Pick<AgentRunResponse, 'sessionId'> {
+function sessionIdPart(
+  result: AgentRunResult | AgentPlanExecuteResult,
+): Pick<AgentRunResponse, 'sessionId'> {
   return result.session === undefined ? {} : { sessionId: result.session.id };
 }
 
@@ -668,7 +891,9 @@ function toSharedRecoveryPlan(plan: AgentPlanRecoveryPlan): AgentPlanRecoverySum
     title: plan.title,
     goal: plan.goal,
     ...(plan.interruptedStepId === undefined ? {} : { interruptedStepId: plan.interruptedStepId }),
-    ...(plan.interruptedStepTitle === undefined ? {} : { interruptedStepTitle: plan.interruptedStepTitle }),
+    ...(plan.interruptedStepTitle === undefined
+      ? {}
+      : { interruptedStepTitle: plan.interruptedStepTitle }),
     completedStepCount: plan.completedStepCount,
     failedStepCount: plan.failedStepCount,
     skippedStepCount: plan.skippedStepCount,
@@ -678,6 +903,24 @@ function toSharedRecoveryPlan(plan: AgentPlanRecoveryPlan): AgentPlanRecoverySum
     startedAt: plan.startedAt,
     updatedAt: plan.updatedAt,
     ...(plan.lastResultText === undefined ? {} : { lastResultText: plan.lastResultText }),
+    ...(plan.lastToolError === undefined ? {} : { lastToolError: plan.lastToolError }),
+    resumePrompt: plan.resumePrompt,
+    actions: plan.actions,
+  };
+}
+
+function toSharedCheckpointRecovery(plan: AgentRecoveryPlan): AgentCheckpointRecoverySummary {
+  return {
+    sessionId: plan.sessionId,
+    title: plan.title,
+    userMessage: plan.userMessage,
+    interruptedIteration: plan.interruptedIteration,
+    startedAt: plan.startedAt,
+    updatedAt: plan.updatedAt,
+    completedToolCount: plan.completedToolCount,
+    failedToolCount: plan.failedToolCount,
+    deniedToolCount: plan.deniedToolCount,
+    ...(plan.lastAssistantText === undefined ? {} : { lastAssistantText: plan.lastAssistantText }),
     ...(plan.lastToolError === undefined ? {} : { lastToolError: plan.lastToolError }),
     resumePrompt: plan.resumePrompt,
     actions: plan.actions,
@@ -700,7 +943,10 @@ function toSharedSessionSummary(summary: CoreAgentSessionSummary): AgentSessionS
   };
 }
 
-function toSharedSessionDetail(session: AgentSession, summary: CoreAgentSessionSummary): AgentSessionDetail {
+function toSharedSessionDetail(
+  session: AgentSession,
+  summary: CoreAgentSessionSummary,
+): AgentSessionDetail {
   return {
     ...toSharedSessionSummary(summary),
     messages: session.messages.map((message) => ({ ...message })),

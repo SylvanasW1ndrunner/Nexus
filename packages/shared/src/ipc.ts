@@ -94,6 +94,9 @@ export const ipcChannels = {
     continuePlan: 'agent:continue-plan',
     restartPlan: 'agent:restart-plan',
     abandonPlan: 'agent:abandon-plan',
+    recoverableCheckpoints: 'agent:recoverable-checkpoints',
+    continueCheckpoint: 'agent:continue-checkpoint',
+    abandonCheckpoint: 'agent:abandon-checkpoint',
     sessions: 'agent:sessions',
     session: 'agent:session',
     updateSession: 'agent:update-session',
@@ -709,6 +712,28 @@ export type AgentRecoverablePlansResponse = {
   plans: AgentPlanRecoverySummary[];
 };
 
+export type AgentCheckpointRecoveryAction = 'continue' | 'restart' | 'abandon';
+
+export type AgentCheckpointRecoverySummary = {
+  sessionId: string;
+  title: string;
+  userMessage: string;
+  interruptedIteration: number;
+  startedAt: string;
+  updatedAt: string;
+  completedToolCount: number;
+  failedToolCount: number;
+  deniedToolCount: number;
+  lastAssistantText?: string;
+  lastToolError?: string;
+  resumePrompt: string;
+  actions: AgentCheckpointRecoveryAction[];
+};
+
+export type AgentRecoverableCheckpointsResponse = {
+  checkpoints: AgentCheckpointRecoverySummary[];
+};
+
 export type AgentRunResponse = {
   runId: string;
   strategy: Exclude<AgentRunStrategy, 'auto'>;
@@ -786,9 +811,47 @@ export type AgentAbandonPlanResponse = {
   message: string;
 };
 
+export type AgentContinueCheckpointRequest = AgentToolPolicyRequest & {
+  sessionId: string;
+  runId?: string;
+  providerId: string;
+  model: string;
+  userMessage?: string;
+  usageMode?: UsageMode;
+  mode?: AgentMode;
+  maxIterations?: number;
+  tokenBudget?: number;
+  contextWindowTokens?: number;
+  keepRecentMessages?: number;
+  maxToolResultChars?: number;
+  maxConsecutiveToolFailures?: number;
+  maxToolExecutionMs?: number;
+};
+
+export type AgentContinueCheckpointResponse = AgentRunResponse & {
+  recoveryCheckpoint?: AgentCheckpointRecoverySummary;
+  abandonedCheckpointCount: number;
+};
+
+export type AgentAbandonCheckpointRequest = {
+  sessionId: string;
+  reason?: string;
+};
+
+export type AgentAbandonCheckpointResponse = {
+  sessionId: string;
+  abandonedCheckpointCount: number;
+  message: string;
+};
+
 export type AgentSessionMessage =
   | { role: 'user'; content: string; createdAt: string }
-  | { role: 'assistant'; content: string; toolCalls?: Array<{ id: string; name: string; arguments: unknown }>; createdAt: string }
+  | {
+      role: 'assistant';
+      content: string;
+      toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
+      createdAt: string;
+    }
   | { role: 'tool'; toolCallId: string; toolName: string; content: string; createdAt: string }
   | { role: 'system'; content: string; createdAt: string };
 
@@ -870,7 +933,11 @@ export type AgentStreamEvent =
   | { type: 'usage'; usage: AgentSessionSummary['tokenUsage'] }
   | {
       type: 'finish';
-      response: { text: string; toolCalls: Array<{ id: string; name: string; arguments: unknown }>; usage?: AgentSessionSummary['tokenUsage'] };
+      response: {
+        text: string;
+        toolCalls: Array<{ id: string; name: string; arguments: unknown }>;
+        usage?: AgentSessionSummary['tokenUsage'];
+      };
       reason?: string;
     };
 
@@ -1068,6 +1135,9 @@ export type IpcRequestMap = {
   'agent:continue-plan': AgentContinuePlanRequest;
   'agent:restart-plan': AgentRestartPlanRequest;
   'agent:abandon-plan': AgentAbandonPlanRequest;
+  'agent:recoverable-checkpoints': void;
+  'agent:continue-checkpoint': AgentContinueCheckpointRequest;
+  'agent:abandon-checkpoint': AgentAbandonCheckpointRequest;
   'agent:sessions': AgentSessionsRequest | undefined;
   'agent:session': AgentSessionRequest;
   'agent:update-session': AgentUpdateSessionRequest;
@@ -1147,6 +1217,9 @@ export type IpcResponseMap = {
   'agent:continue-plan': Result<AgentContinuePlanResponse>;
   'agent:restart-plan': Result<AgentRestartPlanResponse>;
   'agent:abandon-plan': Result<AgentAbandonPlanResponse>;
+  'agent:recoverable-checkpoints': Result<AgentRecoverableCheckpointsResponse>;
+  'agent:continue-checkpoint': Result<AgentContinueCheckpointResponse>;
+  'agent:abandon-checkpoint': Result<AgentAbandonCheckpointResponse>;
   'agent:sessions': Result<AgentSessionsResponse>;
   'agent:session': Result<AgentSessionDetail>;
   'agent:update-session': Result<AgentSessionSummary>;
