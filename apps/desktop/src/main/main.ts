@@ -7,7 +7,7 @@ import { ConnectionStore, QueryCancellationRegistry, QueryHistoryStore, createDe
 import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, TestAuthRepository } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
-import { AgentPlanExecutionStore, PlanExecuteAgent, ReactAgent, ToolRegistry } from '@dbagent/core-agent';
+import { AgentPlanExecutionStore, PlanExecuteAgent, PlanExecuteRecoveryService, ReactAgent, ToolRegistry } from '@dbagent/core-agent';
 import { SchemaRagEngine, SchemaRagSnapshotStore } from '@dbagent/core-rag';
 import { SkillRegistry, registerDefaultBuiltinSkills } from '@dbagent/core-skills';
 import {
@@ -94,12 +94,15 @@ const desktopAgentTools = registerDesktopAgentTools({
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
   auditLog: new DailyAgentAuditLogStore(logsDir),
 });
+const agentPlanExecutionStore = new AgentPlanExecutionStore(agentPlanExecutionPath);
 const planExecuteAgent = new PlanExecuteAgent(llmRouter, reactAgent, {
-  planStore: new AgentPlanExecutionStore(agentPlanExecutionPath),
+  planStore: agentPlanExecutionStore,
 });
+const planExecuteRecoveryService = new PlanExecuteRecoveryService(agentPlanExecutionStore);
 const headlessAgentService = new HeadlessAgentService({
   agent: reactAgent,
   planExecuteAgent,
+  planRecoveryService: planExecuteRecoveryService,
   toolRegistry: agentToolRegistry,
   loadSkills: () => agentSkillRegistry.list(),
 });
@@ -391,6 +394,9 @@ function registerIpcHandlers(): void {
   );
   handle(ipcChannels.agent.run, async (request) => safeResult(() => headlessAgentService.run(request)));
   handle(ipcChannels.agent.abort, (request) => safeResult(() => Promise.resolve(headlessAgentService.abort(request))));
+  handle(ipcChannels.agent.recoverablePlans, async () => safeResult(() => headlessAgentService.listRecoverablePlans()));
+  handle(ipcChannels.agent.continuePlan, async (request) => safeResult(() => headlessAgentService.continuePlan(request)));
+  handle(ipcChannels.agent.abandonPlan, async (request) => safeResult(() => headlessAgentService.abandonPlan(request)));
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
   handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));

@@ -4,6 +4,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   AgentAuditLogStore,
+  AgentPlanExecutionStore,
+  AgentPlanRecoveryService,
+  createAgentSession,
+  type AgentPlan,
   PlanExecuteAgent,
   ReactAgent,
   ToolRegistry,
@@ -193,6 +197,224 @@ describe('HeadlessAgentService', () => {
     expect(result.plan?.title).toBe('GMV root cause plan');
   });
 
+  it('lists recoverable Plan & Execute snapshots for desktop recovery', async () => {
+    const planStore = new AgentPlanExecutionStore(await planStorePath());
+    await planStore.save({
+      plan: recoverablePlan('plan_recoverable_list'),
+      status: 'running',
+      session: testAgentSession('session_recoverable_list'),
+      finalText: 'schema inspected',
+      executedSteps: 1,
+      totalIterations: 2,
+      toolExecutions: [
+        {
+          toolCallId: 'call_schema',
+          toolName: 'describe_table',
+          status: 'success',
+          durationMs: 3,
+          resultPreview: '{"table":"orders"}',
+        },
+      ],
+      now: '2026-06-17T00:05:00.000Z',
+    });
+    const service = await createService({
+      provider: scriptedProvider([]),
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      planStore,
+    });
+
+    const result = await service.listRecoverablePlans();
+
+    expect(result.plans).toMatchObject([
+      {
+        planId: 'plan_recoverable_list',
+        sessionId: 'session_recoverable_list',
+        title: 'Recoverable GMV plan',
+        interruptedStepId: 'run_query',
+        interruptedStepTitle: 'Run query',
+        completedStepCount: 1,
+        pendingStepCount: 1,
+        executedSteps: 1,
+        totalIterations: 2,
+        actions: ['continue', 'restart', 'abandon'],
+      },
+    ]);
+    expect(result.plans[0]?.resumePrompt).toContain('Plan & Execute');
+  });
+
+  it('continues a recoverable Plan & Execute snapshot through desktop service', async () => {
+    const planStore = new AgentPlanExecutionStore(await planStorePath());
+    await planStore.save({
+      plan: recoverablePlan('plan_continue_desktop'),
+      status: 'running',
+      session: testAgentSession('session_continue_desktop'),
+      finalText: 'schema inspected',
+      executedSteps: 1,
+      totalIterations: 1,
+      toolExecutions: [],
+      now: '2026-06-17T00:05:00.000Z',
+    });
+    const provider = scriptedProvider([
+      {
+        text: '',
+        toolCalls: [{ id: 'call_query_after_recovery', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        usage: { promptTokens: 20, completionTokens: 4, totalTokens: 24 },
+      },
+      {
+        text: 'Recovered plan completed.',
+        toolCalls: [],
+        usage: { promptTokens: 24, completionTokens: 5, totalTokens: 29 },
+      },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      planStore,
+    });
+
+    const result = await service.continuePlan({
+      planId: 'plan_continue_desktop',
+      runId: 'run_continue_desktop',
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'readonly',
+      maxIterations: 2,
+    });
+
+    expect(result).toMatchObject({
+      runId: 'run_continue_desktop',
+      strategy: 'plan-execute',
+      status: 'done',
+      finalText: 'Recovered plan completed.',
+      abandonedSnapshot: true,
+      recoveryPlan: {
+        planId: 'plan_continue_desktop',
+        executedSteps: 1,
+        totalIterations: 1,
+      },
+      plan: {
+        id: 'plan_continue_desktop',
+        steps: [
+          { id: 'inspect_schema', status: 'done' },
+          { id: 'run_query', status: 'done', runStatus: 'done' },
+        ],
+      },
+      toolExecutions: [{ toolCallId: 'call_query_after_recovery', toolName: 'query_database', status: 'success' }],
+    });
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[0]?.tools?.map((tool) => tool.name)).toEqual([
+      'list_tables',
+      'describe_table',
+      'query_database',
+    ]);
+    expect(result.toolPolicy.allowedToolNames).toEqual(['list_tables', 'describe_table', 'query_database']);
+    await expect(service.listRecoverablePlans()).resolves.toEqual({ plans: [] });
+    await expect(planStore.load('plan_continue_desktop')).resolves.toMatchObject({
+      status: 'done',
+      executedSteps: 2,
+      totalIterations: 3,
+    });
+  });
+
+  it('keeps a recoverable snapshot when desktop continuation fails', async () => {
+    const planStore = new AgentPlanExecutionStore(await planStorePath());
+    await planStore.save({
+      plan: recoverablePlan('plan_continue_failed_desktop'),
+      status: 'running',
+      session: testAgentSession('session_continue_failed_desktop'),
+      finalText: 'schema inspected',
+      executedSteps: 1,
+      totalIterations: 1,
+      toolExecutions: [],
+      now: '2026-06-17T00:05:00.000Z',
+    });
+    const registry = registryWithQueryTools();
+    registry.register(
+      {
+        name: 'execute_sql',
+        description: 'Execute SQL with writes',
+        inputSchema: { type: 'object', properties: {} },
+        dangerLevel: 'high',
+        readonly: false,
+      },
+      () => ({ ok: true }),
+    );
+    const provider = scriptedProvider([{ text: '', toolCalls: [{ id: 'call_hidden', name: 'execute_sql', arguments: {} }] }]);
+    const service = await createService({
+      provider,
+      registry,
+      skills: [dailyGmvSkill()],
+      planStore,
+    });
+
+    const result = await service.continuePlan({
+      planId: 'plan_continue_failed_desktop',
+      runId: 'run_continue_failed_desktop',
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'readonly',
+      maxIterations: 1,
+    });
+
+    expect(result).toMatchObject({
+      runId: 'run_continue_failed_desktop',
+      status: 'failed',
+      abandonedSnapshot: false,
+      plan: {
+        id: 'plan_continue_failed_desktop',
+        steps: [
+          { id: 'inspect_schema', status: 'done' },
+          { id: 'run_query', status: 'failed', runStatus: 'permission_denied' },
+        ],
+      },
+      toolExecutions: [{ toolCallId: 'call_hidden', toolName: 'execute_sql', status: 'denied' }],
+    });
+    await expect(service.listRecoverablePlans()).resolves.toMatchObject({
+      plans: [
+        {
+          planId: 'plan_continue_failed_desktop',
+          executedSteps: 1,
+          totalIterations: 1,
+        },
+      ],
+    });
+    await expect(planStore.load('plan_continue_failed_desktop')).resolves.toMatchObject({
+      status: 'running',
+      plan: { steps: [{ status: 'done' }, { status: 'pending' }] },
+    });
+  });
+
+  it('abandons a recoverable Plan & Execute snapshot through desktop service', async () => {
+    const planStore = new AgentPlanExecutionStore(await planStorePath());
+    await planStore.save({
+      plan: recoverablePlan('plan_abandon_desktop'),
+      status: 'running',
+      session: testAgentSession('session_abandon_desktop'),
+      now: '2026-06-17T00:05:00.000Z',
+    });
+    const service = await createService({
+      provider: scriptedProvider([]),
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      planStore,
+    });
+
+    await expect(
+      service.abandonPlan({ planId: 'plan_abandon_desktop', reason: 'user chose to discard stale work' }),
+    ).resolves.toEqual({
+      planId: 'plan_abandon_desktop',
+      abandoned: true,
+      message: 'Recoverable Agent plan was abandoned.',
+    });
+    await expect(service.listRecoverablePlans()).resolves.toEqual({ plans: [] });
+    await expect(planStore.load('plan_abandon_desktop')).resolves.toMatchObject({
+      status: 'abandoned',
+      errorMessage: 'user chose to discard stale work',
+    });
+  });
+
   it('writes a desktop Agent audit log for a real headless Agent run', async () => {
     const logsDir = await tempDir('dbagent-agent-service-audit-');
     const provider = scriptedProvider([
@@ -366,6 +588,7 @@ async function createService(input: {
   registry: ToolRegistry;
   skills: SkillDefinition[];
   auditLog?: AgentAuditLogWriter;
+  planStore?: AgentPlanExecutionStore;
 }): Promise<HeadlessAgentService> {
   const usage = new UsageTracker(await usagePath());
   const llmRouter = new LlmRouter(usage, [input.provider]);
@@ -377,10 +600,12 @@ async function createService(input: {
   const planExecuteAgent = new PlanExecuteAgent(llmRouter, agent, {
     now: () => '2026-06-17T00:00:00.000Z',
     createPlanId: () => 'plan_agent_service',
+    ...(input.planStore === undefined ? {} : { planStore: input.planStore }),
   });
   return new HeadlessAgentService({
     agent,
     planExecuteAgent,
+    ...(input.planStore === undefined ? {} : { planRecoveryService: new AgentPlanRecoveryService(input.planStore) }),
     toolRegistry: input.registry,
     loadSkills: () => input.skills,
     createRunId: () => 'run_generated',
@@ -391,10 +616,52 @@ async function usagePath(): Promise<string> {
   return join(await tempDir('dbagent-agent-service-'), 'usage.json');
 }
 
+async function planStorePath(): Promise<string> {
+  return join(await tempDir('dbagent-agent-plan-store-'), 'plans.json');
+}
+
 async function tempDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+function testAgentSession(id: string) {
+  const session = createAgentSession({
+    id,
+    title: 'Recovered desktop Agent session',
+    mode: 'readonly',
+    now: () => '2026-06-17T00:00:00.000Z',
+  });
+  session.strategy = 'plan-execute';
+  return session;
+}
+
+function recoverablePlan(id: string): AgentPlan {
+  return {
+    id,
+    title: 'Recoverable GMV plan',
+    goal: 'Investigate GMV after interrupted desktop run.',
+    createdAt: '2026-06-17T00:00:00.000Z',
+    plannerModelText: '{"title":"Recoverable GMV plan"}',
+    steps: [
+      {
+        id: 'inspect_schema',
+        title: 'Inspect schema',
+        instruction: 'Inspect the orders table before querying.',
+        status: 'done',
+        resultSummary: 'orders table inspected',
+        runStatus: 'done',
+        iterations: 1,
+      },
+      {
+        id: 'run_query',
+        title: 'Run query',
+        instruction: 'Run readonly GMV query and summarize the result.',
+        status: 'pending',
+      },
+    ],
+  };
 }
 
 function registryWithQueryTools(): ToolRegistry {

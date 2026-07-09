@@ -1,4 +1,11 @@
-import type { AgentPlan, AgentPlanExecuteResult, AgentRunResult, ToolRegistry } from '@dbagent/core-agent';
+import type {
+  AgentPlan,
+  AgentPlanExecuteResult,
+  AgentPlanRecoveryPlan,
+  AgentRunResult,
+  PlanExecuteRecoveryService,
+  ToolRegistry,
+} from '@dbagent/core-agent';
 import { findMatchingSkills, type SkillDefinition, type SkillMatchCandidate } from '@dbagent/core-skills';
 import {
   NoMatchingSkillError,
@@ -10,8 +17,14 @@ import {
 } from '@dbagent/core-tools';
 import type {
   AgentAbortRequest,
-  AgentRunPlanSummary,
   AgentAbortResponse,
+  AgentAbandonPlanRequest,
+  AgentAbandonPlanResponse,
+  AgentContinuePlanRequest,
+  AgentContinuePlanResponse,
+  AgentPlanRecoverySummary,
+  AgentRecoverablePlansResponse,
+  AgentRunPlanSummary,
   AgentRunStrategy,
   AgentRunRequest,
   AgentRunResponse,
@@ -26,6 +39,7 @@ import type {
 export type HeadlessAgentServiceDependencies = {
   agent: SkillAgent;
   planExecuteAgent?: SkillPlanExecuteAgent;
+  planRecoveryService?: Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'abandon'>;
   toolRegistry: Pick<ToolRegistry, 'list'>;
   loadSkills: () => Promise<SkillDefinition[]> | SkillDefinition[];
   createRunId?: () => string;
@@ -141,6 +155,85 @@ export class HeadlessAgentService {
     }
   }
 
+  async listRecoverablePlans(): Promise<AgentRecoverablePlansResponse> {
+    return {
+      plans: (await this.requirePlanRecoveryService().listRecoverablePlans()).map(toSharedRecoveryPlan),
+    };
+  }
+
+  async continuePlan(request: AgentContinuePlanRequest): Promise<AgentContinuePlanResponse> {
+    const runId = request.runId?.trim() || this.createRunId();
+    const controller = new AbortController();
+    const toolPolicy = this.resolveToolPolicy(request);
+    this.activeRuns.set(runId, controller);
+
+    try {
+      const continued = await this.requirePlanRecoveryService().continue(request.planId, this.requirePlanExecuteAgent(), {
+        providerId: request.providerId,
+        model: request.model,
+        ...(request.userMessage === undefined ? {} : { userMessage: request.userMessage }),
+        allowedTools: toolPolicy.agentAllowedToolNames,
+        ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
+        ...(request.mode === undefined ? {} : { mode: request.mode }),
+        ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
+        ...(request.maxPlanSteps === undefined ? {} : { maxPlanSteps: request.maxPlanSteps }),
+        ...(request.stopOnStepFailure === undefined ? {} : { stopOnStepFailure: request.stopOnStepFailure }),
+        ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
+        ...(request.contextWindowTokens === undefined ? {} : { contextWindowTokens: request.contextWindowTokens }),
+        ...(request.keepRecentMessages === undefined ? {} : { keepRecentMessages: request.keepRecentMessages }),
+        ...(request.maxToolResultChars === undefined ? {} : { maxToolResultChars: request.maxToolResultChars }),
+        ...(request.maxConsecutiveToolFailures === undefined
+          ? {}
+          : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
+        ...(request.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: request.maxToolExecutionMs }),
+        signal: controller.signal,
+      });
+
+      return {
+        runId,
+        strategy: 'plan-execute',
+        status: normalizeAgentStatus(continued.result.status),
+        ...sessionIdPart(continued.result),
+        finalText: continued.result.finalText,
+        iterations: resultIterations(continued.result),
+        ...planResultPart(continued.result),
+        toolExecutions: continued.result.toolExecutions,
+        toolPolicy: toSharedToolPolicy(toolPolicy),
+        candidates: [],
+        recoveryPlan: toSharedRecoveryPlan(continued.plan),
+        abandonedSnapshot: continued.abandonedSnapshot,
+      };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return {
+          runId,
+          strategy: 'plan-execute',
+          status: 'aborted',
+          finalText: 'Agent plan continuation was aborted.',
+          iterations: 0,
+          toolExecutions: [],
+          toolPolicy: toSharedToolPolicy(toolPolicy),
+          candidates: [],
+          abandonedSnapshot: false,
+        };
+      }
+      return {
+        runId,
+        strategy: 'plan-execute',
+        status: 'failed',
+        finalText: 'Agent plan continuation failed.',
+        iterations: 0,
+        toolExecutions: [],
+        toolPolicy: toSharedToolPolicy(toolPolicy),
+        candidates: [],
+        abandonedSnapshot: false,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      this.activeRuns.delete(runId);
+    }
+  }
+
   abort(request: AgentAbortRequest): AgentAbortResponse {
     const controller = this.activeRuns.get(request.runId);
     if (!controller) {
@@ -155,6 +248,15 @@ export class HeadlessAgentService {
       runId: request.runId,
       aborted: true,
       message: 'Agent run abort signal sent.',
+    };
+  }
+
+  async abandonPlan(request: AgentAbandonPlanRequest): Promise<AgentAbandonPlanResponse> {
+    const abandoned = await this.requirePlanRecoveryService().abandon(request.planId, request.reason);
+    return {
+      planId: request.planId,
+      abandoned,
+      message: abandoned ? 'Recoverable Agent plan was abandoned.' : 'Recoverable Agent plan was not found.',
     };
   }
 
@@ -175,6 +277,13 @@ export class HeadlessAgentService {
       throw new Error('Plan & Execute Agent is not configured for the desktop Agent service.');
     }
     return this.dependencies.planExecuteAgent;
+  }
+
+  private requirePlanRecoveryService(): Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'abandon'> {
+    if (!this.dependencies.planRecoveryService) {
+      throw new Error('Plan & Execute recovery service is not configured for the desktop Agent service.');
+    }
+    return this.dependencies.planRecoveryService;
   }
 
   private buildAutoSkillRunOptions(
@@ -355,5 +464,28 @@ function toSharedPlan(plan: AgentPlan): AgentRunPlanSummary {
       ...(step.runStatus === undefined ? {} : { runStatus: step.runStatus }),
       ...(step.iterations === undefined ? {} : { iterations: step.iterations }),
     })),
+  };
+}
+
+function toSharedRecoveryPlan(plan: AgentPlanRecoveryPlan): AgentPlanRecoverySummary {
+  return {
+    planId: plan.planId,
+    ...(plan.sessionId === undefined ? {} : { sessionId: plan.sessionId }),
+    title: plan.title,
+    goal: plan.goal,
+    ...(plan.interruptedStepId === undefined ? {} : { interruptedStepId: plan.interruptedStepId }),
+    ...(plan.interruptedStepTitle === undefined ? {} : { interruptedStepTitle: plan.interruptedStepTitle }),
+    completedStepCount: plan.completedStepCount,
+    failedStepCount: plan.failedStepCount,
+    skippedStepCount: plan.skippedStepCount,
+    pendingStepCount: plan.pendingStepCount,
+    executedSteps: plan.executedSteps,
+    totalIterations: plan.totalIterations,
+    startedAt: plan.startedAt,
+    updatedAt: plan.updatedAt,
+    ...(plan.lastResultText === undefined ? {} : { lastResultText: plan.lastResultText }),
+    ...(plan.lastToolError === undefined ? {} : { lastToolError: plan.lastToolError }),
+    resumePrompt: plan.resumePrompt,
+    actions: plan.actions,
   };
 }
