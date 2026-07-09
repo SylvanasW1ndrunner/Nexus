@@ -64,6 +64,8 @@ export const ipcChannels = {
     detect: 'python:detect',
     choosePath: 'python:choose-path',
     createEnvironment: 'python:create-environment',
+    verifyDependencies: 'python:verify-dependencies',
+    installDependencies: 'python:install-dependencies',
     runScript: 'python:run-script',
   },
   terminal: {
@@ -599,6 +601,38 @@ export type PythonCreateEnvironmentRequest = {
   mode: 'venv' | 'conda';
   name: string;
   pythonExecutable?: string;
+};
+
+export type PythonVerifyDependenciesRequest = {
+  rootPath: string;
+  config: WorkspacePythonConfig;
+  modules: string[];
+  timeoutMs?: number;
+};
+
+export type PythonDependencyCheck = {
+  module: string;
+  installed: boolean;
+  detail?: string;
+};
+
+export type PythonVerifyDependenciesResult = {
+  command: string;
+  cwd: string;
+  valid: boolean;
+  checks: PythonDependencyCheck[];
+  elapsedMs: number;
+  stdout: string;
+  stderr: string;
+};
+
+export type PythonInstallDependenciesRequest = {
+  rootPath: string;
+  config: WorkspacePythonConfig;
+  requirementsPath?: string;
+  packages?: string[];
+  timeoutMs?: number;
+  upgrade?: boolean;
 };
 
 export type PythonRunScriptRequest = {
@@ -1310,6 +1344,8 @@ export type IpcRequestMap = {
   'python:detect': PythonDetectRequest;
   'python:choose-path': { title?: string; mode: 'file' | 'directory' };
   'python:create-environment': PythonCreateEnvironmentRequest;
+  'python:verify-dependencies': PythonVerifyDependenciesRequest;
+  'python:install-dependencies': PythonInstallDependenciesRequest;
   'python:run-script': PythonRunScriptRequest;
   'terminal:create': { cwd?: string; name?: string };
   'terminal:close': { id: string };
@@ -1403,6 +1439,8 @@ export type IpcResponseMap = {
   'python:detect': Result<PythonEnvironmentInfo[]>;
   'python:choose-path': Result<{ path?: string }>;
   'python:create-environment': Result<PythonEnvironmentInfo>;
+  'python:verify-dependencies': Result<PythonVerifyDependenciesResult>;
+  'python:install-dependencies': Result<PythonRunResult>;
   'python:run-script': Result<PythonRunResult>;
   'terminal:create': Result<TerminalSession>;
   'terminal:close': Result<{ id: string }>;

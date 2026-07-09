@@ -65,6 +65,47 @@ describe('PythonEnvironmentService', () => {
     expect(result.stdout.trim()).toBe('file-run-ok');
   }, REAL_PYTHON_TEST_TIMEOUT_MS);
 
+  it('verifies installed Python modules through a real interpreter', async () => {
+    try {
+      await execFileAsync('python', ['--version']);
+    } catch {
+      return;
+    }
+
+    const result = await new PythonEnvironmentService().verifyDependencies({
+      rootPath: process.cwd(),
+      config: { mode: 'system', requirementsPath: 'requirements.txt' },
+      modules: ['json', 'dbagent_missing_module_for_test'],
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.checks).toEqual([
+      { module: 'json', installed: true },
+      { module: 'dbagent_missing_module_for_test', installed: false },
+    ]);
+  }, REAL_PYTHON_TEST_TIMEOUT_MS);
+
+  it('installs dependencies from an empty requirements file without contacting a package index', async () => {
+    try {
+      await execFileAsync('python', ['-m', 'pip', '--version']);
+    } catch {
+      return;
+    }
+    const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-python-pip-'));
+    tempDirs.push(rootPath);
+    await writeFile(join(rootPath, 'requirements.txt'), '# no dependencies for smoke test\n', 'utf8');
+
+    const result = await new PythonEnvironmentService().installDependencies({
+      rootPath,
+      config: { mode: 'system', requirementsPath: 'requirements.txt' },
+      timeoutMs: 30_000,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.command).toContain('-m pip install');
+    expect(result.command.replaceAll('\\', '/')).toContain(`${rootPath.replaceAll('\\', '/')}/requirements.txt`);
+  }, REAL_PYTHON_TEST_TIMEOUT_MS + 20_000);
+
   it('creates a venv and runs code through that environment when Python venv is available', async () => {
     try {
       await execFileAsync('python', ['-m', 'venv', '--help']);
@@ -123,6 +164,31 @@ describe('PythonEnvironmentService', () => {
         code: 'print("should-not-run")',
       }),
     ).rejects.toThrow('inside the workspace');
+  });
+
+  it('rejects requirements paths outside the workspace before launching pip', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-python-pip-'));
+    tempDirs.push(rootPath);
+
+    await expect(
+      new PythonEnvironmentService().installDependencies({
+        rootPath,
+        config: { mode: 'system', requirementsPath: '../requirements.txt' },
+      }),
+    ).rejects.toThrow('inside the workspace');
+  });
+
+  it('rejects pip option injection in package specs', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-python-pip-'));
+    tempDirs.push(rootPath);
+
+    await expect(
+      new PythonEnvironmentService().installDependencies({
+        rootPath,
+        config: { mode: 'system', requirementsPath: '' },
+        packages: ['--index-url=https://example.invalid/simple'],
+      }),
+    ).rejects.toThrow('Invalid Python package spec');
   });
 
   it('rejects conda environment names that are reserved for workspace venvs before launching conda', async () => {

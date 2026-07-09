@@ -536,6 +536,12 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.python.createEnvironment, async (request) =>
     safeResult(() => pythonEnvironmentService.createEnvironment(request)),
   );
+  handle(ipcChannels.python.verifyDependencies, async (request) =>
+    safeResult(() => pythonEnvironmentService.verifyDependencies(request)),
+  );
+  handle(ipcChannels.python.installDependencies, async (request) =>
+    safeResult(() => pythonEnvironmentService.installDependencies(request)),
+  );
   handle(ipcChannels.python.runScript, async (request) =>
     safeResult(() => pythonEnvironmentService.runScript(request)),
   );

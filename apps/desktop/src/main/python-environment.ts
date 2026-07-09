@@ -5,7 +5,10 @@ import { promisify } from 'node:util';
 import type {
   PythonCreateEnvironmentRequest,
   PythonDetectRequest,
+  PythonInstallDependenciesRequest,
   PythonEnvironmentInfo,
+  PythonVerifyDependenciesRequest,
+  PythonVerifyDependenciesResult,
   PythonRunResult,
   PythonRunScriptRequest,
   WorkspacePythonConfig,
@@ -57,6 +60,99 @@ export class PythonEnvironmentService {
         valid: true,
       }
     );
+  }
+
+  async verifyDependencies(request: PythonVerifyDependenciesRequest): Promise<PythonVerifyDependenciesResult> {
+    const cwd = resolve(request.rootPath);
+    const modules = normalizeModuleNames(request.modules);
+    const code = [
+      'import importlib.util, json',
+      `modules = ${JSON.stringify(modules)}`,
+      'checks = []',
+      'for module in modules:',
+      '    try:',
+      '        found = importlib.util.find_spec(module) is not None',
+      '        checks.append({"module": module, "installed": found})',
+      '    except Exception as exc:',
+      '        checks.append({"module": module, "installed": False, "detail": str(exc)})',
+      'print(json.dumps({"checks": checks}, ensure_ascii=False))',
+    ].join('\n');
+    const invocation = resolvePythonInvocation(cwd, request.config, ['-c', code]);
+    const startedAt = Date.now();
+    try {
+      const output = await execFileAsync(invocation.command, invocation.args, {
+        cwd,
+        timeout: request.timeoutMs ?? defaultTimeoutMs,
+        maxBuffer: 1024 * 1024,
+      });
+      const parsed = JSON.parse(output.stdout.trim() || '{"checks":[]}') as { checks?: PythonVerifyDependenciesResult['checks'] };
+      const checks = Array.isArray(parsed.checks) ? parsed.checks : [];
+      return {
+        command: describeInvocation(invocation),
+        cwd,
+        valid: checks.every((check) => check.installed),
+        checks,
+        elapsedMs: Date.now() - startedAt,
+        stdout: output.stdout,
+        stderr: output.stderr,
+      };
+    } catch (error) {
+      const failed = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
+      return {
+        command: describeInvocation(invocation),
+        cwd,
+        valid: false,
+        checks: modules.map((module) => ({ module, installed: false, detail: failed.stderr ?? failed.message })),
+        elapsedMs: Date.now() - startedAt,
+        stdout: failed.stdout ?? '',
+        stderr: failed.stderr ?? failed.message,
+      };
+    }
+  }
+
+  async installDependencies(request: PythonInstallDependenciesRequest): Promise<PythonRunResult> {
+    const cwd = resolve(request.rootPath);
+    const pipArgs = ['-m', 'pip', 'install', '--disable-pip-version-check'];
+    if (request.upgrade) pipArgs.push('--upgrade');
+
+    const packages = normalizePackageSpecs(request.packages ?? []);
+    const requirementsPath = request.requirementsPath ?? request.config.requirementsPath;
+    if (requirementsPath?.trim()) {
+      pipArgs.push('-r', resolveWorkspaceFile(cwd, requirementsPath, 'Python requirements path'));
+    }
+    pipArgs.push(...packages);
+
+    if (!requirementsPath?.trim() && packages.length === 0) {
+      throw new Error('Python dependency install requires a requirements file or at least one package.');
+    }
+
+    const invocation = resolvePythonInvocation(cwd, request.config, pipArgs);
+    const startedAt = Date.now();
+    try {
+      const output = await execFileAsync(invocation.command, invocation.args, {
+        cwd,
+        timeout: request.timeoutMs ?? 120_000,
+        maxBuffer: 1024 * 1024 * 4,
+      });
+      return {
+        command: describeInvocation(invocation),
+        cwd,
+        exitCode: 0,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        elapsedMs: Date.now() - startedAt,
+      };
+    } catch (error) {
+      const failed = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number | null };
+      return {
+        command: describeInvocation(invocation),
+        cwd,
+        exitCode: typeof failed.code === 'number' ? failed.code : null,
+        stdout: failed.stdout ?? '',
+        stderr: failed.stderr ?? failed.message,
+        elapsedMs: Date.now() - startedAt,
+      };
+    }
   }
 
   async runScript(request: PythonRunScriptRequest): Promise<PythonRunResult> {
@@ -174,6 +270,37 @@ function resolveWorkspaceDirectory(rootPath: string, path: string, label: string
     throw new Error(`${label} must stay inside the workspace.`);
   }
   return resolved;
+}
+
+function resolveWorkspaceFile(rootPath: string, path: string, label: string): string {
+  if (isAbsolute(path)) throw new Error(`${label} must be relative to the workspace.`);
+  const resolved = resolve(rootPath, path);
+  const relativeToRoot = relative(rootPath, resolved);
+  if (relativeToRoot.startsWith('..') || isAbsolute(relativeToRoot)) {
+    throw new Error(`${label} must stay inside the workspace.`);
+  }
+  return resolved;
+}
+
+function normalizeModuleNames(modules: string[]): string[] {
+  const normalized = [...new Set(modules.map((module) => module.trim()).filter(Boolean))];
+  if (normalized.length === 0) throw new Error('Python dependency verification requires at least one module.');
+  for (const module of normalized) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(module)) {
+      throw new Error(`Invalid Python module name: ${module}`);
+    }
+  }
+  return normalized;
+}
+
+function normalizePackageSpecs(packages: string[]): string[] {
+  const normalized = [...new Set(packages.map((pkg) => pkg.trim()).filter(Boolean))];
+  for (const pkg of normalized) {
+    if (pkg.startsWith('-') || pkg.includes('\r') || pkg.includes('\n') || pkg.includes('\0')) {
+      throw new Error(`Invalid Python package spec: ${pkg}`);
+    }
+  }
+  return normalized;
 }
 
 function isCondaPrefixInput(value: string): boolean {
