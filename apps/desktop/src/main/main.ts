@@ -43,6 +43,7 @@ import {
 } from '@dbagent/core-rag';
 import { SkillRegistry, registerDefaultBuiltinSkills } from '@dbagent/core-skills';
 import {
+  createDefaultStaticMcpMarketProvider,
   createStdioMcpRuntimeLauncher,
   McpConfigStore,
   McpHealthManager,
@@ -74,6 +75,7 @@ import { HeadlessAgentService } from './agent-service.js';
 import { registerDesktopAgentTools } from './agent-tool-bootstrap.js';
 import { DailyAgentAuditLogStore } from './agent-audit-log.js';
 import { DesktopDiagnosticReportService } from './diagnostic-report-service.js';
+import { DesktopMcpMarketService } from './mcp-market-service.js';
 import { DesktopMcpService } from './mcp-service.js';
 import {
   recoverSchemaRagSnapshotsAtStartup,
@@ -150,6 +152,10 @@ const desktopMcpService = new DesktopMcpService({
   tools: mcpToolRegistrationManager,
   secrets: credentialVault,
 });
+const desktopMcpMarketService = new DesktopMcpMarketService(
+  [createDefaultStaticMcpMarketProvider()],
+  desktopMcpService,
+);
 const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
 let latestSchemaRagStartupRecovery: SchemaRagStartupRecoverySummary | undefined;
@@ -582,6 +588,12 @@ function registerIpcHandlers(): void {
   );
   handle(ipcChannels.mcp.health, async () =>
     safeResult(() => Promise.resolve(desktopMcpService.health())),
+  );
+  handle(ipcChannels.mcp.marketSearch, async (request) =>
+    safeResult(() => desktopMcpMarketService.search(request ?? {})),
+  );
+  handle(ipcChannels.mcp.marketInstall, async (request) =>
+    safeResult(() => desktopMcpMarketService.install(request)),
   );
 
   handle(ipcChannels.skills.match, async (request) =>

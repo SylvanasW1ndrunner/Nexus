@@ -92,6 +92,8 @@ export const ipcChannels = {
     startAutoStart: 'mcp:start-autostart',
     restartDue: 'mcp:restart-due',
     health: 'mcp:health',
+    marketSearch: 'mcp:market-search',
+    marketInstall: 'mcp:market-install',
   },
   skills: {
     match: 'skills:match',
@@ -532,6 +534,47 @@ export type McpServerOperationResult = {
   running: boolean;
   removed?: boolean;
   secretRefs?: string[];
+};
+
+export type McpMarketRequiredEnv = {
+  name: string;
+  title?: string;
+  description?: string;
+  required: boolean;
+  secret: boolean;
+};
+
+export type McpMarketEntry = {
+  id: string;
+  marketId: string;
+  name: string;
+  description: string;
+  publisher: string;
+  categories: string[];
+  transport: McpTransport;
+  packageName?: string;
+  rating?: number;
+  downloads?: number;
+  requiredEnv: McpMarketRequiredEnv[];
+};
+
+export type McpMarketSearchRequest = {
+  marketId?: string;
+  query?: string;
+  category?: string;
+  limit?: number;
+};
+
+export type McpMarketInstallRequest = {
+  marketId: string;
+  entryId: string;
+  serverId?: string;
+  name?: string;
+  envPlain?: Record<string, string>;
+  envSecrets?: Record<string, string>;
+  autoStart?: boolean;
+  enabled?: boolean;
+  start?: boolean;
 };
 
 export type PythonEnvironmentInfo = {
@@ -1289,6 +1332,8 @@ export type IpcRequestMap = {
   'mcp:start-autostart': void;
   'mcp:restart-due': { now?: string } | undefined;
   'mcp:health': void;
+  'mcp:market-search': McpMarketSearchRequest | undefined;
+  'mcp:market-install': McpMarketInstallRequest;
   'skills:match': SkillsMatchRequest;
   'agent:tool-policy-preview': AgentToolPolicyRequest;
   'agent:run': AgentRunRequest;
@@ -1380,6 +1425,8 @@ export type IpcResponseMap = {
   'mcp:start-autostart': Result<McpServerOperationResult[]>;
   'mcp:restart-due': Result<McpServerOperationResult[]>;
   'mcp:health': Result<McpServerHealthPreview[]>;
+  'mcp:market-search': Result<McpMarketEntry[]>;
+  'mcp:market-install': Result<McpServerOperationResult>;
   'skills:match': Result<SkillsMatchResponse>;
   'agent:tool-policy-preview': Result<AgentToolPolicyPreview>;
   'agent:run': Result<AgentRunResponse>;
