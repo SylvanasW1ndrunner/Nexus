@@ -96,6 +96,7 @@ export const ipcChannels = {
     abandonPlan: 'agent:abandon-plan',
     recoverableCheckpoints: 'agent:recoverable-checkpoints',
     continueCheckpoint: 'agent:continue-checkpoint',
+    restartCheckpoint: 'agent:restart-checkpoint',
     abandonCheckpoint: 'agent:abandon-checkpoint',
     sessions: 'agent:sessions',
     session: 'agent:session',
@@ -833,6 +834,10 @@ export type AgentContinueCheckpointResponse = AgentRunResponse & {
   abandonedCheckpointCount: number;
 };
 
+export type AgentRestartCheckpointRequest = AgentContinueCheckpointRequest;
+
+export type AgentRestartCheckpointResponse = AgentContinueCheckpointResponse;
+
 export type AgentAbandonCheckpointRequest = {
   sessionId: string;
   reason?: string;
@@ -1137,6 +1142,7 @@ export type IpcRequestMap = {
   'agent:abandon-plan': AgentAbandonPlanRequest;
   'agent:recoverable-checkpoints': void;
   'agent:continue-checkpoint': AgentContinueCheckpointRequest;
+  'agent:restart-checkpoint': AgentRestartCheckpointRequest;
   'agent:abandon-checkpoint': AgentAbandonCheckpointRequest;
   'agent:sessions': AgentSessionsRequest | undefined;
   'agent:session': AgentSessionRequest;
@@ -1219,6 +1225,7 @@ export type IpcResponseMap = {
   'agent:abandon-plan': Result<AgentAbandonPlanResponse>;
   'agent:recoverable-checkpoints': Result<AgentRecoverableCheckpointsResponse>;
   'agent:continue-checkpoint': Result<AgentContinueCheckpointResponse>;
+  'agent:restart-checkpoint': Result<AgentRestartCheckpointResponse>;
   'agent:abandon-checkpoint': Result<AgentAbandonCheckpointResponse>;
   'agent:sessions': Result<AgentSessionsResponse>;
   'agent:session': Result<AgentSessionDetail>;

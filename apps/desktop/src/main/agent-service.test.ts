@@ -663,6 +663,74 @@ describe('HeadlessAgentService', () => {
     );
   });
 
+  it('restarts a recoverable ReAct checkpoint through desktop service', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointStorePath());
+    await checkpointStore.save({
+      session: interruptedReactSession('session_checkpoint_restart'),
+      iteration: 2,
+      status: 'running',
+      toolExecutions: [
+        {
+          toolCallId: 'call_orders',
+          toolName: 'query_database',
+          status: 'success',
+          durationMs: 12,
+          resultPreview: '{"rows":[{"order_count":42}]}',
+        },
+      ],
+      now: '2026-06-17T00:06:00.000Z',
+    });
+    const provider = scriptedProvider([
+      {
+        text: 'Restarted ReAct run completed from a clean session.',
+        toolCalls: [],
+        usage: { promptTokens: 18, completionTokens: 7, totalTokens: 25 },
+      },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      checkpointStore,
+    });
+
+    const result = await service.restartCheckpoint({
+      sessionId: 'session_checkpoint_restart',
+      runId: 'run_checkpoint_restart',
+      providerId: 'fake',
+      model: 'fake-model',
+      mode: 'readonly',
+      maxIterations: 1,
+    });
+
+    expect(result).toMatchObject({
+      runId: 'run_checkpoint_restart',
+      strategy: 'react',
+      status: 'done',
+      sessionId: 'session_agent_service',
+      finalText: 'Restarted ReAct run completed from a clean session.',
+      iterations: 1,
+      recoveryCheckpoint: {
+        sessionId: 'session_checkpoint_restart',
+        interruptedIteration: 2,
+      },
+      abandonedCheckpointCount: 1,
+    });
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests[0]?.messages).toHaveLength(1);
+    expect(provider.requests[0]?.messages[0]?.content).toContain(
+      'Restart the interrupted Agent task from the beginning.',
+    );
+    expect(provider.requests[0]?.messages[0]?.content).toContain('Analyze the weekly GMV drop.');
+    await expect(service.listRecoverableCheckpoints()).resolves.toEqual({ checkpoints: [] });
+    await expect(checkpointStore.listBySession('session_checkpoint_restart')).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ iteration: 2, status: 'abandoned' })]),
+    );
+    await expect(checkpointStore.listBySession('session_agent_service')).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ iteration: 1, status: 'done' })]),
+    );
+  });
+
   it('abandons recoverable ReAct checkpoints through desktop service', async () => {
     const checkpointStore = new AgentCheckpointStore(await checkpointStorePath());
     await checkpointStore.save({

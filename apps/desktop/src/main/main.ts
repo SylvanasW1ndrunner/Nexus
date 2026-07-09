@@ -553,6 +553,9 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.agent.continueCheckpoint, async (request) =>
     safeResult(() => headlessAgentService.continueCheckpoint(request)),
   );
+  handle(ipcChannels.agent.restartCheckpoint, async (request) =>
+    safeResult(() => headlessAgentService.restartCheckpoint(request)),
+  );
   handle(ipcChannels.agent.abandonCheckpoint, async (request) =>
     safeResult(() => headlessAgentService.abandonCheckpoint(request)),
   );

@@ -36,17 +36,24 @@ export type AgentRecoveryRunner = {
   run(options: AgentRunOptions): Promise<AgentRunResult>;
 };
 
-export type ContinueAgentRecoveryOptions = Omit<AgentRunOptions, 'initialIteration' | 'initialSession' | 'userMessage'> & {
+export type ContinueAgentRecoveryOptions = Omit<
+  AgentRunOptions,
+  'initialIteration' | 'initialSession' | 'userMessage'
+> & {
   userMessage?: string;
   abandonReason?: string;
   now?: string;
 };
+
+export type RestartAgentRecoveryOptions = ContinueAgentRecoveryOptions;
 
 export type ContinueAgentRecoveryResult = {
   plan: AgentRecoveryPlan;
   result: AgentRunResult;
   abandonedCheckpointCount: number;
 };
+
+export type RestartAgentRecoveryResult = ContinueAgentRecoveryResult;
 
 export class AgentRecoveryService {
   constructor(private readonly store: AgentRecoveryStore) {}
@@ -57,7 +64,11 @@ export class AgentRecoveryService {
     return plans.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  async abandon(sessionId: string, reason = '用户放弃恢复 Agent 任务', now?: string): Promise<number> {
+  async abandon(
+    sessionId: string,
+    reason = '用户放弃恢复 Agent 任务',
+    now?: string,
+  ): Promise<number> {
     return this.store.markAbandoned(sessionId, reason, now);
   }
 
@@ -89,15 +100,52 @@ export class AgentRecoveryService {
     return { plan, result, abandonedCheckpointCount };
   }
 
+  async restart(
+    sessionId: string,
+    runner: AgentRecoveryRunner,
+    options: RestartAgentRecoveryOptions,
+  ): Promise<RestartAgentRecoveryResult> {
+    const { userMessage, abandonReason, now, ...runOptions } = options;
+    const checkpoint = await this.findRecoverableCheckpoint(sessionId);
+    const plan = await this.buildPlan(checkpoint);
+    try {
+      const result = await runner.run({
+        ...runOptions,
+        userMessage: userMessage ?? buildRestartPrompt(plan, checkpoint.toolExecutions),
+        mode: options.mode ?? checkpoint.session.mode,
+      });
+      if (!shouldSupersedeRecoverableCheckpoint(result.status)) {
+        await this.refreshRecoverableCheckpoint(checkpoint, now);
+        return { plan, result, abandonedCheckpointCount: 0 };
+      }
+      const abandoned = await this.store.markCheckpointAbandoned(
+        checkpoint.id,
+        abandonReason ?? 'Restarted Agent task completed successfully.',
+        now,
+      );
+      const abandonedCheckpointCount = abandoned ? 1 : 0;
+      return { plan, result, abandonedCheckpointCount };
+    } catch (error) {
+      await this.refreshRecoverableCheckpoint(checkpoint, now);
+      throw error;
+    }
+  }
+
   private async buildPlan(checkpoint: AgentIterationCheckpoint): Promise<AgentRecoveryPlan> {
     const history = await this.store.listBySession(checkpoint.sessionId);
     const startedAt = history[0]?.startedAt ?? checkpoint.startedAt;
     const userMessage = firstUserMessage(checkpoint.session.messages) ?? checkpoint.session.title;
     const lastAssistantText = lastMessageContent(checkpoint.session.messages, 'assistant');
     const lastToolError = lastFailedTool(checkpoint.toolExecutions)?.resultPreview;
-    const completedToolCount = checkpoint.toolExecutions.filter((item) => item.status === 'success').length;
-    const failedToolCount = checkpoint.toolExecutions.filter((item) => item.status === 'failed').length;
-    const deniedToolCount = checkpoint.toolExecutions.filter((item) => item.status === 'denied').length;
+    const completedToolCount = checkpoint.toolExecutions.filter(
+      (item) => item.status === 'success',
+    ).length;
+    const failedToolCount = checkpoint.toolExecutions.filter(
+      (item) => item.status === 'failed',
+    ).length;
+    const deniedToolCount = checkpoint.toolExecutions.filter(
+      (item) => item.status === 'denied',
+    ).length;
     const plan: AgentRecoveryPlan = {
       sessionId: checkpoint.sessionId,
       title: checkpoint.session.title,
@@ -117,14 +165,19 @@ export class AgentRecoveryService {
   }
 
   private async findRecoverableCheckpoint(sessionId: string): Promise<AgentIterationCheckpoint> {
-    const checkpoint = (await this.store.listRecoverable()).find((item) => item.sessionId === sessionId);
+    const checkpoint = (await this.store.listRecoverable()).find(
+      (item) => item.sessionId === sessionId,
+    );
     if (!checkpoint) {
       throw new Error(`No recoverable Agent checkpoint found for session ${sessionId}.`);
     }
     return checkpoint;
   }
 
-  private async refreshRecoverableCheckpoint(checkpoint: AgentIterationCheckpoint, now?: string): Promise<void> {
+  private async refreshRecoverableCheckpoint(
+    checkpoint: AgentIterationCheckpoint,
+    now?: string,
+  ): Promise<void> {
     await this.store.save({
       session: checkpoint.session,
       iteration: checkpoint.iteration,
@@ -140,7 +193,40 @@ function shouldSupersedeRecoverableCheckpoint(status: AgentRunStatus): boolean {
   return status === 'done';
 }
 
-function buildResumePrompt(plan: AgentRecoveryPlan, toolExecutions: AgentToolExecutionRecord[]): string {
+function buildRestartPrompt(
+  plan: AgentRecoveryPlan,
+  toolExecutions: AgentToolExecutionRecord[],
+): string {
+  const toolSummary =
+    toolExecutions.length === 0
+      ? '- No completed tool calls were persisted.'
+      : toolExecutions
+          .map((tool, index) => {
+            const preview = truncateForPrompt(tool.resultPreview, 800);
+            return `- ${index + 1}. ${tool.toolName} / ${tool.status}: ${preview}`;
+          })
+          .join('\n');
+  const failure = plan.lastToolError
+    ? `\nLatest tool failure: ${truncateForPrompt(plan.lastToolError, 800)}\n`
+    : '';
+  return [
+    'Restart the interrupted Agent task from the beginning.',
+    `Original user task: ${plan.userMessage}`,
+    `Interrupted at iteration: ${plan.interruptedIteration}.`,
+    `Completed tools: ${plan.completedToolCount}; failed tools: ${plan.failedToolCount}; denied tools: ${plan.deniedToolCount}.`,
+    failure.trim(),
+    'Previous execution summary:',
+    toolSummary,
+    'Requirement: create a fresh execution path. Use the previous summary only as diagnostic context; do not assume prior tool results are still valid unless you re-check them.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildResumePrompt(
+  plan: AgentRecoveryPlan,
+  toolExecutions: AgentToolExecutionRecord[],
+): string {
   const toolSummary =
     toolExecutions.length === 0
       ? '- 尚未完成工具调用。'
@@ -151,7 +237,9 @@ function buildResumePrompt(plan: AgentRecoveryPlan, toolExecutions: AgentToolExe
           })
           .join('\n');
 
-  const failure = plan.lastToolError ? `\n最近一次工具失败：${truncateForPrompt(plan.lastToolError, 800)}\n` : '';
+  const failure = plan.lastToolError
+    ? `\n最近一次工具失败：${truncateForPrompt(plan.lastToolError, 800)}\n`
+    : '';
   return [
     '请继续恢复上次中断的 Agent 任务。',
     `原始用户任务：${plan.userMessage}`,
@@ -170,7 +258,10 @@ function firstUserMessage(messages: AgentMessage[]): string | undefined {
   return messages.find((message) => message.role === 'user')?.content;
 }
 
-function lastMessageContent(messages: AgentMessage[], role: AgentMessage['role']): string | undefined {
+function lastMessageContent(
+  messages: AgentMessage[],
+  role: AgentMessage['role'],
+): string | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.role === role) return message.content;
@@ -178,7 +269,9 @@ function lastMessageContent(messages: AgentMessage[], role: AgentMessage['role']
   return undefined;
 }
 
-function lastFailedTool(toolExecutions: AgentToolExecutionRecord[]): AgentToolExecutionRecord | undefined {
+function lastFailedTool(
+  toolExecutions: AgentToolExecutionRecord[],
+): AgentToolExecutionRecord | undefined {
   for (let index = toolExecutions.length - 1; index >= 0; index -= 1) {
     const record = toolExecutions[index];
     if (record?.status === 'failed') return record;

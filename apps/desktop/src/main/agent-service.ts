@@ -46,6 +46,8 @@ import type {
   AgentExportSessionRequest,
   AgentExportSessionResponse,
   AgentForkSessionRequest,
+  AgentRestartCheckpointRequest,
+  AgentRestartCheckpointResponse,
   AgentRestartPlanRequest,
   AgentRestartPlanResponse,
   AgentSessionDetail,
@@ -80,7 +82,7 @@ export type HeadlessAgentServiceDependencies = {
   >;
   agentRecoveryService?: Pick<
     AgentRecoveryService,
-    'listRecoverablePlans' | 'continue' | 'abandon'
+    'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'
   >;
   sessionStore?: Pick<
     AgentSessionStore,
@@ -509,6 +511,90 @@ export class HeadlessAgentService {
     }
   }
 
+  async restartCheckpoint(
+    request: AgentRestartCheckpointRequest,
+  ): Promise<AgentRestartCheckpointResponse> {
+    const runId = request.runId?.trim() || this.createRunId();
+    const controller = new AbortController();
+    const toolPolicy = this.resolveToolPolicy(request);
+    this.activeRuns.set(runId, controller);
+
+    try {
+      const restarted = await this.requireAgentRecoveryService().restart(
+        request.sessionId,
+        this.dependencies.agent,
+        {
+          providerId: request.providerId,
+          model: request.model,
+          ...(request.userMessage === undefined ? {} : { userMessage: request.userMessage }),
+          allowedTools: toolPolicy.agentAllowedToolNames,
+          ...(request.usageMode === undefined ? {} : { usageMode: request.usageMode }),
+          ...(request.mode === undefined ? {} : { mode: request.mode }),
+          ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
+          ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget }),
+          ...(request.contextWindowTokens === undefined
+            ? {}
+            : { contextWindowTokens: request.contextWindowTokens }),
+          ...(request.keepRecentMessages === undefined
+            ? {}
+            : { keepRecentMessages: request.keepRecentMessages }),
+          ...(request.maxToolResultChars === undefined
+            ? {}
+            : { maxToolResultChars: request.maxToolResultChars }),
+          ...(request.maxConsecutiveToolFailures === undefined
+            ? {}
+            : { maxConsecutiveToolFailures: request.maxConsecutiveToolFailures }),
+          ...(request.maxToolExecutionMs === undefined
+            ? {}
+            : { maxToolExecutionMs: request.maxToolExecutionMs }),
+          signal: controller.signal,
+        },
+      );
+
+      return {
+        runId,
+        strategy: 'react',
+        status: normalizeAgentStatus(restarted.result.status),
+        ...sessionIdPart(restarted.result),
+        finalText: restarted.result.finalText,
+        iterations: resultIterations(restarted.result),
+        toolExecutions: restarted.result.toolExecutions,
+        toolPolicy: toSharedToolPolicy(toolPolicy),
+        candidates: [],
+        recoveryCheckpoint: toSharedCheckpointRecovery(restarted.plan),
+        abandonedCheckpointCount: restarted.abandonedCheckpointCount,
+      };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return {
+          runId,
+          strategy: 'react',
+          status: 'aborted',
+          finalText: 'Agent checkpoint restart was aborted.',
+          iterations: 0,
+          toolExecutions: [],
+          toolPolicy: toSharedToolPolicy(toolPolicy),
+          candidates: [],
+          abandonedCheckpointCount: 0,
+        };
+      }
+      return {
+        runId,
+        strategy: 'react',
+        status: 'failed',
+        finalText: 'Agent checkpoint restart failed.',
+        iterations: 0,
+        toolExecutions: [],
+        toolPolicy: toSharedToolPolicy(toolPolicy),
+        candidates: [],
+        abandonedCheckpointCount: 0,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      this.activeRuns.delete(runId);
+    }
+  }
+
   async abandonCheckpoint(
     request: AgentAbandonCheckpointRequest,
   ): Promise<AgentAbandonCheckpointResponse> {
@@ -637,7 +723,7 @@ export class HeadlessAgentService {
 
   private requireAgentRecoveryService(): Pick<
     AgentRecoveryService,
-    'listRecoverablePlans' | 'continue' | 'abandon'
+    'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'
   > {
     if (!this.dependencies.agentRecoveryService) {
       throw new Error(

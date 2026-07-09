@@ -21,6 +21,10 @@
   - 请求：`AgentContinueCheckpointRequest`
   - 响应：`AgentContinueCheckpointResponse`
   - 用途：从历史 session、消息、工具结果和中断 iteration 继续执行。
+- `agent:restart-checkpoint`
+  - 请求：`AgentRestartCheckpointRequest`
+  - 响应：`AgentRestartCheckpointResponse`
+  - 用途：基于原始用户任务和历史执行摘要重新开始一个干净的 ReAct 任务。
 - `agent:abandon-checkpoint`
   - 请求：`AgentAbandonCheckpointRequest`
   - 响应：`AgentAbandonCheckpointResponse`
@@ -41,9 +45,10 @@
 1. ReAct 运行时通过 `AgentCheckpointStore` 写入 running checkpoint。
 2. 应用重启或任务异常后，`agent:recoverable-checkpoints` 返回可恢复摘要。
 3. 用户继续时，`agent:continue-checkpoint` 注入旧 session 和旧 iteration，从下一轮继续。
-4. 继续成功且结果为 done 时，旧 running checkpoint 标记为 abandoned，新完成 checkpoint 写入同一 store。
-5. 继续失败、中止或未完成时，旧 running checkpoint 保持可恢复。
-6. 用户放弃时，`agent:abandon-checkpoint` 标记 abandoned，后续列表不再返回。
+4. 用户重启时，`agent:restart-checkpoint` 不注入旧 session，而是生成包含原始任务和旧执行摘要的 restart prompt，创建新的 ReAct session。
+5. continue 或 restart 成功且结果为 done 时，旧 running checkpoint 标记为 abandoned，新完成 checkpoint 写入同一 store。
+6. continue 或 restart 失败、中止或未完成时，旧 running checkpoint 保持可恢复。
+7. 用户放弃时，`agent:abandon-checkpoint` 标记 abandoned，后续列表不再返回。
 
 ## 开源与依赖评估
 
@@ -53,11 +58,11 @@
 
 - 使用真实临时 JSON checkpoint store 列出 recoverable ReAct checkpoint。
 - 通过 `HeadlessAgentService.continueCheckpoint` 走真实 `AgentRecoveryService` 与 `ReactAgent` 恢复路径。
+- 通过 `HeadlessAgentService.restartCheckpoint` 验证新 session 重启路径，不注入旧 session 历史。
 - 验证恢复请求按当前 readonly 工具策略暴露工具。
 - 验证恢复成功后旧 checkpoint 变为 abandoned，新 checkpoint 变为 done。
 - 验证用户放弃恢复后列表为空，持久化状态为 abandoned。
 
 ## 已知限制
 
-- 当前 IPC 只实现 ReAct checkpoint 的 continue 和 abandon；core 摘要里的 `restart` action 先作为未来 UI 行为提示保留。
 - 默认测试使用 deterministic fake provider；真实 SiliconFlow/DeepSeek 恢复 eval 继续放在 gated live test 中执行。
