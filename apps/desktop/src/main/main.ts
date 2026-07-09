@@ -43,6 +43,13 @@ import {
 } from '@dbagent/core-rag';
 import { SkillRegistry, registerDefaultBuiltinSkills } from '@dbagent/core-skills';
 import {
+  createStdioMcpRuntimeLauncher,
+  McpConfigStore,
+  McpHealthManager,
+  McpRuntimeManager,
+  McpToolRegistrationManager,
+} from '@dbagent/core-tools';
+import {
   ipcChannels,
   err,
   ok,
@@ -67,6 +74,7 @@ import { HeadlessAgentService } from './agent-service.js';
 import { registerDesktopAgentTools } from './agent-tool-bootstrap.js';
 import { DailyAgentAuditLogStore } from './agent-audit-log.js';
 import { DesktopDiagnosticReportService } from './diagnostic-report-service.js';
+import { DesktopMcpService } from './mcp-service.js';
 import {
   recoverSchemaRagSnapshotsAtStartup,
   type SchemaRagStartupRecoverySummary,
@@ -82,6 +90,7 @@ const workspaceStatePath = join(dataDir, 'workspace-state.json');
 const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
 const pluginStatePath = join(dataDir, 'plugins.json');
 const ideSettingsPath = join(dataDir, 'ide-settings.json');
+const mcpConfigPath = join(dataDir, 'mcp.json');
 const schemaRagSnapshotDir = join(dataDir, 'schema-rag-snapshots');
 const agentCheckpointPath = join(dataDir, 'agent-checkpoints.json');
 const agentPlanExecutionPath = join(dataDir, 'agent-plan-executions.json');
@@ -124,6 +133,23 @@ const schemaRagIndexer = new ProgressiveSchemaRagIndexer({
   snapshotStore: schemaRagSnapshotStore,
 });
 const agentToolRegistry = new ToolRegistry();
+const mcpConfigStore = new McpConfigStore(mcpConfigPath);
+const mcpHealthManager = new McpHealthManager();
+const mcpToolRegistrationManager = new McpToolRegistrationManager(agentToolRegistry);
+const mcpRuntimeManager = new McpRuntimeManager({
+  configStore: mcpConfigStore,
+  health: mcpHealthManager,
+  tools: mcpToolRegistrationManager,
+  launcher: createStdioMcpRuntimeLauncher({
+    resolveSecret: (ref) => credentialVault.load(ref),
+  }),
+});
+const desktopMcpService = new DesktopMcpService({
+  configStore: mcpConfigStore,
+  runtime: mcpRuntimeManager,
+  tools: mcpToolRegistrationManager,
+  secrets: credentialVault,
+});
 const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
 let latestSchemaRagStartupRecovery: SchemaRagStartupRecoverySummary | undefined;
@@ -539,6 +565,25 @@ function registerIpcHandlers(): void {
     safeResult(() => pluginRegistry.disable(id)),
   );
 
+  handle(ipcChannels.mcp.list, async () => safeResult(() => desktopMcpService.list()));
+  handle(ipcChannels.mcp.upsert, async (request) =>
+    safeResult(() => desktopMcpService.upsert(request)),
+  );
+  handle(ipcChannels.mcp.remove, async (request) =>
+    safeResult(() => desktopMcpService.remove(request)),
+  );
+  handle(ipcChannels.mcp.start, async ({ id }) => safeResult(() => desktopMcpService.start(id)));
+  handle(ipcChannels.mcp.stop, async ({ id }) => safeResult(() => desktopMcpService.stop(id)));
+  handle(ipcChannels.mcp.startAutoStart, async () =>
+    safeResult(() => desktopMcpService.startAutoStart()),
+  );
+  handle(ipcChannels.mcp.restartDue, async (request) =>
+    safeResult(() => desktopMcpService.restartDue(request?.now)),
+  );
+  handle(ipcChannels.mcp.health, async () =>
+    safeResult(() => Promise.resolve(desktopMcpService.health())),
+  );
+
   handle(ipcChannels.skills.match, async (request) =>
     safeResult(() => headlessAgentService.matchSkills(request)),
   );
@@ -788,6 +833,7 @@ void app.whenReady().then(async () => {
   installApplicationMenu();
   registerIpcHandlers();
   await recoverStartupSchemaRagSnapshots();
+  await startAutoStartMcpServers();
   await refreshAgentWorkspaceScriptTools();
   void llmRouter;
   void createWindow().catch((error) => {
@@ -795,6 +841,14 @@ void app.whenReady().then(async () => {
     app.quit();
   });
 });
+
+async function startAutoStartMcpServers(): Promise<void> {
+  try {
+    await desktopMcpService.startAutoStart();
+  } catch (error) {
+    logMain('mcp:autoStart:error', error);
+  }
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

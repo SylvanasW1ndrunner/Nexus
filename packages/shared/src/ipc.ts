@@ -83,6 +83,16 @@ export const ipcChannels = {
     enable: 'plugin:enable',
     disable: 'plugin:disable',
   },
+  mcp: {
+    list: 'mcp:list',
+    upsert: 'mcp:upsert',
+    remove: 'mcp:remove',
+    start: 'mcp:start',
+    stop: 'mcp:stop',
+    startAutoStart: 'mcp:start-autostart',
+    restartDue: 'mcp:restart-due',
+    health: 'mcp:health',
+  },
   skills: {
     match: 'skills:match',
   },
@@ -430,6 +440,98 @@ export type DesktopDiagnosticReportResult = {
     redactionCount: number;
     omittedCount: number;
   };
+};
+
+export type McpTransport = 'stdio' | 'sse' | 'streamable-http';
+export type McpServerSource = 'builtin' | 'user' | 'market';
+export type McpEnvValue = string | { ref: string };
+export type McpServerStatus =
+  | 'stopped'
+  | 'starting'
+  | 'healthy'
+  | 'unhealthy'
+  | 'restarting'
+  | 'disabled';
+
+export type McpServerInput = {
+  id?: string;
+  name: string;
+  source?: McpServerSource;
+  transport?: McpTransport;
+  autoStart?: boolean;
+  enabled?: boolean;
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, McpEnvValue>;
+  description?: string;
+  packageName?: string;
+  marketEntryId?: string;
+};
+
+export type McpUpsertServerRequest = McpServerInput & {
+  secrets?: Record<string, string>;
+  start?: boolean;
+};
+
+export type McpSafeEnvValue = { kind: 'plain' } | { kind: 'secret-ref'; ref: string };
+
+export type McpServerConfigPreview = {
+  id: string;
+  name: string;
+  source: McpServerSource;
+  transport: McpTransport;
+  autoStart: boolean;
+  enabled: boolean;
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, McpSafeEnvValue>;
+  description?: string;
+  packageName?: string;
+  marketEntryId?: string;
+  installedAt: string;
+  updatedAt: string;
+};
+
+export type McpResourceSamplePreview = {
+  rssBytes?: number;
+  cpuPercent?: number;
+  sampledAt?: string;
+};
+
+export type McpServerHealthPreview = {
+  serverId: string;
+  status: McpServerStatus;
+  healthy: boolean;
+  restartCount: number;
+  warnings: string[];
+  lastStartedAt?: string;
+  lastHealthyAt?: string;
+  lastExitAt?: string;
+  lastExitCode?: number;
+  lastExitSignal?: string;
+  lastError?: string;
+  nextRestartAt?: string;
+  resource?: McpResourceSamplePreview;
+};
+
+export type McpServerSummary = {
+  server: McpServerConfigPreview;
+  health: McpServerHealthPreview;
+  tools: string[];
+  running: boolean;
+};
+
+export type McpServerOperationResult = {
+  serverId: string;
+  server?: McpServerConfigPreview;
+  tools: string[];
+  removedTools: string[];
+  health: McpServerHealthPreview;
+  running: boolean;
+  removed?: boolean;
+  secretRefs?: string[];
 };
 
 export type PythonEnvironmentInfo = {
@@ -1179,6 +1281,14 @@ export type IpcRequestMap = {
   'plugin:uninstall': { id: string };
   'plugin:enable': { id: string };
   'plugin:disable': { id: string };
+  'mcp:list': void;
+  'mcp:upsert': McpUpsertServerRequest;
+  'mcp:remove': { id: string; deleteSecrets?: boolean };
+  'mcp:start': { id: string };
+  'mcp:stop': { id: string };
+  'mcp:start-autostart': void;
+  'mcp:restart-due': { now?: string } | undefined;
+  'mcp:health': void;
   'skills:match': SkillsMatchRequest;
   'agent:tool-policy-preview': AgentToolPolicyRequest;
   'agent:run': AgentRunRequest;
@@ -1262,6 +1372,14 @@ export type IpcResponseMap = {
   'plugin:uninstall': Result<PluginManifest>;
   'plugin:enable': Result<PluginManifest>;
   'plugin:disable': Result<PluginManifest>;
+  'mcp:list': Result<McpServerSummary[]>;
+  'mcp:upsert': Result<McpServerOperationResult>;
+  'mcp:remove': Result<McpServerOperationResult>;
+  'mcp:start': Result<McpServerOperationResult>;
+  'mcp:stop': Result<McpServerOperationResult>;
+  'mcp:start-autostart': Result<McpServerOperationResult[]>;
+  'mcp:restart-due': Result<McpServerOperationResult[]>;
+  'mcp:health': Result<McpServerHealthPreview[]>;
   'skills:match': Result<SkillsMatchResponse>;
   'agent:tool-policy-preview': Result<AgentToolPolicyPreview>;
   'agent:run': Result<AgentRunResponse>;
