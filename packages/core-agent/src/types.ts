@@ -81,8 +81,10 @@ export type AgentTaskSafetyPolicy =
 export type AgentOutputSafetyPolicy =
   | false
   | {
-      pii?: 'redact' | 'allow';
+      pii?: 'redact' | 'block' | 'allow';
       replacementText?: string;
+      blockedToolResultText?: string;
+      blockedFinalText?: string;
       extraSensitiveKeys?: string[];
     };
 
@@ -142,6 +144,7 @@ export type AgentToolExecutionRecord = {
   failureKind?: AgentToolFailureKind;
   retryable?: boolean;
   redacted?: boolean;
+  blocked?: boolean;
   redactionReasons?: AgentOutputRedactionReason[];
 };
 
@@ -156,6 +159,7 @@ export type AgentToolFailureKind =
   | 'sql_repairable'
   | 'timeout'
   | 'transient_dependency'
+  | 'output_safety'
   | 'permission'
   | 'tool_unavailable'
   | 'validation'
@@ -203,6 +207,7 @@ export type AgentBehaviorEvaluationCase = {
 export type AgentBehaviorToolExpectation = {
   toolName: string;
   status?: AgentToolExecutionRecord['status'];
+  blocked?: boolean;
   minCalls?: number;
   maxCalls?: number;
   caseSensitive?: boolean;
@@ -231,6 +236,7 @@ export type AgentBehaviorObservedTool = {
   argumentPreview?: string;
   resultPreview: string;
   redacted?: boolean;
+  blocked?: boolean;
   redactionReasons?: AgentOutputRedactionReason[];
 };
 

@@ -230,6 +230,114 @@ describe('ReactAgent', () => {
     expect(persistedEvidence).toContain('"redacted":true');
   });
 
+  it('blocks unsafe tool results from model context and lets the Agent recover with a safer query', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const rawEmail = 'alice@example.test';
+    const rawPhone = '+8613800138000';
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'unsafe_query',
+            name: 'query_database',
+            arguments: { sql: 'select email, phone from customers' },
+          },
+        ],
+      },
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'safe_query',
+            name: 'query_database',
+            arguments: { sql: 'select city, count(*) as customer_count from customers group by city' },
+          },
+        ],
+      },
+      {
+        text: 'Shanghai customer_count=12',
+        toolCalls: [],
+      },
+    ]);
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      (args) => {
+        if (String(args.sql).includes('email')) {
+          return { rows: [{ email: rawEmail, phone: rawPhone }] };
+        }
+        return { rows: [{ city: 'Shanghai', customer_count: 12 }] };
+      },
+    );
+    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registry, usage, undefined, fixedDependencies());
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '按城市统计客户数。',
+      mode: 'readonly',
+      maxIterations: 3,
+      outputSafety: { pii: 'block' },
+    });
+    const secondCallContext = JSON.stringify(calls[1]?.messages ?? []);
+    const serializedSession = JSON.stringify(result.session);
+
+    expect(result.status).toBe('done');
+    expect(result.finalText).toBe('Shanghai customer_count=12');
+    expect(result.toolExecutions).toMatchObject([
+      {
+        toolCallId: 'unsafe_query',
+        status: 'failed',
+        failureKind: 'output_safety',
+        retryable: true,
+        blocked: true,
+      },
+      { toolCallId: 'safe_query', status: 'success' },
+    ]);
+    expect(result.toolExecutions[0]?.resultPreview).toContain('tool_result_blocked_by_output_safety');
+    expect(secondCallContext).toContain('tool_result_blocked_by_output_safety');
+    expect(secondCallContext).toContain('请改写查询');
+    for (const text of [secondCallContext, serializedSession, JSON.stringify(result.toolExecutions)]) {
+      expect(text).not.toContain(rawEmail);
+      expect(text).not.toContain(rawPhone);
+    }
+  });
+
+  it('blocks final model text when hard output safety detects PII', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const { provider } = scriptedProviderWithCalls([
+      {
+        text: '客户 alice@example.test 的手机号是 +8613800138000。',
+        toolCalls: [],
+      },
+    ]);
+    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registryWithQueryTool(), usage, undefined, fixedDependencies());
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '给我一个总结。',
+      mode: 'readonly',
+      outputSafety: { pii: 'block' },
+    });
+
+    expect(result.status).toBe('safety_blocked');
+    expect(result.finalText).toContain('最终回复包含敏感个人信息');
+    expect(result.finalText).not.toContain('alice@example.test');
+    expect(result.finalText).not.toContain('+8613800138000');
+    expect(result.session.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: result.finalText,
+    });
+  });
+
   it('writes a redacted Agent audit trail for model and tool execution replay', async () => {
     const auditLog = new AgentAuditLogStore(await auditPath());
     const apiKey = ['sk', 'audit-run-secret-123456'].join('-');

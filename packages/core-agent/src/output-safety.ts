@@ -7,10 +7,15 @@ import { redactPersistedAgentString } from './redaction.js';
 export type AgentOutputSafetyResult<T> = {
   value: T;
   redacted: boolean;
+  blocked: boolean;
   reasons: AgentOutputRedactionReason[];
 };
 
 const DEFAULT_REPLACEMENT = '[REDACTED_PII]';
+const DEFAULT_BLOCKED_TOOL_RESULT_TEXT =
+  '工具结果包含敏感个人信息或受保护字段，已阻止进入 Agent 上下文。请改写查询，只返回聚合、脱敏或合规范围内的数据。';
+const DEFAULT_BLOCKED_FINAL_TEXT =
+  '最终回复包含敏感个人信息或受保护字段，已被安全策略阻止。请改为输出脱敏后的统计、分布或合规结论。';
 const REDACTED_FIELD_PREFIX = 'redacted';
 
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
@@ -33,7 +38,7 @@ export function sanitizeAgentOutputValue<T>(
   policy?: AgentOutputSafetyPolicy,
 ): AgentOutputSafetyResult<T> {
   if (policy === false || policy?.pii === 'allow') {
-    return { value, redacted: false, reasons: [] };
+    return { value, redacted: false, blocked: false, reasons: [] };
   }
 
   const reasons = new Set<AgentOutputRedactionReason>();
@@ -47,6 +52,7 @@ export function sanitizeAgentOutputValue<T>(
   return {
     value: sanitized as T,
     redacted: reasons.size > 0,
+    blocked: policy?.pii === 'block' && reasons.size > 0,
     reasons: [...reasons].sort(),
   };
 }
@@ -56,7 +62,7 @@ export function sanitizeAgentOutputText(
   policy?: AgentOutputSafetyPolicy,
 ): AgentOutputSafetyResult<string> {
   if (policy === false || policy?.pii === 'allow') {
-    return { value, redacted: false, reasons: [] };
+    return { value, redacted: false, blocked: false, reasons: [] };
   }
 
   const reasons = new Set<AgentOutputRedactionReason>();
@@ -65,8 +71,35 @@ export function sanitizeAgentOutputText(
   return {
     value: sanitized,
     redacted: reasons.size > 0,
+    blocked: policy?.pii === 'block' && reasons.size > 0,
     reasons: [...reasons].sort(),
   };
+}
+
+export function blockedAgentToolResultMessage(
+  reasons: AgentOutputRedactionReason[],
+  policy?: AgentOutputSafetyPolicy,
+): string {
+  const message = isOutputSafetyPolicyObject(policy)
+    ? policy.blockedToolResultText ?? DEFAULT_BLOCKED_TOOL_RESULT_TEXT
+    : DEFAULT_BLOCKED_TOOL_RESULT_TEXT;
+  return JSON.stringify({
+    error: 'tool_result_blocked_by_output_safety',
+    message,
+    redactionReasons: reasons,
+  });
+}
+
+export function blockedAgentFinalText(policy?: AgentOutputSafetyPolicy): string {
+  return isOutputSafetyPolicyObject(policy)
+    ? policy.blockedFinalText ?? DEFAULT_BLOCKED_FINAL_TEXT
+    : DEFAULT_BLOCKED_FINAL_TEXT;
+}
+
+function isOutputSafetyPolicyObject(
+  policy: AgentOutputSafetyPolicy | undefined,
+): policy is Exclude<AgentOutputSafetyPolicy, false> {
+  return typeof policy === 'object' && policy !== null;
 }
 
 function sanitizeValue(

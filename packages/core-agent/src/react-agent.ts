@@ -3,7 +3,12 @@ import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
 import type { AgentAuditLogWriter, AgentAuditRunStatus } from './audit-log-store.js';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import { buildAgentContext } from './context-manager.js';
-import { sanitizeAgentOutputText, sanitizeAgentOutputValue } from './output-safety.js';
+import {
+  blockedAgentFinalText,
+  blockedAgentToolResultMessage,
+  sanitizeAgentOutputText,
+  sanitizeAgentOutputValue,
+} from './output-safety.js';
 import { PermissionManager } from './permission-manager.js';
 import { addUsage, appendMessage, createAgentSession, createMessage } from './session.js';
 import { redactPersistedAgentValue } from './redaction.js';
@@ -218,10 +223,8 @@ export class ReactAgent {
         });
         addUsage(session, response.usage);
 
-        appendMessage(
-          session,
-          createMessage({ role: 'assistant', content: safeResponseText.value, toolCalls: safeToolCalls }, this.now),
-        );
+        const assistantText = safeResponseText.blocked ? blockedAgentFinalText(options.outputSafety) : safeResponseText.value;
+        appendMessage(session, createMessage({ role: 'assistant', content: assistantText, toolCalls: safeToolCalls }, this.now));
         await this.saveSession(session);
         await saveCheckpoint(checkpointIteration, 'running');
 
@@ -241,12 +244,13 @@ export class ReactAgent {
         }
 
         if (response.toolCalls.length === 0) {
-          finalText = safeResponseText.value;
+          finalText = safeResponseText.blocked ? blockedAgentFinalText(options.outputSafety) : safeResponseText.value;
           await saveCheckpoint(checkpointIteration, 'done');
           await this.saveSession(session);
           await closeRound('success');
-          await finishRunAudit('done', iteration, finalText);
-          return { status: 'done', session, finalText, iterations: iteration, toolExecutions };
+          const status = safeResponseText.blocked ? 'safety_blocked' : 'done';
+          await finishRunAudit(status, iteration, finalText);
+          return { status, session, finalText, iterations: iteration, toolExecutions };
         }
 
         for (const toolCall of response.toolCalls) {
@@ -418,6 +422,47 @@ export class ReactAgent {
               maxToolExecutionMs,
             );
             const safeResult = sanitizeAgentOutputValue(result, options.outputSafety);
+            if (safeResult.blocked) {
+              const preview = blockedAgentToolResultMessage(safeResult.reasons, options.outputSafety);
+              const record = executionRecord(toolCall.id, tool.name, 'failed', startedAt, toolCall.arguments, preview, {
+                outputSafety: options.outputSafety,
+                failure: { failureKind: 'output_safety', retryable: true },
+                blocked: true,
+                redactionReasons: safeResult.reasons,
+              });
+              toolExecutions.push(record);
+              await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
+              consecutiveToolFailures += 1;
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'tool',
+                    toolCallId: toolCall.id,
+                    toolName: tool.name,
+                    content: preview,
+                  },
+                  this.now,
+                ),
+              );
+              await this.saveSession(session);
+              await saveCheckpoint(checkpointIteration, 'running');
+              if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
+                finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
+                await saveCheckpoint(checkpointIteration, 'failed', finalText);
+                await this.saveSession(session);
+                await closeRound('failed', finalText);
+                await finishRunAudit('tool_failed', iteration, finalText, finalText);
+                return {
+                  status: 'tool_failed',
+                  session,
+                  finalText,
+                  iterations: iteration,
+                  toolExecutions,
+                };
+              }
+              continue;
+            }
             const preview = serializeToolResult(safeResult.value, maxToolResultChars);
             const record = executionRecord(toolCall.id, tool.name, 'success', startedAt, toolCall.arguments, preview, {
               outputSafety: options.outputSafety,
@@ -635,6 +680,7 @@ function executionRecord(
       ? {}
       : { failureKind: metadata.failure.failureKind, retryable: metadata.failure.retryable }),
     ...(metadata.redacted === true ? { redacted: true } : {}),
+    ...(metadata.blocked === true ? { blocked: true } : {}),
     ...(metadata.redactionReasons && metadata.redactionReasons.length > 0
       ? { redactionReasons: metadata.redactionReasons }
       : {}),
@@ -645,6 +691,7 @@ type ExecutionRecordMetadata = {
   failure?: { failureKind: NonNullable<AgentToolExecutionRecord['failureKind']>; retryable: boolean };
   outputSafety?: AgentRunOptions['outputSafety'];
   redacted?: boolean;
+  blocked?: boolean;
   redactionReasons?: AgentOutputRedactionReason[];
 };
 
@@ -667,6 +714,7 @@ function toolFinishedAuditEvent(
     ...(record.failureKind === undefined ? {} : { failureKind: record.failureKind }),
     ...(record.retryable === undefined ? {} : { retryable: record.retryable }),
     ...(record.redacted === undefined ? {} : { redacted: record.redacted }),
+    ...(record.blocked === undefined ? {} : { blocked: record.blocked }),
     ...(record.redactionReasons === undefined ? {} : { redactionReasons: record.redactionReasons }),
   };
 }

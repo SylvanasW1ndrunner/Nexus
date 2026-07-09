@@ -42,6 +42,7 @@ function evaluateCase(
     ...(execution.argumentPreview === undefined ? {} : { argumentPreview: execution.argumentPreview }),
     resultPreview: execution.resultPreview,
     ...(execution.redacted === undefined ? {} : { redacted: execution.redacted }),
+    ...(execution.blocked === undefined ? {} : { blocked: execution.blocked }),
     ...(execution.redactionReasons === undefined ? {} : { redactionReasons: execution.redactionReasons }),
   }));
 
@@ -132,6 +133,10 @@ function evaluateToolExpectation(
 
   if (expectation.status !== undefined && !matches.some((execution) => execution.status === expectation.status)) {
     failures.push(`Expected tool ${expectation.toolName} to have status ${expectation.status}.`);
+  }
+
+  if (expectation.blocked !== undefined && !matches.some((execution) => execution.blocked === expectation.blocked)) {
+    failures.push(`Expected tool ${expectation.toolName} to have blocked=${expectation.blocked}.`);
   }
 
   const argumentsText = matches.map((execution) => execution.argumentPreview ?? '').join('\n');

@@ -20,6 +20,7 @@ describe('Agent output safety', () => {
     const serialized = JSON.stringify(result.value);
 
     expect(result.redacted).toBe(true);
+    expect(result.blocked).toBe(false);
     expect(result.reasons).toEqual(expect.arrayContaining(['email', 'sensitive_key']));
     expect(serialized).toContain('redacted_phone');
     expect(serialized).toContain('redacted_email');
@@ -50,7 +51,20 @@ describe('Agent output safety', () => {
     expect(result).toEqual({
       value: { email: 'alice@example.com' },
       redacted: false,
+      blocked: false,
       reasons: [],
     });
+  });
+
+  it('marks matching output as blocked when the policy requires hard blocking', () => {
+    const result = sanitizeAgentOutputValue(
+      { rows: [{ email: 'alice@example.com', phone_enc: 'ciphertext-value' }] },
+      { pii: 'block' },
+    );
+
+    expect(result.blocked).toBe(true);
+    expect(result.redacted).toBe(true);
+    expect(JSON.stringify(result.value)).not.toContain('alice@example.com');
+    expect(JSON.stringify(result.value)).not.toContain('phone_enc');
   });
 });

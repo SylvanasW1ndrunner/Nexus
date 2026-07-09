@@ -206,6 +206,47 @@ describe('evaluateAgentBehavior', () => {
     });
   });
 
+  it('checks whether a tool result was blocked by output safety', () => {
+    const summary = evaluateAgentBehavior({
+      cases: [
+        {
+          case: {
+            id: 'AGENT-BLOCKED-001',
+            userTask: 'Verify unsafe tool output is blocked and recoverable',
+            expectedStatus: 'done',
+            toolExpectations: [
+              {
+                toolName: 'query_database',
+                status: 'failed',
+                blocked: true,
+                resultIncludes: ['tool_result_blocked_by_output_safety'],
+              },
+            ],
+          },
+          result: runResult({
+            toolExecutions: [
+              {
+                toolCallId: 'unsafe_query',
+                toolName: 'query_database',
+                status: 'failed',
+                durationMs: 1,
+                resultPreview: '{"error":"tool_result_blocked_by_output_safety"}',
+                failureKind: 'output_safety',
+                retryable: true,
+                blocked: true,
+              },
+            ],
+          }),
+        },
+      ],
+    });
+
+    expect(summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
+    expect(summary.results[0]?.observedToolDetails).toMatchObject([
+      { toolName: 'query_database', status: 'failed', blocked: true },
+    ]);
+  });
+
   it('reports detailed tool expectation failures', () => {
     const summary = evaluateAgentBehavior({
       cases: [
