@@ -533,6 +533,8 @@ export type PluginManifest = {
 
 export type AgentMode = 'ask' | 'auto' | 'full-auto' | 'readonly';
 
+export type AgentRunStrategy = 'auto' | 'react' | 'plan-execute';
+
 export type AgentToolDangerLevel = 'safe' | 'medium' | 'high' | 'critical';
 
 export type AgentToolPolicyRequest = {
@@ -626,8 +628,11 @@ export type AgentRunRequest = SkillsMatchRequest & {
   runId?: string;
   providerId: string;
   model: string;
+  strategy?: AgentRunStrategy;
   usageMode?: UsageMode;
   maxIterations?: number;
+  maxPlanSteps?: number;
+  stopOnStepFailure?: boolean;
   tokenBudget?: number;
   contextWindowTokens?: number;
   keepRecentMessages?: number;
@@ -645,20 +650,44 @@ export type AgentToolExecution = {
   resultPreview: string;
 };
 
+export type AgentPlanStepSnapshot = {
+  id: string;
+  title: string;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  resultSummary?: string;
+  failureReason?: string;
+  runStatus?: string;
+  iterations?: number;
+};
+
+export type AgentRunPlanSummary = {
+  id: string;
+  title: string;
+  goal: string;
+  createdAt: string;
+  steps: AgentPlanStepSnapshot[];
+};
+
 export type AgentRunResponse = {
   runId: string;
+  strategy: Exclude<AgentRunStrategy, 'auto'>;
   status:
     | 'done'
     | 'aborted'
     | 'max_iterations_reached'
     | 'permission_denied'
+    | 'safety_blocked'
     | 'tool_failed'
     | 'quota_exceeded'
+    | 'planning_failed'
     | 'no_matching_skill'
     | 'failed';
   sessionId?: string;
   finalText: string;
   iterations: number;
+  executedSteps?: number;
+  totalIterations?: number;
+  plan?: AgentRunPlanSummary;
   toolExecutions: AgentToolExecution[];
   toolPolicy: AgentToolPolicyPreview;
   candidates: AgentSkillMatchCandidate[];

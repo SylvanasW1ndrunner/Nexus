@@ -2,7 +2,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AgentAuditLogStore, ReactAgent, ToolRegistry, type AgentAuditLogWriter } from '@dbagent/core-agent';
+import {
+  AgentAuditLogStore,
+  PlanExecuteAgent,
+  ReactAgent,
+  ToolRegistry,
+  type AgentAuditLogWriter,
+} from '@dbagent/core-agent';
 import {
   LlmRouter,
   type LlmChatRequest,
@@ -74,6 +80,7 @@ describe('HeadlessAgentService', () => {
 
     expect(result).toMatchObject({
       runId: 'run_daily_gmv',
+      strategy: 'react',
       status: 'done',
       sessionId: 'session_agent_service',
       finalText: '昨日 GMV 是 100。',
@@ -82,6 +89,108 @@ describe('HeadlessAgentService', () => {
     });
     expect(provider.requests[0]?.tools?.map((tool) => tool.name)).toEqual(['query_database']);
     expect(result.toolPolicy.allowedToolNames).toEqual(['query_database']);
+  });
+
+  it('runs an explicitly requested Plan & Execute Skill and returns a serializable plan summary', async () => {
+    const provider = scriptedProvider([
+      {
+        text: JSON.stringify({
+          title: 'GMV drop investigation',
+          steps: [
+            {
+              id: 'inspect_gmv',
+              title: 'Inspect GMV',
+              instruction: 'Query GMV and summarize the drop.',
+            },
+          ],
+        }),
+        toolCalls: [],
+      },
+      {
+        text: '',
+        toolCalls: [{ id: 'call_query', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25 },
+      },
+      {
+        text: 'GMV drop investigation completed.',
+        toolCalls: [],
+        usage: { promptTokens: 24, completionTokens: 6, totalTokens: 30 },
+      },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+    });
+
+    const result = await service.run({
+      runId: 'run_plan_gmv',
+      providerId: 'fake',
+      model: 'fake-model',
+      strategy: 'plan-execute',
+      userInput: 'daily_gmv_report: Analyze GMV drop reason step-by-step',
+      mode: 'readonly',
+      maxIterations: 2,
+      maxPlanSteps: 3,
+    });
+
+    expect(result).toMatchObject({
+      runId: 'run_plan_gmv',
+      strategy: 'plan-execute',
+      status: 'done',
+      finalText: 'GMV drop investigation completed.',
+      iterations: 2,
+      executedSteps: 1,
+      totalIterations: 2,
+      selectedSkill: { skill: { name: 'daily_gmv_report' } },
+      plan: {
+        title: 'GMV drop investigation',
+        steps: [
+          {
+            id: 'inspect_gmv',
+            title: 'Inspect GMV',
+            status: 'done',
+            runStatus: 'done',
+            iterations: 2,
+          },
+        ],
+      },
+      toolExecutions: [{ toolCallId: 'call_query', toolName: 'query_database', status: 'success' }],
+    });
+    expect(provider.requests).toHaveLength(3);
+    expect(provider.requests[0]?.tools).toBeUndefined();
+    expect(provider.requests[1]?.tools?.map((tool) => tool.name)).toEqual(['query_database']);
+  });
+
+  it('auto-selects Plan & Execute for complex investigation tasks', async () => {
+    const provider = scriptedProvider([
+      {
+        text: JSON.stringify({
+          title: 'GMV root cause plan',
+          steps: [{ id: 'inspect', title: 'Inspect', instruction: 'Inspect GMV symptoms.' }],
+        }),
+        toolCalls: [],
+      },
+      { text: 'No tool needed for this test.', toolCalls: [] },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+    });
+
+    const result = await service.run({
+      runId: 'run_auto_plan',
+      providerId: 'fake',
+      model: 'fake-model',
+      strategy: 'auto',
+      userInput: 'daily_gmv_report: investigate root cause of GMV drop',
+      mode: 'readonly',
+      maxIterations: 1,
+    });
+
+    expect(result.strategy).toBe('plan-execute');
+    expect(result.plan?.title).toBe('GMV root cause plan');
   });
 
   it('writes a desktop Agent audit log for a real headless Agent run', async () => {
@@ -259,13 +368,19 @@ async function createService(input: {
   auditLog?: AgentAuditLogWriter;
 }): Promise<HeadlessAgentService> {
   const usage = new UsageTracker(await usagePath());
-  const agent = new ReactAgent(new LlmRouter(usage, [input.provider]), input.registry, usage, undefined, {
+  const llmRouter = new LlmRouter(usage, [input.provider]);
+  const agent = new ReactAgent(llmRouter, input.registry, usage, undefined, {
     now: () => '2026-06-17T00:00:00.000Z',
     createSessionId: () => 'session_agent_service',
     ...(input.auditLog === undefined ? {} : { auditLog: input.auditLog }),
   });
+  const planExecuteAgent = new PlanExecuteAgent(llmRouter, agent, {
+    now: () => '2026-06-17T00:00:00.000Z',
+    createPlanId: () => 'plan_agent_service',
+  });
   return new HeadlessAgentService({
     agent,
+    planExecuteAgent,
     toolRegistry: input.registry,
     loadSkills: () => input.skills,
     createRunId: () => 'run_generated',

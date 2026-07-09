@@ -7,7 +7,7 @@ import { ConnectionStore, QueryCancellationRegistry, QueryHistoryStore, createDe
 import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, TestAuthRepository } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
-import { ReactAgent, ToolRegistry } from '@dbagent/core-agent';
+import { AgentPlanExecutionStore, PlanExecuteAgent, ReactAgent, ToolRegistry } from '@dbagent/core-agent';
 import { SchemaRagEngine, SchemaRagSnapshotStore } from '@dbagent/core-rag';
 import { SkillRegistry, registerDefaultBuiltinSkills } from '@dbagent/core-skills';
 import {
@@ -48,6 +48,7 @@ const workspaceProjectStatePath = join(dataDir, 'workspaces.json');
 const pluginStatePath = join(dataDir, 'plugins.json');
 const ideSettingsPath = join(dataDir, 'ide-settings.json');
 const schemaRagSnapshotDir = join(dataDir, 'schema-rag-snapshots');
+const agentPlanExecutionPath = join(dataDir, 'agent-plan-executions.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
@@ -93,8 +94,12 @@ const desktopAgentTools = registerDesktopAgentTools({
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
   auditLog: new DailyAgentAuditLogStore(logsDir),
 });
+const planExecuteAgent = new PlanExecuteAgent(llmRouter, reactAgent, {
+  planStore: new AgentPlanExecutionStore(agentPlanExecutionPath),
+});
 const headlessAgentService = new HeadlessAgentService({
   agent: reactAgent,
+  planExecuteAgent,
   toolRegistry: agentToolRegistry,
   loadSkills: () => agentSkillRegistry.list(),
 });
