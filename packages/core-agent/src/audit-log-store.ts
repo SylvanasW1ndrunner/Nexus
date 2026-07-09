@@ -3,7 +3,12 @@ import { dirname } from 'node:path';
 import type { LlmUsage } from '@dbagent/core-llm';
 import type { UsageMode } from '@dbagent/shared';
 import { redactPersistedAgentString, redactPersistedAgentValue } from './redaction.js';
-import type { AgentMode, AgentRunStatus, AgentToolExecutionRecord } from './types.js';
+import type {
+  AgentContextCompressionReport,
+  AgentMode,
+  AgentRunStatus,
+  AgentToolExecutionRecord,
+} from './types.js';
 
 const MAX_AUDIT_STRING_CHARS = 4_000;
 
@@ -27,6 +32,13 @@ export type AgentAuditEvent =
       providerId: string;
       model: string;
       toolCount: number;
+    }
+  | {
+      type: 'context_compression_applied';
+      timestamp: string;
+      sessionId: string;
+      iteration: number;
+      compression: AgentContextCompressionReport;
     }
   | {
       type: 'model_call_finished';

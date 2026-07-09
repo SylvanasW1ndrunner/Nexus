@@ -14,10 +14,36 @@ describe('buildAgentContext', () => {
     expect(context.messages).toEqual([{ role: 'user', content: '查一下订单数' }]);
     expect(context.tools.map((tool) => tool.name)).toEqual(['query_database']);
     expect(context.compression).toMatchObject({
+      phase: 'healthy',
       level: 'none',
+      maxPromptTokens: 2_000,
+      retainedMessageCount: 1,
+      toolCount: 1,
       archivedMessageCount: 0,
       summarizedToolResultCount: 0,
+      steps: [],
       warnings: [],
+    });
+  });
+
+  it('reports warning phase before local compression is required', () => {
+    const session = createAgentSession({ id: 's1', title: 'Warning', mode: 'readonly', now });
+    appendMessage(session, createMessage({ role: 'user', content: '订单 '.repeat(30) }, now));
+
+    const context = buildAgentContext(session, tools(), {
+      maxPromptTokens: 200,
+      warningThresholdRatio: 0.5,
+      softCompressionThresholdRatio: 0.95,
+      hardCompressionThresholdRatio: 1,
+    });
+
+    expect(context.compression).toMatchObject({
+      phase: 'warning',
+      level: 'none',
+      warningThresholdTokens: 100,
+      softCompressionThresholdTokens: 190,
+      hardCompressionThresholdTokens: 200,
+      steps: [],
     });
   });
 
@@ -39,7 +65,14 @@ describe('buildAgentContext', () => {
 
     const context = buildAgentContext(session, tools(), { maxPromptTokens: 120, maxToolResultChars: 240 });
 
+    expect(context.compression.phase).toMatch(/soft_compressed|hard_compressed|over_budget/);
     expect(context.compression.summarizedToolResultCount).toBe(1);
+    expect(context.compression.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'tool-summary',
+        affectedMessageCount: 1,
+      }),
+    ]));
     expect(context.messages.find((message) => message.role === 'tool')?.content).toContain('工具结果已在本地摘要');
     expect(context.compression.finalTokenEstimate).toBeLessThan(context.compression.originalTokenEstimate);
   });
@@ -58,7 +91,12 @@ describe('buildAgentContext', () => {
     });
 
     expect(context.compression.level).toBe('archive-early-messages');
+    expect(context.compression.phase).toMatch(/hard_compressed|over_budget/);
     expect(context.compression.archivedMessageCount).toBeGreaterThan(0);
+    expect(context.compression.steps.at(-1)).toMatchObject({
+      type: 'archive-early-messages',
+      affectedMessageCount: context.compression.archivedMessageCount,
+    });
     expect(context.messages[0]?.role).toBe('system');
     expect(context.messages[0]?.content).toContain('前文已归档');
     expect(context.messages.at(-1)?.content).toContain('第 12 轮回答');

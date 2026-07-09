@@ -46,6 +46,7 @@ export type AgentRunResult = {
   finalText: string;
   iterations: number;
   toolExecutions: AgentToolExecutionRecord[];
+  contextCompression?: AgentContextCompressionReport[];
 };
 
 export type AgentRunOptions = {
@@ -180,6 +181,42 @@ export type AgentRunDependencies = {
   sessionStore?: AgentSessionWriter;
   streamStore?: AgentStreamStore;
   auditLog?: AgentAuditLogWriter;
+};
+
+export type AgentContextCompressionLevel =
+  | 'none'
+  | 'tool-summary'
+  | 'archive-early-messages';
+
+export type AgentContextCompressionPhase =
+  | 'healthy'
+  | 'warning'
+  | 'soft_compressed'
+  | 'hard_compressed'
+  | 'over_budget';
+
+export type AgentContextCompressionStep = {
+  type: Exclude<AgentContextCompressionLevel, 'none'>;
+  beforeTokenEstimate: number;
+  afterTokenEstimate: number;
+  affectedMessageCount: number;
+};
+
+export type AgentContextCompressionReport = {
+  phase: AgentContextCompressionPhase;
+  level: AgentContextCompressionLevel;
+  originalTokenEstimate: number;
+  finalTokenEstimate: number;
+  maxPromptTokens: number;
+  warningThresholdTokens: number;
+  softCompressionThresholdTokens: number;
+  hardCompressionThresholdTokens: number;
+  retainedMessageCount: number;
+  toolCount: number;
+  archivedMessageCount: number;
+  summarizedToolResultCount: number;
+  steps: AgentContextCompressionStep[];
+  warnings: string[];
 };
 
 export type AgentContextBuildResult = {

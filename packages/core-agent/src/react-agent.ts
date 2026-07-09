@@ -26,6 +26,7 @@ import type {
   AgentToolContext,
   AgentToolExecutionRecord,
   AgentToolHandler,
+  AgentContextCompressionReport,
   AgentOutputRedactionReason,
   ApprovalProvider,
 } from './types.js';
@@ -101,6 +102,7 @@ export class ReactAgent {
       });
     };
     const toolExecutions: AgentToolExecutionRecord[] = [];
+    const contextCompression: AgentContextCompressionReport[] = [];
     let finalText = '';
 
     if (usageMode === 'subscription') {
@@ -113,6 +115,7 @@ export class ReactAgent {
           finalText: 'Usage quota exceeded.',
           iterations: 0,
           toolExecutions: [],
+          contextCompression,
         };
       }
     }
@@ -129,6 +132,7 @@ export class ReactAgent {
         finalText,
         iterations: 0,
         toolExecutions: [],
+        contextCompression,
       };
     }
 
@@ -175,7 +179,7 @@ export class ReactAgent {
           await this.saveSession(session);
           await closeRound('aborted');
           await finishRunAudit('aborted', iteration - 1, finalText);
-          return { status: 'aborted', session, finalText, iterations: iteration - 1, toolExecutions };
+          return { status: 'aborted', session, finalText, iterations: iteration - 1, toolExecutions, contextCompression };
         }
 
         await saveCheckpoint(checkpointIteration, 'running');
@@ -184,6 +188,16 @@ export class ReactAgent {
           ...(options.keepRecentMessages === undefined ? {} : { keepRecentMessages: options.keepRecentMessages }),
           ...(options.maxToolResultChars === undefined ? {} : { maxToolResultChars: options.maxToolResultChars }),
         });
+        contextCompression.push(context.compression);
+        if (context.compression.phase !== 'healthy') {
+          await this.auditLog?.append({
+            type: 'context_compression_applied',
+            timestamp: this.now(),
+            sessionId: session.id,
+            iteration,
+            compression: context.compression,
+          });
+        }
         const request = {
           model: options.model,
           messages: context.messages,
@@ -240,6 +254,7 @@ export class ReactAgent {
             finalText,
             iterations: iteration,
             toolExecutions,
+            contextCompression,
           };
         }
 
@@ -250,7 +265,7 @@ export class ReactAgent {
           await closeRound('success');
           const status = safeResponseText.blocked ? 'safety_blocked' : 'done';
           await finishRunAudit(status, iteration, finalText);
-          return { status, session, finalText, iterations: iteration, toolExecutions };
+          return { status, session, finalText, iterations: iteration, toolExecutions, contextCompression };
         }
 
         for (const toolCall of response.toolCalls) {
@@ -300,6 +315,7 @@ export class ReactAgent {
               finalText,
               iterations: iteration,
               toolExecutions,
+              contextCompression,
             };
           }
 
@@ -343,6 +359,7 @@ export class ReactAgent {
                 finalText,
                 iterations: iteration,
                 toolExecutions,
+                contextCompression,
               };
             }
             continue;
@@ -393,6 +410,7 @@ export class ReactAgent {
                 finalText,
                 iterations: iteration,
                 toolExecutions,
+                contextCompression,
               };
             }
             continue;
@@ -459,6 +477,7 @@ export class ReactAgent {
                   finalText,
                   iterations: iteration,
                   toolExecutions,
+                  contextCompression,
                 };
               }
               continue;
@@ -526,6 +545,7 @@ export class ReactAgent {
                 finalText,
                 iterations: iteration,
                 toolExecutions,
+                contextCompression,
               };
             }
           }
@@ -543,6 +563,7 @@ export class ReactAgent {
         finalText,
         iterations: maxIterations,
         toolExecutions,
+        contextCompression,
       };
     } catch (error) {
       const status = options.signal?.aborted || session.aborted ? 'aborted' : 'failed';

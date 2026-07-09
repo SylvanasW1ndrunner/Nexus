@@ -1,22 +1,19 @@
 import type { LlmMessage, LlmTool } from '@dbagent/core-llm';
 import { toLlmMessages } from './session.js';
-import type { AgentSession } from './types.js';
-
-export type AgentContextCompressionLevel = 'none' | 'tool-summary' | 'archive-early-messages';
+import type {
+  AgentContextCompressionLevel,
+  AgentContextCompressionReport,
+  AgentContextCompressionStep,
+  AgentSession,
+} from './types.js';
 
 export type AgentContextManagerOptions = {
   maxPromptTokens?: number;
   keepRecentMessages?: number;
   maxToolResultChars?: number;
-};
-
-export type AgentContextCompressionReport = {
-  level: AgentContextCompressionLevel;
-  originalTokenEstimate: number;
-  finalTokenEstimate: number;
-  archivedMessageCount: number;
-  summarizedToolResultCount: number;
-  warnings: string[];
+  warningThresholdRatio?: number;
+  softCompressionThresholdRatio?: number;
+  hardCompressionThresholdRatio?: number;
 };
 
 export type AgentContextBuildOutput = {
@@ -28,6 +25,9 @@ export type AgentContextBuildOutput = {
 const DEFAULT_MAX_PROMPT_TOKENS = 40_000;
 const DEFAULT_KEEP_RECENT_MESSAGES = 8;
 const DEFAULT_MAX_TOOL_RESULT_CHARS = 1_200;
+const DEFAULT_WARNING_THRESHOLD_RATIO = 0.6;
+const DEFAULT_SOFT_COMPRESSION_THRESHOLD_RATIO = 0.8;
+const DEFAULT_HARD_COMPRESSION_THRESHOLD_RATIO = 0.95;
 
 export function buildAgentContext(
   session: AgentSession,
@@ -37,28 +37,49 @@ export function buildAgentContext(
   const maxPromptTokens = normalizePositiveInteger(options.maxPromptTokens, DEFAULT_MAX_PROMPT_TOKENS);
   const keepRecentMessages = normalizePositiveInteger(options.keepRecentMessages, DEFAULT_KEEP_RECENT_MESSAGES);
   const maxToolResultChars = normalizePositiveInteger(options.maxToolResultChars, DEFAULT_MAX_TOOL_RESULT_CHARS);
+  const thresholds = normalizeCompressionThresholds(maxPromptTokens, options);
   const originalMessages = toLlmMessages(session);
   const originalTokenEstimate = estimatePromptTokens(originalMessages, tools);
   const warnings: string[] = [];
+  const steps: AgentContextCompressionStep[] = [];
   let messages = originalMessages;
   let summarizedToolResultCount = 0;
   let archivedMessageCount = 0;
   let level: AgentContextCompressionLevel = 'none';
 
-  if (originalTokenEstimate > maxPromptTokens * 0.8) {
+  if (originalTokenEstimate >= thresholds.softCompressionThresholdTokens) {
+    const beforeTokenEstimate = estimatePromptTokens(messages, tools);
     const summarized = summarizeLargeToolResults(messages, maxToolResultChars);
     messages = summarized.messages;
     summarizedToolResultCount = summarized.count;
-    if (summarized.count > 0) level = 'tool-summary';
+    if (summarized.count > 0) {
+      const afterTokenEstimate = estimatePromptTokens(messages, tools);
+      steps.push({
+        type: 'tool-summary',
+        beforeTokenEstimate,
+        afterTokenEstimate,
+        affectedMessageCount: summarized.count,
+      });
+      level = 'tool-summary';
+    }
   }
 
   let finalTokenEstimate = estimatePromptTokens(messages, tools);
-  if (finalTokenEstimate > maxPromptTokens) {
+  if (finalTokenEstimate >= thresholds.hardCompressionThresholdTokens) {
+    const beforeTokenEstimate = finalTokenEstimate;
     const archived = archiveEarlyMessages(messages, keepRecentMessages);
     messages = archived.messages;
     archivedMessageCount = archived.archivedMessageCount;
     finalTokenEstimate = estimatePromptTokens(messages, tools);
-    level = 'archive-early-messages';
+    if (archived.archivedMessageCount > 0) {
+      steps.push({
+        type: 'archive-early-messages',
+        beforeTokenEstimate,
+        afterTokenEstimate: finalTokenEstimate,
+        affectedMessageCount: archived.archivedMessageCount,
+      });
+      level = 'archive-early-messages';
+    }
   }
 
   if (finalTokenEstimate > maxPromptTokens) {
@@ -69,11 +90,24 @@ export function buildAgentContext(
     messages,
     tools,
     compression: {
+      phase: compressionPhase({
+        originalTokenEstimate,
+        finalTokenEstimate,
+        warningThresholdTokens: thresholds.warningThresholdTokens,
+        maxPromptTokens,
+        archivedMessageCount,
+        summarizedToolResultCount,
+      }),
       level,
       originalTokenEstimate,
       finalTokenEstimate,
+      maxPromptTokens,
+      ...thresholds,
+      retainedMessageCount: messages.length,
+      toolCount: tools.length,
       archivedMessageCount,
       summarizedToolResultCount,
+      steps,
       warnings,
     },
   };
@@ -163,4 +197,53 @@ function estimateTextTokens(text: string): number {
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
+}
+
+function normalizeCompressionThresholds(
+  maxPromptTokens: number,
+  options: AgentContextManagerOptions,
+): {
+  warningThresholdTokens: number;
+  softCompressionThresholdTokens: number;
+  hardCompressionThresholdTokens: number;
+} {
+  const warningRatio = normalizeRatio(
+    options.warningThresholdRatio,
+    DEFAULT_WARNING_THRESHOLD_RATIO,
+  );
+  const softRatio = Math.max(
+    warningRatio,
+    normalizeRatio(options.softCompressionThresholdRatio, DEFAULT_SOFT_COMPRESSION_THRESHOLD_RATIO),
+  );
+  const hardRatio = Math.max(
+    softRatio,
+    normalizeRatio(options.hardCompressionThresholdRatio, DEFAULT_HARD_COMPRESSION_THRESHOLD_RATIO),
+  );
+  return {
+    warningThresholdTokens: Math.max(1, Math.floor(maxPromptTokens * warningRatio)),
+    softCompressionThresholdTokens: Math.max(1, Math.floor(maxPromptTokens * softRatio)),
+    hardCompressionThresholdTokens: Math.max(1, Math.floor(maxPromptTokens * hardRatio)),
+  };
+}
+
+function normalizeRatio(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0 || value > 1) {
+    return fallback;
+  }
+  return value;
+}
+
+function compressionPhase(input: {
+  originalTokenEstimate: number;
+  finalTokenEstimate: number;
+  warningThresholdTokens: number;
+  maxPromptTokens: number;
+  archivedMessageCount: number;
+  summarizedToolResultCount: number;
+}): AgentContextCompressionReport['phase'] {
+  if (input.finalTokenEstimate > input.maxPromptTokens) return 'over_budget';
+  if (input.archivedMessageCount > 0) return 'hard_compressed';
+  if (input.summarizedToolResultCount > 0) return 'soft_compressed';
+  if (input.originalTokenEstimate >= input.warningThresholdTokens) return 'warning';
+  return 'healthy';
 }

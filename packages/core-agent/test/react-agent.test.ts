@@ -14,6 +14,9 @@ import {
   AgentAuditLogStore,
   AgentCheckpointStore,
   AgentStreamStore,
+  appendMessage,
+  createAgentSession,
+  createMessage,
   ReactAgent,
   ToolRegistry,
   type AgentToolApproval,
@@ -276,7 +279,13 @@ describe('ReactAgent', () => {
         return { rows: [{ city: 'Shanghai', customer_count: 12 }] };
       },
     );
-    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registry, usage, undefined, fixedDependencies());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
 
     const result = await agent.run({
       providerId: 'fake',
@@ -370,7 +379,6 @@ describe('ReactAgent', () => {
       undefined,
       { ...fixedDependencies(), auditLog },
     );
-
     const result = await agent.run({
       providerId: 'fake',
       model: 'fake-model',
@@ -1047,6 +1055,7 @@ describe('ReactAgent', () => {
   });
 
   it('compresses long conversation context before model calls', async () => {
+    const auditLog = new AgentAuditLogStore(await auditPath());
     const usage = new UsageTracker(await usagePath());
     const { provider, calls } = scriptedProviderWithCalls([
       {
@@ -1069,13 +1078,20 @@ describe('ReactAgent', () => {
       },
       () => ({ rows: Array.from({ length: 200 }, (_, index) => ({ id: index, amount: index * 10 })) }),
     );
-    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registry, usage, undefined, fixedDependencies());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      { ...fixedDependencies(), auditLog },
+    );
 
     const result = await agent.run({
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '分析所有订单明细',
       mode: 'readonly',
+      initialSession: longRestoredSession(),
       maxIterations: 2,
       contextWindowTokens: 120,
       maxToolResultChars: 240,
@@ -1083,6 +1099,24 @@ describe('ReactAgent', () => {
 
     expect(result.status).toBe('done');
     expect(calls).toHaveLength(2);
+    expect(result.contextCompression).toHaveLength(2);
+    expect(result.contextCompression?.[0]).toMatchObject({
+      summarizedToolResultCount: 1,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      steps: expect.arrayContaining([expect.objectContaining({ type: 'tool-summary' })]),
+    });
+    expect(result.contextCompression?.[0]?.phase).toMatch(/soft_compressed|hard_compressed|over_budget/);
+    await expect(auditLog.readAll()).resolves.toContainEqual(
+      expect.objectContaining({
+        type: 'context_compression_applied',
+        sessionId: 'session_test',
+        iteration: 1,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        compression: expect.objectContaining({
+          summarizedToolResultCount: 1,
+        }),
+      }),
+    );
     expect(calls[1]?.messages.some((message) => message.content.includes('工具结果已在本地摘要'))).toBe(true);
   });
 
@@ -1426,4 +1460,36 @@ function fixedDependencies() {
     now: () => '2026-06-17T00:00:00.000Z',
     createSessionId: () => 'session_test',
   };
+}
+
+function longRestoredSession() {
+  const session = createAgentSession({
+    id: 'session_test',
+    title: 'Long restored session',
+    mode: 'readonly',
+    now: fixedDependencies().now,
+  });
+  appendMessage(
+    session,
+    createMessage({ role: 'user', content: 'Restore previous analysis.' }, fixedDependencies().now),
+  );
+  appendMessage(
+    session,
+    createMessage(
+      {
+        role: 'tool',
+        toolCallId: 'restored_large_result',
+        toolName: 'query_database',
+        content: JSON.stringify({
+          rows: Array.from({ length: 300 }, (_, index) => ({
+            id: index,
+            amount: index * 10,
+            payload: 'x'.repeat(80),
+          })),
+        }),
+      },
+      fixedDependencies().now,
+    ),
+  );
+  return session;
 }
