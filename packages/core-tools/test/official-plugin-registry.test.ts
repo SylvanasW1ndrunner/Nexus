@@ -20,6 +20,7 @@ describe('OfficialPluginRegistry', () => {
       'official.database-postgres',
       'official.mcp-client',
       'official.schema-rag',
+      'official.shell-command',
       'official.workspace-files',
       'official.workspace-python',
     ]);
@@ -47,6 +48,7 @@ describe('OfficialPluginRegistry', () => {
       'search_schema',
       'get_relations',
       'build_schema_context',
+      'run_shell_command',
       'list_workspace_dir',
       'read_workspace_file',
       'write_workspace_file',

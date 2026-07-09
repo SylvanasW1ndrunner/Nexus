@@ -42,7 +42,8 @@ export type OfficialPluginResourceScope =
   | 'agent.checkpoint'
   | 'agent.session'
   | 'agent.plan'
-  | 'eval.report';
+  | 'eval.report'
+  | 'system.process';
 export type OfficialPluginSecretKind =
   | 'database-password'
   | 'api-key'
@@ -690,6 +691,46 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
         true,
         ['rag.schema.read'],
         ['schema-rag'],
+      ),
+    ],
+  },
+  {
+    id: 'official.shell-command',
+    name: 'Shell Command 工具',
+    version: '0.1.0',
+    publisher: 'DBAgent',
+    source: 'official',
+    category: 'agent',
+    description:
+      '在受控子进程中执行 shell 命令，提供白名单、黑名单、超时、输出截断和敏感环境变量遮蔽。',
+    enabledByDefault: true,
+    capabilities: ['shell-command-runner', 'shell-policy', 'process-output-capture'],
+    permissions: [
+      permission(
+        'system.shell.execute',
+        '执行 Shell 命令',
+        '在用户本机启动受控 shell 子进程执行命令；高风险命令必须经过模式和审批策略约束。',
+        'high',
+        false,
+        {
+          resourceScopes: ['workspace.process', 'system.process'],
+          approvalPolicy: 'mode-dependent',
+          networkAccess: 'remote',
+          processAccess: 'managed-child-process',
+          secretKinds: ['none'],
+          auditLevel: 'metadata-and-arguments',
+        },
+      ),
+    ],
+    tools: [
+      tool(
+        'run_shell_command',
+        '执行 Shell 命令',
+        '执行本机 shell 命令并返回 stdout/stderr、退出码、超时和截断信息。',
+        'high',
+        false,
+        ['system.shell.execute'],
+        ['official'],
       ),
     ],
   },

@@ -67,9 +67,16 @@ describe('registerDesktopAgentTools', () => {
       'list_workspace_dir',
       'query_database',
       'read_workspace_file',
+      'run_shell_command',
       'search_schema',
       'write_workspace_file',
     ]);
+    expect(registry.get('run_shell_command')).toMatchObject({
+      dangerLevel: 'high',
+      readonly: false,
+      source: 'official',
+      sourceId: 'official.shell-command',
+    });
   });
 
   it('reads the latest async connection state and routes SQL execution by engine', async () => {

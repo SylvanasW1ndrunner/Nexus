@@ -20,6 +20,7 @@ import type {
 import { SchemaRagEngine } from '@dbagent/core-rag';
 import {
   registerDatabaseTools,
+  registerShellCommandTool,
   registerWorkspaceScriptTools,
   registerWorkspaceTools,
   runWorkspacePythonScript,
@@ -127,6 +128,7 @@ export function registerDesktopAgentTools(
     workspace,
     getWorkspaceRoot: async () => (await dependencies.workspaceProjects.loadActive())?.rootPath,
   });
+  registerShellCommandTool({ registry: dependencies.registry });
   registerAgentHistoryTools(dependencies);
 
   return {
