@@ -10,8 +10,10 @@ import {
 } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
 import {
+  AgentPlanExecutionStore,
   createAgentSession,
   PlanExecuteAgent,
+  type AgentPlan,
   type AgentRunOptions,
   type AgentRunResult,
   type AgentSession,
@@ -99,6 +101,61 @@ describe('PlanExecuteAgent', () => {
     await expect(usage.current()).resolves.toMatchObject({ byokTokenEstimate: 50 });
   });
 
+  it('persists plan progress snapshots while executing steps', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const planStore = new AgentPlanExecutionStore(await planStorePath());
+    const provider = scriptedProvider([
+      {
+        text: JSON.stringify({
+          title: 'Revenue investigation',
+          steps: [
+            { id: 'inspect_schema', title: 'Inspect schema', instruction: 'Inspect revenue tables.' },
+            { id: 'run_query', title: 'Run query', instruction: 'Query daily revenue.' },
+          ],
+        }),
+        toolCalls: [],
+      },
+    ]);
+    const runner = scriptedRunner([
+      successfulRun('schema inspected', 1, [toolRecord('schema_1', 'search_schema', 'success')]),
+      successfulRun('daily revenue checked', 2, [toolRecord('query_1', 'query_database', 'success')]),
+    ]);
+    const agent = new PlanExecuteAgent(new LlmRouter(usage, [provider]), runner, {
+      ...fixedDependencies(),
+      createPlanId: () => 'plan_persisted',
+      planStore,
+    });
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Investigate revenue movement.',
+      mode: 'readonly',
+    });
+    const snapshot = await planStore.load('plan_persisted');
+
+    expect(result.status).toBe('done');
+    expect(snapshot).toMatchObject({
+      planId: 'plan_persisted',
+      status: 'done',
+      finalText: 'daily revenue checked',
+      executedSteps: 2,
+      totalIterations: 3,
+      session: { id: 'session_test' },
+      plan: {
+        steps: [
+          { id: 'inspect_schema', status: 'done', resultSummary: 'schema inspected' },
+          { id: 'run_query', status: 'done', resultSummary: 'daily revenue checked' },
+        ],
+      },
+      toolExecutions: [
+        { toolCallId: 'schema_1', toolName: 'search_schema', status: 'success' },
+        { toolCallId: 'query_1', toolName: 'query_database', status: 'success' },
+      ],
+    });
+    await expect(planStore.listRecoverable()).resolves.toEqual([]);
+  });
+
   it('stops and skips remaining steps when a ReAct step fails', async () => {
     const usage = new UsageTracker(await usagePath());
     const provider = scriptedProvider([
@@ -150,6 +207,48 @@ describe('PlanExecuteAgent', () => {
     expect(result.plan.steps).toEqual([]);
     expect(result.finalText).toContain('Agent planning failed');
     expect(runner.calls).toEqual([]);
+  });
+
+  it('resumes from a persisted plan without replanning or repeating completed steps', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([]);
+    const planStore = new AgentPlanExecutionStore(await planStorePath());
+    const initialPlan = recoveredPlan();
+    const runner = scriptedRunner([
+      successfulRun('refund spike verified', 2, [toolRecord('query_2', 'query_database', 'success')]),
+    ]);
+    const agent = new PlanExecuteAgent(new LlmRouter(usage, [provider]), runner, {
+      ...fixedDependencies(),
+      planStore,
+    });
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Resume refund analysis.',
+      mode: 'readonly',
+      initialPlan,
+      initialSession: testSession(),
+      initialExecutedSteps: 1,
+      initialTotalIterations: 3,
+    });
+
+    expect(calls).toEqual([]);
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]).toMatchObject({ initialIteration: 3 });
+    expect(runner.calls[0]?.userMessage).toContain('Completed step summaries:\n- Inspect schema: orders and refunds located');
+    expect(result.status).toBe('done');
+    expect(result.executedSteps).toBe(2);
+    expect(result.totalIterations).toBe(5);
+    expect(result.plan.steps).toMatchObject([
+      { id: 'inspect_schema', status: 'done' },
+      { id: 'run_query', status: 'done', resultSummary: 'refund spike verified' },
+    ]);
+    await expect(planStore.load('plan_recovered')).resolves.toMatchObject({
+      status: 'done',
+      executedSteps: 2,
+      totalIterations: 5,
+    });
   });
 });
 
@@ -251,8 +350,41 @@ async function usagePath(): Promise<string> {
   return join(dir, 'usage-history.json');
 }
 
+async function planStorePath(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'dbagent-plan-execute-store-'));
+  tempDirs.push(dir);
+  return join(dir, 'plan-executions.json');
+}
+
 function fixedDependencies() {
   return {
     now: () => '2026-07-09T00:00:00.000Z',
+  };
+}
+
+function recoveredPlan(): AgentPlan {
+  return {
+    id: 'plan_recovered',
+    title: 'Recovered refund analysis',
+    goal: 'Analyze refunds after crash.',
+    createdAt: '2026-07-09T00:00:00.000Z',
+    plannerModelText: '{"title":"Recovered refund analysis"}',
+    steps: [
+      {
+        id: 'inspect_schema',
+        title: 'Inspect schema',
+        instruction: 'Find order and refund tables.',
+        status: 'done',
+        resultSummary: 'orders and refunds located',
+        runStatus: 'done',
+        iterations: 3,
+      },
+      {
+        id: 'run_query',
+        title: 'Run query',
+        instruction: 'Query refund spike.',
+        status: 'pending',
+      },
+    ],
   };
 }

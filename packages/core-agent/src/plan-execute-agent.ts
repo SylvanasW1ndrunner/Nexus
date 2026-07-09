@@ -1,7 +1,9 @@
 import type { LlmChatRequest, LlmRouter } from '@dbagent/core-llm';
+import type { AgentPlanExecutionWriter } from './plan-execute-store.js';
 import type { ReactAgent } from './react-agent.js';
 import type {
   AgentPlan,
+  AgentPlanExecutionSnapshotStatus,
   AgentPlanExecuteOptions,
   AgentPlanExecuteResult,
   AgentPlanStep,
@@ -23,8 +25,18 @@ export class PlanExecuteAgent {
 
   async run(options: AgentPlanExecuteOptions): Promise<AgentPlanExecuteResult> {
     const now = this.dependencies.now ?? (() => new Date().toISOString());
-    const plan = await this.createPlan(options, now);
+    const plan = clonePlan(options.initialPlan) ?? (await this.createPlan(options, now));
     if (plan.steps.length === 0) {
+      await this.saveSnapshot({
+        plan,
+        status: 'planning_failed',
+        finalText: 'Agent planning failed: no executable steps were produced.',
+        executedSteps: 0,
+        totalIterations: 0,
+        toolExecutions: [],
+        contextCompression: [],
+        now,
+      });
       return {
         status: 'planning_failed',
         plan,
@@ -40,14 +52,27 @@ export class PlanExecuteAgent {
     const toolExecutions: AgentToolExecutionRecord[] = [];
     const contextCompression: AgentContextCompressionReport[] = [];
     let session = options.initialSession;
-    let totalIterations = 0;
-    let executedSteps = 0;
+    let totalIterations = normalizeNonNegativeInteger(options.initialTotalIterations, 0);
+    let executedSteps = normalizeNonNegativeInteger(options.initialExecutedSteps, countExecutedSteps(plan.steps));
     let finalText = '';
+    await this.saveSnapshot({
+      plan,
+      status: 'running',
+      ...(session === undefined ? {} : { session }),
+      finalText,
+      executedSteps,
+      totalIterations,
+      toolExecutions,
+      contextCompression,
+      now,
+    });
 
     for (const step of plan.steps) {
+      if (isTerminalStep(step)) continue;
+
       if (options.signal?.aborted) {
         markStep(step, 'skipped', 'Agent run was aborted before this step.');
-        return {
+        const result = {
           status: 'aborted',
           plan,
           ...(session === undefined ? {} : { session }),
@@ -56,16 +81,48 @@ export class PlanExecuteAgent {
           totalIterations,
           toolExecutions,
           contextCompression,
-        };
+        } satisfies AgentPlanExecuteResult;
+        await this.saveResultSnapshot(result, now);
+        return result;
       }
 
       markStep(step, 'running');
-      const result = await this.stepRunner.run({
-        ...toStepRunOptions(options),
-        userMessage: buildStepInstruction(plan, step),
-        initialIteration: totalIterations,
-        ...(session === undefined ? {} : { initialSession: session }),
+      await this.saveSnapshot({
+        plan,
+        status: 'running',
+        ...(session === undefined ? {} : { session }),
+        finalText,
+        executedSteps,
+        totalIterations,
+        toolExecutions,
+        contextCompression,
+        now,
       });
+      let result: AgentRunResult;
+      try {
+        result = await this.stepRunner.run({
+          ...toStepRunOptions(options),
+          userMessage: buildStepInstruction(plan, step),
+          initialIteration: totalIterations,
+          ...(session === undefined ? {} : { initialSession: session }),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        markStep(step, 'failed', message);
+        await this.saveSnapshot({
+          plan,
+          status: 'failed',
+          ...(session === undefined ? {} : { session }),
+          finalText: message,
+          executedSteps,
+          totalIterations,
+          toolExecutions,
+          contextCompression,
+          errorMessage: message,
+          now,
+        });
+        throw error;
+      }
       session = result.session;
       executedSteps += 1;
       totalIterations += result.iterations;
@@ -79,13 +136,24 @@ export class PlanExecuteAgent {
 
       if (isSuccessfulStep(result)) {
         markStep(step, 'done');
+        await this.saveSnapshot({
+          plan,
+          status: 'running',
+          session,
+          finalText,
+          executedSteps,
+          totalIterations,
+          toolExecutions,
+          contextCompression,
+          now,
+        });
         continue;
       }
 
       markStep(step, 'failed', result.finalText || result.status);
       if (stopOnStepFailure) {
         skipRemainingSteps(plan.steps, step.id, 'Previous plan step failed.');
-        return {
+        const failedResult = {
           status: result.status === 'aborted' ? 'aborted' : 'failed',
           plan,
           session,
@@ -94,11 +162,24 @@ export class PlanExecuteAgent {
           totalIterations,
           toolExecutions,
           contextCompression,
-        };
+        } satisfies AgentPlanExecuteResult;
+        await this.saveResultSnapshot(failedResult, now);
+        return failedResult;
       }
+      await this.saveSnapshot({
+        plan,
+        status: 'running',
+        session,
+        finalText,
+        executedSteps,
+        totalIterations,
+        toolExecutions,
+        contextCompression,
+        now,
+      });
     }
 
-    return {
+    const finalResult = {
       status: plan.steps.some((step) => step.status === 'failed') ? 'failed' : 'done',
       plan,
       ...(session === undefined ? {} : { session }),
@@ -107,7 +188,9 @@ export class PlanExecuteAgent {
       totalIterations,
       toolExecutions,
       contextCompression,
-    };
+    } satisfies AgentPlanExecuteResult;
+    await this.saveResultSnapshot(finalResult, now);
+    return finalResult;
   }
 
   private async createPlan(options: AgentPlanExecuteOptions, now: () => string): Promise<AgentPlan> {
@@ -138,10 +221,11 @@ export class PlanExecuteAgent {
         raw: parsePlannerJson(response.text),
         maxPlanSteps,
         now,
+        createPlanId: this.dependencies.createPlanId ?? createPlanId,
       });
     } catch {
       return {
-        id: createPlanId(),
+        id: (this.dependencies.createPlanId ?? createPlanId)(),
         title: 'Planning failed',
         goal: options.userMessage,
         createdAt: now(),
@@ -150,10 +234,52 @@ export class PlanExecuteAgent {
       };
     }
   }
+
+  private async saveResultSnapshot(result: AgentPlanExecuteResult, now: () => string): Promise<void> {
+    await this.saveSnapshot({
+      plan: result.plan,
+      status: result.status,
+      ...(result.session === undefined ? {} : { session: result.session }),
+      finalText: result.finalText,
+      executedSteps: result.executedSteps,
+      totalIterations: result.totalIterations,
+      toolExecutions: result.toolExecutions,
+      contextCompression: result.contextCompression ?? [],
+      now,
+    });
+  }
+
+  private async saveSnapshot(input: {
+    plan: AgentPlan;
+    status: AgentPlanExecutionSnapshotStatus;
+    session?: AgentRunResult['session'];
+    finalText: string;
+    executedSteps: number;
+    totalIterations: number;
+    toolExecutions: AgentToolExecutionRecord[];
+    contextCompression: AgentContextCompressionReport[];
+    errorMessage?: string;
+    now: () => string;
+  }): Promise<void> {
+    await this.dependencies.planStore?.save({
+      plan: input.plan,
+      status: input.status,
+      ...(input.session === undefined ? {} : { session: input.session }),
+      finalText: input.finalText,
+      executedSteps: input.executedSteps,
+      totalIterations: input.totalIterations,
+      toolExecutions: input.toolExecutions,
+      contextCompression: input.contextCompression,
+      ...(input.errorMessage === undefined ? {} : { errorMessage: input.errorMessage }),
+      now: input.now(),
+    });
+  }
 }
 
 export type PlanExecuteDependencies = {
   now?: () => string;
+  createPlanId?: () => string;
+  planStore?: AgentPlanExecutionWriter;
 };
 
 type StepRunBaseOptions = Omit<AgentRunOptions, 'userMessage' | 'initialSession' | 'initialIteration'>;
@@ -186,6 +312,7 @@ function normalizePlan(input: {
   raw: unknown;
   maxPlanSteps: number;
   now: () => string;
+  createPlanId: () => string;
 }): AgentPlan {
   if (!isRecord(input.raw)) throw new Error('Planner response must be a JSON object.');
   const title = normalizeTitle(input.raw.title, input.goal);
@@ -193,7 +320,7 @@ function normalizePlan(input: {
   const steps = rawSteps.slice(0, input.maxPlanSteps).map((rawStep, index) => normalizeStep(rawStep, index));
   if (steps.length === 0) throw new Error('Planner response did not include executable steps.');
   return {
-    id: createPlanId(),
+    id: input.createPlanId(),
     title,
     goal: input.goal,
     createdAt: input.now(),
@@ -252,6 +379,10 @@ function isSuccessfulStep(result: AgentRunResult): boolean {
   return result.status === 'done' || result.status === 'max_iterations_reached';
 }
 
+function isTerminalStep(step: AgentPlanStep): boolean {
+  return step.status === 'done' || step.status === 'skipped';
+}
+
 function failureText(step: AgentPlanStep, result: AgentRunResult): string {
   return `Plan step failed: ${step.title}. Status: ${result.status}. ${result.finalText}`.trim();
 }
@@ -289,6 +420,15 @@ function normalizeMaxPlanSteps(value: number | undefined): number {
   return Math.max(1, Math.min(20, Math.floor(value)));
 }
 
+function normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
+}
+
+function countExecutedSteps(steps: AgentPlanStep[]): number {
+  return steps.filter((step) => step.status === 'done' || step.status === 'failed').length;
+}
+
 function sanitizeStepId(value: string, index: number): string {
   const sanitized = value
     .trim()
@@ -309,4 +449,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function createPlanId(): string {
   return `plan_${crypto.randomUUID()}`;
+}
+
+function clonePlan(plan: AgentPlan | undefined): AgentPlan | undefined {
+  return plan === undefined ? undefined : (JSON.parse(JSON.stringify(plan)) as AgentPlan);
 }

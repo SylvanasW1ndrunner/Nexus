@@ -99,6 +99,9 @@ export type AgentPlanExecutionStatus = 'done' | 'aborted' | 'failed' | 'planning
 export type AgentPlanExecuteOptions = AgentRunOptions & {
   maxPlanSteps?: number;
   stopOnStepFailure?: boolean;
+  initialPlan?: AgentPlan;
+  initialExecutedSteps?: number;
+  initialTotalIterations?: number;
 };
 
 export type AgentPlanExecuteResult = {
@@ -110,6 +113,27 @@ export type AgentPlanExecuteResult = {
   totalIterations: number;
   toolExecutions: AgentToolExecutionRecord[];
   contextCompression?: AgentContextCompressionReport[];
+};
+
+export type AgentPlanExecutionSnapshotStatus =
+  | AgentPlanExecutionStatus
+  | 'running'
+  | 'abandoned';
+
+export type AgentPlanExecutionSnapshot = {
+  planId: string;
+  status: AgentPlanExecutionSnapshotStatus;
+  plan: AgentPlan;
+  session?: AgentSession;
+  finalText: string;
+  executedSteps: number;
+  totalIterations: number;
+  toolExecutions: AgentToolExecutionRecord[];
+  contextCompression?: AgentContextCompressionReport[];
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
 };
 
 export type AgentTaskSafetyPolicy =

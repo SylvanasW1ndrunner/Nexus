@@ -6,6 +6,7 @@ export * from './evaluation-report-store.js';
 export * from './output-safety.js';
 export * from './permission-manager.js';
 export * from './plan-execute-agent.js';
+export * from './plan-execute-store.js';
 export * from './react-agent.js';
 export * from './recovery.js';
 export * from './schema-rag-tools.js';
