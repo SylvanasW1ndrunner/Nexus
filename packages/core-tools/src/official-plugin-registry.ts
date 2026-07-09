@@ -1,8 +1,19 @@
 import type { ToolDangerLevel } from '@dbagent/core-agent';
-import { parseAgentEvalSuiteManifest, type AgentEvalSuiteManifest } from './agent-eval-suite-manifest.js';
+import {
+  parseAgentEvalSuiteManifest,
+  type AgentEvalSuiteManifest,
+} from './agent-eval-suite-manifest.js';
 import type { AgentEvalSuite } from './agent-eval-suite-runner.js';
 
-export type OfficialPluginCategory = 'database' | 'rag' | 'workspace' | 'python' | 'mcp' | 'skill' | 'eval';
+export type OfficialPluginCategory =
+  | 'database'
+  | 'rag'
+  | 'workspace'
+  | 'python'
+  | 'mcp'
+  | 'skill'
+  | 'agent'
+  | 'eval';
 
 export type OfficialPluginSource = 'official';
 
@@ -30,7 +41,12 @@ export type OfficialPluginResourceScope =
   | 'skill.source'
   | 'agent.session'
   | 'eval.report';
-export type OfficialPluginSecretKind = 'database-password' | 'api-key' | 'mcp-env' | 'ssh-key' | 'none';
+export type OfficialPluginSecretKind =
+  | 'database-password'
+  | 'api-key'
+  | 'mcp-env'
+  | 'ssh-key'
+  | 'none';
 
 export type OfficialPluginPermission = {
   id: string;
@@ -157,15 +173,25 @@ export class OfficialPluginRegistry {
   }
 
   list(): OfficialPluginManifest[] {
-    return [...this.manifests.values()].map(cloneManifest).sort((left, right) => left.id.localeCompare(right.id));
+    return [...this.manifests.values()]
+      .map(cloneManifest)
+      .sort((left, right) => left.id.localeCompare(right.id));
   }
 
-  listEnabled(options: Pick<OfficialPluginToolResolutionOptions, 'enabledPluginIds' | 'disabledPluginIds'> = {}): OfficialPluginManifest[] {
+  listEnabled(
+    options: Pick<
+      OfficialPluginToolResolutionOptions,
+      'enabledPluginIds' | 'disabledPluginIds'
+    > = {},
+  ): OfficialPluginManifest[] {
     return this.list().filter((manifest) => isPluginEnabled(manifest, options));
   }
 
-  resolveToolContributions(options: OfficialPluginToolResolutionOptions = {}): OfficialPluginToolResolution {
-    const allowedPermissions = options.allowedPermissions === undefined ? undefined : new Set(options.allowedPermissions);
+  resolveToolContributions(
+    options: OfficialPluginToolResolutionOptions = {},
+  ): OfficialPluginToolResolution {
+    const allowedPermissions =
+      options.allowedPermissions === undefined ? undefined : new Set(options.allowedPermissions);
     const toolNames: string[] = [];
     const staticTools: OfficialPluginToolContribution[] = [];
     const dynamicTools: OfficialPluginToolContribution[] = [];
@@ -174,15 +200,24 @@ export class OfficialPluginRegistry {
     for (const manifest of this.listEnabled(options)) {
       for (const tool of manifest.tools) {
         if (options.readonlyOnly === true && !tool.readonly) continue;
-        if (options.maxDangerLevel && dangerRank[tool.dangerLevel] > dangerRank[options.maxDangerLevel]) continue;
-        if (allowedPermissions && !tool.permissions.every((permission) => allowedPermissions.has(permission))) continue;
+        if (
+          options.maxDangerLevel &&
+          dangerRank[tool.dangerLevel] > dangerRank[options.maxDangerLevel]
+        )
+          continue;
+        if (
+          allowedPermissions &&
+          !tool.permissions.every((permission) => allowedPermissions.has(permission))
+        )
+          continue;
 
         const cloned = cloneTool(tool);
         if (tool.dynamic) {
           dynamicTools.push(cloned);
           continue;
         }
-        if (seen.has(tool.name)) throw new Error(`Duplicate resolved official tool contribution: ${tool.name}`);
+        if (seen.has(tool.name))
+          throw new Error(`Duplicate resolved official tool contribution: ${tool.name}`);
         seen.add(tool.name);
         toolNames.push(tool.name);
         staticTools.push(cloned);
@@ -192,7 +227,9 @@ export class OfficialPluginRegistry {
     return { toolNames, staticTools, dynamicTools };
   }
 
-  resolveRuntimeTools(options: OfficialPluginRuntimeToolResolutionOptions): OfficialPluginRuntimeToolResolution {
+  resolveRuntimeTools(
+    options: OfficialPluginRuntimeToolResolutionOptions,
+  ): OfficialPluginRuntimeToolResolution {
     const resolved = this.resolveToolContributions(options);
     const runtimeToolNames = new Set<string>();
     const allowedToolNames: string[] = [];
@@ -211,7 +248,9 @@ export class OfficialPluginRegistry {
       );
       const dynamicAllowed =
         !resolved.toolNames.includes(runtimeTool.name) &&
-        resolved.dynamicTools.some((contribution) => dynamicContributionMatchesRuntimeTool(contribution, runtimeTool));
+        resolved.dynamicTools.some((contribution) =>
+          dynamicContributionMatchesRuntimeTool(contribution, runtimeTool),
+        );
       const runtimeAllowed = runtimeToolPassesResolutionOptions(runtimeTool, options);
 
       if ((staticAllowed || dynamicAllowed) && runtimeAllowed) {
@@ -233,7 +272,9 @@ export class OfficialPluginRegistry {
     };
   }
 
-  resolveEvalSuites(options: OfficialPluginEvalSuiteResolutionOptions = {}): OfficialPluginEvalSuiteResolution {
+  resolveEvalSuites(
+    options: OfficialPluginEvalSuiteResolutionOptions = {},
+  ): OfficialPluginEvalSuiteResolution {
     const suiteFilter = options.suiteIds === undefined ? undefined : new Set(options.suiteIds);
     const suites: AgentEvalSuite[] = [];
     const manifests: OfficialPluginEvalSuiteResolution['manifests'] = [];
@@ -326,14 +367,21 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     enabledByDefault: false,
     capabilities: ['agent-eval-suite', 'tool-evidence-report', 'release-quality-gate'],
     permissions: [
-      permission('eval.report.write', '写入评估报告', '写入脱敏后的 Agent/RAG 行为评估报告和索引。', 'safe', true, {
-        resourceScopes: ['agent.session', 'eval.report'],
-        approvalPolicy: 'never',
-        networkAccess: 'none',
-        processAccess: 'none',
-        secretKinds: ['none'],
-        auditLevel: 'metadata',
-      }),
+      permission(
+        'eval.report.write',
+        '写入评估报告',
+        '写入脱敏后的 Agent/RAG 行为评估报告和索引。',
+        'safe',
+        true,
+        {
+          resourceScopes: ['agent.session', 'eval.report'],
+          approvalPolicy: 'never',
+          networkAccess: 'none',
+          processAccess: 'none',
+          secretKinds: ['none'],
+          auditLevel: 'metadata',
+        },
+      ),
     ],
     tools: [],
     evalSuites: [DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST],
@@ -349,38 +397,107 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     enabledByDefault: true,
     capabilities: ['schema-browse', 'sql-audit', 'sql-query', 'sql-execute'],
     permissions: [
-      permission('database.schema.read', '读取数据库结构', '读取 schema、表、字段和关系元数据。', 'safe', true, {
-        resourceScopes: ['database.connection'],
-        approvalPolicy: 'never',
-        networkAccess: 'local',
-        processAccess: 'none',
-        secretKinds: ['database-password'],
-        auditLevel: 'metadata',
-      }),
-      permission('database.query.read', '执行只读查询', '执行 SELECT、SHOW、VALUES 等只读 SQL。', 'medium', true, {
-        resourceScopes: ['database.connection'],
-        approvalPolicy: 'mode-dependent',
-        networkAccess: 'local',
-        processAccess: 'none',
-        secretKinds: ['database-password'],
-        auditLevel: 'metadata-and-arguments',
-      }),
-      permission('database.query.write', '执行写入 SQL', '执行 INSERT、UPDATE、DELETE、DDL 或其他可能改变数据库状态的 SQL。', 'high', false, {
-        resourceScopes: ['database.connection'],
-        approvalPolicy: 'always',
-        networkAccess: 'local',
-        processAccess: 'none',
-        secretKinds: ['database-password'],
-        auditLevel: 'metadata-and-arguments',
-      }),
+      permission(
+        'database.schema.read',
+        '读取数据库结构',
+        '读取 schema、表、字段和关系元数据。',
+        'safe',
+        true,
+        {
+          resourceScopes: ['database.connection'],
+          approvalPolicy: 'never',
+          networkAccess: 'local',
+          processAccess: 'none',
+          secretKinds: ['database-password'],
+          auditLevel: 'metadata',
+        },
+      ),
+      permission(
+        'database.query.read',
+        '执行只读查询',
+        '执行 SELECT、SHOW、VALUES 等只读 SQL。',
+        'medium',
+        true,
+        {
+          resourceScopes: ['database.connection'],
+          approvalPolicy: 'mode-dependent',
+          networkAccess: 'local',
+          processAccess: 'none',
+          secretKinds: ['database-password'],
+          auditLevel: 'metadata-and-arguments',
+        },
+      ),
+      permission(
+        'database.query.write',
+        '执行写入 SQL',
+        '执行 INSERT、UPDATE、DELETE、DDL 或其他可能改变数据库状态的 SQL。',
+        'high',
+        false,
+        {
+          resourceScopes: ['database.connection'],
+          approvalPolicy: 'always',
+          networkAccess: 'local',
+          processAccess: 'none',
+          secretKinds: ['database-password'],
+          auditLevel: 'metadata-and-arguments',
+        },
+      ),
     ],
     tools: [
-      tool('list_schemas', '列出 Schema', '列出当前连接中的 schema。', 'safe', true, ['database.schema.read'], ['database']),
-      tool('list_tables', '列出表', '列出当前连接中的表和视图。', 'safe', true, ['database.schema.read'], ['database']),
-      tool('describe_table', '描述表', '读取单表字段、主键和注释。', 'safe', true, ['database.schema.read'], ['database']),
-      tool('audit_sql', 'SQL 预审', '在执行前返回 SQL 安全报告。', 'safe', true, ['database.query.read'], ['database']),
-      tool('query_database', '只读查询', '执行单条只读 SQL 并返回结果。', 'medium', true, ['database.query.read'], ['database']),
-      tool('execute_sql', '执行 SQL', '执行需要批准的写入或 DDL SQL。', 'high', false, ['database.query.write'], ['database']),
+      tool(
+        'list_schemas',
+        '列出 Schema',
+        '列出当前连接中的 schema。',
+        'safe',
+        true,
+        ['database.schema.read'],
+        ['database'],
+      ),
+      tool(
+        'list_tables',
+        '列出表',
+        '列出当前连接中的表和视图。',
+        'safe',
+        true,
+        ['database.schema.read'],
+        ['database'],
+      ),
+      tool(
+        'describe_table',
+        '描述表',
+        '读取单表字段、主键和注释。',
+        'safe',
+        true,
+        ['database.schema.read'],
+        ['database'],
+      ),
+      tool(
+        'audit_sql',
+        'SQL 预审',
+        '在执行前返回 SQL 安全报告。',
+        'safe',
+        true,
+        ['database.query.read'],
+        ['database'],
+      ),
+      tool(
+        'query_database',
+        '只读查询',
+        '执行单条只读 SQL 并返回结果。',
+        'medium',
+        true,
+        ['database.query.read'],
+        ['database'],
+      ),
+      tool(
+        'execute_sql',
+        '执行 SQL',
+        '执行需要批准的写入或 DDL SQL。',
+        'high',
+        false,
+        ['database.query.write'],
+        ['database'],
+      ),
     ],
   },
   {
@@ -394,20 +511,59 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     enabledByDefault: true,
     capabilities: ['schema-rag-status', 'schema-search', 'relation-context', 'context-builder'],
     permissions: [
-      permission('rag.schema.read', '读取本地 Schema 索引', '读取本地 RAG 索引中的 schema 文档和关系上下文。', 'safe', true, {
-        resourceScopes: ['rag.index'],
-        approvalPolicy: 'never',
-        networkAccess: 'none',
-        processAccess: 'none',
-        secretKinds: ['none'],
-        auditLevel: 'metadata',
-      }),
+      permission(
+        'rag.schema.read',
+        '读取本地 Schema 索引',
+        '读取本地 RAG 索引中的 schema 文档和关系上下文。',
+        'safe',
+        true,
+        {
+          resourceScopes: ['rag.index'],
+          approvalPolicy: 'never',
+          networkAccess: 'none',
+          processAccess: 'none',
+          secretKinds: ['none'],
+          auditLevel: 'metadata',
+        },
+      ),
     ],
     tools: [
-      tool('get_schema_rag_status', '读取 Schema RAG 状态', '读取本地 Schema RAG 索引阶段、ready 状态和文档计数。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
-      tool('search_schema', '检索 Schema', '按业务问题检索 schema 文档。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
-      tool('get_relations', '读取关系上下文', '读取单表一跳关系上下文。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
-      tool('build_schema_context', '构建 Schema 上下文', '构建供 Agent 使用的紧凑 schema 上下文。', 'safe', true, ['rag.schema.read'], ['schema-rag']),
+      tool(
+        'get_schema_rag_status',
+        '读取 Schema RAG 状态',
+        '读取本地 Schema RAG 索引阶段、ready 状态和文档计数。',
+        'safe',
+        true,
+        ['rag.schema.read'],
+        ['schema-rag'],
+      ),
+      tool(
+        'search_schema',
+        '检索 Schema',
+        '按业务问题检索 schema 文档。',
+        'safe',
+        true,
+        ['rag.schema.read'],
+        ['schema-rag'],
+      ),
+      tool(
+        'get_relations',
+        '读取关系上下文',
+        '读取单表一跳关系上下文。',
+        'safe',
+        true,
+        ['rag.schema.read'],
+        ['schema-rag'],
+      ),
+      tool(
+        'build_schema_context',
+        '构建 Schema 上下文',
+        '构建供 Agent 使用的紧凑 schema 上下文。',
+        'safe',
+        true,
+        ['rag.schema.read'],
+        ['schema-rag'],
+      ),
     ],
   },
   {
@@ -421,27 +577,65 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     enabledByDefault: true,
     capabilities: ['workspace-list', 'workspace-read', 'workspace-write'],
     permissions: [
-      permission('workspace.file.read', '读取工作区文件', '读取工作区托管目录内的文件和目录列表。', 'safe', true, {
-        resourceScopes: ['workspace.root'],
-        approvalPolicy: 'never',
-        networkAccess: 'none',
-        processAccess: 'none',
-        secretKinds: ['none'],
-        auditLevel: 'metadata-and-arguments',
-      }),
-      permission('workspace.file.write', '写入工作区文件', '在工作区托管目录内原子写入文本文件。', 'medium', false, {
-        resourceScopes: ['workspace.root'],
-        approvalPolicy: 'mode-dependent',
-        networkAccess: 'none',
-        processAccess: 'none',
-        secretKinds: ['none'],
-        auditLevel: 'metadata-and-arguments',
-      }),
+      permission(
+        'workspace.file.read',
+        '读取工作区文件',
+        '读取工作区托管目录内的文件和目录列表。',
+        'safe',
+        true,
+        {
+          resourceScopes: ['workspace.root'],
+          approvalPolicy: 'never',
+          networkAccess: 'none',
+          processAccess: 'none',
+          secretKinds: ['none'],
+          auditLevel: 'metadata-and-arguments',
+        },
+      ),
+      permission(
+        'workspace.file.write',
+        '写入工作区文件',
+        '在工作区托管目录内原子写入文本文件。',
+        'medium',
+        false,
+        {
+          resourceScopes: ['workspace.root'],
+          approvalPolicy: 'mode-dependent',
+          networkAccess: 'none',
+          processAccess: 'none',
+          secretKinds: ['none'],
+          auditLevel: 'metadata-and-arguments',
+        },
+      ),
     ],
     tools: [
-      tool('list_workspace_dir', '列出目录', '列出工作区目录内容。', 'safe', true, ['workspace.file.read'], ['workspace']),
-      tool('read_workspace_file', '读取文件', '读取 UTF-8 文本文件。', 'safe', true, ['workspace.file.read'], ['workspace']),
-      tool('write_workspace_file', '写入文件', '原子写入 UTF-8 文本文件。', 'medium', false, ['workspace.file.write'], ['workspace']),
+      tool(
+        'list_workspace_dir',
+        '列出目录',
+        '列出工作区目录内容。',
+        'safe',
+        true,
+        ['workspace.file.read'],
+        ['workspace'],
+      ),
+      tool(
+        'read_workspace_file',
+        '读取文件',
+        '读取 UTF-8 文本文件。',
+        'safe',
+        true,
+        ['workspace.file.read'],
+        ['workspace'],
+      ),
+      tool(
+        'write_workspace_file',
+        '写入文件',
+        '原子写入 UTF-8 文本文件。',
+        'medium',
+        false,
+        ['workspace.file.write'],
+        ['workspace'],
+      ),
     ],
   },
   {
@@ -455,14 +649,21 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     enabledByDefault: true,
     capabilities: ['python-script-discovery', 'python-script-runner', 'run-archive'],
     permissions: [
-      permission('workspace.process.execute', '执行工作区进程', '在当前工作区内启动受控 Python 子进程。', 'medium', false, {
-        resourceScopes: ['workspace.process', 'workspace.root'],
-        approvalPolicy: 'mode-dependent',
-        networkAccess: 'none',
-        processAccess: 'managed-child-process',
-        secretKinds: ['none'],
-        auditLevel: 'metadata-and-arguments',
-      }),
+      permission(
+        'workspace.process.execute',
+        '执行工作区进程',
+        '在当前工作区内启动受控 Python 子进程。',
+        'medium',
+        false,
+        {
+          resourceScopes: ['workspace.process', 'workspace.root'],
+          approvalPolicy: 'mode-dependent',
+          networkAccess: 'none',
+          processAccess: 'managed-child-process',
+          secretKinds: ['none'],
+          auditLevel: 'metadata-and-arguments',
+        },
+      ),
     ],
     tools: [
       {
@@ -479,6 +680,97 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     ],
   },
   {
+    id: 'official.agent-session-history',
+    name: 'Agent Session History',
+    version: '0.1.0',
+    publisher: 'DBAgent',
+    source: 'official',
+    category: 'agent',
+    description:
+      'Expose persisted Agent sessions and stream records as readonly official tools for recovery, handoff, and audit review.',
+    enabledByDefault: true,
+    capabilities: [
+      'agent-session-list',
+      'agent-session-read',
+      'agent-session-export',
+      'agent-stream-read',
+      'agent-stream-recovery',
+    ],
+    permissions: [
+      permission(
+        'agent.session.read',
+        'Read Agent session history',
+        'Read redacted local Agent sessions and stream records.',
+        'safe',
+        true,
+        {
+          resourceScopes: ['agent.session'],
+          approvalPolicy: 'never',
+          networkAccess: 'none',
+          processAccess: 'none',
+          secretKinds: ['none'],
+          auditLevel: 'metadata',
+        },
+      ),
+    ],
+    tools: [
+      tool(
+        'list_agent_sessions',
+        'List Agent sessions',
+        'List persisted Agent session summaries.',
+        'safe',
+        true,
+        ['agent.session.read'],
+        ['official'],
+      ),
+      tool(
+        'read_agent_session',
+        'Read Agent session',
+        'Read a persisted Agent session with recent messages.',
+        'safe',
+        true,
+        ['agent.session.read'],
+        ['official'],
+      ),
+      tool(
+        'export_agent_session',
+        'Export Agent session',
+        'Export a persisted Agent session as markdown or JSON.',
+        'safe',
+        true,
+        ['agent.session.read'],
+        ['official'],
+      ),
+      tool(
+        'list_agent_streams',
+        'List Agent streams',
+        'List persisted Agent stream summaries for a session.',
+        'safe',
+        true,
+        ['agent.session.read'],
+        ['official'],
+      ),
+      tool(
+        'list_recoverable_agent_streams',
+        'List recoverable Agent streams',
+        'List incomplete Agent streams that may need recovery.',
+        'safe',
+        true,
+        ['agent.session.read'],
+        ['official'],
+      ),
+      tool(
+        'read_agent_stream',
+        'Read Agent stream',
+        'Read a persisted Agent stream and optional chunks.',
+        'safe',
+        true,
+        ['agent.session.read'],
+        ['official'],
+      ),
+    ],
+  },
+  {
     id: 'official.mcp-client',
     name: 'MCP 客户端',
     version: '0.1.0',
@@ -489,14 +781,21 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     enabledByDefault: true,
     capabilities: ['mcp-stdio', 'mcp-tool-adapter', 'mcp-health'],
     permissions: [
-      permission('mcp.tool.invoke', '调用 MCP 工具', '调用用户或市场安装的 MCP server 暴露的工具。', 'high', false, {
-        resourceScopes: ['mcp.server'],
-        approvalPolicy: 'mode-dependent',
-        networkAccess: 'remote',
-        processAccess: 'managed-child-process',
-        secretKinds: ['mcp-env', 'api-key'],
-        auditLevel: 'metadata-and-arguments',
-      }),
+      permission(
+        'mcp.tool.invoke',
+        '调用 MCP 工具',
+        '调用用户或市场安装的 MCP server 暴露的工具。',
+        'high',
+        false,
+        {
+          resourceScopes: ['mcp.server'],
+          approvalPolicy: 'mode-dependent',
+          networkAccess: 'remote',
+          processAccess: 'managed-child-process',
+          secretKinds: ['mcp-env', 'api-key'],
+          auditLevel: 'metadata-and-arguments',
+        },
+      ),
     ],
     tools: [
       {
@@ -555,11 +854,13 @@ function permission(
 function validateManifest(manifest: OfficialPluginManifest): void {
   if (!manifest.id.trim()) throw new Error('Official plugin id is required.');
   if (!manifest.name.trim()) throw new Error(`Official plugin name is required: ${manifest.id}`);
-  if (manifest.source !== 'official') throw new Error(`Official plugin must use source=official: ${manifest.id}`);
+  if (manifest.source !== 'official')
+    throw new Error(`Official plugin must use source=official: ${manifest.id}`);
 
   const permissions = new Set<string>();
   for (const permission of manifest.permissions) {
-    if (!permission.id.trim()) throw new Error(`Official plugin permission id is required: ${manifest.id}`);
+    if (!permission.id.trim())
+      throw new Error(`Official plugin permission id is required: ${manifest.id}`);
     if (permissions.has(permission.id)) {
       throw new Error(`Duplicate permission in official plugin ${manifest.id}: ${permission.id}`);
     }
@@ -574,7 +875,8 @@ function validateManifest(manifest: OfficialPluginManifest): void {
 
   const toolNames = new Set<string>();
   for (const contribution of manifest.tools) {
-    if (!contribution.name.trim()) throw new Error(`Official plugin tool name is required: ${manifest.id}`);
+    if (!contribution.name.trim())
+      throw new Error(`Official plugin tool name is required: ${manifest.id}`);
     if (toolNames.has(contribution.name)) {
       throw new Error(`Duplicate tool in official plugin ${manifest.id}: ${contribution.name}`);
     }
@@ -602,15 +904,22 @@ function validateManifest(manifest: OfficialPluginManifest): void {
     for (const evalSuite of manifest.evalSuites) {
       const parsed = parseAgentEvalSuiteManifest(evalSuite);
       if (suiteIds.has(parsed.suiteId)) {
-        throw new Error(`Duplicate eval suite in official plugin ${manifest.id}: ${parsed.suiteId}`);
+        throw new Error(
+          `Duplicate eval suite in official plugin ${manifest.id}: ${parsed.suiteId}`,
+        );
       }
       suiteIds.add(parsed.suiteId);
     }
   }
 }
 
-function assertNoStaticToolNameConflict(existing: OfficialPluginManifest, next: OfficialPluginManifest): void {
-  const existingTools = new Set(existing.tools.filter((tool) => !tool.dynamic).map((tool) => tool.name));
+function assertNoStaticToolNameConflict(
+  existing: OfficialPluginManifest,
+  next: OfficialPluginManifest,
+): void {
+  const existingTools = new Set(
+    existing.tools.filter((tool) => !tool.dynamic).map((tool) => tool.name),
+  );
   for (const contribution of next.tools) {
     if (!contribution.dynamic && existingTools.has(contribution.name)) {
       throw new Error(
@@ -665,7 +974,11 @@ function runtimeToolPassesResolutionOptions(
   options: Pick<OfficialPluginToolResolutionOptions, 'readonlyOnly' | 'maxDangerLevel'>,
 ): boolean {
   if (options.readonlyOnly === true && runtimeTool.readonly !== true) return false;
-  if (options.maxDangerLevel && dangerRank[runtimeTool.dangerLevel] > dangerRank[options.maxDangerLevel]) return false;
+  if (
+    options.maxDangerLevel &&
+    dangerRank[runtimeTool.dangerLevel] > dangerRank[options.maxDangerLevel]
+  )
+    return false;
   return true;
 }
 

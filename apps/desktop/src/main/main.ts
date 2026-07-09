@@ -1,10 +1,28 @@
-﻿import { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, type MenuItemConstructorOptions } from 'electron';
+﻿import {
+  app,
+  BrowserWindow,
+  Menu,
+  dialog,
+  ipcMain,
+  safeStorage,
+  type MenuItemConstructorOptions,
+} from 'electron';
 import { appendFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ConnectionStore, QueryCancellationRegistry, QueryHistoryStore, createDefaultDatabaseDriverRegistry } from '@dbagent/core-db';
-import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, TestAuthRepository } from '@dbagent/core-auth';
+import {
+  ConnectionStore,
+  QueryCancellationRegistry,
+  QueryHistoryStore,
+  createDefaultDatabaseDriverRegistry,
+} from '@dbagent/core-db';
+import {
+  AuthDatabaseUnavailableError,
+  AuthService,
+  PostgresAuthRepository,
+  TestAuthRepository,
+} from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
 import {
@@ -94,15 +112,17 @@ const schemaRagSnapshotStore = new SchemaRagSnapshotStore({ rootDir: schemaRagSn
 const agentToolRegistry = new ToolRegistry();
 const agentSkillRegistry = new SkillRegistry();
 registerDefaultBuiltinSkills(agentSkillRegistry);
+const agentSessionStore = new AgentSessionStore(agentSessionPath);
+const agentStreamStore = new AgentStreamStore(agentStreamPath);
 const desktopAgentTools = registerDesktopAgentTools({
   registry: agentToolRegistry,
   connections: connectionStore,
   workspaceProjects: workspaceProjectStore,
   driverForEngine: (engine) => databaseDrivers.get(engine),
   rag: schemaRagEngine,
+  agentSessions: agentSessionStore,
+  agentStreams: agentStreamStore,
 });
-const agentSessionStore = new AgentSessionStore(agentSessionPath);
-const agentStreamStore = new AgentStreamStore(agentStreamPath);
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
   sessionStore: agentSessionStore,
   streamStore: agentStreamStore,
@@ -213,10 +233,22 @@ function installApplicationMenu(): void {
     {
       label: '\u6587\u4ef6',
       submenu: [
-        { label: '\u65b0\u5efa\u9879\u76ee', accelerator: 'CmdOrCtrl+N', click: () => sendMenuCommand('new-project') },
-        { label: '\u6253\u5f00\u9879\u76ee...', accelerator: 'CmdOrCtrl+O', click: () => sendMenuCommand('open-project') },
+        {
+          label: '\u65b0\u5efa\u9879\u76ee',
+          accelerator: 'CmdOrCtrl+N',
+          click: () => sendMenuCommand('new-project'),
+        },
+        {
+          label: '\u6253\u5f00\u9879\u76ee...',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => sendMenuCommand('open-project'),
+        },
         { type: 'separator' },
-        { label: '\u4fdd\u5b58\u6587\u4ef6', accelerator: 'CmdOrCtrl+S', click: () => sendMenuCommand('save-file') },
+        {
+          label: '\u4fdd\u5b58\u6587\u4ef6',
+          accelerator: 'CmdOrCtrl+S',
+          click: () => sendMenuCommand('save-file'),
+        },
         { type: 'separator' },
         { label: '\u9000\u51fa', role: 'quit' },
       ],
@@ -236,22 +268,54 @@ function installApplicationMenu(): void {
     {
       label: '\u8fd0\u884c',
       submenu: [
-        { label: '\u8fd0\u884c\u5f53\u524d SQL', accelerator: 'F5', click: () => sendMenuCommand('run-sql') },
-        { label: '\u5206\u6790\u5f53\u524d SQL', accelerator: 'CmdOrCtrl+Enter', click: () => sendMenuCommand('explain-sql') },
-        { label: '\u8fd0\u884c\u5f53\u524d Python', accelerator: 'F6', click: () => sendMenuCommand('run-python') },
+        {
+          label: '\u8fd0\u884c\u5f53\u524d SQL',
+          accelerator: 'F5',
+          click: () => sendMenuCommand('run-sql'),
+        },
+        {
+          label: '\u5206\u6790\u5f53\u524d SQL',
+          accelerator: 'CmdOrCtrl+Enter',
+          click: () => sendMenuCommand('explain-sql'),
+        },
+        {
+          label: '\u8fd0\u884c\u5f53\u524d Python',
+          accelerator: 'F6',
+          click: () => sendMenuCommand('run-python'),
+        },
       ],
     },
     {
       label: '\u89c6\u56fe',
       submenu: [
-        { label: '\u547d\u4ee4\u9762\u677f...', accelerator: 'CmdOrCtrl+Shift+P', click: () => sendMenuCommand('command-palette') },
+        {
+          label: '\u547d\u4ee4\u9762\u677f...',
+          accelerator: 'CmdOrCtrl+Shift+P',
+          click: () => sendMenuCommand('command-palette'),
+        },
         { type: 'separator' },
-        { label: '\u5207\u6362\u5de6\u4fa7\u680f', accelerator: 'CmdOrCtrl+B', click: () => sendMenuCommand('toggle-left-sidebar') },
-        { label: '\u5207\u6362 Agent', accelerator: 'CmdOrCtrl+Shift+A', click: () => sendMenuCommand('toggle-right-sidebar') },
+        {
+          label: '\u5207\u6362\u5de6\u4fa7\u680f',
+          accelerator: 'CmdOrCtrl+B',
+          click: () => sendMenuCommand('toggle-left-sidebar'),
+        },
+        {
+          label: '\u5207\u6362 Agent',
+          accelerator: 'CmdOrCtrl+Shift+A',
+          click: () => sendMenuCommand('toggle-right-sidebar'),
+        },
         { type: 'separator' },
-        { label: '\u95ee\u9898', accelerator: 'CmdOrCtrl+Shift+M', click: () => sendMenuCommand('show-problems') },
+        {
+          label: '\u95ee\u9898',
+          accelerator: 'CmdOrCtrl+Shift+M',
+          click: () => sendMenuCommand('show-problems'),
+        },
         { label: '\u8f93\u51fa', click: () => sendMenuCommand('show-results') },
-        { label: '\u7ec8\u7aef', accelerator: 'CmdOrCtrl+`', click: () => sendMenuCommand('show-terminal') },
+        {
+          label: '\u7ec8\u7aef',
+          accelerator: 'CmdOrCtrl+`',
+          click: () => sendMenuCommand('show-terminal'),
+        },
         { label: '\u7aef\u53e3', click: () => sendMenuCommand('show-ports') },
         { type: 'separator' },
         { label: '\u91cd\u65b0\u52a0\u8f7d', role: 'reload' },
@@ -260,7 +324,13 @@ function installApplicationMenu(): void {
     },
     {
       label: '\u8bbe\u7f6e',
-      submenu: [{ label: '\u8bbe\u7f6e...', accelerator: 'CmdOrCtrl+,', click: () => sendMenuCommand('project-settings') }],
+      submenu: [
+        {
+          label: '\u8bbe\u7f6e...',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => sendMenuCommand('project-settings'),
+        },
+      ],
     },
     {
       label: '\u5e2e\u52a9',
@@ -271,7 +341,11 @@ function installApplicationMenu(): void {
 }
 function logMain(message: string, error?: unknown): void {
   const detail = serializeLogDetail(error);
-  appendFileSync(join(userDataDir, 'main.log'), `[${new Date().toISOString()}] ${message} ${detail}\n`, 'utf8');
+  appendFileSync(
+    join(userDataDir, 'main.log'),
+    `[${new Date().toISOString()}] ${message} ${detail}\n`,
+    'utf8',
+  );
 }
 
 function serializeLogDetail(value: unknown): string {
@@ -325,7 +399,9 @@ function handle<Channel extends IpcChannel>(
   ipcMain.handle(channel, (_event, request: IpcRequestMap[Channel]) => listener(request));
 }
 
-async function safeResult<T>(operation: () => Promise<T>): Promise<ReturnType<typeof ok<T>> | ReturnType<typeof err>> {
+async function safeResult<T>(
+  operation: () => Promise<T>,
+): Promise<ReturnType<typeof ok<T>> | ReturnType<typeof err>> {
   try {
     return ok(await operation());
   } catch (error) {
@@ -347,7 +423,9 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.connection.list, async () => connectionWorkflow.list());
   handle(ipcChannels.connection.test, async (input) => connectionWorkflow.test(input));
   handle(ipcChannels.connection.create, async (input) => connectionWorkflow.create(input));
-  handle(ipcChannels.connection.update, async ({ id, patch }) => connectionWorkflow.update(id, patch));
+  handle(ipcChannels.connection.update, async ({ id, patch }) =>
+    connectionWorkflow.update(id, patch),
+  );
   handle(ipcChannels.connection.remove, async ({ id }) => connectionWorkflow.remove(id));
   handle(ipcChannels.connection.connect, async ({ id }) => connectionWorkflow.connect(id));
   handle(ipcChannels.connection.disconnect, async ({ id }) => connectionWorkflow.disconnect(id));
@@ -355,18 +433,28 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.db.executeQuery, async (request) => executeQuery(request));
   handle(ipcChannels.db.cancelQuery, async (request) => cancelQuery(request));
   handle(ipcChannels.db.explainQuery, async (request) => explainQuery(request));
-  handle(ipcChannels.db.listTables, async ({ connectionId }) => schemaWorkflow.listTables(connectionId));
+  handle(ipcChannels.db.listTables, async ({ connectionId }) =>
+    schemaWorkflow.listTables(connectionId),
+  );
   handle(ipcChannels.db.describeTable, async ({ connectionId, schema, table }) =>
     schemaWorkflow.describeTable(connectionId, schema, table),
   );
-  handle(ipcChannels.db.queryHistory, async (request) => ok(await queryHistoryStore.list(request ?? {})));
+  handle(ipcChannels.db.queryHistory, async (request) =>
+    ok(await queryHistoryStore.list(request ?? {})),
+  );
 
   handle(ipcChannels.auth.status, async () => ok(withAuthCapabilities(await authService.status())));
   handle(ipcChannels.auth.login, async (request) =>
-    safeResult(async () => withAuthCapabilities(await authService.login(request.identifier, request.password))),
+    safeResult(async () =>
+      withAuthCapabilities(await authService.login(request.identifier, request.password)),
+    ),
   );
-  handle(ipcChannels.auth.register, async (request) => safeResult(async () => withAuthCapabilities(await authService.register(request))));
-  handle(ipcChannels.auth.requestCode, async (request) => safeResult(() => authService.requestCode(request)));
+  handle(ipcChannels.auth.register, async (request) =>
+    safeResult(async () => withAuthCapabilities(await authService.register(request))),
+  );
+  handle(ipcChannels.auth.requestCode, async (request) =>
+    safeResult(() => authService.requestCode(request)),
+  );
   handle(ipcChannels.auth.verifyCodeLogin, async (request) =>
     safeResult(async () => withAuthCapabilities(await authService.verifyCodeLogin(request))),
   );
@@ -375,7 +463,9 @@ function registerIpcHandlers(): void {
   );
   handle(ipcChannels.auth.logout, async () => ok(withAuthCapabilities(await authService.logout())));
 
-  handle(ipcChannels.python.detect, async (request) => safeResult(() => pythonEnvironmentService.detect(request)));
+  handle(ipcChannels.python.detect, async (request) =>
+    safeResult(() => pythonEnvironmentService.detect(request)),
+  );
   handle(ipcChannels.python.choosePath, async (request) => {
     const selection = await dialog.showOpenDialog(mainWindow!, {
       title: request?.title ?? 'Choose Python path',
@@ -387,46 +477,100 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.python.createEnvironment, async (request) =>
     safeResult(() => pythonEnvironmentService.createEnvironment(request)),
   );
-  handle(ipcChannels.python.runScript, async (request) => safeResult(() => pythonEnvironmentService.runScript(request)));
+  handle(ipcChannels.python.runScript, async (request) =>
+    safeResult(() => pythonEnvironmentService.runScript(request)),
+  );
 
-  handle(ipcChannels.terminal.create, (request) => Promise.resolve(ok(terminalService.create(request ?? {}))));
+  handle(ipcChannels.terminal.create, (request) =>
+    Promise.resolve(ok(terminalService.create(request ?? {}))),
+  );
   handle(ipcChannels.terminal.close, ({ id }) => Promise.resolve(ok(terminalService.close(id))));
   handle(ipcChannels.terminal.clear, ({ id }) => Promise.resolve(ok(terminalService.clear(id))));
-  handle(ipcChannels.terminal.resize, (request) => Promise.resolve(ok(terminalService.resize(request))));
-  handle(ipcChannels.terminal.write, (request) => Promise.resolve(ok(terminalService.write(request))));
-  handle(ipcChannels.terminal.read, (request) => Promise.resolve(ok(terminalService.read(request))));
-  handle(ipcChannels.terminal.run, async (request) => safeResult(() => terminalService.run(request)));
+  handle(ipcChannels.terminal.resize, (request) =>
+    Promise.resolve(ok(terminalService.resize(request))),
+  );
+  handle(ipcChannels.terminal.write, (request) =>
+    Promise.resolve(ok(terminalService.write(request))),
+  );
+  handle(ipcChannels.terminal.read, (request) =>
+    Promise.resolve(ok(terminalService.read(request))),
+  );
+  handle(ipcChannels.terminal.run, async (request) =>
+    safeResult(() => terminalService.run(request)),
+  );
   handle(ipcChannels.terminal.list, () => Promise.resolve(ok(terminalService.list())));
 
   handle(ipcChannels.plugin.list, async () => safeResult(() => pluginRegistry.list()));
-  handle(ipcChannels.plugin.install, async ({ id }) => safeResult(() => pluginRegistry.install(id)));
-  handle(ipcChannels.plugin.uninstall, async ({ id }) => safeResult(() => pluginRegistry.uninstall(id)));
+  handle(ipcChannels.plugin.install, async ({ id }) =>
+    safeResult(() => pluginRegistry.install(id)),
+  );
+  handle(ipcChannels.plugin.uninstall, async ({ id }) =>
+    safeResult(() => pluginRegistry.uninstall(id)),
+  );
   handle(ipcChannels.plugin.enable, async ({ id }) => safeResult(() => pluginRegistry.enable(id)));
-  handle(ipcChannels.plugin.disable, async ({ id }) => safeResult(() => pluginRegistry.disable(id)));
+  handle(ipcChannels.plugin.disable, async ({ id }) =>
+    safeResult(() => pluginRegistry.disable(id)),
+  );
 
-  handle(ipcChannels.skills.match, async (request) => safeResult(() => headlessAgentService.matchSkills(request)));
+  handle(ipcChannels.skills.match, async (request) =>
+    safeResult(() => headlessAgentService.matchSkills(request)),
+  );
   handle(ipcChannels.agent.toolPolicyPreview, (request) =>
     safeResult(() => Promise.resolve(headlessAgentService.previewToolPolicy(request ?? {}))),
   );
-  handle(ipcChannels.agent.run, async (request) => safeResult(() => headlessAgentService.run(request)));
-  handle(ipcChannels.agent.abort, (request) => safeResult(() => Promise.resolve(headlessAgentService.abort(request))));
-  handle(ipcChannels.agent.recoverablePlans, async () => safeResult(() => headlessAgentService.listRecoverablePlans()));
-  handle(ipcChannels.agent.continuePlan, async (request) => safeResult(() => headlessAgentService.continuePlan(request)));
-  handle(ipcChannels.agent.restartPlan, async (request) => safeResult(() => headlessAgentService.restartPlan(request)));
-  handle(ipcChannels.agent.abandonPlan, async (request) => safeResult(() => headlessAgentService.abandonPlan(request)));
-  handle(ipcChannels.agent.sessions, async (request) => safeResult(() => headlessAgentService.listSessions(request ?? {})));
-  handle(ipcChannels.agent.session, async (request) => safeResult(() => headlessAgentService.loadSession(request)));
-  handle(ipcChannels.agent.updateSession, async (request) => safeResult(() => headlessAgentService.updateSession(request)));
-  handle(ipcChannels.agent.archiveSession, async (request) => safeResult(() => headlessAgentService.archiveSession(request)));
-  handle(ipcChannels.agent.deleteSession, async (request) => safeResult(() => headlessAgentService.deleteSession(request)));
-  handle(ipcChannels.agent.forkSession, async (request) => safeResult(() => headlessAgentService.forkSession(request)));
-  handle(ipcChannels.agent.exportSession, async (request) => safeResult(() => headlessAgentService.exportSession(request)));
-  handle(ipcChannels.agent.streams, async (request) => safeResult(() => headlessAgentService.listStreams(request)));
-  handle(ipcChannels.agent.stream, async (request) => safeResult(() => headlessAgentService.loadStream(request)));
-  handle(ipcChannels.agent.recoverableStreams, async () => safeResult(() => headlessAgentService.listRecoverableStreams()));
+  handle(ipcChannels.agent.run, async (request) =>
+    safeResult(() => headlessAgentService.run(request)),
+  );
+  handle(ipcChannels.agent.abort, (request) =>
+    safeResult(() => Promise.resolve(headlessAgentService.abort(request))),
+  );
+  handle(ipcChannels.agent.recoverablePlans, async () =>
+    safeResult(() => headlessAgentService.listRecoverablePlans()),
+  );
+  handle(ipcChannels.agent.continuePlan, async (request) =>
+    safeResult(() => headlessAgentService.continuePlan(request)),
+  );
+  handle(ipcChannels.agent.restartPlan, async (request) =>
+    safeResult(() => headlessAgentService.restartPlan(request)),
+  );
+  handle(ipcChannels.agent.abandonPlan, async (request) =>
+    safeResult(() => headlessAgentService.abandonPlan(request)),
+  );
+  handle(ipcChannels.agent.sessions, async (request) =>
+    safeResult(() => headlessAgentService.listSessions(request ?? {})),
+  );
+  handle(ipcChannels.agent.session, async (request) =>
+    safeResult(() => headlessAgentService.loadSession(request)),
+  );
+  handle(ipcChannels.agent.updateSession, async (request) =>
+    safeResult(() => headlessAgentService.updateSession(request)),
+  );
+  handle(ipcChannels.agent.archiveSession, async (request) =>
+    safeResult(() => headlessAgentService.archiveSession(request)),
+  );
+  handle(ipcChannels.agent.deleteSession, async (request) =>
+    safeResult(() => headlessAgentService.deleteSession(request)),
+  );
+  handle(ipcChannels.agent.forkSession, async (request) =>
+    safeResult(() => headlessAgentService.forkSession(request)),
+  );
+  handle(ipcChannels.agent.exportSession, async (request) =>
+    safeResult(() => headlessAgentService.exportSession(request)),
+  );
+  handle(ipcChannels.agent.streams, async (request) =>
+    safeResult(() => headlessAgentService.listStreams(request)),
+  );
+  handle(ipcChannels.agent.stream, async (request) =>
+    safeResult(() => headlessAgentService.loadStream(request)),
+  );
+  handle(ipcChannels.agent.recoverableStreams, async () =>
+    safeResult(() => headlessAgentService.listRecoverableStreams()),
+  );
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
-  handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));
+  handle(ipcChannels.usage.history, async (request) =>
+    ok(await usageTracker.history(request?.limit)),
+  );
 
   handle(ipcChannels.app.loadWorkspaceState, async () => ok(await workspaceStateStore.load()));
   handle(ipcChannels.app.saveWorkspaceState, async (state) => {
@@ -487,8 +631,12 @@ function registerIpcHandlers(): void {
       });
     }
   });
-  handle(ipcChannels.workspace.listRecent, async () => ok(await workspaceProjectStore.listRecent()));
-  handle(ipcChannels.workspace.loadActive, async () => ok(await workspaceProjectStore.loadActive()));
+  handle(ipcChannels.workspace.listRecent, async () =>
+    ok(await workspaceProjectStore.listRecent()),
+  );
+  handle(ipcChannels.workspace.loadActive, async () =>
+    ok(await workspaceProjectStore.loadActive()),
+  );
   handle(ipcChannels.workspace.listFiles, async ({ rootPath }) => {
     try {
       return ok(await workspaceProjectStore.listFiles(rootPath));

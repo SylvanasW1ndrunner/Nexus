@@ -14,6 +14,7 @@ describe('OfficialPluginRegistry', () => {
 
     expect(registry.list().map((plugin) => plugin.id)).toEqual([
       'official.agent-rag-eval',
+      'official.agent-session-history',
       'official.database-postgres',
       'official.mcp-client',
       'official.schema-rag',
@@ -21,6 +22,12 @@ describe('OfficialPluginRegistry', () => {
       'official.workspace-python',
     ]);
     expect(registry.resolveToolContributions().toolNames).toEqual([
+      'list_agent_sessions',
+      'read_agent_session',
+      'export_agent_session',
+      'list_agent_streams',
+      'list_recoverable_agent_streams',
+      'read_agent_stream',
       'list_schemas',
       'list_tables',
       'describe_table',
@@ -99,7 +106,9 @@ describe('OfficialPluginRegistry', () => {
       'build_schema_context',
     ]);
 
-    expect(registry.resolveToolContributions({ maxDangerLevel: 'medium' }).toolNames).not.toContain('execute_sql');
+    expect(registry.resolveToolContributions({ maxDangerLevel: 'medium' }).toolNames).not.toContain(
+      'execute_sql',
+    );
   });
 
   it('resolves allowed runtime tools from static official tools and dynamic tool sources', () => {
@@ -108,9 +117,29 @@ describe('OfficialPluginRegistry', () => {
       runtimeTool('query_database', 'medium', true, 'database'),
       runtimeTool('execute_sql', 'high', false),
       runtimeTool('read_workspace_file', 'safe', true, 'workspace'),
-      runtimeTool('orders_server__list_orders', 'safe', true, 'user-mcp', 'orders_server', 'list_orders'),
-      runtimeTool('analytics_server__drop_table', 'high', false, 'market-mcp', 'analytics_server', 'drop_table'),
-      runtimeTool('workspace_script:summarize_orders', 'medium', false, 'workspace-script', 'scripts/summarize_orders.py'),
+      runtimeTool(
+        'orders_server__list_orders',
+        'safe',
+        true,
+        'user-mcp',
+        'orders_server',
+        'list_orders',
+      ),
+      runtimeTool(
+        'analytics_server__drop_table',
+        'high',
+        false,
+        'market-mcp',
+        'analytics_server',
+        'drop_table',
+      ),
+      runtimeTool(
+        'workspace_script:summarize_orders',
+        'medium',
+        false,
+        'workspace-script',
+        'scripts/summarize_orders.py',
+      ),
       runtimeTool('unregistered_custom_tool', 'safe', true, 'skill'),
     ];
 
@@ -125,7 +154,11 @@ describe('OfficialPluginRegistry', () => {
       'workspace_script:summarize_orders',
     ]);
     expect(resolved.blockedToolNames).toEqual(['unregistered_custom_tool']);
-    expect(resolved.staticToolNames).toEqual(['query_database', 'execute_sql', 'read_workspace_file']);
+    expect(resolved.staticToolNames).toEqual([
+      'query_database',
+      'execute_sql',
+      'read_workspace_file',
+    ]);
     expect(resolved.dynamicToolNames).toEqual([
       'orders_server__list_orders',
       'analytics_server__drop_table',
@@ -139,7 +172,9 @@ describe('OfficialPluginRegistry', () => {
     const registry = createDefaultOfficialPluginRegistry();
 
     const resolved = registry.resolveRuntimeTools({
-      runtimeTools: [runtimeTool('query_database', 'safe', true, 'user-mcp', 'orders_server', 'query_database')],
+      runtimeTools: [
+        runtimeTool('query_database', 'safe', true, 'user-mcp', 'orders_server', 'query_database'),
+      ],
     });
 
     expect(resolved.allowedToolNames).toEqual([]);
@@ -153,8 +188,21 @@ describe('OfficialPluginRegistry', () => {
     const runtimeTools = [
       runtimeTool('query_database', 'medium', true),
       runtimeTool('execute_sql', 'high', false),
-      runtimeTool('orders_server__list_orders', 'safe', true, 'user-mcp', 'orders_server', 'list_orders'),
-      runtimeTool('workspace_script:summarize_orders', 'medium', false, 'workspace-script', 'scripts/summarize_orders.py'),
+      runtimeTool(
+        'orders_server__list_orders',
+        'safe',
+        true,
+        'user-mcp',
+        'orders_server',
+        'list_orders',
+      ),
+      runtimeTool(
+        'workspace_script:summarize_orders',
+        'medium',
+        false,
+        'workspace-script',
+        'scripts/summarize_orders.py',
+      ),
     ];
 
     expect(
@@ -164,14 +212,13 @@ describe('OfficialPluginRegistry', () => {
       }).allowedToolNames,
     ).toEqual(['query_database', 'execute_sql', 'workspace_script:summarize_orders']);
 
-    expect(registry.resolveRuntimeTools({ runtimeTools, readonlyOnly: true }).allowedToolNames).toEqual([
-      'query_database',
-    ]);
+    expect(
+      registry.resolveRuntimeTools({ runtimeTools, readonlyOnly: true }).allowedToolNames,
+    ).toEqual(['query_database']);
 
-    expect(registry.resolveRuntimeTools({ runtimeTools, maxDangerLevel: 'medium' }).allowedToolNames).toEqual([
-      'query_database',
-      'workspace_script:summarize_orders',
-    ]);
+    expect(
+      registry.resolveRuntimeTools({ runtimeTools, maxDangerLevel: 'medium' }).allowedToolNames,
+    ).toEqual(['query_database', 'workspace_script:summarize_orders']);
   });
 
   it('enables an official plugin that is disabled by default only when explicitly requested', () => {
@@ -185,7 +232,10 @@ describe('OfficialPluginRegistry', () => {
         },
       ],
     };
-    const registry = new OfficialPluginRegistry([minimalManifest('official.base'), disabledByDefault]);
+    const registry = new OfficialPluginRegistry([
+      minimalManifest('official.base'),
+      disabledByDefault,
+    ]);
 
     expect(registry.resolveToolContributions().toolNames).toEqual(['test_tool']);
     expect(
@@ -265,7 +315,13 @@ describe('OfficialPluginRegistry', () => {
         ]),
     ).toThrow('Duplicate tool in official plugin official.duplicate-tools');
 
-    expect(() => new OfficialPluginRegistry([minimalManifest('official.first'), minimalManifest('official.second')])).toThrow(
+    expect(
+      () =>
+        new OfficialPluginRegistry([
+          minimalManifest('official.first'),
+          minimalManifest('official.second'),
+        ]),
+    ).toThrow(
       'Official plugin tool test_tool is already contributed by official.first; cannot register official.second.',
     );
 
@@ -303,7 +359,10 @@ describe('OfficialPluginRegistry', () => {
 
     expect(() =>
       registry.resolveRuntimeTools({
-        runtimeTools: [runtimeTool('query_database', 'medium', true), runtimeTool('query_database', 'medium', true)],
+        runtimeTools: [
+          runtimeTool('query_database', 'medium', true),
+          runtimeTool('query_database', 'medium', true),
+        ],
       }),
     ).toThrow('Duplicate runtime tool descriptor: query_database');
 
@@ -375,12 +434,16 @@ describe('OfficialPluginRegistry', () => {
       'official.agent-rag.business-readonly',
     );
     expect(
-      registry.resolveEvalSuites({ enabledPluginIds: ['official.agent-rag-eval'] }).manifests[0]?.manifest.suite.suiteId,
+      registry.resolveEvalSuites({ enabledPluginIds: ['official.agent-rag-eval'] }).manifests[0]
+        ?.manifest.suite.suiteId,
     ).toBe('official.agent-rag.business-readonly');
     expect(
-      DEFAULT_OFFICIAL_PLUGIN_MANIFESTS.find((item) => item.id === 'official.database-postgres')?.tools[0]?.name,
+      DEFAULT_OFFICIAL_PLUGIN_MANIFESTS.find((item) => item.id === 'official.database-postgres')
+        ?.tools[0]?.name,
     ).toBe('list_schemas');
-    expect(DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST.suite.suiteId).toBe('official.agent-rag.business-readonly');
+    expect(DEFAULT_AGENT_RAG_EVAL_SUITE_MANIFEST.suite.suiteId).toBe(
+      'official.agent-rag.business-readonly',
+    );
   });
 });
 

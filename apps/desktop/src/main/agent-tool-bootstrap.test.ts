@@ -2,9 +2,18 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ToolRegistry, type AgentToolContext } from '@dbagent/core-agent';
+import {
+  AgentSessionStore,
+  AgentStreamStore,
+  ToolRegistry,
+  type AgentSession,
+  type AgentToolContext,
+} from '@dbagent/core-agent';
 import type { IDatabaseDriver, TableSummary } from '@dbagent/core-db';
-import type { WorkspaceScriptRunRequest } from '@dbagent/core-tools';
+import {
+  resolveOfficialPluginAgentTools,
+  type WorkspaceScriptRunRequest,
+} from '@dbagent/core-tools';
 import { WorkspaceCore } from '@dbagent/core-workspace';
 import {
   ok,
@@ -36,7 +45,12 @@ describe('registerDesktopAgentTools', () => {
       driverForEngine: () => fakeDriver(),
     });
 
-    expect(registry.list().map((tool) => tool.name).sort()).toEqual([
+    expect(
+      registry
+        .list()
+        .map((tool) => tool.name)
+        .sort(),
+    ).toEqual([
       'audit_sql',
       'build_schema_context',
       'describe_table',
@@ -125,9 +139,9 @@ describe('registerDesktopAgentTools', () => {
       driverForEngine: () => fakeDriver(),
     });
 
-    await expect(registry.get('list_workspace_dir')?.handler({ path: '.' }, toolContext())).rejects.toThrow(
-      'No active workspace.',
-    );
+    await expect(
+      registry.get('list_workspace_dir')?.handler({ path: '.' }, toolContext()),
+    ).rejects.toThrow('No active workspace.');
   });
 
   it('resolves the active workspace root at tool execution time', async () => {
@@ -162,7 +176,10 @@ describe('registerDesktopAgentTools', () => {
     await expect(
       registry
         .get('write_workspace_file')
-        ?.handler({ path: 'outputs/summary.md', content: '# Summary\n\nactive workspace\n' }, toolContext()),
+        ?.handler(
+          { path: 'outputs/summary.md', content: '# Summary\n\nactive workspace\n' },
+          toolContext(),
+        ),
     ).resolves.toMatchObject({
       relativePath: 'outputs/summary.md',
       bytes: 28,
@@ -202,7 +219,9 @@ describe('registerDesktopAgentTools', () => {
         relativePath: 'scripts/summarize_orders.py',
       },
     ]);
-    expect(desktopTools.registeredWorkspaceScriptToolNames()).toEqual(['workspace_script:summarize_orders']);
+    expect(desktopTools.registeredWorkspaceScriptToolNames()).toEqual([
+      'workspace_script:summarize_orders',
+    ]);
     expect(registry.get('workspace_script:summarize_orders')).toMatchObject({
       dangerLevel: 'medium',
       readonly: false,
@@ -212,7 +231,9 @@ describe('registerDesktopAgentTools', () => {
     });
 
     await expect(
-      registry.get('workspace_script:summarize_orders')?.handler({ count: 3, region: 'east' }, toolContext()),
+      registry
+        .get('workspace_script:summarize_orders')
+        ?.handler({ count: 3, region: 'east' }, toolContext()),
     ).resolves.toMatchObject({
       exitCode: 0,
       stdout: 'ok',
@@ -231,7 +252,9 @@ describe('registerDesktopAgentTools', () => {
     const registry = new ToolRegistry();
     const first = await scriptWorkspace('summarize_orders');
     const second = await scriptWorkspace('plot_gmv');
-    const activeProject: { value: WorkspaceProject | undefined } = { value: workspaceProject(first.rootPath) };
+    const activeProject: { value: WorkspaceProject | undefined } = {
+      value: workspaceProject(first.rootPath),
+    };
     const desktopTools = registerDesktopAgentTools({
       registry,
       connections: connectionReader([connectedConnection()]),
@@ -250,14 +273,121 @@ describe('registerDesktopAgentTools', () => {
 
     activeProject.value = undefined;
     await expect(
-      registry.get('workspace_script:summarize_orders')?.handler({ count: 1, region: 'east' }, toolContext()),
+      registry
+        .get('workspace_script:summarize_orders')
+        ?.handler({ count: 1, region: 'east' }, toolContext()),
     ).rejects.toThrow('Workspace script tool is no longer active.');
 
     activeProject.value = workspaceProject(second.rootPath);
     await desktopTools.refreshWorkspaceScriptTools();
     expect(registry.has('workspace_script:summarize_orders')).toBe(false);
     expect(registry.has('workspace_script:plot_gmv')).toBe(true);
-    expect(desktopTools.registeredWorkspaceScriptToolNames()).toEqual(['workspace_script:plot_gmv']);
+    expect(desktopTools.registeredWorkspaceScriptToolNames()).toEqual([
+      'workspace_script:plot_gmv',
+    ]);
+  });
+
+  it('exposes persisted Agent sessions and streams as official readonly tools', async () => {
+    const registry = new ToolRegistry();
+    const sessionStore = new AgentSessionStore(await sessionStorePath());
+    const streamStore = new AgentStreamStore(await streamStorePath());
+    await sessionStore.save({
+      session: agentSession('session_orders', '订单分析'),
+      now: '2026-07-09T10:00:00.000Z',
+    });
+    await streamStore.start({
+      id: 'stream_orders',
+      sessionId: 'session_orders',
+      providerId: 'siliconflow',
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      now: '2026-07-09T10:00:01.000Z',
+    });
+    await streamStore.appendEvent(
+      'stream_orders',
+      { type: 'text-delta', text: '订单总数为 42。' },
+      '2026-07-09T10:00:02.000Z',
+    );
+    await streamStore.markIncomplete(
+      'stream_orders',
+      'network reset during stream',
+      '2026-07-09T10:00:03.000Z',
+    );
+
+    registerDesktopAgentTools({
+      registry,
+      connections: connectionReader([connectedConnection()]),
+      workspaceProjects: workspaceReader(),
+      driverForEngine: () => fakeDriver(),
+      agentSessions: sessionStore,
+      agentStreams: streamStore,
+    });
+
+    await expect(
+      registry.get('list_agent_sessions')?.handler({ query: '订单', limit: 5 }, toolContext()),
+    ).resolves.toMatchObject({
+      sessions: [{ id: 'session_orders', title: '订单分析', messageCount: 3, toolMessageCount: 1 }],
+    });
+    await expect(
+      registry
+        .get('read_agent_session')
+        ?.handler({ sessionId: 'session_orders', maxMessages: 2 }, toolContext()),
+    ).resolves.toMatchObject({
+      id: 'session_orders',
+      returnedMessageCount: 2,
+      omittedMessageCount: 1,
+      messages: [{ role: 'assistant' }, { role: 'tool' }],
+    });
+    await expect(
+      registry
+        .get('export_agent_session')
+        ?.handler({ sessionId: 'session_orders', format: 'markdown', maxChars: 50 }, toolContext()),
+    ).resolves.toMatchObject({
+      sessionId: 'session_orders',
+      format: 'markdown',
+      truncated: true,
+    });
+    await expect(
+      registry.get('list_recoverable_agent_streams')?.handler({ limit: 10 }, toolContext()),
+    ).resolves.toMatchObject({
+      streams: [{ id: 'stream_orders', status: 'incomplete', chunkCount: 1 }],
+    });
+    await expect(
+      registry
+        .get('read_agent_stream')
+        ?.handler({ streamId: 'stream_orders', includeChunks: true }, toolContext()),
+    ).resolves.toMatchObject({
+      id: 'stream_orders',
+      sessionId: 'session_orders',
+      status: 'incomplete',
+      text: '订单总数为 42。',
+      chunkCount: 1,
+      returnedChunkCount: 1,
+    });
+
+    const policy = resolveOfficialPluginAgentTools({
+      toolRegistry: registry,
+      readonlyOnly: true,
+      skillAllowedTools: ['list_agent_sessions', 'read_agent_session', 'read_agent_stream'],
+    });
+    expect(policy.agentAllowedToolNames.sort()).toEqual([
+      'list_agent_sessions',
+      'read_agent_session',
+      'read_agent_stream',
+    ]);
+    expect(policy.toolPermissions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: 'read_agent_session',
+          pluginId: 'official.agent-session-history',
+          permissions: [
+            expect.objectContaining({
+              id: 'agent.session.read',
+              resourceScopes: ['agent.session'],
+            }),
+          ],
+        }),
+      ]),
+    );
   });
 });
 
@@ -306,7 +436,9 @@ function workspaceProject(rootPath: string): WorkspaceProject {
   };
 }
 
-async function scriptWorkspace(toolName: string): Promise<{ workspace: WorkspaceCore; rootPath: string }> {
+async function scriptWorkspace(
+  toolName: string,
+): Promise<{ workspace: WorkspaceCore; rootPath: string }> {
   const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-script-workspace-'));
   tempDirs.push(rootPath);
   const workspace = new WorkspaceCore();
@@ -316,6 +448,55 @@ async function scriptWorkspace(toolName: string): Promise<{ workspace: Workspace
   });
   await workspace.writeFile(rootPath, `scripts/${toolName}.py`, scriptToolContent(toolName));
   return { workspace, rootPath };
+}
+
+async function sessionStorePath(): Promise<string> {
+  const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-session-tools-'));
+  tempDirs.push(rootPath);
+  return join(rootPath, 'agent-sessions.json');
+}
+
+async function streamStorePath(): Promise<string> {
+  const rootPath = await mkdtemp(join(tmpdir(), 'dbagent-desktop-agent-stream-tools-'));
+  tempDirs.push(rootPath);
+  return join(rootPath, 'agent-streams.json');
+}
+
+function agentSession(id: string, title: string): AgentSession {
+  return {
+    id,
+    title,
+    mode: 'readonly',
+    strategy: 'react',
+    messages: [
+      { role: 'user', content: '分析昨天订单总数。', createdAt: '2026-07-09T09:59:00.000Z' },
+      {
+        role: 'assistant',
+        content: '我会先查询订单表。',
+        toolCalls: [
+          {
+            id: 'call_orders',
+            name: 'query_database',
+            arguments: { connectionId: 'conn_desktop', sql: 'select count(*) from orders' },
+          },
+        ],
+        createdAt: '2026-07-09T09:59:01.000Z',
+      },
+      {
+        role: 'tool',
+        toolCallId: 'call_orders',
+        toolName: 'query_database',
+        content: '{"rows":[{"count":42}]}',
+        createdAt: '2026-07-09T09:59:02.000Z',
+      },
+    ],
+    tokenUsage: {
+      promptTokens: 20,
+      completionTokens: 8,
+      totalTokens: 28,
+    },
+    aborted: false,
+  };
 }
 
 function scriptToolContent(toolName: string): string {
@@ -372,7 +553,10 @@ function fakeDriver(): IDatabaseDriver & {
     disconnect() {
       return Promise.resolve(ok(undefined));
     },
-    execute(request: QueryRequest, connection: SavedConnection): Promise<Result<QueryExecutionResult>> {
+    execute(
+      request: QueryRequest,
+      connection: SavedConnection,
+    ): Promise<Result<QueryExecutionResult>> {
       executed.push({
         connectionId: request.connectionId,
         database: connection.database,
