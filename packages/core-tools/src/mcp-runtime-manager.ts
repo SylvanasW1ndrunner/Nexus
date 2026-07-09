@@ -23,6 +23,12 @@ export type McpRuntimeStopResult = {
   health: McpServerHealthState;
 };
 
+export type McpRuntimeExitResult = {
+  serverId: string;
+  removedTools: string[];
+  health: McpServerHealthState;
+};
+
 export class McpRuntimeManager {
   private readonly clients = new Map<string, McpRuntimeClient>();
 
@@ -86,6 +92,35 @@ export class McpRuntimeManager {
       removedTools,
       health: this.options.health.markStopped(serverId),
     };
+  }
+
+  recordExit(
+    serverId: string,
+    input: { code?: number; signal?: string; at?: string } = {},
+  ): McpRuntimeExitResult {
+    const removedTools = this.options.tools.unregisterServerTools(serverId).map((tool) => tool.name);
+    this.clients.delete(serverId);
+    return {
+      serverId,
+      removedTools,
+      health: this.options.health.recordExit(serverId, input),
+    };
+  }
+
+  async restartDue(now: string = new Date().toISOString()): Promise<McpRuntimeStartResult[]> {
+    const due = this.options.health
+      .list()
+      .filter(
+        (state) =>
+          state.status === 'restarting' &&
+          state.nextRestartAt !== undefined &&
+          Date.parse(state.nextRestartAt) <= Date.parse(now),
+      );
+    const results: McpRuntimeStartResult[] = [];
+    for (const state of due) {
+      results.push(await this.start(state.serverId));
+    }
+    return results;
   }
 
   async startAutoStart(): Promise<McpRuntimeStartResult[]> {

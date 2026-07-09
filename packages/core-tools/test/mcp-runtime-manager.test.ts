@@ -6,6 +6,7 @@ import { ToolRegistry } from '@dbagent/core-agent';
 import {
   McpConfigStore,
   McpHealthManager,
+  type McpHealthManagerOptions,
   McpRuntimeManager,
   McpToolRegistrationManager,
   type McpRuntimeClient,
@@ -99,11 +100,57 @@ describe('McpRuntimeManager', () => {
     expect(harness.launchedServers).toEqual(['auto']);
     expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual(['auto__list_tables']);
   });
+
+  it('unregisters tools on unexpected exit and restarts due servers without exposing stale tools', async () => {
+    let now = '2026-06-18T10:00:00.000Z';
+    const harness = await runtimeHarness({
+      health: {
+        baseRestartDelayMs: 1_000,
+        now: () => now,
+      },
+    });
+    await harness.store.upsert({ id: 'warehouse', name: 'Warehouse Tools', command: 'node' });
+    await harness.runtime.start('warehouse');
+
+    const exited = harness.runtime.recordExit('warehouse', { code: 1 });
+
+    expect(exited.removedTools).toEqual(['warehouse__list_tables']);
+    expect(exited.health).toMatchObject({
+      status: 'restarting',
+      healthy: false,
+      restartCount: 1,
+      nextRestartAt: '2026-06-18T10:00:01.000Z',
+    });
+    expect(harness.runtime.isRunning('warehouse')).toBe(false);
+    expect(harness.registry.llmTools()).toEqual([]);
+
+    await expect(harness.runtime.restartDue('2026-06-18T10:00:00.999Z')).resolves.toEqual([]);
+    expect(harness.launchedServers).toEqual(['warehouse']);
+
+    now = '2026-06-18T10:00:01.000Z';
+    const restarted = await harness.runtime.restartDue(now);
+
+    expect(restarted).toMatchObject([
+      {
+        server: { id: 'warehouse' },
+        tools: ['warehouse__list_tables'],
+        health: { status: 'healthy', healthy: true },
+      },
+    ]);
+    expect(harness.launchedServers).toEqual(['warehouse', 'warehouse']);
+    expect(harness.runtime.isRunning('warehouse')).toBe(true);
+    expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual(['warehouse__list_tables']);
+  });
 });
 
-async function runtimeHarness(input: { launcher?: (server: McpServerConfig) => McpRuntimeClient } = {}) {
+async function runtimeHarness(
+  input: {
+    launcher?: (server: McpServerConfig) => McpRuntimeClient;
+    health?: McpHealthManagerOptions;
+  } = {},
+) {
   const registry = new ToolRegistry();
-  const health = new McpHealthManager();
+  const health = new McpHealthManager(input.health);
   const store = new McpConfigStore(await configPath(), { includeBuiltinDefaults: false });
   const tools = new McpToolRegistrationManager(registry);
   const launchedServers: string[] = [];
