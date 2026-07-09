@@ -52,6 +52,9 @@ describe('OfficialPluginRegistry', () => {
       'list_workspace_dir',
       'read_workspace_file',
       'write_workspace_file',
+      'run_python_script',
+      'python_repl',
+      'install_python_deps',
     ]);
     expect(registry.resolveToolContributions().dynamicTools.map((tool) => tool.name)).toEqual([
       'mcp:*',

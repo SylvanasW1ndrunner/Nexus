@@ -815,8 +815,23 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     category: 'python',
     description: '把工作区中声明的 Python 脚本注册为可执行 Agent 工具。',
     enabledByDefault: true,
-    capabilities: ['python-script-discovery', 'python-script-runner', 'run-archive'],
+    capabilities: ['python-script-discovery', 'python-script-runner', 'python-repl', 'python-dependency-install', 'run-archive'],
     permissions: [
+      permission(
+        'workspace.python.execute',
+        '执行工作区 Python',
+        '在当前工作区内运行 Python 脚本、短代码片段或依赖安装命令。',
+        'high',
+        false,
+        {
+          resourceScopes: ['workspace.process', 'workspace.root'],
+          approvalPolicy: 'mode-dependent',
+          networkAccess: 'remote',
+          processAccess: 'managed-child-process',
+          secretKinds: ['none'],
+          auditLevel: 'metadata-and-arguments',
+        },
+      ),
       permission(
         'workspace.process.execute',
         '执行工作区进程',
@@ -834,6 +849,33 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
       ),
     ],
     tools: [
+      tool(
+        'run_python_script',
+        '执行 Python 脚本',
+        '执行当前工作区内的 Python 脚本并返回 stdout/stderr、退出码和运行归档信息。',
+        'high',
+        false,
+        ['workspace.python.execute'],
+        ['official'],
+      ),
+      tool(
+        'python_repl',
+        '执行 Python 短代码',
+        '在当前工作区内执行短 Python 代码片段，不创建脚本文件。',
+        'high',
+        false,
+        ['workspace.python.execute'],
+        ['official'],
+      ),
+      tool(
+        'install_python_deps',
+        '安装 Python 依赖',
+        '使用当前工作区 Python 解释器和 requirements 文件安装依赖。',
+        'high',
+        false,
+        ['workspace.python.execute'],
+        ['official'],
+      ),
       {
         name: 'workspace_script:*',
         title: '工作区脚本动态工具',
