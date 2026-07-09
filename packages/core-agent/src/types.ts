@@ -7,7 +7,7 @@ import type { AgentStreamStore } from './stream-store.js';
 
 export type AgentMode = 'ask' | 'auto' | 'full-auto' | 'readonly';
 
-export type AgentStrategy = 'react';
+export type AgentStrategy = 'react' | 'plan-execute';
 
 export type AgentMessage =
   | { role: 'user'; content: string; createdAt: string }
@@ -68,6 +68,48 @@ export type AgentRunOptions = {
   taskSafety?: AgentTaskSafetyPolicy;
   outputSafety?: AgentOutputSafetyPolicy;
   signal?: AbortSignal;
+};
+
+export type AgentPlanStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+
+export type AgentPlanStep = {
+  id: string;
+  title: string;
+  instruction: string;
+  status: AgentPlanStepStatus;
+  dependsOn?: string[];
+  resultSummary?: string;
+  failureReason?: string;
+  runStatus?: AgentRunStatus;
+  iterations?: number;
+  toolExecutions?: AgentToolExecutionRecord[];
+};
+
+export type AgentPlan = {
+  id: string;
+  title: string;
+  goal: string;
+  createdAt: string;
+  steps: AgentPlanStep[];
+  plannerModelText: string;
+};
+
+export type AgentPlanExecutionStatus = 'done' | 'aborted' | 'failed' | 'planning_failed';
+
+export type AgentPlanExecuteOptions = AgentRunOptions & {
+  maxPlanSteps?: number;
+  stopOnStepFailure?: boolean;
+};
+
+export type AgentPlanExecuteResult = {
+  status: AgentPlanExecutionStatus;
+  plan: AgentPlan;
+  session?: AgentSession;
+  finalText: string;
+  executedSteps: number;
+  totalIterations: number;
+  toolExecutions: AgentToolExecutionRecord[];
+  contextCompression?: AgentContextCompressionReport[];
 };
 
 export type AgentTaskSafetyPolicy =
