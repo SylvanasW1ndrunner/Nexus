@@ -6,6 +6,7 @@ import {
   AgentAuditLogStore,
   AgentPlanExecutionStore,
   AgentPlanRecoveryService,
+  AgentSessionStore,
   createAgentSession,
   type AgentPlan,
   PlanExecuteAgent,
@@ -564,6 +565,123 @@ describe('HeadlessAgentService', () => {
     });
   });
 
+  it('persists Agent sessions and exposes history operations through desktop service', async () => {
+    const sessionStore = new AgentSessionStore(await sessionStorePath());
+    const provider = scriptedProvider([
+      {
+        text: '',
+        toolCalls: [{ id: 'call_query_history', name: 'query_database', arguments: { sql: 'select 100 as gmv' } }],
+        usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14 },
+      },
+      {
+        text: 'History run completed.',
+        toolCalls: [],
+        usage: { promptTokens: 16, completionTokens: 6, totalTokens: 22 },
+      },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      sessionStore,
+    });
+
+    const run = await service.run({
+      runId: 'run_session_history',
+      providerId: 'fake',
+      model: 'fake-model',
+      userInput: 'daily_gmv_report: save this run in session history',
+      mode: 'readonly',
+      maxIterations: 2,
+    });
+    const sessions = await service.listSessions({ query: 'save this run', limit: 10 });
+    const detail = await service.loadSession({ sessionId: run.sessionId! });
+    const exported = await service.exportSession({ sessionId: run.sessionId!, format: 'markdown' });
+
+    expect(run.status).toBe('done');
+    expect(sessions.sessions).toMatchObject([
+      {
+        id: 'session_agent_service',
+        archived: false,
+        messageCount: 4,
+        toolMessageCount: 1,
+        tokenUsage: { promptTokens: 26, completionTokens: 10, totalTokens: 36 },
+      },
+    ]);
+    expect(detail).toMatchObject({
+      id: 'session_agent_service',
+      archived: false,
+      aborted: false,
+      messages: [
+        { role: 'user' },
+        { role: 'assistant', toolCalls: [{ name: 'query_database' }] },
+        { role: 'tool', toolName: 'query_database' },
+        { role: 'assistant', content: 'History run completed.' },
+      ],
+    });
+    expect(detail.messages[0]?.content).toContain('daily_gmv_report: save this run in session history');
+    expect(exported).toMatchObject({
+      sessionId: 'session_agent_service',
+      format: 'markdown',
+    });
+    expect(exported.content).toContain('daily_gmv_report: save this run in session history');
+    expect(exported.content).toContain('History run completed.');
+  });
+
+  it('updates, archives, forks, and deletes persisted Agent sessions through desktop service', async () => {
+    const sessionStore = new AgentSessionStore(await sessionStorePath());
+    const service = await createService({
+      provider: scriptedProvider([]),
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      sessionStore,
+    });
+    await sessionStore.save({ session: persistedSession('session_manage'), now: '2026-06-17T00:05:00.000Z' });
+
+    await expect(
+      service.updateSession({
+        sessionId: 'session_manage',
+        title: 'Managed GMV session',
+      }),
+    ).resolves.toMatchObject({
+      id: 'session_manage',
+      title: 'Managed GMV session',
+      archived: false,
+    });
+    await expect(service.archiveSession({ sessionId: 'session_manage', archived: true })).resolves.toMatchObject({
+      id: 'session_manage',
+      archived: true,
+    });
+    await expect(service.listSessions({ archived: true })).resolves.toMatchObject({
+      sessions: [{ id: 'session_manage', archived: true }],
+    });
+
+    const forked = await service.forkSession({
+      sessionId: 'session_manage',
+      fromMessageIndex: 0,
+      newSessionId: 'session_manage_fork',
+      title: 'Managed GMV fork',
+    });
+
+    expect(forked).toMatchObject({
+      id: 'session_manage_fork',
+      title: 'Managed GMV fork',
+      archived: false,
+      messageCount: 1,
+      messages: [{ role: 'user', content: 'Analyze GMV history' }],
+    });
+    await expect(service.archiveSession({ sessionId: 'session_manage', archived: false })).resolves.toMatchObject({
+      archived: false,
+    });
+    await expect(service.deleteSession({ sessionId: 'session_manage' })).resolves.toEqual({
+      sessionId: 'session_manage',
+      deleted: true,
+    });
+    await expect(service.loadSession({ sessionId: 'session_manage' })).rejects.toThrow(
+      'Agent session not found: session_manage',
+    );
+  });
+
   it('returns missing-tool diagnostics without running Agent when a Skill cannot execute', async () => {
     const provider = scriptedProvider([]);
     const service = await createService({
@@ -678,12 +796,14 @@ async function createService(input: {
   skills: SkillDefinition[];
   auditLog?: AgentAuditLogWriter;
   planStore?: AgentPlanExecutionStore;
+  sessionStore?: AgentSessionStore;
 }): Promise<HeadlessAgentService> {
   const usage = new UsageTracker(await usagePath());
   const llmRouter = new LlmRouter(usage, [input.provider]);
   const agent = new ReactAgent(llmRouter, input.registry, usage, undefined, {
     now: () => '2026-06-17T00:00:00.000Z',
     createSessionId: () => 'session_agent_service',
+    ...(input.sessionStore === undefined ? {} : { sessionStore: input.sessionStore }),
     ...(input.auditLog === undefined ? {} : { auditLog: input.auditLog }),
   });
   const planExecuteAgent = new PlanExecuteAgent(llmRouter, agent, {
@@ -695,6 +815,7 @@ async function createService(input: {
     agent,
     planExecuteAgent,
     ...(input.planStore === undefined ? {} : { planRecoveryService: new AgentPlanRecoveryService(input.planStore) }),
+    ...(input.sessionStore === undefined ? {} : { sessionStore: input.sessionStore }),
     toolRegistry: input.registry,
     loadSkills: () => input.skills,
     createRunId: () => 'run_generated',
@@ -707,6 +828,10 @@ async function usagePath(): Promise<string> {
 
 async function planStorePath(): Promise<string> {
   return join(await tempDir('dbagent-agent-plan-store-'), 'plans.json');
+}
+
+async function sessionStorePath(): Promise<string> {
+  return join(await tempDir('dbagent-agent-session-store-'), 'sessions.json');
 }
 
 async function tempDir(prefix: string): Promise<string> {
@@ -750,6 +875,21 @@ function recoverablePlan(id: string): AgentPlan {
         status: 'pending',
       },
     ],
+  };
+}
+
+function persistedSession(id: string) {
+  return {
+    id,
+    title: 'Managed session',
+    mode: 'readonly' as const,
+    strategy: 'react' as const,
+    messages: [
+      { role: 'user' as const, content: 'Analyze GMV history', createdAt: '2026-06-17T00:00:00.000Z' },
+      { role: 'assistant' as const, content: 'Use query_database.', createdAt: '2026-06-17T00:00:01.000Z' },
+    ],
+    tokenUsage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+    aborted: false,
   };
 }
 

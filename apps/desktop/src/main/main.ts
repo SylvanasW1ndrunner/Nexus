@@ -7,7 +7,14 @@ import { ConnectionStore, QueryCancellationRegistry, QueryHistoryStore, createDe
 import { AuthDatabaseUnavailableError, AuthService, PostgresAuthRepository, TestAuthRepository } from '@dbagent/core-auth';
 import { UsageTracker } from '@dbagent/core-usage';
 import { LlmRouter } from '@dbagent/core-llm';
-import { AgentPlanExecutionStore, PlanExecuteAgent, PlanExecuteRecoveryService, ReactAgent, ToolRegistry } from '@dbagent/core-agent';
+import {
+  AgentPlanExecutionStore,
+  AgentSessionStore,
+  PlanExecuteAgent,
+  PlanExecuteRecoveryService,
+  ReactAgent,
+  ToolRegistry,
+} from '@dbagent/core-agent';
 import { SchemaRagEngine, SchemaRagSnapshotStore } from '@dbagent/core-rag';
 import { SkillRegistry, registerDefaultBuiltinSkills } from '@dbagent/core-skills';
 import {
@@ -49,6 +56,7 @@ const pluginStatePath = join(dataDir, 'plugins.json');
 const ideSettingsPath = join(dataDir, 'ide-settings.json');
 const schemaRagSnapshotDir = join(dataDir, 'schema-rag-snapshots');
 const agentPlanExecutionPath = join(dataDir, 'agent-plan-executions.json');
+const agentSessionPath = join(dataDir, 'agent-sessions.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
@@ -91,7 +99,9 @@ const desktopAgentTools = registerDesktopAgentTools({
   driverForEngine: (engine) => databaseDrivers.get(engine),
   rag: schemaRagEngine,
 });
+const agentSessionStore = new AgentSessionStore(agentSessionPath);
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
+  sessionStore: agentSessionStore,
   auditLog: new DailyAgentAuditLogStore(logsDir),
 });
 const agentPlanExecutionStore = new AgentPlanExecutionStore(agentPlanExecutionPath);
@@ -103,6 +113,7 @@ const headlessAgentService = new HeadlessAgentService({
   agent: reactAgent,
   planExecuteAgent,
   planRecoveryService: planExecuteRecoveryService,
+  sessionStore: agentSessionStore,
   toolRegistry: agentToolRegistry,
   loadSkills: () => agentSkillRegistry.list(),
 });
@@ -398,6 +409,13 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.agent.continuePlan, async (request) => safeResult(() => headlessAgentService.continuePlan(request)));
   handle(ipcChannels.agent.restartPlan, async (request) => safeResult(() => headlessAgentService.restartPlan(request)));
   handle(ipcChannels.agent.abandonPlan, async (request) => safeResult(() => headlessAgentService.abandonPlan(request)));
+  handle(ipcChannels.agent.sessions, async (request) => safeResult(() => headlessAgentService.listSessions(request ?? {})));
+  handle(ipcChannels.agent.session, async (request) => safeResult(() => headlessAgentService.loadSession(request)));
+  handle(ipcChannels.agent.updateSession, async (request) => safeResult(() => headlessAgentService.updateSession(request)));
+  handle(ipcChannels.agent.archiveSession, async (request) => safeResult(() => headlessAgentService.archiveSession(request)));
+  handle(ipcChannels.agent.deleteSession, async (request) => safeResult(() => headlessAgentService.deleteSession(request)));
+  handle(ipcChannels.agent.forkSession, async (request) => safeResult(() => headlessAgentService.forkSession(request)));
+  handle(ipcChannels.agent.exportSession, async (request) => safeResult(() => headlessAgentService.exportSession(request)));
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
   handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));

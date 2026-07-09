@@ -94,6 +94,13 @@ export const ipcChannels = {
     continuePlan: 'agent:continue-plan',
     restartPlan: 'agent:restart-plan',
     abandonPlan: 'agent:abandon-plan',
+    sessions: 'agent:sessions',
+    session: 'agent:session',
+    updateSession: 'agent:update-session',
+    archiveSession: 'agent:archive-session',
+    deleteSession: 'agent:delete-session',
+    forkSession: 'agent:fork-session',
+    exportSession: 'agent:export-session',
   },
   usage: {
     currentQuota: 'usage:current-quota',
@@ -776,6 +783,81 @@ export type AgentAbandonPlanResponse = {
   message: string;
 };
 
+export type AgentSessionMessage =
+  | { role: 'user'; content: string; createdAt: string }
+  | { role: 'assistant'; content: string; toolCalls?: Array<{ id: string; name: string; arguments: unknown }>; createdAt: string }
+  | { role: 'tool'; toolCallId: string; toolName: string; content: string; createdAt: string }
+  | { role: 'system'; content: string; createdAt: string };
+
+export type AgentSessionSummary = {
+  id: string;
+  title: string;
+  mode: AgentMode;
+  strategy: Exclude<AgentRunStrategy, 'auto'>;
+  archived: boolean;
+  messageCount: number;
+  toolMessageCount: number;
+  tokenUsage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt?: string;
+};
+
+export type AgentSessionDetail = AgentSessionSummary & {
+  messages: AgentSessionMessage[];
+  aborted: boolean;
+};
+
+export type AgentSessionsRequest = {
+  archived?: boolean;
+  query?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type AgentSessionsResponse = {
+  sessions: AgentSessionSummary[];
+};
+
+export type AgentSessionRequest = {
+  sessionId: string;
+};
+
+export type AgentUpdateSessionRequest = AgentSessionRequest & {
+  title?: string;
+  mode?: AgentMode;
+  aborted?: boolean;
+};
+
+export type AgentArchiveSessionRequest = AgentSessionRequest & {
+  archived?: boolean;
+};
+
+export type AgentDeleteSessionResponse = {
+  sessionId: string;
+  deleted: boolean;
+};
+
+export type AgentForkSessionRequest = AgentSessionRequest & {
+  fromMessageIndex: number;
+  newSessionId?: string;
+  title?: string;
+};
+
+export type AgentExportSessionRequest = AgentSessionRequest & {
+  format: 'json' | 'markdown';
+};
+
+export type AgentExportSessionResponse = {
+  sessionId: string;
+  format: AgentExportSessionRequest['format'];
+  content: string;
+};
+
 export type WorkspaceSummary = Pick<
   WorkspaceProject,
   'id' | 'name' | 'rootPath' | 'description' | 'template' | 'updatedAt' | 'tags'
@@ -930,6 +1012,13 @@ export type IpcRequestMap = {
   'agent:continue-plan': AgentContinuePlanRequest;
   'agent:restart-plan': AgentRestartPlanRequest;
   'agent:abandon-plan': AgentAbandonPlanRequest;
+  'agent:sessions': AgentSessionsRequest | undefined;
+  'agent:session': AgentSessionRequest;
+  'agent:update-session': AgentUpdateSessionRequest;
+  'agent:archive-session': AgentArchiveSessionRequest;
+  'agent:delete-session': AgentSessionRequest;
+  'agent:fork-session': AgentForkSessionRequest;
+  'agent:export-session': AgentExportSessionRequest;
   'usage:current-quota': void;
   'usage:history': { limit?: number };
   'app:load-workspace-state': void;
@@ -999,6 +1088,13 @@ export type IpcResponseMap = {
   'agent:continue-plan': Result<AgentContinuePlanResponse>;
   'agent:restart-plan': Result<AgentRestartPlanResponse>;
   'agent:abandon-plan': Result<AgentAbandonPlanResponse>;
+  'agent:sessions': Result<AgentSessionsResponse>;
+  'agent:session': Result<AgentSessionDetail>;
+  'agent:update-session': Result<AgentSessionSummary>;
+  'agent:archive-session': Result<AgentSessionSummary>;
+  'agent:delete-session': Result<AgentDeleteSessionResponse>;
+  'agent:fork-session': Result<AgentSessionDetail>;
+  'agent:export-session': Result<AgentExportSessionResponse>;
   'usage:current-quota': Result<UsageSnapshot>;
   'usage:history': Result<UsageSnapshot[]>;
   'app:load-workspace-state': Result<WorkspaceState | undefined>;

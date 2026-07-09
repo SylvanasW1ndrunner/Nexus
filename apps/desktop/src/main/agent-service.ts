@@ -3,6 +3,9 @@ import type {
   AgentPlanExecuteResult,
   AgentPlanRecoveryPlan,
   AgentRunResult,
+  AgentSession,
+  AgentSessionStore,
+  AgentSessionSummary as CoreAgentSessionSummary,
   PlanExecuteRecoveryService,
   ToolRegistry,
 } from '@dbagent/core-agent';
@@ -24,8 +27,19 @@ import type {
   AgentContinuePlanResponse,
   AgentPlanRecoverySummary,
   AgentRecoverablePlansResponse,
+  AgentArchiveSessionRequest,
+  AgentDeleteSessionResponse,
+  AgentExportSessionRequest,
+  AgentExportSessionResponse,
+  AgentForkSessionRequest,
   AgentRestartPlanRequest,
   AgentRestartPlanResponse,
+  AgentSessionDetail,
+  AgentSessionRequest,
+  AgentSessionsRequest,
+  AgentSessionsResponse,
+  AgentSessionSummary,
+  AgentUpdateSessionRequest,
   AgentRunPlanSummary,
   AgentRunStrategy,
   AgentRunRequest,
@@ -42,6 +56,7 @@ export type HeadlessAgentServiceDependencies = {
   agent: SkillAgent;
   planExecuteAgent?: SkillPlanExecuteAgent;
   planRecoveryService?: Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'>;
+  sessionStore?: Pick<AgentSessionStore, 'list' | 'load' | 'update' | 'archive' | 'delete' | 'fork' | 'export'>;
   toolRegistry: Pick<ToolRegistry, 'list'>;
   loadSkills: () => Promise<SkillDefinition[]> | SkillDefinition[];
   createRunId?: () => string;
@@ -335,6 +350,59 @@ export class HeadlessAgentService {
     };
   }
 
+  async listSessions(request: AgentSessionsRequest = {}): Promise<AgentSessionsResponse> {
+    return {
+      sessions: (await this.requireSessionStore().list(request)).map(toSharedSessionSummary),
+    };
+  }
+
+  async loadSession(request: AgentSessionRequest): Promise<AgentSessionDetail> {
+    const store = this.requireSessionStore();
+    const session = await store.load(request.sessionId);
+    if (!session) throw new Error(`Agent session not found: ${request.sessionId}`);
+    return toSharedSessionDetail(session, await this.loadSessionSummary(store, session));
+  }
+
+  async updateSession(request: AgentUpdateSessionRequest): Promise<AgentSessionSummary> {
+    const patch = {
+      ...(request.title === undefined ? {} : { title: request.title }),
+      ...(request.mode === undefined ? {} : { mode: request.mode }),
+      ...(request.aborted === undefined ? {} : { aborted: request.aborted }),
+    };
+    return toSharedSessionSummary(await this.requireSessionStore().update(request.sessionId, patch));
+  }
+
+  async archiveSession(request: AgentArchiveSessionRequest): Promise<AgentSessionSummary> {
+    return toSharedSessionSummary(await this.requireSessionStore().archive(request.sessionId, request.archived ?? true));
+  }
+
+  async deleteSession(request: AgentSessionRequest): Promise<AgentDeleteSessionResponse> {
+    return {
+      sessionId: request.sessionId,
+      deleted: await this.requireSessionStore().delete(request.sessionId),
+    };
+  }
+
+  async forkSession(request: AgentForkSessionRequest): Promise<AgentSessionDetail> {
+    const store = this.requireSessionStore();
+    const forked = await store.fork({
+      id: request.sessionId,
+      fromMessageIndex: request.fromMessageIndex,
+      ...(request.newSessionId === undefined ? {} : { newId: request.newSessionId }),
+      ...(request.title === undefined ? {} : { title: request.title }),
+    });
+    const loaded = (await store.load(forked.id)) ?? forked;
+    return toSharedSessionDetail(loaded, await this.loadSessionSummary(store, loaded));
+  }
+
+  async exportSession(request: AgentExportSessionRequest): Promise<AgentExportSessionResponse> {
+    return {
+      sessionId: request.sessionId,
+      format: request.format,
+      content: await this.requireSessionStore().export(request.sessionId, request.format),
+    };
+  }
+
   private resolveToolPolicy(request: AgentToolPolicyRequest): OfficialPluginAgentToolPolicy {
     return resolveOfficialPluginAgentTools({
       toolRegistry: this.dependencies.toolRegistry,
@@ -359,6 +427,24 @@ export class HeadlessAgentService {
       throw new Error('Plan & Execute recovery service is not configured for the desktop Agent service.');
     }
     return this.dependencies.planRecoveryService;
+  }
+
+  private requireSessionStore(): Pick<AgentSessionStore, 'list' | 'load' | 'update' | 'archive' | 'delete' | 'fork' | 'export'> {
+    if (!this.dependencies.sessionStore) {
+      throw new Error('Agent session store is not configured for the desktop Agent service.');
+    }
+    return this.dependencies.sessionStore;
+  }
+
+  private async loadSessionSummary(
+    store: Pick<AgentSessionStore, 'list'>,
+    session: AgentSession,
+  ): Promise<CoreAgentSessionSummary> {
+    const [active, archived] = await Promise.all([
+      store.list({ limit: 10_000 }),
+      store.list({ archived: true, limit: 10_000 }),
+    ]);
+    return [...active, ...archived].find((summary) => summary.id === session.id) ?? summarizeLoadedSession(session);
   }
 
   private buildAutoSkillRunOptions(
@@ -562,5 +648,46 @@ function toSharedRecoveryPlan(plan: AgentPlanRecoveryPlan): AgentPlanRecoverySum
     ...(plan.lastToolError === undefined ? {} : { lastToolError: plan.lastToolError }),
     resumePrompt: plan.resumePrompt,
     actions: plan.actions,
+  };
+}
+
+function toSharedSessionSummary(summary: CoreAgentSessionSummary): AgentSessionSummary {
+  return {
+    id: summary.id,
+    title: summary.title,
+    mode: summary.mode,
+    strategy: summary.strategy,
+    archived: summary.archived,
+    messageCount: summary.messageCount,
+    toolMessageCount: summary.toolMessageCount,
+    tokenUsage: summary.tokenUsage,
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+    ...(summary.lastMessageAt === undefined ? {} : { lastMessageAt: summary.lastMessageAt }),
+  };
+}
+
+function toSharedSessionDetail(session: AgentSession, summary: CoreAgentSessionSummary): AgentSessionDetail {
+  return {
+    ...toSharedSessionSummary(summary),
+    messages: session.messages.map((message) => ({ ...message })),
+    aborted: session.aborted,
+  };
+}
+
+function summarizeLoadedSession(session: AgentSession): CoreAgentSessionSummary {
+  const lastMessageAt = session.messages.at(-1)?.createdAt;
+  return {
+    id: session.id,
+    title: session.title,
+    mode: session.mode,
+    strategy: session.strategy,
+    archived: false,
+    messageCount: session.messages.length,
+    toolMessageCount: session.messages.filter((message) => message.role === 'tool').length,
+    tokenUsage: session.tokenUsage,
+    createdAt: session.messages[0]?.createdAt ?? new Date(0).toISOString(),
+    updatedAt: lastMessageAt ?? new Date(0).toISOString(),
+    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
   };
 }
