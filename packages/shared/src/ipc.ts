@@ -101,6 +101,9 @@ export const ipcChannels = {
     deleteSession: 'agent:delete-session',
     forkSession: 'agent:fork-session',
     exportSession: 'agent:export-session',
+    streams: 'agent:streams',
+    stream: 'agent:stream',
+    recoverableStreams: 'agent:recoverable-streams',
   },
   usage: {
     currentQuota: 'usage:current-quota',
@@ -858,6 +861,59 @@ export type AgentExportSessionResponse = {
   content: string;
 };
 
+export type AgentStreamStatus = 'streaming' | 'complete' | 'incomplete' | 'failed' | 'aborted';
+
+export type AgentStreamEvent =
+  | { type: 'text-delta'; text: string }
+  | { type: 'tool-call-delta'; index: number; id?: string; name?: string; argumentsDelta?: string }
+  | { type: 'tool-call'; toolCall: { id: string; name: string; arguments: unknown } }
+  | { type: 'usage'; usage: AgentSessionSummary['tokenUsage'] }
+  | {
+      type: 'finish';
+      response: { text: string; toolCalls: Array<{ id: string; name: string; arguments: unknown }>; usage?: AgentSessionSummary['tokenUsage'] };
+      reason?: string;
+    };
+
+export type AgentStreamChunk = {
+  sequence: number;
+  event: AgentStreamEvent;
+  createdAt: string;
+};
+
+export type AgentStreamSummary = {
+  id: string;
+  sessionId: string;
+  roundId?: string;
+  providerId: string;
+  model: string;
+  status: AgentStreamStatus;
+  text: string;
+  toolCallCount: number;
+  chunkCount: number;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  errorMessage?: string;
+};
+
+export type AgentStreamDetail = AgentStreamSummary & {
+  toolCalls: Array<{ id: string; name: string; arguments: unknown }>;
+  usage?: AgentSessionSummary['tokenUsage'];
+  chunks: AgentStreamChunk[];
+};
+
+export type AgentStreamsRequest = {
+  sessionId: string;
+};
+
+export type AgentStreamRequest = {
+  streamId: string;
+};
+
+export type AgentStreamsResponse = {
+  streams: AgentStreamSummary[];
+};
+
 export type WorkspaceSummary = Pick<
   WorkspaceProject,
   'id' | 'name' | 'rootPath' | 'description' | 'template' | 'updatedAt' | 'tags'
@@ -1019,6 +1075,9 @@ export type IpcRequestMap = {
   'agent:delete-session': AgentSessionRequest;
   'agent:fork-session': AgentForkSessionRequest;
   'agent:export-session': AgentExportSessionRequest;
+  'agent:streams': AgentStreamsRequest;
+  'agent:stream': AgentStreamRequest;
+  'agent:recoverable-streams': void;
   'usage:current-quota': void;
   'usage:history': { limit?: number };
   'app:load-workspace-state': void;
@@ -1095,6 +1154,9 @@ export type IpcResponseMap = {
   'agent:delete-session': Result<AgentDeleteSessionResponse>;
   'agent:fork-session': Result<AgentSessionDetail>;
   'agent:export-session': Result<AgentExportSessionResponse>;
+  'agent:streams': Result<AgentStreamsResponse>;
+  'agent:stream': Result<AgentStreamDetail>;
+  'agent:recoverable-streams': Result<AgentStreamsResponse>;
   'usage:current-quota': Result<UsageSnapshot>;
   'usage:history': Result<UsageSnapshot[]>;
   'app:load-workspace-state': Result<WorkspaceState | undefined>;

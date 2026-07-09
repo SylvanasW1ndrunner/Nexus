@@ -10,6 +10,7 @@ import { LlmRouter } from '@dbagent/core-llm';
 import {
   AgentPlanExecutionStore,
   AgentSessionStore,
+  AgentStreamStore,
   PlanExecuteAgent,
   PlanExecuteRecoveryService,
   ReactAgent,
@@ -57,6 +58,7 @@ const ideSettingsPath = join(dataDir, 'ide-settings.json');
 const schemaRagSnapshotDir = join(dataDir, 'schema-rag-snapshots');
 const agentPlanExecutionPath = join(dataDir, 'agent-plan-executions.json');
 const agentSessionPath = join(dataDir, 'agent-sessions.json');
+const agentStreamPath = join(dataDir, 'agent-streams.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
@@ -100,8 +102,10 @@ const desktopAgentTools = registerDesktopAgentTools({
   rag: schemaRagEngine,
 });
 const agentSessionStore = new AgentSessionStore(agentSessionPath);
+const agentStreamStore = new AgentStreamStore(agentStreamPath);
 const reactAgent = new ReactAgent(llmRouter, agentToolRegistry, usageTracker, undefined, {
   sessionStore: agentSessionStore,
+  streamStore: agentStreamStore,
   auditLog: new DailyAgentAuditLogStore(logsDir),
 });
 const agentPlanExecutionStore = new AgentPlanExecutionStore(agentPlanExecutionPath);
@@ -114,6 +118,7 @@ const headlessAgentService = new HeadlessAgentService({
   planExecuteAgent,
   planRecoveryService: planExecuteRecoveryService,
   sessionStore: agentSessionStore,
+  streamStore: agentStreamStore,
   toolRegistry: agentToolRegistry,
   loadSkills: () => agentSkillRegistry.list(),
 });
@@ -416,6 +421,9 @@ function registerIpcHandlers(): void {
   handle(ipcChannels.agent.deleteSession, async (request) => safeResult(() => headlessAgentService.deleteSession(request)));
   handle(ipcChannels.agent.forkSession, async (request) => safeResult(() => headlessAgentService.forkSession(request)));
   handle(ipcChannels.agent.exportSession, async (request) => safeResult(() => headlessAgentService.exportSession(request)));
+  handle(ipcChannels.agent.streams, async (request) => safeResult(() => headlessAgentService.listStreams(request)));
+  handle(ipcChannels.agent.stream, async (request) => safeResult(() => headlessAgentService.loadStream(request)));
+  handle(ipcChannels.agent.recoverableStreams, async () => safeResult(() => headlessAgentService.listRecoverableStreams()));
 
   handle(ipcChannels.usage.currentQuota, async () => ok(await usageTracker.current()));
   handle(ipcChannels.usage.history, async (request) => ok(await usageTracker.history(request?.limit)));

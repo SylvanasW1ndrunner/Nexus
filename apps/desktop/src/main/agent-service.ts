@@ -6,6 +6,8 @@ import type {
   AgentSession,
   AgentSessionStore,
   AgentSessionSummary as CoreAgentSessionSummary,
+  AgentStreamRecord,
+  AgentStreamStore,
   PlanExecuteRecoveryService,
   ToolRegistry,
 } from '@dbagent/core-agent';
@@ -39,6 +41,11 @@ import type {
   AgentSessionsRequest,
   AgentSessionsResponse,
   AgentSessionSummary,
+  AgentStreamDetail,
+  AgentStreamRequest,
+  AgentStreamsRequest,
+  AgentStreamsResponse,
+  AgentStreamSummary,
   AgentUpdateSessionRequest,
   AgentRunPlanSummary,
   AgentRunStrategy,
@@ -57,6 +64,7 @@ export type HeadlessAgentServiceDependencies = {
   planExecuteAgent?: SkillPlanExecuteAgent;
   planRecoveryService?: Pick<PlanExecuteRecoveryService, 'listRecoverablePlans' | 'continue' | 'restart' | 'abandon'>;
   sessionStore?: Pick<AgentSessionStore, 'list' | 'load' | 'update' | 'archive' | 'delete' | 'fork' | 'export'>;
+  streamStore?: Pick<AgentStreamStore, 'listBySession' | 'load' | 'listRecoverable'>;
   toolRegistry: Pick<ToolRegistry, 'list'>;
   loadSkills: () => Promise<SkillDefinition[]> | SkillDefinition[];
   createRunId?: () => string;
@@ -403,6 +411,24 @@ export class HeadlessAgentService {
     };
   }
 
+  async listStreams(request: AgentStreamsRequest): Promise<AgentStreamsResponse> {
+    return {
+      streams: (await this.requireStreamStore().listBySession(request.sessionId)).map(toSharedStreamSummary),
+    };
+  }
+
+  async loadStream(request: AgentStreamRequest): Promise<AgentStreamDetail> {
+    const stream = await this.requireStreamStore().load(request.streamId);
+    if (!stream) throw new Error(`Agent stream not found: ${request.streamId}`);
+    return toSharedStreamDetail(stream);
+  }
+
+  async listRecoverableStreams(): Promise<AgentStreamsResponse> {
+    return {
+      streams: (await this.requireStreamStore().listRecoverable()).map(toSharedStreamSummary),
+    };
+  }
+
   private resolveToolPolicy(request: AgentToolPolicyRequest): OfficialPluginAgentToolPolicy {
     return resolveOfficialPluginAgentTools({
       toolRegistry: this.dependencies.toolRegistry,
@@ -434,6 +460,13 @@ export class HeadlessAgentService {
       throw new Error('Agent session store is not configured for the desktop Agent service.');
     }
     return this.dependencies.sessionStore;
+  }
+
+  private requireStreamStore(): Pick<AgentStreamStore, 'listBySession' | 'load' | 'listRecoverable'> {
+    if (!this.dependencies.streamStore) {
+      throw new Error('Agent stream store is not configured for the desktop Agent service.');
+    }
+    return this.dependencies.streamStore;
   }
 
   private async loadSessionSummary(
@@ -689,5 +722,32 @@ function summarizeLoadedSession(session: AgentSession): CoreAgentSessionSummary 
     createdAt: session.messages[0]?.createdAt ?? new Date(0).toISOString(),
     updatedAt: lastMessageAt ?? new Date(0).toISOString(),
     ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
+  };
+}
+
+function toSharedStreamSummary(stream: AgentStreamRecord): AgentStreamSummary {
+  return {
+    id: stream.id,
+    sessionId: stream.sessionId,
+    ...(stream.roundId === undefined ? {} : { roundId: stream.roundId }),
+    providerId: stream.providerId,
+    model: stream.model,
+    status: stream.status,
+    text: stream.text,
+    toolCallCount: stream.toolCalls.length,
+    chunkCount: stream.chunks.length,
+    startedAt: stream.startedAt,
+    updatedAt: stream.updatedAt,
+    ...(stream.finishedAt === undefined ? {} : { finishedAt: stream.finishedAt }),
+    ...(stream.errorMessage === undefined ? {} : { errorMessage: stream.errorMessage }),
+  };
+}
+
+function toSharedStreamDetail(stream: AgentStreamRecord): AgentStreamDetail {
+  return {
+    ...toSharedStreamSummary(stream),
+    toolCalls: stream.toolCalls.map((toolCall) => ({ ...toolCall })),
+    ...(stream.usage === undefined ? {} : { usage: stream.usage }),
+    chunks: stream.chunks.map((chunk) => ({ ...chunk, event: { ...chunk.event } })),
   };
 }

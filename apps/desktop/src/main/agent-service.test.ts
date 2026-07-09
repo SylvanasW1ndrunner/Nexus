@@ -7,6 +7,7 @@ import {
   AgentPlanExecutionStore,
   AgentPlanRecoveryService,
   AgentSessionStore,
+  AgentStreamStore,
   createAgentSession,
   type AgentPlan,
   PlanExecuteAgent,
@@ -682,6 +683,100 @@ describe('HeadlessAgentService', () => {
     );
   });
 
+  it('persists streamed Agent model events and exposes stream history through desktop service', async () => {
+    const sessionStore = new AgentSessionStore(await sessionStorePath());
+    const streamStore = new AgentStreamStore(await streamStorePath());
+    const provider = streamingProvider([
+      { type: 'text-delta', text: 'Streaming ' },
+      { type: 'text-delta', text: 'done.' },
+      { type: 'usage', usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 } },
+      {
+        type: 'finish',
+        response: {
+          text: 'Streaming done.',
+          toolCalls: [],
+          usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+        },
+      },
+    ]);
+    const service = await createService({
+      provider,
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      sessionStore,
+      streamStore,
+    });
+
+    const run = await service.run({
+      runId: 'run_stream_history',
+      providerId: 'fake',
+      model: 'fake-model',
+      userInput: 'daily_gmv_report: stream this response',
+      mode: 'readonly',
+      maxIterations: 1,
+    });
+    const streams = await service.listStreams({ sessionId: run.sessionId! });
+    const detail = await service.loadStream({ streamId: streams.streams[0]!.id });
+
+    expect(run).toMatchObject({
+      status: 'done',
+      finalText: 'Streaming done.',
+      sessionId: 'session_agent_service',
+    });
+    expect(streams.streams).toMatchObject([
+      {
+        sessionId: 'session_agent_service',
+        providerId: 'fake',
+        model: 'fake-model',
+        status: 'complete',
+        text: 'Streaming done.',
+        toolCallCount: 0,
+        chunkCount: 4,
+      },
+    ]);
+    expect(detail).toMatchObject({
+      status: 'complete',
+      usage: { totalTokens: 7 },
+      chunks: [
+        { sequence: 1, event: { type: 'text-delta', text: 'Streaming ' } },
+        { sequence: 2, event: { type: 'text-delta', text: 'done.' } },
+        { sequence: 3, event: { type: 'usage', usage: { totalTokens: 7 } } },
+        { sequence: 4, event: { type: 'finish', response: { text: 'Streaming done.' } } },
+      ],
+    });
+    await expect(service.listRecoverableStreams()).resolves.toEqual({ streams: [] });
+  });
+
+  it('lists recoverable incomplete Agent streams through desktop service', async () => {
+    const streamStore = new AgentStreamStore(await streamStorePath());
+    const service = await createService({
+      provider: scriptedProvider([]),
+      registry: registryWithQueryTools(),
+      skills: [dailyGmvSkill()],
+      streamStore,
+    });
+    const stream = await streamStore.start({
+      id: 'stream_incomplete',
+      sessionId: 'session_incomplete',
+      providerId: 'fake',
+      model: 'fake-model',
+      now: '2026-06-17T00:00:00.000Z',
+    });
+    await streamStore.appendEvent(stream.id, { type: 'text-delta', text: 'partial output' }, '2026-06-17T00:00:01.000Z');
+
+    await expect(service.listRecoverableStreams()).resolves.toMatchObject({
+      streams: [
+        {
+          id: 'stream_incomplete',
+          sessionId: 'session_incomplete',
+          status: 'streaming',
+          text: 'partial output',
+          chunkCount: 1,
+        },
+      ],
+    });
+  });
+
   it('returns missing-tool diagnostics without running Agent when a Skill cannot execute', async () => {
     const provider = scriptedProvider([]);
     const service = await createService({
@@ -797,6 +892,7 @@ async function createService(input: {
   auditLog?: AgentAuditLogWriter;
   planStore?: AgentPlanExecutionStore;
   sessionStore?: AgentSessionStore;
+  streamStore?: AgentStreamStore;
 }): Promise<HeadlessAgentService> {
   const usage = new UsageTracker(await usagePath());
   const llmRouter = new LlmRouter(usage, [input.provider]);
@@ -804,6 +900,7 @@ async function createService(input: {
     now: () => '2026-06-17T00:00:00.000Z',
     createSessionId: () => 'session_agent_service',
     ...(input.sessionStore === undefined ? {} : { sessionStore: input.sessionStore }),
+    ...(input.streamStore === undefined ? {} : { streamStore: input.streamStore }),
     ...(input.auditLog === undefined ? {} : { auditLog: input.auditLog }),
   });
   const planExecuteAgent = new PlanExecuteAgent(llmRouter, agent, {
@@ -816,6 +913,7 @@ async function createService(input: {
     planExecuteAgent,
     ...(input.planStore === undefined ? {} : { planRecoveryService: new AgentPlanRecoveryService(input.planStore) }),
     ...(input.sessionStore === undefined ? {} : { sessionStore: input.sessionStore }),
+    ...(input.streamStore === undefined ? {} : { streamStore: input.streamStore }),
     toolRegistry: input.registry,
     loadSkills: () => input.skills,
     createRunId: () => 'run_generated',
@@ -832,6 +930,10 @@ async function planStorePath(): Promise<string> {
 
 async function sessionStorePath(): Promise<string> {
   return join(await tempDir('dbagent-agent-session-store-'), 'sessions.json');
+}
+
+async function streamStorePath(): Promise<string> {
+  return join(await tempDir('dbagent-agent-stream-store-'), 'streams.json');
 }
 
 async function tempDir(prefix: string): Promise<string> {
@@ -977,6 +1079,35 @@ function scriptedProvider(responses: LlmChatResponse[]): LlmProvider & { request
     },
   };
 }
+
+function streamingProvider(events: LlmProviderStreamEvent[]): LlmProvider & { requests: LlmChatRequest[] } {
+  const requests: LlmChatRequest[] = [];
+  return {
+    id: 'fake',
+    name: 'Streaming provider',
+    mode: 'byok',
+    requests,
+    chat() {
+      throw new Error('chat should not be called when stream store is configured.');
+    },
+    async *stream(request) {
+      requests.push(request);
+      await Promise.resolve();
+      for (const event of events) {
+        yield event;
+      }
+    },
+    isAvailable() {
+      return Promise.resolve({ available: true });
+    },
+  };
+}
+
+type LlmProviderStreamEvent = NonNullable<LlmProvider['stream']> extends (
+  request: LlmChatRequest,
+) => AsyncIterable<infer Event>
+  ? Event
+  : never;
 
 function blockingProvider(
   handler: (request: LlmChatRequest) => Promise<LlmChatResponse>,
