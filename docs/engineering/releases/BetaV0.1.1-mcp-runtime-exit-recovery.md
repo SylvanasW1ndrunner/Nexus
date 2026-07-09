@@ -5,6 +5,7 @@
 - MCP runtime manager 支持记录 server 异常退出。
 - 异常退出后自动移除该 server 注册到 Agent 的工具。
 - 支持按 health 中的 `nextRestartAt` 重启到期 server。
+- stdio MCP client 支持 exit 事件订阅，真实子进程退出后 runtime manager 可自动收敛状态。
 - 补充 MCP runtime、health、adapter、registration manager 测试。
 
 ## 验证

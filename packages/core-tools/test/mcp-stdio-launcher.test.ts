@@ -2,7 +2,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { launchStdioMcpServer, type McpServerConfig } from '../src/index.js';
+import {
+  launchStdioMcpServer,
+  type McpRuntimeExitEvent,
+  type McpServerConfig,
+} from '../src/index.js';
 
 const tempDirs: string[] = [];
 const REAL_PROCESS_REQUEST_TIMEOUT_MS = 5_000;
@@ -76,6 +80,22 @@ describe('stdio MCP launcher', () => {
 
     await expect(client.listTools()).rejects.toThrow(/exited with code 7/);
   }, REAL_PROCESS_TEST_TIMEOUT_MS);
+
+  it('emits an exit event with bounded stderr when a real stdio process exits', async () => {
+    const script = await crashServer();
+    const client = await launchStdioMcpServer(serverConfig(script), {
+      requestTimeoutMs: REAL_PROCESS_REQUEST_TIMEOUT_MS,
+      stderrLimitBytes: 64,
+    });
+    const exit = onceExit(client);
+
+    await expect(client.listTools()).rejects.toThrow(/exited with code 7/);
+
+    const event = await exit;
+    expect(event.code).toBe(7);
+    expect(event.signal).toBeUndefined();
+    expect(event.stderrPreview).toHaveLength(64);
+  }, REAL_PROCESS_TEST_TIMEOUT_MS);
 });
 
 function serverConfig(script: string): McpServerConfig {
@@ -126,4 +146,16 @@ async function writeScript(source: string): Promise<string> {
   const path = join(dir, 'server.cjs');
   await writeFile(path, source, 'utf8');
   return path;
+}
+
+function onceExit(
+  client: { onExit?: (handler: (event: McpRuntimeExitEvent) => void) => () => void },
+): Promise<McpRuntimeExitEvent> {
+  return new Promise((resolve, reject) => {
+    const unsubscribe = client.onExit?.((event) => {
+      unsubscribe?.();
+      resolve(event);
+    });
+    if (!unsubscribe) reject(new Error('MCP client does not expose onExit.'));
+  });
 }

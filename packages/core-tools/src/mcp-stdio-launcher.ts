@@ -1,7 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { McpServerConfig, McpEnvValue } from './mcp-config-store.js';
-import type { McpRuntimeClient, McpRuntimeLauncher } from './mcp-runtime-manager.js';
+import type {
+  McpRuntimeClient,
+  McpRuntimeExitEvent,
+  McpRuntimeLauncher,
+} from './mcp-runtime-manager.js';
 import type { McpToolSpec } from './mcp-tool-adapter.js';
 
 export type McpSecretResolver = (ref: string) => Promise<string | undefined> | string | undefined;
@@ -58,7 +62,9 @@ class StdioMcpRuntimeClient implements McpRuntimeClient {
   private nextId = 1;
   private initialized = false;
   private closed = false;
+  private stopping = false;
   private stderrPreview = '';
+  private readonly exitHandlers = new Set<(event: McpRuntimeExitEvent) => void>();
 
   constructor(
     private readonly serverId: string,
@@ -87,10 +93,18 @@ class StdioMcpRuntimeClient implements McpRuntimeClient {
 
   stop(): Promise<void> {
     if (this.closed) return Promise.resolve();
+    this.stopping = true;
     this.closed = true;
     this.rejectAll(new Error(`MCP server ${this.serverId} stopped.`));
     this.child.kill();
     return Promise.resolve();
+  }
+
+  onExit(handler: (event: McpRuntimeExitEvent) => void): () => void {
+    this.exitHandlers.add(handler);
+    return () => {
+      this.exitHandlers.delete(handler);
+    };
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -154,6 +168,7 @@ class StdioMcpRuntimeClient implements McpRuntimeClient {
     this.child.on('error', (error) => {
       this.closed = true;
       this.rejectAll(error);
+      this.emitExit({ errorMessage: error.message });
     });
     this.child.on('exit', (code, signal) => {
       this.closed = true;
@@ -162,7 +177,20 @@ class StdioMcpRuntimeClient implements McpRuntimeClient {
           `MCP server ${this.serverId} exited with code ${code ?? 'null'} signal ${signal ?? 'null'}${this.stderrPreview ? `: ${this.stderrPreview}` : ''}`,
         ),
       );
+      this.emitExit({
+        ...(code === null ? {} : { code }),
+        ...(signal === null ? {} : { signal }),
+        ...(this.stderrPreview ? { stderrPreview: this.stderrPreview } : {}),
+      });
     });
+  }
+
+  private emitExit(event: McpRuntimeExitEvent): void {
+    if (this.stopping) return;
+    const fullEvent = { ...event, at: new Date().toISOString() };
+    for (const handler of [...this.exitHandlers]) {
+      handler(fullEvent);
+    }
   }
 
   private onLine(line: string): void {

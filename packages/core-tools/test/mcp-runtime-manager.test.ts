@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ToolRegistry } from '@dbagent/core-agent';
 import {
+  createStdioMcpRuntimeLauncher,
   McpConfigStore,
   McpHealthManager,
   type McpHealthManagerOptions,
@@ -141,6 +142,42 @@ describe('McpRuntimeManager', () => {
     expect(harness.runtime.isRunning('warehouse')).toBe(true);
     expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual(['warehouse__list_tables']);
   });
+
+  it('reacts to a real stdio process exit by removing stale Agent tools', async () => {
+    const script = await exitAfterToolsListServer();
+    const harness = await runtimeHarness({
+      health: {
+        baseRestartDelayMs: 1_000,
+        now: () => '2026-06-18T10:00:00.000Z',
+      },
+      launcher: createStdioMcpRuntimeLauncher({ requestTimeoutMs: 1_000 }),
+    });
+    await harness.store.upsert({
+      id: 'volatile',
+      name: 'Volatile MCP',
+      source: 'user',
+      transport: 'stdio',
+      command: process.execPath,
+      args: [script],
+      enabled: true,
+      autoStart: false,
+    });
+
+    const started = await harness.runtime.start('volatile');
+
+    expect(started.tools).toEqual(['volatile__echo']);
+    expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual(['volatile__echo']);
+
+    await waitFor(() => !harness.runtime.isRunning('volatile'));
+
+    expect(harness.registry.llmTools()).toEqual([]);
+    expect(harness.runtime.health('volatile')).toMatchObject({
+      status: 'restarting',
+      healthy: false,
+      restartCount: 1,
+    });
+    expect(harness.runtime.health('volatile').nextRestartAt).toBeDefined();
+  });
 });
 
 async function runtimeHarness(
@@ -197,4 +234,36 @@ function toolContext() {
       aborted: false,
     },
   };
+}
+
+async function exitAfterToolsListServer(): Promise<string> {
+  return writeScript(`
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+function send(id, result) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') send(msg.id, { protocolVersion: '2024-11-05', capabilities: {} });
+  if (msg.method === 'tools/list') {
+    send(msg.id, { tools: [{ name: 'echo', description: 'Echo', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }] });
+    setTimeout(() => process.exit(9), 20);
+  }
+});
+`);
+}
+
+async function writeScript(source: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'dbagent-mcp-runtime-process-'));
+  tempDirs.push(dir);
+  const path = join(dir, 'server.cjs');
+  await writeFile(path, source, 'utf8');
+  return path;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error('Timed out waiting for condition.');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }

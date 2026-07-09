@@ -7,9 +7,18 @@ export type McpRuntimeClient = {
   listTools(): Promise<McpToolSpec[]>;
   callTool(toolName: string, args: Record<string, unknown>, signal: AbortSignal): unknown;
   stop(): Promise<void> | void;
+  onExit?(handler: (event: McpRuntimeExitEvent) => void): () => void;
 };
 
 export type McpRuntimeLauncher = (server: McpServerConfig) => Promise<McpRuntimeClient> | McpRuntimeClient;
+
+export type McpRuntimeExitEvent = {
+  code?: number;
+  signal?: string;
+  errorMessage?: string;
+  stderrPreview?: string;
+  at?: string;
+};
 
 export type McpRuntimeStartResult = {
   server: McpServerConfig;
@@ -30,7 +39,10 @@ export type McpRuntimeExitResult = {
 };
 
 export class McpRuntimeManager {
-  private readonly clients = new Map<string, McpRuntimeClient>();
+  private readonly clients = new Map<
+    string,
+    { client: McpRuntimeClient; unsubscribeExit?: () => void }
+  >();
 
   constructor(
     private readonly options: {
@@ -64,7 +76,15 @@ export class McpRuntimeManager {
         health: this.options.health,
         callTool: ({ toolName, args, signal }) => client.callTool(toolName, args, signal),
       });
-      this.clients.set(server.id, client);
+      const unsubscribeExit = client.onExit?.((event) => {
+        const running = this.clients.get(server.id);
+        if (running?.client !== client) return;
+        this.recordExit(server.id, event);
+      });
+      this.clients.set(server.id, {
+        client,
+        ...(unsubscribeExit === undefined ? {} : { unsubscribeExit }),
+      });
       const health = this.options.health.markHealthy(server.id);
       return {
         server,
@@ -83,10 +103,11 @@ export class McpRuntimeManager {
   }
 
   async stop(serverId: string): Promise<McpRuntimeStopResult> {
-    const client = this.clients.get(serverId);
+    const running = this.clients.get(serverId);
     const removedTools = this.options.tools.unregisterServerTools(serverId).map((tool) => tool.name);
     this.clients.delete(serverId);
-    if (client) await client.stop();
+    running?.unsubscribeExit?.();
+    if (running) await running.client.stop();
     return {
       serverId,
       removedTools,
@@ -98,6 +119,8 @@ export class McpRuntimeManager {
     serverId: string,
     input: { code?: number; signal?: string; at?: string } = {},
   ): McpRuntimeExitResult {
+    const running = this.clients.get(serverId);
+    running?.unsubscribeExit?.();
     const removedTools = this.options.tools.unregisterServerTools(serverId).map((tool) => tool.name);
     this.clients.delete(serverId);
     return {

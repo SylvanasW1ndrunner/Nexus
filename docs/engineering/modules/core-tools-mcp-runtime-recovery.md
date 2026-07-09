@@ -23,6 +23,8 @@
 - 对每个到期 server 调用 `start(serverId)`。
 - 重新注册 tool 并恢复 `healthy` 状态；启动失败时沿用既有 `start()` 失败语义，清理半注册工具并标记 unhealthy。
 
+`McpRuntimeClient.onExit(handler)` 是 launcher 可选能力。stdio launcher 已实现该接口；`McpRuntimeManager.start()` 会在启动成功后订阅退出事件。当真实子进程 `error` 或 `exit` 时，如果该 client 仍是当前运行实例，manager 会自动调用 `recordExit()`。用户主动 `stop()` 会先取消订阅，避免把正常停止误记为崩溃。
+
 ## 安全边界
 
 进程退出后必须先移除 tool，再进入 restarting。这样 Agent 在 MCP server 不可用时不会继续看到旧 tool，也不会把模型生成的 tool call 发送给已经失效的 client。
@@ -41,6 +43,9 @@
   - 启动失败不留下半注册工具。
   - autoStart 只启动 enabled server。
   - 异常退出后移除 tool，未到重启时间不启动，到期后重新注册 tool。
+  - 真实 stdio 子进程在 `tools/list` 后退出时，runtime manager 自动移除旧 tool 并进入 restarting。
+- `packages/core-tools/test/mcp-stdio-launcher.test.ts`
+  - 真实 stdio 子进程退出时发出带 code 和 stderr tail 的 exit event。
 - `packages/core-tools/test/mcp-health.test.ts`
   - 退出重启计划、重启上限、禁用状态、资源告警、tool timeout 和 abort。
 - `packages/core-tools/test/mcp-tool-registration-manager.test.ts`
@@ -50,4 +55,4 @@
 
 ## 后续扩展
 
-桌面主进程接入真实 stdio MCP 子进程时，应在子进程 exit/error 事件中调用 `recordExit()`，并由一个轻量后台调度器调用 `restartDue()`。后续还可以把 restart 结果接入官方插件策略诊断和 Agent 审计日志。
+桌面主进程接入真实 stdio MCP 子进程时，应使用 `createStdioMcpRuntimeLauncher()`，这样 exit/error 事件会由 runtime manager 自动收敛；同时仍需要一个轻量后台调度器调用 `restartDue()`。后续还可以把 restart 结果接入官方插件策略诊断和 Agent 审计日志。
