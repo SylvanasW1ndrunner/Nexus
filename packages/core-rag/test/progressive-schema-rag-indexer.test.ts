@@ -77,6 +77,45 @@ describe('ProgressiveSchemaRagIndexer', () => {
     ).toContain('public.conversions');
   });
 
+  it('keeps hybrid retrieval reasons after snapshot restore', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-hybrid-restore-'));
+    const firstEngine = new SchemaRagEngine();
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    await new ProgressiveSchemaRagIndexer({ engine: firstEngine, snapshotStore: store }).index({
+      connectionId: 'traffic_warehouse',
+      tables: fixtureTables(),
+      glossary: [
+        {
+          term: 'ROAS',
+          aliases: ['return on ad spend'],
+          description: 'Revenue attributed to campaign traffic.',
+          documentIds: ['table:public.conversions', 'column:public.conversions.revenue'],
+          weight: 80,
+        },
+      ],
+    });
+
+    const before = firstEngine.search({
+      connectionId: 'traffic_warehouse',
+      query: 'ROAS revenue',
+      limit: 4,
+    });
+    const secondEngine = new SchemaRagEngine();
+    await new ProgressiveSchemaRagIndexer({
+      engine: secondEngine,
+      snapshotStore: store,
+    }).restore('traffic_warehouse');
+    const after = secondEngine.search({
+      connectionId: 'traffic_warehouse',
+      query: 'ROAS revenue',
+      limit: 4,
+    });
+
+    expect(after.map((item) => item.document.id)).toEqual(before.map((item) => item.document.id));
+    expect(after[0]?.reasons).toEqual(expect.arrayContaining(['glossary:ROAS']));
+    expect(after[0]?.scoreDetails?.map((detail) => detail.channel)).toContain('glossary');
+  });
+
   it('persists on-demand upserted tables so they survive process restart', async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-upsert-restore-'));
     const firstEngine = new SchemaRagEngine();

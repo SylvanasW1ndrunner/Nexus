@@ -20,8 +20,7 @@ export function extractExplicitSchemaReferences(query: string): SchemaRagExplici
 }
 
 export function parseExplicitSchemaReference(raw: string): SchemaRagExplicitReference | undefined {
-  const parts = raw
-    .split('.')
+  const parts = splitQualifiedIdentifier(raw)
     .map((part) => unquoteIdentifier(part.trim()))
     .filter(Boolean);
   if (parts.length === 1) {
@@ -34,6 +33,34 @@ export function parseExplicitSchemaReference(raw: string): SchemaRagExplicitRefe
     return { raw, schema: parts[0]!, table: parts[1]!, column: parts[2]! };
   }
   return undefined;
+}
+
+function splitQualifiedIdentifier(raw: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let quote: '"' | '`' | undefined;
+
+  for (const char of raw) {
+    if ((char === '"' || char === '`') && quote === undefined) {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (quote !== undefined && char === quote) {
+      quote = undefined;
+      current += char;
+      continue;
+    }
+    if (char === '.' && quote === undefined) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+
+  parts.push(current);
+  return parts;
 }
 
 function unquoteIdentifier(value: string): string {

@@ -27,6 +27,14 @@ describe('extractExplicitSchemaReferences', () => {
         column: 'sku',
       },
     ]);
+    expect(extractExplicitSchemaReferences('Inspect @"sales.data"."order.items".sku')).toEqual([
+      {
+        raw: '"sales.data"."order.items".sku',
+        schema: 'sales.data',
+        table: 'order.items',
+        column: 'sku',
+      },
+    ]);
   });
 });
 

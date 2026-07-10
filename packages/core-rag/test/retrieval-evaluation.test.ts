@@ -90,8 +90,8 @@ describe('evaluateSchemaRagRetrieval', () => {
         {
           id: 'RAG-003',
           query: '用户邮箱',
-          mustInclude: ['column:public.users.email', 'table:public.orders'],
-          shouldInclude: ['column:public.orders.total_amount'],
+          mustInclude: ['column:public.users.email', 'table:public.products'],
+          shouldInclude: ['column:public.products.name'],
           limit: 3,
         },
       ],
@@ -101,8 +101,8 @@ describe('evaluateSchemaRagRetrieval', () => {
     expect(summary.passRate).toBe(0);
     expect(summary.results[0]).toMatchObject({
       passed: false,
-      missingMustInclude: ['table:public.orders'],
-      missingShouldInclude: ['column:public.orders.total_amount'],
+      missingMustInclude: ['table:public.products'],
+      missingShouldInclude: ['column:public.products.name'],
       mustHitRate: 0.5,
       shouldHitRate: 0,
     });

@@ -69,12 +69,28 @@ export type SchemaRagSearchRequest = {
   explicitColumns?: string[];
   limit?: number;
   includeRelations?: boolean;
+  expandHops?: number;
+  tokenBudget?: number;
+};
+
+export type SchemaRagRetrievalChannel = 'explicit' | 'keyword' | 'glossary' | 'graph' | 'vector' | 'rerank';
+
+export type SchemaRagScoreDetail = {
+  channel: SchemaRagRetrievalChannel;
+  score: number;
+  rank?: number;
+  reasons: string[];
 };
 
 export type SchemaRagSearchResult = {
   document: SchemaRagDocument;
   score: number;
   reasons: string[];
+  scoreDetails?: SchemaRagScoreDetail[];
+};
+
+export type SchemaRagRetriever = {
+  search(index: SchemaRagIndex, request: SchemaRagSearchRequest): SchemaRagSearchResult[];
 };
 
 export type SchemaRagContextRequest = {

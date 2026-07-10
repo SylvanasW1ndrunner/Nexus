@@ -1,9 +1,5 @@
-import { buildSchemaDocuments, tableDocumentId, tokenize } from './schema-documents.js';
-import {
-  extractExplicitSchemaReferences,
-  parseExplicitSchemaReference,
-  type SchemaRagExplicitReference,
-} from './explicit-references.js';
+import { buildSchemaDocuments, tableDocumentId } from './schema-documents.js';
+import { searchSchemaRagIndex } from './hybrid-schema-retriever.js';
 import type {
   SchemaRagDocument,
   SchemaRagContext,
@@ -192,60 +188,7 @@ export class SchemaRagEngine {
 
   search(request: SchemaRagSearchRequest): SchemaRagSearchResult[] {
     const index = this.requireIndex(request.connectionId);
-    const queryTokens = tokenize([request.query]);
-    const explicitReferences = [
-      ...extractExplicitSchemaReferences(request.query),
-      ...(request.explicitTables ?? []).flatMap((reference) => {
-        const parsed = parseExplicitSchemaReference(reference);
-        return parsed ? [parsed] : [];
-      }),
-      ...(request.explicitColumns ?? []).flatMap((reference) => {
-        const parsed = parseExplicitSchemaReference(reference);
-        return parsed ? [parsed] : [];
-      }),
-    ];
-    const limit = request.limit ?? 8;
-    const includeRelations = request.includeRelations ?? true;
-
-    const scored = index.documents
-      .map((document) =>
-        scoreDocument(document, request.query, queryTokens, index.glossary, explicitReferences),
-      )
-      .filter((result) => result.score > 0)
-      .sort(
-        (left, right) =>
-          right.score - left.score || left.document.id.localeCompare(right.document.id),
-      );
-
-    const selected = new Map<string, SchemaRagSearchResult>();
-    const directLimit = includeRelations ? Math.max(1, Math.ceil(limit / 2)) : limit;
-
-    for (const result of scored.slice(0, directLimit)) {
-      selected.set(result.document.id, result);
-      if (!includeRelations) continue;
-      for (const relationId of index.graph.get(result.document.id) ?? []) {
-        if (selected.size >= limit) break;
-        const relation = index.documents.find((document) => document.id === relationId);
-        if (!relation || selected.has(relation.id)) continue;
-        selected.set(relation.id, {
-          document: relation,
-          score: Math.max(1, result.score * 0.35),
-          reasons: [`relation:${result.document.id}`],
-        });
-      }
-    }
-
-    for (const result of scored) {
-      if (selected.size >= limit) break;
-      if (!selected.has(result.document.id)) selected.set(result.document.id, result);
-    }
-
-    return [...selected.values()]
-      .sort(
-        (left, right) =>
-          right.score - left.score || left.document.id.localeCompare(right.document.id),
-      )
-      .slice(0, limit);
+    return searchSchemaRagIndex(index, request);
   }
 
   buildContext(request: SchemaRagContextRequest): SchemaRagContext {
@@ -329,93 +272,6 @@ function buildReadyStatus(index: SchemaRagIndex, updatedAt: string): SchemaRagIn
   };
 }
 
-function scoreDocument(
-  document: SchemaRagDocument,
-  query: string,
-  queryTokens: string[],
-  glossary: SchemaRagGlossaryEntry[],
-  explicitReferences: SchemaRagExplicitReference[],
-): SchemaRagSearchResult {
-  const reasons: string[] = [];
-  let score = 0;
-  const normalizedQuery = query.toLowerCase();
-  const normalizedTitle = document.title.toLowerCase();
-  const normalizedText = document.text.toLowerCase();
-
-  const explicitScore = scoreExplicitReference(document, explicitReferences);
-  if (explicitScore > 0) {
-    score += explicitScore;
-    reasons.push(document.kind === 'column' ? 'explicit-column' : 'explicit-table');
-  }
-
-  if (normalizedTitle === normalizedQuery) {
-    score += 100;
-    reasons.push('exact-title');
-  } else if (normalizedTitle.includes(normalizedQuery) && normalizedQuery.length > 1) {
-    score += 40;
-    reasons.push('title-contains');
-  }
-
-  for (const token of queryTokens) {
-    if (document.tokens.includes(token)) {
-      score += 10;
-      reasons.push(`token:${token}`);
-    } else if (normalizedText.includes(token)) {
-      score += 3;
-      reasons.push(`text:${token}`);
-    }
-  }
-
-  for (const entry of glossary) {
-    if (!entry.documentIds.includes(document.id)) continue;
-    const matchedTerm = findGlossaryMatch(entry, normalizedQuery, queryTokens);
-    if (!matchedTerm) continue;
-    const weight = entry.weight ?? 30;
-    score += weight;
-    reasons.push(`glossary:${matchedTerm}`);
-    if (entry.description) {
-      for (const token of tokenize([entry.description])) {
-        if (queryTokens.includes(token)) score += 2;
-      }
-    }
-  }
-
-  if (document.kind === 'table' && score > 0) {
-    score += 5;
-    reasons.push('table-priority');
-  }
-
-  return { document, score, reasons };
-}
-
-function scoreExplicitReference(
-  document: SchemaRagDocument,
-  references: SchemaRagExplicitReference[],
-): number {
-  let score = 0;
-  for (const reference of references) {
-    const schemaMatches = reference.schema === undefined || reference.schema === document.schema;
-    const tableMatches = reference.table === document.table;
-    if (!schemaMatches || !tableMatches) continue;
-
-    if (reference.column) {
-      if (document.kind === 'column' && document.column === reference.column) {
-        score = Math.max(score, 320);
-      } else if (document.kind === 'table') {
-        score = Math.max(score, 160);
-      }
-      continue;
-    }
-
-    if (document.kind === 'table') {
-      score = Math.max(score, reference.schema ? 300 : 240);
-    } else if (document.kind === 'column') {
-      score = Math.max(score, reference.schema ? 90 : 60);
-    }
-  }
-  return score;
-}
-
 function normalizeGlossary(
   entries: SchemaRagGlossaryEntry[],
   documents: SchemaRagDocument[],
@@ -430,21 +286,6 @@ function normalizeGlossary(
       ...(entry.weight === undefined ? {} : { weight: Math.max(1, entry.weight) }),
     }))
     .filter((entry) => entry.term.length > 0 && entry.documentIds.length > 0);
-}
-
-function findGlossaryMatch(
-  entry: SchemaRagGlossaryEntry,
-  normalizedQuery: string,
-  queryTokens: string[],
-): string | undefined {
-  const candidates = [entry.term, ...(entry.aliases ?? [])];
-  for (const candidate of candidates) {
-    const normalized = candidate.toLowerCase();
-    if (normalizedQuery.includes(normalized)) return candidate;
-    const tokens = tokenize([candidate]);
-    if (tokens.some((token) => queryTokens.includes(token))) return candidate;
-  }
-  return undefined;
 }
 
 function unique(values: string[]): string[] {
