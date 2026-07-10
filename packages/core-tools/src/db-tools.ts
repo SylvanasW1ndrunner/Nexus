@@ -1,7 +1,12 @@
 import { registerSchemaRagTools, type ToolRegistry } from '@dbagent/core-agent';
-import { analyzeSqlSafety, type IDatabaseDriver, type TableSummary } from '@dbagent/core-db';
+import {
+  analyzeSqlSafety,
+  type IDatabaseDriver,
+  type QueryHistoryListOptions,
+  type TableSummary,
+} from '@dbagent/core-db';
 import type { SchemaRagEngine } from '@dbagent/core-rag';
-import type { SavedConnection } from '@dbagent/shared';
+import type { QueryHistoryItem, QueryRiskLevel, SavedConnection } from '@dbagent/shared';
 import { optionalPositiveInteger, optionalString, requireString } from './validation.js';
 
 export type DbToolDependencies = {
@@ -9,10 +14,13 @@ export type DbToolDependencies = {
   driver: IDatabaseDriver;
   getConnection: (connectionId: string) => SavedConnection | undefined | Promise<SavedConnection | undefined>;
   rag?: SchemaRagEngine;
+  history?: {
+    list(options?: QueryHistoryListOptions): Promise<QueryHistoryItem[]>;
+  };
 };
 
 export function registerDatabaseTools(dependencies: DbToolDependencies): void {
-  const { registry, driver, getConnection, rag } = dependencies;
+  const { registry, driver, getConnection, rag, history } = dependencies;
 
   registry.register(
     {
@@ -163,6 +171,47 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
     },
   );
 
+  if (history) {
+    registry.register(
+      {
+        name: 'read_query_history',
+        description:
+          'Read local SQL execution history for recovery, rerun planning, and incident investigation. This does not execute SQL.',
+        inputSchema: objectSchema({
+          connectionId: { type: 'string' },
+          searchText: { type: 'string' },
+          status: { type: 'string' },
+          riskLevel: { type: 'string' },
+          statementKind: { type: 'string' },
+          limit: { type: 'number' },
+          offset: { type: 'number' },
+        }),
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      async (args) => {
+        const connectionId = optionalString(args, 'connectionId');
+        const searchText = optionalString(args, 'searchText');
+        const status = optionalHistoryStatuses(args, 'status');
+        const riskLevel = optionalRiskLevels(args, 'riskLevel');
+        const statementKind = optionalString(args, 'statementKind');
+        const limit = optionalPositiveInteger(args, 'limit');
+        const offset = optionalNonNegativeInteger(args, 'offset');
+        return {
+          items: await history.list({
+            ...(connectionId ? { connectionId } : {}),
+            ...(searchText ? { searchText } : {}),
+            ...(status ? { status } : {}),
+            ...(riskLevel ? { riskLevel } : {}),
+            ...(statementKind ? { statementKind } : {}),
+            ...(limit !== undefined ? { limit } : {}),
+            ...(offset !== undefined ? { offset } : {}),
+          }),
+        };
+      },
+    );
+  }
+
   if (rag) {
     registerSchemaRagTools(registry, rag, { skipExistingTools: true });
 
@@ -222,4 +271,54 @@ function objectSchema(properties: Record<string, Record<string, unknown>>): Reco
     type: 'object',
     properties,
   };
+}
+
+function optionalHistoryStatuses(
+  args: Record<string, unknown>,
+  key: string,
+): QueryHistoryItem['status'] | QueryHistoryItem['status'][] | undefined {
+  const values = optionalStringList(args, key);
+  if (values === undefined) return undefined;
+  const valid = new Set<QueryHistoryItem['status']>(['success', 'failed', 'blocked', 'cancelled']);
+  for (const value of values) {
+    if (!valid.has(value as QueryHistoryItem['status'])) {
+      throw new Error(`Tool argument "${key}" contains an unsupported query history status.`);
+    }
+  }
+  return values.length === 1 ? (values[0] as QueryHistoryItem['status']) : (values as QueryHistoryItem['status'][]);
+}
+
+function optionalRiskLevels(
+  args: Record<string, unknown>,
+  key: string,
+): QueryRiskLevel | QueryRiskLevel[] | undefined {
+  const values = optionalStringList(args, key);
+  if (values === undefined) return undefined;
+  const valid = new Set<QueryRiskLevel>(['safe', 'caution', 'dangerous', 'blocked']);
+  for (const value of values) {
+    if (!valid.has(value as QueryRiskLevel)) {
+      throw new Error(`Tool argument "${key}" contains an unsupported SQL risk level.`);
+    }
+  }
+  return values.length === 1 ? (values[0] as QueryRiskLevel) : (values as QueryRiskLevel[]);
+}
+
+function optionalStringList(args: Record<string, unknown>, key: string): string[] | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  const values = Array.isArray(value) ? value : [value];
+  const normalized = values.map((item) => {
+    if (typeof item !== 'string') throw new Error(`Tool argument "${key}" must be a string or string array.`);
+    return item.trim();
+  }).filter((item) => item.length > 0);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function optionalNonNegativeInteger(args: Record<string, unknown>, key: string): number | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(`Tool argument "${key}" must be a non-negative integer.`);
+  }
+  return value;
 }

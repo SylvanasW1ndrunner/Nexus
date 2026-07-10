@@ -15,6 +15,10 @@ Renderer 只能通过 `packages/shared/src/ipc.ts` 中定义的类型化 IPC 契
 - `connection:disconnect`
 - `db:execute-query`
 - `db:query-history`
+- `db:create-query-snapshot`
+- `db:list-query-snapshots`
+- `db:get-query-snapshot`
+- `db:delete-query-snapshot`
 - `db:explain-query`
 - `db:list-tables`
 - `db:describe-table`

@@ -213,6 +213,100 @@ describe('registerDatabaseTools', () => {
     });
   });
 
+  it('exposes local SQL history as a readonly Agent tool for recovery', async () => {
+    const registry = new ToolRegistry();
+    const driver = fakeDriver();
+    const historyCalls: unknown[] = [];
+    registerDatabaseTools({
+      registry,
+      driver,
+      getConnection: () => savedConnection(),
+      history: {
+        list(options) {
+          historyCalls.push(options);
+          return Promise.resolve([
+            {
+              id: 'history_1',
+              connectionId: 'conn_1',
+              sql: 'select count(*) from orders',
+              status: 'success',
+              rowCount: 1,
+              elapsedMs: 12,
+              createdAt: '2026-06-24T00:00:00.000Z',
+              safety: {
+                statementKind: 'SELECT',
+                riskLevel: 'safe',
+                requiresConfirmation: false,
+                blocked: false,
+                reasons: [],
+              },
+            },
+          ]);
+        },
+      },
+    });
+
+    await expect(
+      registry.get('read_query_history')?.handler(
+        {
+          connectionId: 'conn_1',
+          searchText: 'orders',
+          status: 'success',
+          riskLevel: 'safe',
+          statementKind: 'select',
+          limit: 5,
+          offset: 0,
+        },
+        toolContext(),
+      ),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          id: 'history_1',
+          sql: 'select count(*) from orders',
+          status: 'success',
+        },
+      ],
+    });
+    expect(historyCalls).toEqual([
+      {
+        connectionId: 'conn_1',
+        searchText: 'orders',
+        status: 'success',
+        riskLevel: 'safe',
+        statementKind: 'select',
+        limit: 5,
+        offset: 0,
+      },
+    ]);
+    expect(driver.executedSql).toEqual([]);
+    expect(registry.get('read_query_history')).toMatchObject({
+      dangerLevel: 'safe',
+      readonly: true,
+    });
+  });
+
+  it('validates query history filter enums before reading history', async () => {
+    const registry = new ToolRegistry();
+    registerDatabaseTools({
+      registry,
+      driver: fakeDriver(),
+      getConnection: () => savedConnection(),
+      history: {
+        list() {
+          throw new Error('history should not be read for invalid filters');
+        },
+      },
+    });
+
+    await expect(
+      registry.get('read_query_history')?.handler({ status: 'unknown' }, toolContext()),
+    ).rejects.toThrow('unsupported query history status');
+    await expect(
+      registry.get('read_query_history')?.handler({ riskLevel: 'warning' }, toolContext()),
+    ).rejects.toThrow('unsupported SQL risk level');
+  });
+
   it('rejects write SQL passed through the readonly query tool even on writable connections', async () => {
     const registry = new ToolRegistry();
     const driver = fakeDriver();

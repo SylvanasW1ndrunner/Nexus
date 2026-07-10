@@ -24,6 +24,10 @@ export const ipcChannels = {
     executeQuery: 'db:execute-query',
     cancelQuery: 'db:cancel-query',
     queryHistory: 'db:query-history',
+    createQuerySnapshot: 'db:create-query-snapshot',
+    listQuerySnapshots: 'db:list-query-snapshots',
+    getQuerySnapshot: 'db:get-query-snapshot',
+    deleteQuerySnapshot: 'db:delete-query-snapshot',
     explainQuery: 'db:explain-query',
     listTables: 'db:list-tables',
     describeTable: 'db:describe-table',
@@ -282,6 +286,76 @@ export type QueryHistoryRequest = {
   statementKind?: string | string[];
   createdFrom?: string;
   createdTo?: string;
+};
+
+export type QuerySnapshotCellValue =
+  | string
+  | number
+  | boolean
+  | null
+  | QuerySnapshotTypedValue
+  | QuerySnapshotCellValue[]
+  | { [key: string]: QuerySnapshotCellValue };
+
+export type QuerySnapshotTypedValue =
+  | { type: 'bigint'; value: string }
+  | { type: 'date'; value: string }
+  | { type: 'buffer'; encoding: 'base64'; value: string }
+  | { type: 'number'; value: string };
+
+export type QuerySnapshotRow = Record<string, QuerySnapshotCellValue>;
+
+export type QuerySnapshot = {
+  id: string;
+  connectionId: ConnectionId;
+  queryId: string;
+  title: string;
+  sql: string;
+  columns: QueryExecutionResult['columns'];
+  rows: QuerySnapshotRow[];
+  rowCount: number;
+  returnedRowCount?: number;
+  rowLimit?: number;
+  hasMore?: boolean;
+  truncated?: boolean;
+  elapsedMs: number;
+  safety: QuerySafetyReport;
+  tags: string[];
+  note?: string;
+  sourceHistoryId?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type QuerySnapshotSummary = Omit<QuerySnapshot, 'rows'> & {
+  previewRows: QuerySnapshotRow[];
+};
+
+export type CreateQuerySnapshotRequest = {
+  connectionId: ConnectionId;
+  sql: string;
+  result: QueryExecutionResult;
+  title?: string;
+  tags?: string[];
+  note?: string;
+  sourceHistoryId?: string;
+};
+
+export type ListQuerySnapshotsRequest = {
+  connectionId?: ConnectionId;
+  searchText?: string;
+  limit?: number;
+  offset?: number;
+  previewRowLimit?: number;
+};
+
+export type QuerySnapshotRequest = {
+  id: string;
+};
+
+export type DeleteQuerySnapshotResponse = {
+  id: string;
+  deleted: boolean;
 };
 
 export type AuthStatus = {
@@ -1331,6 +1405,10 @@ export type IpcRequestMap = {
   'db:execute-query': QueryRequest;
   'db:cancel-query': QueryCancelRequest;
   'db:query-history': QueryHistoryRequest;
+  'db:create-query-snapshot': CreateQuerySnapshotRequest;
+  'db:list-query-snapshots': ListQuerySnapshotsRequest;
+  'db:get-query-snapshot': QuerySnapshotRequest;
+  'db:delete-query-snapshot': QuerySnapshotRequest;
   'db:explain-query': QueryRequest;
   'db:list-tables': { connectionId: ConnectionId };
   'db:describe-table': { connectionId: ConnectionId; schema: string; table: string };
@@ -1426,6 +1504,10 @@ export type IpcResponseMap = {
   'db:execute-query': Result<QueryExecutionResult>;
   'db:cancel-query': Result<QueryCancelResponse>;
   'db:query-history': Result<QueryHistoryItem[]>;
+  'db:create-query-snapshot': Result<QuerySnapshot>;
+  'db:list-query-snapshots': Result<QuerySnapshotSummary[]>;
+  'db:get-query-snapshot': Result<QuerySnapshot>;
+  'db:delete-query-snapshot': Result<DeleteQuerySnapshotResponse>;
   'db:explain-query': Result<QueryExecutionResult>;
   'db:list-tables': Result<TableSummary[]>;
   'db:describe-table': Result<TableDetail>;

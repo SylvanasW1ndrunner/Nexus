@@ -15,6 +15,7 @@ import type {
   DatabaseConnectionConfig,
   IDatabaseDriver,
   QueryExecutionObserver,
+  QueryHistoryListOptions,
   TableSummary,
 } from '@dbagent/core-db';
 import { SchemaRagEngine } from '@dbagent/core-rag';
@@ -33,6 +34,7 @@ import type {
   DatabaseEngine,
   QueryCancelResponse,
   QueryExecutionResult,
+  QueryHistoryItem,
   QueryRequest,
   Result,
   SavedConnection,
@@ -43,6 +45,10 @@ import { resolveWorkspacePythonExecution } from './python-environment.js';
 
 type ConnectionReader = {
   list(): Promise<SavedConnection[]>;
+};
+
+type QueryHistoryReader = {
+  list(options?: QueryHistoryListOptions): Promise<QueryHistoryItem[]>;
 };
 
 type WorkspaceReader = {
@@ -89,6 +95,7 @@ export type AgentToolBootstrapDependencies = {
   connections: ConnectionReader;
   workspaceProjects: WorkspaceReader;
   driverForEngine: (engine: DatabaseEngine) => IDatabaseDriver;
+  queryHistory?: QueryHistoryReader;
   rag?: SchemaRagEngine;
   workspace?: WorkspaceCore;
   scriptRunner?: WorkspaceScriptRunner;
@@ -123,6 +130,7 @@ export function registerDesktopAgentTools(
         (connection) => connection.id === connectionId && connection.status === 'connected',
       ),
     rag,
+    ...(dependencies.queryHistory ? { history: dependencies.queryHistory } : {}),
   });
   registerWorkspaceTools({
     registry: dependencies.registry,

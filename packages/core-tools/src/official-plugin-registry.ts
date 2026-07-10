@@ -514,7 +514,7 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
     category: 'database',
     description: '连接、浏览、预审和执行 PostgreSQL SQL 的官方内置工具组。',
     enabledByDefault: true,
-    capabilities: ['schema-browse', 'sql-audit', 'sql-query', 'sql-execute'],
+    capabilities: ['schema-browse', 'sql-audit', 'sql-query', 'sql-history', 'sql-execute'],
     permissions: [
       permission(
         'database.schema.read',
@@ -604,6 +604,15 @@ export const DEFAULT_OFFICIAL_PLUGIN_MANIFESTS: OfficialPluginManifest[] = [
         '只读查询',
         '执行单条只读 SQL 并返回结果。',
         'medium',
+        true,
+        ['database.query.read'],
+        ['database'],
+      ),
+      tool(
+        'read_query_history',
+        '读取 SQL 历史',
+        '读取本地 SQL 执行历史，用于恢复、复查和重新运行。',
+        'safe',
         true,
         ['database.query.read'],
         ['database'],

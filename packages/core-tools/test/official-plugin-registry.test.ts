@@ -42,6 +42,7 @@ describe('OfficialPluginRegistry', () => {
       'describe_table',
       'audit_sql',
       'query_database',
+      'read_query_history',
       'execute_sql',
       'get_schema_rag_status',
       'get_schema_rag_startup_recovery',

@@ -25,6 +25,7 @@ import {
   type DatabaseEngine,
   type QueryCancelResponse,
   type QueryExecutionResult,
+  type QueryHistoryItem,
   type QueryRequest,
   type Result,
   type SavedConnection,
@@ -48,6 +49,7 @@ describe('registerDesktopAgentTools', () => {
       connections: connectionReader([connectedConnection()]),
       workspaceProjects: workspaceReader(),
       driverForEngine: () => fakeDriver(),
+      queryHistory: queryHistoryReader(),
     });
 
     expect(
@@ -72,6 +74,7 @@ describe('registerDesktopAgentTools', () => {
       'list_workspace_dir',
       'python_repl',
       'query_database',
+      'read_query_history',
       'read_workspace_file',
       'run_python_script',
       'run_shell_command',
@@ -123,6 +126,39 @@ describe('registerDesktopAgentTools', () => {
       },
     ]);
     expect(routedEngines).toEqual(['postgres']);
+  });
+
+  it('exposes local SQL history to the headless Agent when a history reader is provided', async () => {
+    const registry = new ToolRegistry();
+    const calls: unknown[] = [];
+
+    registerDesktopAgentTools({
+      registry,
+      connections: connectionReader([connectedConnection()]),
+      workspaceProjects: workspaceReader(),
+      driverForEngine: () => fakeDriver(),
+      queryHistory: queryHistoryReader(calls),
+    });
+
+    await expect(
+      registry.get('read_query_history')?.handler(
+        {
+          connectionId: 'conn_desktop',
+          searchText: 'orders',
+          limit: 5,
+        },
+        toolContext(),
+      ),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          id: 'history_desktop_1',
+          connectionId: 'conn_desktop',
+          sql: 'select count(*) from public.orders',
+        },
+      ],
+    });
+    expect(calls).toEqual([{ connectionId: 'conn_desktop', searchText: 'orders', limit: 5 }]);
   });
 
   it('exposes the latest Schema RAG startup recovery summary as an official readonly tool', () => {
@@ -739,6 +775,32 @@ function workspaceReader(project?: WorkspaceProject) {
   return {
     loadActive() {
       return Promise.resolve(project);
+    },
+  };
+}
+
+function queryHistoryReader(calls: unknown[] = []) {
+  return {
+    list(options?: unknown): Promise<QueryHistoryItem[]> {
+      calls.push(options ?? {});
+      return Promise.resolve([
+        {
+          id: 'history_desktop_1',
+          connectionId: 'conn_desktop',
+          sql: 'select count(*) from public.orders',
+          status: 'success',
+          rowCount: 1,
+          elapsedMs: 12,
+          createdAt: '2026-07-10T00:00:00.000Z',
+          safety: {
+            statementKind: 'SELECT',
+            riskLevel: 'safe',
+            requiresConfirmation: false,
+            blocked: false,
+            reasons: [],
+          },
+        },
+      ]);
     },
   };
 }

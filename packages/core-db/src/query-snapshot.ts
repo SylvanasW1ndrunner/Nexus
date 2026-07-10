@@ -1,67 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import type { ConnectionId, QueryExecutionResult, QuerySafetyReport } from '@dbagent/shared';
+import type {
+  CreateQuerySnapshotRequest,
+  ListQuerySnapshotsRequest,
+  QueryExecutionResult,
+  QuerySnapshot,
+  QuerySnapshotCellValue,
+  QuerySnapshotRow,
+  QuerySnapshotSummary,
+} from '@dbagent/shared';
 import { readJsonFile, writeJsonFileAtomic } from './json-file.js';
 
-export type QuerySnapshotCellValue =
-  | string
-  | number
-  | boolean
-  | null
-  | QuerySnapshotTypedValue
-  | QuerySnapshotCellValue[]
-  | { [key: string]: QuerySnapshotCellValue };
-
-export type QuerySnapshotTypedValue =
-  | { type: 'bigint'; value: string }
-  | { type: 'date'; value: string }
-  | { type: 'buffer'; encoding: 'base64'; value: string }
-  | { type: 'number'; value: string };
-
-export type QuerySnapshotRow = Record<string, QuerySnapshotCellValue>;
-
-export type QuerySnapshot = {
-  id: string;
-  connectionId: ConnectionId;
-  queryId: string;
-  title: string;
-  sql: string;
-  columns: QueryExecutionResult['columns'];
-  rows: QuerySnapshotRow[];
-  rowCount: number;
-  returnedRowCount?: number;
-  rowLimit?: number;
-  hasMore?: boolean;
-  truncated?: boolean;
-  elapsedMs: number;
-  safety: QuerySafetyReport;
-  tags: string[];
-  note?: string;
-  sourceHistoryId?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type QuerySnapshotSummary = Omit<QuerySnapshot, 'rows'> & {
-  previewRows: QuerySnapshotRow[];
-};
-
-export type CreateQuerySnapshotInput = {
-  connectionId: ConnectionId;
-  sql: string;
-  result: QueryExecutionResult;
-  title?: string;
-  tags?: string[];
-  note?: string;
-  sourceHistoryId?: string;
-};
-
-export type ListQuerySnapshotsOptions = {
-  connectionId?: ConnectionId;
-  searchText?: string;
-  limit?: number;
-  offset?: number;
-  previewRowLimit?: number;
-};
+export type {
+  CreateQuerySnapshotRequest as CreateQuerySnapshotInput,
+  ListQuerySnapshotsRequest as ListQuerySnapshotsOptions,
+  QuerySnapshot,
+  QuerySnapshotCellValue,
+  QuerySnapshotRow,
+  QuerySnapshotSummary,
+} from '@dbagent/shared';
 
 export class QuerySnapshotStore {
   constructor(
@@ -69,7 +25,7 @@ export class QuerySnapshotStore {
     private readonly maxSnapshots = 200,
   ) {}
 
-  async create(input: CreateQuerySnapshotInput): Promise<QuerySnapshot> {
+  async create(input: CreateQuerySnapshotRequest): Promise<QuerySnapshot> {
     const now = new Date().toISOString();
     const snapshot: QuerySnapshot = {
       id: randomUUID(),
@@ -98,7 +54,7 @@ export class QuerySnapshotStore {
     return snapshot;
   }
 
-  async list(options: ListQuerySnapshotsOptions = {}): Promise<QuerySnapshotSummary[]> {
+  async list(options: ListQuerySnapshotsRequest = {}): Promise<QuerySnapshotSummary[]> {
     const previewRowLimit = Math.max(0, options.previewRowLimit ?? 5);
     const offset = Math.max(0, options.offset ?? 0);
     const limit = Math.max(0, options.limit ?? 100);
@@ -136,7 +92,7 @@ export class QuerySnapshotStore {
   }
 }
 
-function buildSnapshotTitle(input: CreateQuerySnapshotInput): string {
+function buildSnapshotTitle(input: CreateQuerySnapshotRequest): string {
   const explicit = input.title?.trim();
   if (explicit) return explicit.slice(0, 120);
   const firstLine = input.sql

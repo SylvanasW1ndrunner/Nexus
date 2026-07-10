@@ -15,6 +15,7 @@ import {
   ConnectionStore,
   QueryCancellationRegistry,
   QueryHistoryStore,
+  QuerySnapshotStore,
   createDefaultDatabaseDriverRegistry,
 } from '@dbagent/core-db';
 import {
@@ -100,6 +101,7 @@ const agentSessionPath = join(dataDir, 'agent-sessions.json');
 const agentStreamPath = join(dataDir, 'agent-streams.json');
 const connectionStore = new ConnectionStore(join(dataDir, 'connections.json'));
 const queryHistoryStore = new QueryHistoryStore(join(dataDir, 'query-history.json'));
+const querySnapshotStore = new QuerySnapshotStore(join(dataDir, 'query-snapshots.json'));
 const credentialVault = new CredentialVault(credentialPath, safeStorage);
 const workspaceStateStore = new WorkspaceStateStore(workspaceStatePath);
 const workspaceProjectStore = new WorkspaceProjectStore(workspaceProjectStatePath);
@@ -170,6 +172,7 @@ const desktopAgentTools = registerDesktopAgentTools({
   connections: connectionStore,
   workspaceProjects: workspaceProjectStore,
   driverForEngine: (engine) => databaseDrivers.get(engine),
+  queryHistory: queryHistoryStore,
   rag: schemaRagEngine,
   agentSessions: agentSessionStore,
   agentStreams: agentStreamStore,
@@ -500,6 +503,22 @@ function registerIpcHandlers(): void {
   );
   handle(ipcChannels.db.queryHistory, async (request) =>
     ok(await queryHistoryStore.list(request ?? {})),
+  );
+  handle(ipcChannels.db.createQuerySnapshot, async (request) =>
+    safeResult(() => querySnapshotStore.create(request)),
+  );
+  handle(ipcChannels.db.listQuerySnapshots, async (request) =>
+    safeResult(() => querySnapshotStore.list(request ?? {})),
+  );
+  handle(ipcChannels.db.getQuerySnapshot, async ({ id }) =>
+    safeResult(async () => {
+      const snapshot = await querySnapshotStore.get(id);
+      if (!snapshot) throw new Error(`Query snapshot not found: ${id}`);
+      return snapshot;
+    }),
+  );
+  handle(ipcChannels.db.deleteQuerySnapshot, async ({ id }) =>
+    safeResult(async () => ({ id, deleted: await querySnapshotStore.remove(id) })),
   );
 
   handle(ipcChannels.auth.status, async () => ok(withAuthCapabilities(await authService.status())));
