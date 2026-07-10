@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -64,6 +64,150 @@ describe('workspace Agent tools', () => {
     await expect(
       registry.get('read_workspace_file')?.handler({ path: '../escape.md' }, context()),
     ).rejects.toThrow('Workspace path escapes are not allowed.');
+    await expect(
+      registry.get('delete_workspace_file')?.handler({ path: '../escape.md' }, context()),
+    ).rejects.toThrow('Workspace path escapes are not allowed.');
+  });
+
+  it('edits a workspace file with exact replacement and rejects ambiguous edits', async () => {
+    const { registry, rootPath } = await workspaceHarness();
+
+    await registry.get('write_workspace_file')?.handler(
+      {
+        path: 'scripts/analyze_orders.py',
+        content: [
+          'def summarize():',
+          '    status = "pending"',
+          '    return status',
+          '',
+          'def audit():',
+          '    return "pending"',
+          '',
+        ].join('\n'),
+      },
+      context(),
+    );
+
+    await expect(
+      registry.get('edit_workspace_file')?.handler(
+        {
+          path: 'scripts/analyze_orders.py',
+          oldText: 'status = "pending"',
+          newText: 'status = "paid"',
+        },
+        context(),
+      ),
+    ).resolves.toMatchObject({
+      path: 'scripts/analyze_orders.py',
+      replacements: 1,
+    });
+
+    await expect(readFile(join(rootPath, 'scripts', 'analyze_orders.py'), 'utf8')).resolves.toContain(
+      'status = "paid"',
+    );
+
+    await expect(
+      registry.get('edit_workspace_file')?.handler(
+        {
+          path: 'scripts/analyze_orders.py',
+          oldText: 'return',
+          newText: 'yield',
+        },
+        context(),
+      ),
+    ).rejects.toThrow('Workspace edit target text is ambiguous.');
+
+    await expect(
+      registry.get('edit_workspace_file')?.handler(
+        {
+          path: 'scripts/analyze_orders.py',
+          oldText: 'return',
+          newText: 'yield',
+          replaceAll: true,
+        },
+        context(),
+      ),
+    ).resolves.toMatchObject({
+      replacements: 2,
+    });
+  });
+
+  it('moves deleted files into workspace trash instead of permanently removing them', async () => {
+    const { registry, rootPath } = await workspaceHarness();
+    await registry.get('write_workspace_file')?.handler(
+      { path: 'outputs/reports/obsolete.md', content: '# obsolete\n' },
+      context(),
+    );
+
+    const result = await registry.get('delete_workspace_file')?.handler(
+      { path: 'outputs/reports/obsolete.md' },
+      context(),
+    );
+
+    expect(result).toMatchObject({
+      path: 'outputs/reports/obsolete.md',
+      deleted: true,
+      undoAvailable: true,
+      bytes: 11,
+    });
+    expect(String(result?.trashPath)).toMatch(/^outputs\/_trash\/deleted\/.+\/obsolete\.md$/);
+    await expect(access(join(rootPath, 'outputs', 'reports', 'obsolete.md'))).rejects.toThrow();
+    await expect(readFile(join(rootPath, String(result?.trashPath)), 'utf8')).resolves.toBe('# obsolete\n');
+  });
+
+  it('finds workspace paths with glob and searches file content with grep', async () => {
+    const { registry } = await workspaceHarness();
+    await registry.get('write_workspace_file')?.handler(
+      {
+        path: 'sql/analytics/orders.sql',
+        content: 'select order_id, gmv from marts.orders where status = \'paid\';\n',
+      },
+      context(),
+    );
+    await registry.get('write_workspace_file')?.handler(
+      {
+        path: 'scripts/traffic/analyze.py',
+        content: 'source = "traffic_events"\nprint(source)\n',
+      },
+      context(),
+    );
+    await registry.get('write_workspace_file')?.handler(
+      {
+        path: 'outputs/_trash/deleted/ignored/orders.sql',
+        content: 'select should_not_appear from ignored;\n',
+      },
+      context(),
+    );
+
+    await expect(
+      registry.get('glob_workspace')?.handler({ pattern: 'scripts/**/*.py' }, context()),
+    ).resolves.toMatchObject({
+      pattern: 'scripts/**/*.py',
+      matches: [{ path: 'scripts/traffic/analyze.py', type: 'file' }],
+      count: 1,
+    });
+
+    await expect(
+      registry.get('grep_workspace')?.handler({ path: 'sql', query: 'GMV', include: 'sql/**/*.sql' }, context()),
+    ).resolves.toMatchObject({
+      query: 'GMV',
+      matches: [
+        {
+          path: 'sql/analytics/orders.sql',
+          line: 1,
+          column: 18,
+          preview: "select order_id, gmv from marts.orders where status = 'paid';",
+        },
+      ],
+      count: 1,
+    });
+
+    await expect(
+      registry.get('grep_workspace')?.handler({ path: '.', query: 'should_not_appear' }, context()),
+    ).resolves.toMatchObject({
+      matches: [],
+      count: 0,
+    });
   });
 
   it('requires an active workspace before touching the filesystem', async () => {
