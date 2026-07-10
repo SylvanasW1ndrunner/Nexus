@@ -46,6 +46,12 @@ describe('Auto Skill Agent runner', () => {
       'write_workspace_file',
       'execute_sql',
     ]);
+    expect(output.preflightToolPolicyReport.summary).toMatchObject({
+      allowedToolCount: 4,
+      blockedToolCount: 0,
+      writeCapableAllowedToolCount: 2,
+      approvalRequiredToolNames: ['query_database', 'write_workspace_file', 'execute_sql'],
+    });
     expect(agent.calls).toHaveLength(1);
     expect(agent.calls[0]).toMatchObject({
       providerId: 'fake',
@@ -59,6 +65,13 @@ describe('Auto Skill Agent runner', () => {
     expect(agent.calls[0]?.userMessage).toContain('用户任务:\n请生成昨日 GMV 日报，并写入工作区');
     expect(output.toolPolicy.blockedByPluginToolNames).toEqual([]);
     expect(output.toolPolicy.blockedBySkillToolNames).toEqual(['execute_sql']);
+    expect(output.toolPolicyReport.summary).toMatchObject({
+      allowedToolCount: 3,
+      blockedBySkillCount: 1,
+      writeCapableAllowedToolCount: 1,
+      approvalRequiredToolNames: ['query_database', 'write_workspace_file'],
+      secretKinds: ['none', 'database-password'],
+    });
   });
 
   it('uses inferred and explicit signals to select Python analysis Skills', () => {
@@ -158,6 +171,12 @@ describe('Auto Skill Agent runner', () => {
         },
       ],
       pluginAllowedToolNames: ['search_schema', 'query_database'],
+      preflightToolPolicyReport: {
+        summary: {
+          allowedToolCount: 2,
+          blockedToolCount: 0,
+        },
+      },
     });
 
     expect(agent.calls).toEqual([]);

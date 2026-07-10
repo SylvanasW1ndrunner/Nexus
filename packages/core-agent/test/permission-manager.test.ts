@@ -1,7 +1,52 @@
 import { describe, expect, it } from 'vitest';
-import { PermissionManager, decideAutomaticPermission } from '../src/index.js';
+import {
+  PermissionManager,
+  decideAutomaticPermission,
+  type AgentMode,
+  type ToolDangerLevel,
+} from '../src/index.js';
 
 describe('decideAutomaticPermission', () => {
+  it('keeps a stable mode and danger-level matrix for runtime tool decisions', () => {
+    const cases: Array<{
+      mode: AgentMode;
+      dangerLevel: ToolDangerLevel;
+      readonly?: boolean;
+      decision: 'allow' | 'deny' | 'ask';
+    }> = [
+      { mode: 'readonly', dangerLevel: 'safe', readonly: true, decision: 'allow' },
+      { mode: 'readonly', dangerLevel: 'medium', readonly: true, decision: 'allow' },
+      { mode: 'readonly', dangerLevel: 'high', readonly: true, decision: 'allow' },
+      { mode: 'readonly', dangerLevel: 'critical', readonly: true, decision: 'allow' },
+      { mode: 'readonly', dangerLevel: 'safe', readonly: false, decision: 'deny' },
+      { mode: 'readonly', dangerLevel: 'medium', readonly: false, decision: 'deny' },
+      { mode: 'readonly', dangerLevel: 'high', readonly: false, decision: 'deny' },
+      { mode: 'readonly', dangerLevel: 'critical', readonly: false, decision: 'deny' },
+      { mode: 'ask', dangerLevel: 'safe', decision: 'allow' },
+      { mode: 'ask', dangerLevel: 'medium', decision: 'ask' },
+      { mode: 'ask', dangerLevel: 'high', decision: 'ask' },
+      { mode: 'ask', dangerLevel: 'critical', decision: 'deny' },
+      { mode: 'auto', dangerLevel: 'safe', decision: 'allow' },
+      { mode: 'auto', dangerLevel: 'medium', decision: 'ask' },
+      { mode: 'auto', dangerLevel: 'high', decision: 'ask' },
+      { mode: 'auto', dangerLevel: 'critical', decision: 'deny' },
+      { mode: 'full-auto', dangerLevel: 'safe', decision: 'allow' },
+      { mode: 'full-auto', dangerLevel: 'medium', decision: 'allow' },
+      { mode: 'full-auto', dangerLevel: 'high', decision: 'allow' },
+      { mode: 'full-auto', dangerLevel: 'critical', decision: 'ask' },
+    ];
+
+    for (const item of cases) {
+      expect(
+        decideAutomaticPermission(item.mode, {
+          dangerLevel: item.dangerLevel,
+          ...(item.readonly === undefined ? {} : { readonly: item.readonly }),
+        }),
+        `${item.mode} ${item.dangerLevel} readonly=${String(item.readonly)}`,
+      ).toBe(item.decision);
+    }
+  });
+
   it('allows safe tools in every mode', () => {
     expect(decideAutomaticPermission('readonly', { dangerLevel: 'safe', readonly: true })).toBe('allow');
     expect(decideAutomaticPermission('ask', { dangerLevel: 'safe' })).toBe('allow');

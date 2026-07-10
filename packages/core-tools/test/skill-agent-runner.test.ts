@@ -77,6 +77,18 @@ describe('Skill Agent runner', () => {
       'missing_tool',
     ]);
     expect(output.toolPolicy.blockedBySkillToolNames).toEqual([]);
+    expect(output.toolPolicyReport.summary).toMatchObject({
+      allowedToolCount: 1,
+      blockedByPluginCount: 4,
+      blockedBySkillCount: 0,
+      approvalRequiredToolNames: [],
+      secretKinds: ['database-password'],
+    });
+    expect(output.toolPolicyReport.allowedTools[0]).toMatchObject({
+      toolName: 'query_database',
+      automaticDecision: 'allow',
+      permissionIds: ['database.query.read'],
+    });
     expect(output.result.status).toBe('done');
   });
 
@@ -157,6 +169,8 @@ describe('Skill Agent runner', () => {
     );
     expect(output.result.status).toBe('done');
     expect(output.toolPolicy.blockedByPluginToolNames).toEqual(['execute_sql']);
+    expect(output.toolPolicyReport.summary.deniedByModeToolNames).toEqual([]);
+    expect(output.toolPolicyReport.summary.approvalRequiredToolNames).toEqual(['query_database']);
   });
 
   it('renders a deterministic Skill Agent user message', () => {

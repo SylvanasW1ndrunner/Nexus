@@ -6,6 +6,10 @@ import type {
   AgentStrategy,
 } from '@dbagent/core-agent';
 import {
+  buildAgentToolPolicyReport,
+  type AgentToolPolicyReport,
+} from './agent-tool-policy-report.js';
+import {
   resolveOfficialPluginAgentTools,
   type OfficialPluginAgentToolPolicy,
   type OfficialPluginAgentToolPolicyOptions,
@@ -62,6 +66,7 @@ export type SkillAgentRunResult = {
   strategy: 'react';
   result: AgentRunResult;
   toolPolicy: OfficialPluginAgentToolPolicy;
+  toolPolicyReport: AgentToolPolicyReport;
   renderedUserMessage: string;
 };
 
@@ -69,6 +74,7 @@ export type SkillPlanExecuteRunResult = {
   strategy: 'plan-execute';
   result: AgentPlanExecuteResult;
   toolPolicy: OfficialPluginAgentToolPolicy;
+  toolPolicyReport: AgentToolPolicyReport;
   renderedUserMessage: string;
 };
 
@@ -89,6 +95,10 @@ export async function runSkillAgent(
     ...options.toolPolicy,
     skillAllowedTools: options.skillPlan.allowedTools,
   });
+  const toolPolicyReport = buildAgentToolPolicyReport(
+    toolPolicy,
+    options.mode === undefined ? {} : { mode: options.mode },
+  );
   const renderedUserMessage = renderSkillAgentUserMessage(options.skillPlan, options.userMessagePrefix);
   if (options.strategy === 'plan-execute') {
     const agentRunOptions: SkillPlanExecuteRunOptionsForAgent = {
@@ -105,6 +115,7 @@ export async function runSkillAgent(
       strategy: 'plan-execute',
       result,
       toolPolicy,
+      toolPolicyReport,
       renderedUserMessage,
     };
   }
@@ -120,6 +131,7 @@ export async function runSkillAgent(
     strategy: 'react',
     result,
     toolPolicy,
+    toolPolicyReport,
     renderedUserMessage,
   };
 }

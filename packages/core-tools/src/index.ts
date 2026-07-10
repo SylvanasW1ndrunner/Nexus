@@ -18,6 +18,7 @@ export * from './agent-eval-suite-catalog.js';
 export * from './agent-eval-suite-catalog-service.js';
 export * from './agent-eval-suite-run-service.js';
 export * from './agent-eval-gate.js';
+export * from './agent-tool-policy-report.js';
 export * from './skill-agent-runner.js';
 export * from './shell-tools.js';
 export * from './validation.js';

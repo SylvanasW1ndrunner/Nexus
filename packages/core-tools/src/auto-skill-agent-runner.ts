@@ -12,6 +12,10 @@ import {
   type OfficialPluginAgentToolPolicyOptions,
 } from './official-plugin-tool-policy.js';
 import {
+  buildAgentToolPolicyReport,
+  type AgentToolPolicyReport,
+} from './agent-tool-policy-report.js';
+import {
   runSkillAgent,
   type SkillAgent,
   type SkillAgentPlan,
@@ -52,12 +56,14 @@ export type AutoSkillAgentRunResult = SkillAgentRunResult & {
   autoPlan: SkillAutoExecutionPlan;
   candidates: SkillMatchCandidate[];
   preflightToolPolicy: OfficialPluginAgentToolPolicy;
+  preflightToolPolicyReport: AgentToolPolicyReport;
 };
 
 export type AutoSkillPlanExecuteRunResult = SkillPlanExecuteRunResult & {
   autoPlan: SkillAutoExecutionPlan;
   candidates: SkillMatchCandidate[];
   preflightToolPolicy: OfficialPluginAgentToolPolicy;
+  preflightToolPolicyReport: AgentToolPolicyReport;
 };
 
 export type AutoSkillStrategyRunOptions = AutoSkillAgentRunOptions | AutoSkillPlanExecuteRunOptions;
@@ -68,12 +74,19 @@ export class NoMatchingSkillError extends Error {
   readonly code = 'skill.no_matching_skill';
   readonly candidates: SkillMatchCandidate[];
   readonly pluginAllowedToolNames: string[];
+  readonly preflightToolPolicyReport: AgentToolPolicyReport;
 
-  constructor(message: string, candidates: SkillMatchCandidate[], pluginAllowedToolNames: string[]) {
+  constructor(
+    message: string,
+    candidates: SkillMatchCandidate[],
+    pluginAllowedToolNames: string[],
+    preflightToolPolicyReport: AgentToolPolicyReport,
+  ) {
     super(message);
     this.name = 'NoMatchingSkillError';
     this.candidates = candidates;
     this.pluginAllowedToolNames = pluginAllowedToolNames;
+    this.preflightToolPolicyReport = preflightToolPolicyReport;
   }
 }
 
@@ -87,8 +100,12 @@ export async function runAutoSkillAgent(
   options: AutoSkillStrategyRunOptions,
 ): Promise<AutoSkillStrategyRunResult> {
   const preflightToolPolicy = resolveOfficialPluginAgentTools(options.toolPolicy);
+  const preflightToolPolicyReport = buildAgentToolPolicyReport(
+    preflightToolPolicy,
+    options.mode === undefined ? {} : { mode: options.mode },
+  );
   const candidates = buildDiagnosticCandidates(options, preflightToolPolicy);
-  const autoPlan = selectAutoSkillPlan(options, preflightToolPolicy, candidates);
+  const autoPlan = selectAutoSkillPlan(options, preflightToolPolicy, candidates, preflightToolPolicyReport);
   if (options.strategy === 'plan-execute') {
     const output = await runSkillAgent(agent as SkillPlanExecuteAgent, {
       ...buildCommonSkillAgentOptions(options, autoPlan),
@@ -105,6 +122,7 @@ export async function runAutoSkillAgent(
       autoPlan,
       candidates,
       preflightToolPolicy,
+      preflightToolPolicyReport,
     };
   }
 
@@ -115,6 +133,7 @@ export async function runAutoSkillAgent(
     autoPlan,
     candidates,
     preflightToolPolicy,
+    preflightToolPolicyReport,
   };
 }
 
@@ -122,6 +141,10 @@ export function selectAutoSkillPlan(
   options: AutoSkillStrategyRunOptions,
   preflightToolPolicy = resolveOfficialPluginAgentTools(options.toolPolicy),
   candidates = buildDiagnosticCandidates(options, preflightToolPolicy),
+  preflightToolPolicyReport = buildAgentToolPolicyReport(
+    preflightToolPolicy,
+    options.mode === undefined ? {} : { mode: options.mode },
+  ),
 ): SkillAutoExecutionPlan {
   const autoPlan = createAutoExecutionPlan(options.skills, {
     userInput: options.userInput,
@@ -136,6 +159,7 @@ export function selectAutoSkillPlan(
       'No eligible Skill matched the user input and current tool policy.',
       candidates,
       preflightToolPolicy.agentAllowedToolNames,
+      preflightToolPolicyReport,
     );
   }
 
