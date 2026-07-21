@@ -21,6 +21,35 @@ const reviewKinds = new Set([
   'VACUUM',
 ]);
 
+const sideEffectFunctions = [
+  'nextval',
+  'setval',
+  'set_config',
+  'pg_advisory_lock',
+  'pg_advisory_lock_shared',
+  'pg_advisory_xact_lock',
+  'pg_advisory_xact_lock_shared',
+  'pg_try_advisory_lock',
+  'pg_try_advisory_lock_shared',
+  'pg_try_advisory_xact_lock',
+  'pg_try_advisory_xact_lock_shared',
+  'pg_cancel_backend',
+  'pg_terminate_backend',
+  'pg_reload_conf',
+  'pg_rotate_logfile',
+  'pg_logical_emit_message',
+  'pg_create_restore_point',
+  'lo_create',
+  'lo_from_bytea',
+  'lo_import',
+  'lo_export',
+  'lo_put',
+  'lo_unlink',
+  'dblink_exec',
+] as const;
+
+const sideEffectFunctionPattern = new RegExp(`\\b(${sideEffectFunctions.join('|')})\\s*\\(`, 'i');
+
 export type AnalyzeSqlOptions = {
   readOnly: boolean;
 };
@@ -72,11 +101,21 @@ export function analyzeSqlSafety(sql: string, options: AnalyzeSqlOptions): Query
   }
 
   const readOnlyViolationKind = findReadOnlyViolationKind(statements);
-  if (options.readOnly && readOnlyViolationKind) {
-    reasons.push('Connection is read-only, so write or DDL statements are blocked.');
+  const readSideEffect = findReadSideEffect(normalized, statementKind);
+  if (readSideEffect) {
+    reasons.push(
+      `${statementKind} contains ${readSideEffect}, so it can change database or session state.`,
+    );
   }
 
-  const blocked = options.readOnly && readOnlyViolationKind !== undefined;
+  if (options.readOnly && (readOnlyViolationKind || readSideEffect)) {
+    reasons.push(
+      'Connection is read-only, so write, locking, or side-effecting statements are blocked.',
+    );
+  }
+
+  const blocked =
+    options.readOnly && (readOnlyViolationKind !== undefined || readSideEffect !== undefined);
   const requiresConfirmation =
     !blocked &&
     (writeKinds.has(statementKind) ||
@@ -84,13 +123,17 @@ export function analyzeSqlSafety(sql: string, options: AnalyzeSqlOptions): Query
       reviewKinds.has(statementKind) ||
       statementKind === 'UNKNOWN' ||
       wrappedWriteKind !== undefined ||
+      readSideEffect !== undefined ||
       containsMultipleStatements(normalized));
 
   return {
     statementKind,
     riskLevel: blocked
       ? 'blocked'
-      : dangerousKinds.has(statementKind) || unboundedMutation || wrappedWriteKind !== undefined
+      : dangerousKinds.has(statementKind) ||
+          unboundedMutation ||
+          wrappedWriteKind !== undefined ||
+          readSideEffect !== undefined
         ? 'dangerous'
         : requiresConfirmation
           ? 'caution'
@@ -140,4 +183,68 @@ function findReadOnlyViolationKind(statements: string[]): string | undefined {
     if (wrappedWriteKind) return wrappedWriteKind;
   }
   return undefined;
+}
+
+function findReadSideEffect(sql: string, statementKind: string): string | undefined {
+  if (statementKind !== 'SELECT' && statementKind !== 'WITH' && statementKind !== 'VALUES') {
+    return undefined;
+  }
+
+  const masked = maskSqlLiterals(sql);
+  if (/\bSELECT\b[\s\S]*?\bINTO\b/i.test(masked)) return 'SELECT INTO';
+
+  const rowLock = masked.match(/\bFOR\s+(?:NO\s+KEY\s+UPDATE|KEY\s+SHARE|UPDATE|SHARE)\b/i)?.[0];
+  if (rowLock) return `row-locking clause ${rowLock.toUpperCase().replace(/\s+/g, ' ')}`;
+
+  const functionName = masked.match(sideEffectFunctionPattern)?.[1];
+  if (functionName) return `side-effect function ${functionName.toLowerCase()}()`;
+
+  return undefined;
+}
+
+function maskSqlLiterals(sql: string): string {
+  let output = '';
+  let index = 0;
+
+  while (index < sql.length) {
+    const char = sql[index]!;
+    if (char === "'" || char === '"') {
+      const quote = char;
+      output += ' ';
+      index += 1;
+      while (index < sql.length) {
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) {
+            output += '  ';
+            index += 2;
+            continue;
+          }
+          output += ' ';
+          index += 1;
+          break;
+        }
+        output += ' ';
+        index += 1;
+      }
+      continue;
+    }
+
+    if (char === '$') {
+      const delimiter = sql.slice(index).match(/^\$(?:[a-zA-Z_][a-zA-Z0-9_]*)?\$/)?.[0];
+      if (delimiter) {
+        const closingIndex = sql.indexOf(delimiter, index + delimiter.length);
+        if (closingIndex >= 0) {
+          const end = closingIndex + delimiter.length;
+          output += ' '.repeat(end - index);
+          index = end;
+          continue;
+        }
+      }
+    }
+
+    output += char;
+    index += 1;
+  }
+
+  return output;
 }

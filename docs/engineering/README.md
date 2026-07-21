@@ -4,6 +4,9 @@
 
 ## 核心入口
 
+- [Headless Runtime MVP 合同](../product/11-headless-mvp.md)
+- [SDK Runtime 模块](./modules/sdk-runtime.md)
+- [Server、CLI 与参考 WebUI 模块](./modules/server.md)
 - [接口文档](./interfaces.md)
 - [M2+ 非 UI 服务合约预留](./interfaces-m2-contracts.md)
 - [模块开发说明](./modules.md)
@@ -21,6 +24,7 @@
 - [开发切片模板](./templates/development-slice.md)
 - [用户级验收报告模板](./templates/acceptance-report.md)
 - [开发切片记录](./slices/README.md)
+- [2026-07-21 Headless Runtime MVP 切片](./slices/2026-07-21-headless-runtime-mvp.md)
 - [架构决策记录](./adr/README.md)
 
 ## 版本与验收

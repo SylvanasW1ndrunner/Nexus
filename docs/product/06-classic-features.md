@@ -2,6 +2,8 @@
 
 > 文档版本：v0.1
 > 关联：[00-overview.md](./00-overview.md), [01-ui-design.md](./01-ui-design.md)
+>
+> **路线校准（2026-07-21）**：本文保留为未来参考客户端和 Database Tool 的需求库，不再代表当前产品基本盘。表设计器、复杂 SQL IDE、ER 编辑、数据浏览编辑和 Navicat 对标能力全部移出 H1 MVP；只有连接、只读执行、结果和 EXPLAIN 等可复用后端能力按真实需求进入 Runtime。
 
 ---
 

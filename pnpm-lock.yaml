@@ -14,6 +14,9 @@ importers:
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.20
+      esbuild:
+        specifier: ^0.25.12
+        version: 0.25.12
       eslint:
         specifier: ^9.17.0
         version: 9.39.4
@@ -111,6 +114,22 @@ importers:
       vite:
         specifier: ^6.0.5
         version: 6.4.3(@types/node@22.19.20)
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.20)
+
+  apps/server:
+    dependencies:
+      '@dbagent/core-llm':
+        specifier: workspace:*
+        version: link:../../packages/core-llm
+      '@dbagent/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+      '@dbagent/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+    devDependencies:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.20)
@@ -238,6 +257,25 @@ importers:
 
   packages/core-workspace:
     dependencies:
+      '@dbagent/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.20)
+
+  packages/sdk:
+    dependencies:
+      '@dbagent/core-db':
+        specifier: workspace:*
+        version: link:../core-db
+      '@dbagent/core-llm':
+        specifier: workspace:*
+        version: link:../core-llm
+      '@dbagent/core-rag':
+        specifier: workspace:*
+        version: link:../core-rag
       '@dbagent/shared':
         specifier: workspace:*
         version: link:../shared

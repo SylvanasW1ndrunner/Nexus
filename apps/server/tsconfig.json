@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true
+  },
+  "references": [
+    { "path": "../../packages/core-llm" },
+    { "path": "../../packages/sdk" },
+    { "path": "../../packages/shared" }
+  ],
+  "include": ["src/**/*.ts"]
+}

@@ -1,5 +1,7 @@
 # 模块开发说明
 
+> 路线校准（2026-07-21）：本文主体记录 M0-M1.5 桌面阶段的历史实现。当前产品主入口已经调整为 `@dbagent/sdk` + 本地 REST/CLI + 极简 WebUI；新开发以 [SDK Runtime 模块](./modules/sdk-runtime.md)、[Server 模块](./modules/server.md) 和 [ADR-0001](./adr/0001-headless-sdk-first.md) 为准。Electron 能力保留但不再决定当前 MVP 验收。
+
 本文档解释 M0-M1.5 阶段各模块的开发逻辑、职责边界和后续扩展方向。它不是产品设计稿的重复，而是面向开发和验收的工程说明。
 
 ## 总体原则

@@ -29,6 +29,9 @@ await runVitest('packages/core-auth/test/postgres.integration.test.ts', {
 await runVitest('packages/core-tools/test/agent-rag-business-scenario.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_tools_test',
 });
+await runVitest('packages/sdk/test/postgres.integration.test.ts', {
+  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
+});
 
 async function assertPostgresReachable() {
   const host = process.env.DBAGENT_TEST_PG_HOST ?? '127.0.0.1';

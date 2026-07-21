@@ -150,6 +150,44 @@ describe('analyzeSqlSafety', () => {
     expect(report.reasons.join(' ')).toContain('read-only');
   });
 
+  it.each([
+    ['select * into temporary recent_orders from orders', 'SELECT INTO'],
+    ['select * from orders where id = 1 for update', 'FOR UPDATE'],
+    ["select nextval('orders_id_seq')", 'nextval()'],
+  ])('blocks side-effecting reads on read-only connections: %s', (sql, reason) => {
+    const report = analyzeSqlSafety(sql, { readOnly: true });
+
+    expect(report).toMatchObject({
+      riskLevel: 'blocked',
+      blocked: true,
+      requiresConfirmation: false,
+    });
+    expect(report.reasons.join(' ')).toContain(reason);
+  });
+
+  it('requires confirmation for side-effecting reads on writable connections', () => {
+    expect(
+      analyzeSqlSafety('select * from orders for no key update', { readOnly: false }),
+    ).toMatchObject({
+      statementKind: 'SELECT',
+      riskLevel: 'dangerous',
+      blocked: false,
+      requiresConfirmation: true,
+    });
+  });
+
+  it('does not classify side-effect words inside literals as executable behavior', () => {
+    expect(
+      analyzeSqlSafety("select 'nextval(1)' as example, $$for update$$ as note limit 1", {
+        readOnly: true,
+      }),
+    ).toMatchObject({
+      riskLevel: 'safe',
+      blocked: false,
+      requiresConfirmation: false,
+    });
+  });
+
   it('ignores comments before classifying complex CTE reads', () => {
     const report = analyzeSqlSafety(
       `

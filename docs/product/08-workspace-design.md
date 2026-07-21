@@ -2,6 +2,8 @@
 
 > 文档版本：v0.1
 > 关联：[03-agent-design.md](./03-agent-design.md), [06-classic-features.md](./06-classic-features.md)
+>
+> **路线校准（2026-07-21）**：Workspace、Python、制品和脚本工具属于 H3 以后的扩展能力，不进入当前 Headless MVP。已实现 core-workspace 能力继续保留和测试；新增能力必须以 Tool/Plugin 合同接入 Runtime，不能重新把产品中心变成桌面 IDE。
 
 ---
 

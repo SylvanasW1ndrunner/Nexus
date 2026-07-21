@@ -2,6 +2,8 @@
 
 > 文档版本：v0.1
 > 关联：[00-overview.md](./00-overview.md), [02-rag-design.md](./02-rag-design.md)
+>
+> **路线校准（2026-07-21）**：Agent Engine 仍是长期核心，但当前 H1 先交付“Schema 检索 → 结构化 SQL 生成 → 本地审计 → 人工执行”的 SDK Runtime。ReAct、Plan & Execute、子 Agent、Skill 自动编排和 MCP 属于 H2/H3；所有能力必须通过传输无关合同使用，不能依赖复杂 Desktop UI。
 
 ---
 

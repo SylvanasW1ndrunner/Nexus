@@ -1,0 +1,27 @@
+{
+  "name": "@dbagent/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "dbagent-server": "dist/cli.js"
+  },
+  "files": ["dist", "package.json"],
+  "scripts": {
+    "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run --passWithNoTests",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@dbagent/core-llm": "workspace:*",
+    "@dbagent/sdk": "workspace:*",
+    "@dbagent/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}

@@ -14,9 +14,11 @@
    - [core-tools Agent/RAG Eval Suite Runner](./core-tools-agent-eval-suite.md)
 7. [workspace / Python 模块](./workspace-python.md)
 8. [core-skills 与开发 Skill 模块](./development-skills.md)
-9. [desktop 桌面应用模块](./desktop.md)
-10. [auth / usage / llm 支撑模块](./supporting-core.md)
-11. [scripts 工程脚本模块](./scripts.md)
+9. [sdk Headless Runtime 模块](./sdk-runtime.md)
+10. [server、CLI 与参考 WebUI 模块](./server.md)
+11. [desktop 桌面应用模块（保留路线）](./desktop.md)
+12. [auth / usage / llm 支撑模块](./supporting-core.md)
+13. [scripts 工程脚本模块](./scripts.md)
 
 ## 维护规则
 

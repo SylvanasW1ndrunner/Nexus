@@ -834,5 +834,6 @@ function toPgConfig(config: DatabaseConnectionConfig) {
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,
     application_name: 'DBAgent',
+    options: config.readOnly ? '-c default_transaction_read_only=on' : undefined,
   };
 }

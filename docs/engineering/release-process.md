@@ -28,6 +28,15 @@ pnpm package:verify
 
 同时必须提供 `SHA256SUMS.txt`，记录全部发布资产的 SHA256，便于用户下载后校验。
 
+Headless MVP 版本至少提供：
+
+- `DBAgent-Headless-MVP-v<version>.tgz`：可由 npm/npx 直接安装运行的包。
+- `SHA256SUMS.txt`：tarball 的 SHA256。
+
+npm registry 包名为 `@nwlworkshop/dbagent`，可执行命令为 `dbagent`。公开发布后用户入口为 `npx --yes @nwlworkshop/dbagent`。
+
+生成命令为 `pnpm package:mvp:npm`。发布前必须从仓库外的临时目录安装该 tarball，启动 `dbagent`，并验证首页和 `/health`；不能只验证 workspace 内的开发服务。
+
 如果当前机器无法产出 macOS 或 Linux 包，该版本可以只发布 Windows 包，但版本记录中必须说明缺失平台和原因。后续进入跨平台验收阶段后，Windows、macOS、Linux 都应分别产出安装或解压资产。
 
 ## 本地资产目录
@@ -40,6 +49,8 @@ pnpm package:verify
 release/<version>/DBAgent-<version>-win-x64-setup.exe
 release/<version>/DBAgent-<version>-win-x64-unpacked.zip
 release/<version>/SHA256SUMS.txt
+release/HeadlessMVP-v<version>/DBAgent-Headless-MVP-v<version>.tgz
+release/HeadlessMVP-v<version>/SHA256SUMS.txt
 ```
 
 ## GitHub Release

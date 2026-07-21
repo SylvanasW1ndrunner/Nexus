@@ -28,6 +28,16 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
     expect(connectResult.ok).toBe(true);
     if (!connectResult.ok) return;
 
+    const readOnlySession = await driver.execute(
+      { connectionId: config.id, sql: 'show transaction_read_only' },
+      connectResult.data,
+    );
+    expect(readOnlySession.ok).toBe(true);
+    if (!readOnlySession.ok) return;
+    expect(readOnlySession.data.rows).toEqual([
+      expect.objectContaining({ transaction_read_only: 'on' }),
+    ]);
+
     const tablesResult = await driver.listTables(config.id);
     expect(tablesResult.ok).toBe(true);
     if (!tablesResult.ok) return;

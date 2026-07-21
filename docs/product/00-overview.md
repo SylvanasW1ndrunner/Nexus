@@ -1,310 +1,171 @@
-# 00 - 总纲（Overview）
+# 00 - 产品总览
 
-> 项目代号：**DBAgent**（暂定，最终名称待定）
-> 文档版本：v0.1
-> 最后更新：2026-05
+> 文档版本：v1.0
+> 产品路线：Headless Runtime / SDK-first
+> 当前实现范围：[11-headless-mvp.md](./11-headless-mvp.md)
 
----
+## 1. 一句话定位
 
-## 1. 项目愿景
+> DBAgent 是面向中国数据库生态的可嵌入式 AI Database Agent Runtime，让 SaaS、数据平台、运维系统和 AI 客户端通过 SDK、API 或 MCP 获得自然语言查数与安全数据库运维能力。
 
-### 1.1 一句话定义
+我们不以“再造一个 Navicat、DBeaver 或 Cursor 风格 IDE”为目标。官方 WebUI 只用于试用、调试、审批和结果查看。
 
-> **DBAgent 是一款面向数据工程师的 Agent 原生数据库 IDE。** 它不仅是 SQL 编辑器，更是能够自主完成"理解 Schema → 生成 SQL → 调用工具 → 执行任务 → 解读结果"全流程的智能工作台。
+## 2. 目标用户
 
-### 1.2 与现有产品的关系
+### 2.1 第一阶段
 
-| 维度 | Navicat / DBeaver | Vanna / Chat2DB | **DBAgent** |
-|---|---|---|---|
-| 核心定位 | SQL 编辑器 | Text-to-SQL | **Agent IDE** |
-| AI 能力 | 插件式辅助 | 单轮生成 | **多步 Agent 自主执行** |
-| 工具扩展 | 无 | 无 | **MCP 生态 + 内置工具** |
-| 上下文 | 全量 schema 复制粘贴 | 简单 RAG | **结构化 RAG + 业务语义层** |
-| 执行模式 | 手动 | 手动 | **询问 / 自动双模式** |
-| 商业模式 | License 买断 | 开源 + 企业版 | **订阅制 + 私有化** |
-
-### 1.3 目标用户
-
-**主要用户**：
-- 数据分析师（写 SQL 但不擅长复杂查询）
-- 后端工程师（业务开发顺带操作数据库）
-- DBA（需要批量分析、跨库操作）
-
-**次要用户**：
-- 数据科学家（探索性查询）
-- 产品经理 / 运营（基于自然语言查数）
-
-### 1.4 核心价值主张
-
-1. **零上下文输入**：连接数据库即自动建立 RAG，告别复制粘贴 schema
-2. **Agent 自主完成任务**：不只是生成 SQL，而是端到端完成"分析任务"
-3. **可扩展工具生态**：内置工具 + 用户自定义 MCP + 公共 MCP Market
-4. **执行安全网**：双模式（询问/自动）+ 危险操作拦截 + 可回滚事务
-5. **国内友好**：DeepSeek 默认接入、中文优化、私有化可选
-
----
-
-## 2. 产品形态
-
-### 2.1 形态定位
-
-**桌面应用（Desktop App）+ 单机架构**
-
-- **打包方式**：Electron + TypeScript
-- **运行方式**：用户本机运行，数据库连接、RAG、Agent 全部在本地
-- **数据流向**：用户数据库 ↔ 本机 App ↔ LLM API（仅 prompt 经过云端）
-- **企业版**：支持完全离线（本地 LLM via Ollama / vLLM）
-
-### 2.2 为什么是桌面端
-
-| 候选 | 优点 | 缺点 | 是否选用 |
-|---|---|---|---|
-| Web SaaS | 部署简单 | 数据要经过服务器，企业不接受 | ❌ |
-| VS Code 扩展 | 分发现成 | 受限于 VSCode UI，非技术用户门槛高 | ❌ |
-| **桌面端 (Electron)** | 完整体验、本地数据、商业化清晰 | 包体积大 | ✅ |
-| CLI | 启动快 | 用户面窄、表格展示差 | ❌ |
-
-### 2.3 单机架构示意
-
-```
-┌─────────────────────────────────────────────────┐
-│  Electron Desktop App                            │
-│                                                  │
-│  ┌──────────────────┐       ┌────────────────┐  │
-│  │   Renderer       │       │  Main Process  │  │
-│  │   (React UI)     │ ←IPC→ │  (Node.js)     │  │
-│  │                  │       │                │  │
-│  │  - 对话窗口      │       │  - Agent Core  │  │
-│  │  - 结果表格      │       │  - DB Pool     │  │
-│  │  - Schema 树     │       │  - RAG Engine  │  │
-│  │  - 设置面板      │       │  - MCP Client  │  │
-│  └──────────────────┘       │  - LLM Router  │  │
-│                             └────────┬───────┘  │
-└──────────────────────────────────────┼──────────┘
-                                       │
-              ┌────────────────────────┼─────────────────────┐
-              │                        │                     │
-        ┌─────▼──────┐          ┌──────▼─────┐         ┌─────▼──────┐
-        │ User's DB  │          │ LLM API    │         │ MCP Servers│
-        │ (PG/MySQL) │          │ (DeepSeek/ │         │ (local +   │
-        │            │          │  Claude/   │         │  remote)   │
-        │            │          │  Ollama)   │         │            │
-        └────────────┘          └────────────┘         └────────────┘
-```
-
-> **关键原则**：**用户数据永不经过我们的服务器**。这是数据库工具商业化的底线。
-
----
-
-## 3. 核心功能模块
-
-### 3.1 模块全景图
-
-```
-┌────────────────────────────────────────────────────────────┐
-│                        DBAgent App                          │
-├────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
-│  │ UI Layer │  │  Agent   │  │   RAG    │  │ Connection │  │
-│  │  (React) │  │  Engine  │  │  Engine  │  │  Manager   │  │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └─────┬──────┘  │
-│       │             │             │              │          │
-│       └─────────────┼─────────────┼──────────────┘          │
-│                     │             │                          │
-│              ┌──────▼─────────────▼──────┐                  │
-│              │      Core Services         │                  │
-│              │  - LLM Router              │                  │
-│              │  - MCP Client Manager      │                  │
-│              │  - Tool Registry           │                  │
-│              │  - Skill Registry          │                  │
-│              │  - Session Manager         │                  │
-│              │  - Permission/Approval     │                  │
-│              └────────────┬───────────────┘                  │
-│                           │                                  │
-│              ┌────────────▼───────────────┐                  │
-│              │      Storage Layer         │                  │
-│              │  - SQLite (sessions/cfg)   │                  │
-│              │  - sqlite-vec (vectors)    │                  │
-│              │  - File system (skills)    │                  │
-│              └────────────────────────────┘                  │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### 3.2 模块清单与文档索引
-
-| # | 模块 | 职责 | 详细文档 |
-|---|---|---|---|
-| 1 | **UI Layer** | 用户交互、对话窗、结果展示 | [01-ui-design.md](./01-ui-design.md) |
-| 2 | **RAG Engine** | Schema 提取、向量化、检索 | [02-rag-design.md](./02-rag-design.md) |
-| 3 | **Agent Engine** | 任务规划、ReAct loop、子 agent | [03-agent-design.md](./03-agent-design.md) |
-| 4 | **Configuration** | 模型配置、连接、权限设置 | [04-config-design.md](./04-config-design.md) |
-| 5 | **Development** | 项目结构、技术栈、里程碑 | [05-development-guide.md](./05-development-guide.md) |
-| 6 | **Classic Features** | 传统数据库工具能力（基本盘） | [06-classic-features.md](./06-classic-features.md) |
-| 7 | **Design Principles** | 设计哲学与原则（最高仲裁） | [07-design-principles.md](./07-design-principles.md) |
-| 8 | **Workspace** | 工作空间 + Python 脚本 + Agent 制品 | [08-workspace-design.md](./08-workspace-design.md) |
-| 9 | **Error Recovery** | 错误恢复、自动保存、崩溃恢复 | [09-error-recovery.md](./09-error-recovery.md) |
-| 10 | **Usage & Subscription** | 用量计量、订阅、注册登录、BYOK | [10-usage-and-subscription.md](./10-usage-and-subscription.md) |
-
----
-
-## 4. 关键设计原则
-
-### 4.1 模块化（Modularity）
-
-- **数据库适配器抽象**：MVP 仅 PostgreSQL，但接口设计兼容 MySQL/Oracle/ClickHouse/MongoDB
-- **LLM Provider 抽象**：默认 DeepSeek，支持 OpenAI/Claude/Ollama/vLLM 任意 OpenAI 兼容端点
-- **工具系统统一**：内置工具、用户 MCP、市场 MCP 走同一调用接口
-- **Agent 策略可插拔**：ReAct / Plan-and-Execute / Reflexion 等策略可切换
-
-### 4.2 安全优先（Security First）
-
-- **默认询问执行**：所有写操作（INSERT/UPDATE/DELETE/DDL）需用户确认
-- **只读模式**：连接级别可强制只读，agent 无法越权
-- **事务回滚**：DML 默认在事务中执行，失败自动回滚
-- **凭证隔离**：数据库密码、API Key 用 OS keychain 加密存储
-- **审计日志**：所有 SQL 执行记录可追溯
-
-### 4.3 渐进增强（Progressive Enhancement）
-
-- **离线可用**：连接 + SQL 执行不依赖网络
-- **AI 增强**：网络可用时启用 RAG + Agent
-- **本地模型**：Ollama/vLLM 支持完全本地化
-
-### 4.4 用户掌控（User in Control）
-
-- **模式切换**：询问执行 / 自动执行 随时切换
-- **会话隔离**：每个会话独立 context，可命名、可导出
-- **撤销机制**：所有 agent 行为可中止、可回退
-
----
-
-## 5. 技术栈总览
-
-| 层 | 技术 | 理由 |
+| 用户 | 典型需求 | 采用方式 |
 |---|---|---|
-| 桌面框架 | **Electron 30+** | 成熟、AI 生态友好、社区资源多 |
-| 前端 | **React 18 + TypeScript** | 团队熟悉、组件库丰富 |
-| 状态管理 | **Zustand** | 轻量、好用 |
-| UI 库 | **Radix UI + Tailwind CSS** | 现代化、可定制 |
-| 主进程 | **Node.js 20+ (TypeScript)** | 与渲染进程同语言 |
-| Agent 框架 | **Vercel AI SDK + 自写 loop** | TS 原生、tool calling 简洁 |
-| 数据库驱动 | **pg (PostgreSQL)** + 适配层 | 官方稳定 |
-| 向量存储 | **sqlite-vec** | 嵌入式、零部署 |
-| Embedding | **BGE-M3** (本地) / **OpenAI 兼容** | 中英文双优 |
-| MCP | **@modelcontextprotocol/sdk** | 官方 SDK |
-| 凭证存储 | **keytar** | OS keychain 集成 |
-| 打包 | **electron-builder** | 跨平台 |
-| 测试 | **Vitest + Playwright** | 单元 + E2E |
+| SaaS / ISV 开发团队 | 在自己的产品中嵌入自然语言查数 | TypeScript SDK / REST API |
+| 企业数据平台团队 | 给内部系统增加统一数据库 Agent | 私有部署 Server / API |
+| DBA 与研发效能团队 | 将查询、诊断和 Runbook 接入现有工具 | CLI / MCP / API |
+| AI Agent 平台开发者 | 给通用 Agent 增加受控数据库工具 | MCP / Tool Plugin |
 
----
+### 2.2 当前不作为主目标
 
-## 6. 实现效果（Demo 场景）
+- 需要完整可视化 BI 的业务用户。
+- 需要传统数据库 IDE 全功能的重度 SQL 编辑用户。
+- 希望零配置、纯云端托管数据库分析的个人用户。
 
-### 6.1 场景一：自然语言查数
+不做复杂 UI 会降低终端用户获客范围，但能让三人团队把资源集中在准确率、安全、集成体验和中国数据库生态适配上。
 
-```
-用户：上周哪个商品销量最高？
+## 3. 用户问题
 
-[Agent 思考]
-  → 检索 RAG：products / orders / order_items 三张表相关
-  → 生成 SQL：SELECT ... JOIN ... GROUP BY ... ORDER BY ... LIMIT 1
-  → 询问用户确认（默认询问模式）
-  → 执行
-  → 解读：上周销量最高的是 XX 商品，共售出 1234 件
+当前自然语言转 SQL 产品普遍存在以下问题：
 
-[结果区域]
-| product_name | total_sold |
-|--------------|------------|
-| iPhone 15    | 1234       |
-```
+1. 只看到表结构，不理解业务口径和历史正确 SQL。
+2. 生成 SQL 后缺少结构化校验、风险审计和执行隔离。
+3. Demo 容易，嵌入生产系统困难：接口不稳定、凭证边界不清晰、无法审计。
+4. 数据库运维能力通常与 Text-to-SQL 分离，无法共享上下文、工具和权限。
+5. 国内模型、私有化环境、网络条件和国产数据库支持不足。
 
-### 6.2 场景二：调用自定义工具（MCP）
+DBAgent 的核心价值不是“让模型写出一段 SQL”，而是让数据库任务在生产环境中 **可理解、可控制、可评测、可审计、可嵌入**。
 
-```
-用户：把用户表里 phone 字段解密后，统计每个城市的注册人数
+## 4. 产品形态
 
-[Agent 思考]
-  → 检索 RAG：users 表，phone 字段标注为 AES 加密
-  → 发现已挂载 decrypt_phone MCP tool
-  → 计划：
-    1. SELECT id, phone FROM users
-    2. 对每条 phone 调用 decrypt_phone tool
-    3. 解析城市码，按城市聚合
-  → 询问用户：是否执行（涉及全表扫描）？
-  → 用户确认后执行
-  → 输出聚合结果
+```text
+客户应用 / AI 客户端 / 自动化系统 / 极简 WebUI
+                    │
+        TypeScript SDK / REST / CLI / MCP
+                    │
+              DBAgent Runtime
+       ┌────────────┼────────────┐
+       │            │            │
+ Schema RAG   SQL Safety    Agent / Tools
+       │            │            │
+ 语义知识库     审批与审计     查询与运维任务
+       └────────────┼────────────┘
+                    │
+          Database Driver Registry
+                    │
+              PostgreSQL（MVP）
 ```
 
-### 6.3 场景三：子 Agent 并行
+### 4.1 同一核心，多种入口
 
-```
-用户：帮我分析为什么上周 GMV 下降了
+- **SDK**：进程内使用 Runtime，适合 Node.js 服务和桌面/本地产品。
+- **REST API**：语言无关，适合远程服务、内部平台和 OEM 集成。
+- **CLI**：完成启动、健康检查、Schema 索引和自动化任务。
+- **MCP Server**：将受控数据库工具暴露给外部 AI 客户端。
+- **WebUI**：REST API 的官方参考客户端，不承载独有能力。
 
-[主 Agent 拆解任务]
-  → 子 Agent 1：分析订单数变化
-  → 子 Agent 2：分析客单价变化
-  → 子 Agent 3：分析退款率变化
-  [三个子 Agent 并行执行 SQL 查询]
+所有入口共享统一的请求、事件、错误和审批语义。任何核心能力都必须能在没有正式 UI 的情况下测试和使用。
 
-[主 Agent 汇总]
-  → 输出分析报告：
-    - 订单数同比 -5%
-    - 客单价同比 -8% （主因）
-    - 退款率上升 2pp
-    → 建议：检查 7/15 上线的优惠券规则
-```
+## 5. 核心能力
 
----
+### 5.1 Schema Context
 
-## 7. 商业化路径
+- 从数据库 Catalog 提取表、字段、注释、主外键、索引和约束。
+- 按连接隔离索引。
+- 支持词法、显式引用、关系扩展和后续向量检索。
+- 支持业务词汇、Verified SQL 和文档作为补充知识源。
 
-> 详细见 [10-usage-and-subscription.md](./10-usage-and-subscription.md)。
+### 5.2 Natural Language to SQL
 
-### 7.1 双路径商业模式
+- 根据问题检索相关 Schema，而不是把全库结构塞入 Prompt。
+- 要求模型输出结构化 SQL、解释和假设。
+- 生成结果必须经过本地 SQL 安全分析。
+- 生成和执行分离，默认不执行。
+- 用户修正的 SQL 后续可沉淀为 Verified Query。
 
-| 路径 | 形态 | 是否登录 | 是否联网 | 计费 |
-|---|---|---|---|---|
-| **BYOK（用户自带 key）** | 完全免费 | ❌ | 取决于用户的 endpoint | 用户自付 LLM 费用 |
-| **订阅（用我们的 LLM）** | 付费 | ✅ 必须注册 | ✅ 走我们的 gateway | 时间窗口配额（如 5h N 轮，参考 Claude Code） |
+### 5.3 Database Agent 与运维
 
-> BYOK 永久免费，所有功能不锁；订阅的核心价值是"代付 LLM 费用 + 省去 API key 管理"。
+- 将 Schema 检索、查询、EXPLAIN、慢 SQL、锁和会话诊断注册为受控工具。
+- 通过 Tool Registry、权限策略和审批记录限制副作用。
+- 运维动作优先生成建议和预览，写操作延后到安全体系成熟后开放。
 
-### 7.2 阶段规划
+### 5.4 生产化能力
 
-| 阶段 | 形态 | 关键能力 |
+- 运行状态、取消、超时和错误分类。
+- 审批、审计和敏感信息脱敏。
+- 可复现评测集与行为断言。
+- 本地运行、BYOK 和私有化部署。
+- Provider、数据库和工具适配器。
+
+## 6. Headless MVP 范围
+
+第一版验证以下完整闭环：
+
+- OpenAI-compatible BYOK 模型。
+- PostgreSQL 只读连接。
+- Schema 抽取和内存索引。
+- 自然语言问题生成单条只读 SQL。
+- SQL 解释、假设、上下文证据和安全报告。
+- 用户显式执行已生成 SQL。
+- 查询结果行数限制和结构化错误。
+- TypeScript SDK、本地 REST API、CLI 启动入口和极简 WebUI。
+
+第一版明确不包含：写 SQL、复杂 Agent 规划、子 Agent、插件市场、多租户云服务、完整订阅系统和传统数据库 IDE。
+
+## 7. 产品原则
+
+1. **Headless first**：核心能力先以公共合同交付，再做客户端。
+2. **Read-only first**：自动生成 SQL 默认只读，生成与执行分离。
+3. **Evidence first**：返回检索证据、SQL 解释和安全判断，不只返回答案。
+4. **Evaluation first**：正确率和安全性必须由固定案例持续验证。
+5. **China-ready**：优先兼容国内 OpenAI-compatible 模型、私有化环境和后续国产数据库。
+6. **One runtime, thin adapters**：SDK、REST、CLI、MCP、WebUI 不重复实现业务逻辑。
+7. **Developer experience is UX**：文档、类型、错误、示例和十分钟接入体验就是核心界面。
+
+完整原则见 [07-design-principles.md](./07-design-principles.md)。
+
+## 8. 成功指标
+
+### 8.1 MVP 指标
+
+- 新用户从启动到第一次生成 SQL不超过 10 分钟。
+- SDK 完成最小集成不超过 30 行核心代码。
+- 固定测试集中，只读 SQL 安全拦截无漏放。
+- 每次生成都返回可解析结构和安全报告。
+- Runtime、API 和 WebUI 对同一任务返回一致语义。
+- PostgreSQL 真实集成测试覆盖连接、索引、生成后的执行和断连。
+
+### 8.2 产品指标
+
+- 执行正确率，而不是仅语法正确率。
+- 用户接受或少量修改后执行的比例。
+- Verified Query 被复用后带来的准确率提升。
+- 第三方产品完成嵌入所需时间。
+- 团队环境中的审批、审计和私有化转化率。
+
+## 9. 商业化方向
+
+- **Community**：本地单用户、BYOK、基础 SDK/API/CLI/MCP。
+- **Team**：共享语义知识、Verified SQL、评测、RBAC、审计和集中 Secret。
+- **Enterprise**：私有化、高可用、SSO、国产数据库适配、自定义策略和 SLA。
+- **OEM / Embedded**：供软件厂商嵌入，按环境、实例、并发或年度授权收费。
+- **Managed LLM**：作为可选增值服务，不作为主要产品壁垒。
+
+详见 [10-usage-and-subscription.md](./10-usage-and-subscription.md)。
+
+## 10. 路线图
+
+| 阶段 | 目标 | 主要交付 |
 |---|---|---|
-| MVP（开发期） | 闭源桌面端 + Free/Pro 订阅 | DeepSeek 默认、PG 支持、基础 Agent、注册登录骨架 |
-| v1.0 | 个人版 + 团队版 | 多数据库、MCP Market、Skill 系统、设备管理 |
-| v2.0 | 企业版 | 私有化部署、SSO、审计、本地 LLM、自定义合规 |
+| H0 | 路线重构 | 产品文档、公共边界、MVP 验收 |
+| H1 | 可试用 MVP | SDK Runtime、REST、CLI、极简 WebUI、PG 只读闭环 |
+| H2 | 可嵌入 Beta | MCP Server、Verified Query、评测报告、持久化运行记录 |
+| H3 | 运维 Agent | EXPLAIN、慢 SQL、锁、会话和受控 Runbook |
+| H4 | 团队与商业化 | RBAC、审计、团队知识、私有化与 OEM |
 
-### 7.3 技术决策对商业的硬要求
-
-- 私有化部署 → LLM Provider 必须可插拔
-- 企业合规 → 数据不出本机（对应 BYOK 模式）
-- 团队协作 → Skill / RAG 训练数据可导出/共享
-- 订阅计费 → **从 M1 起就要有用量记录 + 注册登录骨架**（避免后期重构）
-
----
-
-## 8. 项目里程碑
-
-| 里程碑 | 范围 | 验收标准 |
-|---|---|---|
-| **M0：设计完成** | 5 份设计文档 | 当前阶段 |
-| **M1：可连可查** | DB 连接 + 手动 SQL 执行 + 结果展示 | 端到端能跑 PG |
-| **M2：RAG 上线** | Schema 提取 + 向量化 + 检索 | 能基于 RAG 生成 SQL |
-| **M3：Agent 上线** | ReAct loop + 询问执行 + Tool 调用 | 三大 demo 场景跑通 |
-| **M4：MCP 集成** | MCP Client + 公共 Market 对接 | 能挂载用户 MCP server |
-| **M5：Beta 发布** | 打包 + 安装包 + 基础订阅 | 邀请 50 个内测用户 |
-
-> 每个里程碑采用**垂直切片**方式，端到端可跑可 demo。
-
----
-
-## 9. 文档维护规则
-
-- 所有设计变更需更新对应文档并标注版本
-- 重大架构决策记录在 `docs/adr/` 目录（待建）
-- 每次里程碑发版前 review 一次文档与实现的偏差
+当前只以 H1 为开发目标，不得用 H2-H4 的需求扩大 MVP。

@@ -1,6 +1,6 @@
 # 打包策略
 
-DBAgent 是桌面端产品，因此依赖选择必须服务于稳定、可验证的 Electron 打包。
+DBAgent 当前有 Headless npm 包和历史 Electron 桌面包两条交付路径。依赖选择必须服务于稳定、可验证、可独立启动的发布物。
 
 ## 基本规则
 
@@ -10,6 +10,7 @@ DBAgent 是桌面端产品，因此依赖选择必须服务于稳定、可验证
 - 原生模块隔离在 package 边界内，让打包问题局部化。
 - RAG embedding、MCP server、Python runtime、模型服务和大型索引后续必须 lazy load。
 - 以打包后的 Electron 应用作为发布物。Vite、Vitest 或 renderer 浏览器里能跑，不代表最终应用能启动。
+- Headless MVP 以标准 npm tarball 作为发布物；试用者只需要 Node.js 自带的 npm/npx，不需要 pnpm、workspace 或源码。
 
 ## 当前运行时依赖
 
@@ -36,6 +37,25 @@ DBAgent 是桌面端产品，因此依赖选择必须服务于稳定、可验证
 - 密码存储当前使用 Electron `safeStorage`；发布 QA 必须分别验证 Windows、macOS、Linux 上的加密可用性和 fallback 行为。
 - CSV 导出这类 renderer-only 功能优先使用浏览器原生能力，除非未来格式确实需要运行时依赖。
 - 工作区恢复状态是 Electron `userData` 下的小 JSON 文件，不能进入 ASAR；安装/卸载 QA 应把它视作用户数据。
+
+## Headless npm 包
+
+执行：
+
+```bash
+pnpm package:mvp:npm
+```
+
+会先构建 `@dbagent/server`，再把 Server、SDK、数据库驱动和极简 WebUI bundle 为单个 Node ESM 可执行文件，最终在 `release/HeadlessMVP-v<version>/` 生成：
+
+- `DBAgent-Headless-MVP-v<version>.tgz`：标准 npm tarball。
+- `SHA256SUMS.txt`：下载校验值。
+
+仓库内的构建包继续使用 `@dbagent/server`，对外 npm 包名固定为 `@nwlworkshop/dbagent`，CLI 命令为 `dbagent`。两者分离可以避免为了发布名称改动 workspace 依赖关系。
+
+tarball 只允许包含 bundle、`package.json`、试用说明和第三方运行时许可证。不得包含 `.env`、源码、source map、测试、fixture、workspace symlink、数据库服务器、模型服务器或构建工具。包要求 Node.js 20.11 或更高版本，启动命令为 `npx --yes ./DBAgent-Headless-MVP-v<version>.tgz`。
+
+构建使用 `esbuild` 0.25.x（MIT）作为开发依赖，将 workspace 运行时代码和 `pg` 依赖封装为一个跨平台 ESM 文件；它不会进入用户的运行时依赖树。相比发布带 `workspace:*` 的原始包或复制整套 `node_modules`，单文件 bundle 避免 pnpm symlink、平台路径和安装期联网问题。替代方案包括逐包发布、npm workspaces 重写和 `@vercel/ncc`，但对当前三人团队的 MVP 增加了版本协调或额外工具成本。发布前仍需在仓库外解包并启动，检查 `/health` 和首页。
 
 ## 打包命令
 
@@ -85,5 +105,7 @@ Windows 上曾通过 `pnpm package` 生成 `apps/desktop/release/DBAgent Setup 0
 - 安装包：由 `pnpm package` 生成的 NSIS 安装程序。
 - 解压包：由 `apps/desktop/release/win-unpacked` 压缩得到，用户可解压后直接运行 `DBAgent.exe`。
 - 校验文件：`SHA256SUMS.txt`，记录安装包和解压包的 SHA256。
+
+Headless MVP 可独立发布 npm tarball 和对应校验文件，不受构建机操作系统限制。正式发布到 npm registry 前必须确认 `NWLworkshop` 账号拥有 `@nwlworkshop` scope 的发布权限、版本号正确，并明确选择公开或受限发布；本地 tarball 或 GitHub Release 附件不需要 registry 登录。
 
 发布资产放在 `release/<version>/` 下，并上传到同名 GitHub Release。完整流程见 [发布流程](./release-process.md)。

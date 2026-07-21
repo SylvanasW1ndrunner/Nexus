@@ -2,6 +2,8 @@
 
 > 文档版本：v0.1
 > 关联：[03-agent-design.md](./03-agent-design.md), [06-classic-features.md](./06-classic-features.md), [08-workspace-design.md](./08-workspace-design.md)
+>
+> **路线校准（2026-07-21）**：恢复能力现在同时约束 SDK Runtime、HTTP Server、CLI/MCP adapter 和可选 Desktop。H1 优先保证连接失败、模型超时/取消、非法响应、SQL 阻断、查询失败和进程重启后的明确降级；复杂会话、Plan、Workspace 和桌面布局恢复沿用现有实现但不阻塞 MVP。
 
 ---
 

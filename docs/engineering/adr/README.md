@@ -24,3 +24,6 @@ NNNN-short-title.md
 - 影响
 - 测试和回滚
 
+## 已接受决策
+
+- [ADR-0001：产品主线调整为 Headless Runtime / SDK-first](./0001-headless-sdk-first.md)

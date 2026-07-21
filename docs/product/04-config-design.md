@@ -2,6 +2,8 @@
 
 > 文档版本：v0.1
 > 关联：[00-overview.md](./00-overview.md), [03-agent-design.md](./03-agent-design.md)
+>
+> **路线校准（2026-07-21）**：配置边界从 Electron IPC-first 调整为 Runtime/Server-first。H1 的模型和数据库 Secret 仅保存在本地 Server 进程内存中，WebUI 不回显、不落盘；环境变量由 Server 装配层读取。OS Keychain、团队 Secret、配置同步和完整设置 UI 均延后。
 
 ---
 

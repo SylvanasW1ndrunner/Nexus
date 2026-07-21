@@ -2,6 +2,8 @@
 
 > 文档版本：v0.1
 > 关联：[00-overview.md](./00-overview.md)
+>
+> **路线校准（2026-07-21）**：本文作为 Headless Runtime 的 Schema Context 技术参考继续有效。当前 MVP 只使用已有 Catalog 抽取、内存词法/关系索引和 Context Builder；向量库、Embedding、渐进持久化和复杂评测进入 H2，不得阻塞 [11-headless-mvp.md](./11-headless-mvp.md)。
 
 ---
 

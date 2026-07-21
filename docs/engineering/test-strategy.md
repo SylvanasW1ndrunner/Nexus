@@ -99,6 +99,25 @@ pnpm db:down
 
 ## PostgreSQL 集成验证
 
+### Headless Runtime MVP 增量（2026-07-21）
+
+- `packages/sdk/test/parse-generation.test.ts` 覆盖模型 JSON、code fence、原始 SQL 和无效输出。
+- `packages/sdk/test/runtime.test.ts` 覆盖 fake Provider + fake Driver 的连接、索引、生成、显式执行、run 状态和副作用 SQL 阻断。
+- `packages/sdk/test/postgres.integration.test.ts` 已进入 `pnpm test:postgres`，覆盖真实 Catalog、Schema RAG 证据、数据库只读会话和有限行数执行。
+- `apps/server/test/server.test.ts` 覆盖 WebUI、REST 完整闭环、Secret 脱敏、错误响应、chunked JSON 和 loopback 地址限制。
+- `packages/core-db/test/sql-safety.test.ts` 额外覆盖 `SELECT INTO`、行锁子句、sequence/advisory/backend control 等副作用入口。
+
+真实模型与真实 PostgreSQL 组合门控默认关闭。准备好 `dbagent_core_db_test` 后可运行：
+
+```powershell
+$env:DBAGENT_RUN_SDK_MVP_LIVE='1'
+$env:TEST_SILICONFLOW_API_KEY='<本机临时密钥>'
+$env:TEST_SILICONFLOW_MODEL='deepseek-ai/DeepSeek-V4-Pro'
+pnpm test:postgres
+```
+
+该门控要求模型根据真实 `public.users` Schema 生成只读聚合 SQL，再由同一 Runtime 显式执行。API Key 只能通过环境变量注入，不写入仓库、报告或日志。
+
 本地 PostgreSQL fixture：
 
 ```bash

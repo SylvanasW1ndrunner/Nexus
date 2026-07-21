@@ -19,3 +19,7 @@ YYYY-MM-DD-<slice-name>-acceptance.md
 
 项目总工程师负责合并最终记录；开发者、架构师、测试三类 Agent 不应并行修改同一份切片记录。
 
+## 当前记录
+
+- [2026-07-21 Headless Runtime MVP](./2026-07-21-headless-runtime-mvp.md)
+- [2026-07-21 Headless Runtime MVP 验收](./2026-07-21-headless-runtime-mvp-acceptance.md)
