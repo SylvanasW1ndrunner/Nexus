@@ -26,21 +26,9 @@ export type LlmUsageInput = {
   totalTokens: number;
 };
 
-export type QuotaStatus = {
-  mode: UsageMode;
-  windowStartedAt: string;
-  windowEndsAt?: string;
-  roundsUsed: number;
-  roundLimit?: number;
-  remainingRounds?: number;
-  exceeded: boolean;
-  byokTokenEstimate: number;
-};
-
 export type UsageTrackerOptions = {
   now?: () => Date;
   createRoundId?: () => string;
-  subscriptionRoundLimit?: number;
   historyLimit?: number;
 };
 
@@ -55,7 +43,6 @@ const DEFAULT_HISTORY_LIMIT = 100;
 export class UsageTracker {
   private readonly now: () => Date;
   private readonly createRoundId: () => string;
-  private readonly subscriptionRoundLimit: number | undefined;
   private readonly historyLimit: number;
 
   constructor(
@@ -64,7 +51,6 @@ export class UsageTracker {
   ) {
     this.now = options.now ?? (() => new Date());
     this.createRoundId = options.createRoundId ?? (() => crypto.randomUUID());
-    this.subscriptionRoundLimit = options.subscriptionRoundLimit;
     this.historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
   }
 
@@ -81,22 +67,6 @@ export class UsageTracker {
   async roundHistory(limit = 30): Promise<UsageRoundRecord[]> {
     const state = await this.loadState();
     return state.rounds.slice(0, limit);
-  }
-
-  async getCurrentQuota(mode: UsageMode = 'byok'): Promise<QuotaStatus> {
-    const current = await this.currentForMode(mode);
-    const roundLimit = mode === 'subscription' ? this.subscriptionRoundLimit : undefined;
-    const remainingRounds = roundLimit === undefined ? undefined : Math.max(0, roundLimit - current.usedRounds);
-    return {
-      mode,
-      windowStartedAt: current.windowStartedAt,
-      ...(current.windowEndsAt === undefined ? {} : { windowEndsAt: current.windowEndsAt }),
-      roundsUsed: current.usedRounds,
-      ...(roundLimit === undefined ? {} : { roundLimit }),
-      ...(remainingRounds === undefined ? {} : { remainingRounds }),
-      exceeded: roundLimit !== undefined && current.usedRounds >= roundLimit,
-      byokTokenEstimate: current.byokTokenEstimate,
-    };
   }
 
   async startConversationRound(sessionId: string, mode: UsageMode): Promise<RoundContext> {
@@ -165,8 +135,12 @@ export class UsageTracker {
     const rounds = [...state.rounds];
     rounds[index] = endedRound;
 
-    const billable = status === 'success' || status === 'aborted';
-    const nextSnapshot = this.snapshotAfterRound(state.snapshots, round.mode, billable, endedRound.totalTokens);
+    const countCompletedRound = status === 'success' || status === 'aborted';
+    const nextSnapshot = this.snapshotAfterRound(state.snapshots, round.mode, countCompletedRound, {
+      promptTokens: endedRound.promptTokens,
+      completionTokens: endedRound.completionTokens,
+      totalTokens: endedRound.totalTokens,
+    });
     const snapshots = [nextSnapshot, ...state.snapshots].slice(0, this.historyLimit);
     await this.saveState({ ...state, rounds, snapshots });
     return nextSnapshot;
@@ -174,47 +148,45 @@ export class UsageTracker {
 
   async recordLocalQuery(): Promise<UsageSnapshot> {
     const state = await this.loadState();
-    const next = this.snapshotAfterRound(state.snapshots, 'byok', true, 0);
+    const next = this.snapshotAfterRound(state.snapshots, 'byok', true, {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    });
     const snapshots = [next, ...state.snapshots].slice(0, this.historyLimit);
     await this.saveState({ ...state, snapshots });
     return next;
   }
 
-  async recordByokTokens(tokenEstimate: number): Promise<UsageSnapshot> {
+  async recordTokens(mode: UsageMode, usage: LlmUsageInput): Promise<UsageSnapshot> {
     const state = await this.loadState();
-    const current = this.snapshotForMode(state.snapshots, 'byok');
+    const current = this.snapshotForMode(state.snapshots, mode);
     const next: UsageSnapshot = {
       ...current,
-      mode: 'byok',
-      byokTokenEstimate: current.byokTokenEstimate + Math.max(0, Math.trunc(tokenEstimate)),
+      mode,
+      promptTokens: current.promptTokens + normalizeTokens(usage.promptTokens),
+      completionTokens: current.completionTokens + normalizeTokens(usage.completionTokens),
+      totalTokens: current.totalTokens + normalizeTokens(usage.totalTokens),
     };
     const snapshots = [next, ...state.snapshots].slice(0, this.historyLimit);
     await this.saveState({ ...state, snapshots });
     return next;
   }
 
-  private async currentForMode(mode: UsageMode): Promise<UsageSnapshot> {
-    const state = await this.loadState();
-    return this.snapshotForMode(state.snapshots, mode);
-  }
-
   private snapshotAfterRound(
     snapshots: UsageSnapshot[],
     mode: UsageMode,
-    billable: boolean,
-    tokenEstimate: number,
+    countCompletedRound: boolean,
+    usage: LlmUsageInput,
   ): UsageSnapshot {
     const current = this.snapshotForMode(snapshots, mode);
-    const roundLimit = mode === 'subscription' ? this.subscriptionRoundLimit : current.roundLimit;
     return {
       ...current,
       mode,
-      usedRounds: current.usedRounds + (billable ? 1 : 0),
-      byokTokenEstimate:
-        mode === 'byok'
-          ? current.byokTokenEstimate + Math.max(0, Math.trunc(tokenEstimate))
-          : current.byokTokenEstimate,
-      ...(roundLimit === undefined ? {} : { roundLimit }),
+      completedRounds: current.completedRounds + (countCompletedRound ? 1 : 0),
+      promptTokens: current.promptTokens + normalizeTokens(usage.promptTokens),
+      completionTokens: current.completionTokens + normalizeTokens(usage.completionTokens),
+      totalTokens: current.totalTokens + normalizeTokens(usage.totalTokens),
     };
   }
 
@@ -223,13 +195,13 @@ export class UsageTracker {
   }
 
   private zeroSnapshot(mode: UsageMode): UsageSnapshot {
-    const roundLimit = mode === 'subscription' ? this.subscriptionRoundLimit : undefined;
     return {
       mode,
       windowStartedAt: this.now().toISOString(),
-      usedRounds: 0,
-      ...(roundLimit === undefined ? {} : { roundLimit }),
-      byokTokenEstimate: 0,
+      completedRounds: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
     };
   }
 
@@ -255,4 +227,8 @@ export class UsageTracker {
     await mkdir(dirname(this.historyPath), { recursive: true });
     await writeFile(this.historyPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
   }
+}
+
+function normalizeTokens(value: number): number {
+  return Math.max(0, Math.trunc(value));
 }

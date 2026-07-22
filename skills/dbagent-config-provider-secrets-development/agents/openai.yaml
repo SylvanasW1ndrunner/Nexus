@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent Config Provider Secrets Development"
-  short_description: "Build settings, providers, secrets, and IPC contracts."
-  default_prompt: "Use this skill to implement DBAgent configuration, provider, and secret-storage capabilities."

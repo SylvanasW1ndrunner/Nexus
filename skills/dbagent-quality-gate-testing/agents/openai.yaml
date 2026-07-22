@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent 质量与测试闸门"
-  short_description: "为 DBAgent 功能开发建立测试、文档和发布验收闸门"
-  default_prompt: "Use $dbagent-quality-gate-testing to validate a DBAgent backend feature before commit or release."

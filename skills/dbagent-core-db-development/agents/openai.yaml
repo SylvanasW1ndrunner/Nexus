@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent 核心数据库开发"
-  short_description: "开发连接、SQL 执行、事务、回滚与数据库驱动抽象"
-  default_prompt: "Use $dbagent-core-db-development to implement and test DBAgent core database driver and SQL execution capabilities."

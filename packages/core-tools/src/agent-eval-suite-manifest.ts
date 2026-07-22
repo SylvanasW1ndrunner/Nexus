@@ -81,7 +81,6 @@ const RUN_STATUSES = new Set([
   'max_iterations_reached',
   'permission_denied',
   'tool_failed',
-  'quota_exceeded',
 ] satisfies AgentRunStatus[]);
 
 const TOOL_STATUSES = new Set([
@@ -92,7 +91,7 @@ const TOOL_STATUSES = new Set([
 
 const AGENT_MODES = new Set(['ask', 'auto', 'full-auto', 'readonly'] satisfies AgentMode[]);
 
-const USAGE_MODES = new Set(['byok', 'subscription'] satisfies UsageMode[]);
+const USAGE_MODES = new Set(['byok', 'managed'] satisfies UsageMode[]);
 
 const FORBIDDEN_RUN_KEYS = new Set(['providerId', 'model', 'userMessage', 'signal']);
 

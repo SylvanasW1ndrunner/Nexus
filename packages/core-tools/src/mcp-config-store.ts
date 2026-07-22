@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 export type McpTransport = 'stdio' | 'sse' | 'streamable-http';
-export type McpServerSource = 'builtin' | 'user' | 'market';
+export type McpServerSource = 'builtin' | 'imported';
 export type McpEnvValue = string | { ref: string };
 
 export type McpServerConfig = {
@@ -19,7 +19,6 @@ export type McpServerConfig = {
   env?: Record<string, McpEnvValue> | undefined;
   description?: string | undefined;
   packageName?: string | undefined;
-  marketEntryId?: string | undefined;
   installedAt: string;
   updatedAt: string;
 };
@@ -37,7 +36,6 @@ export type McpServerInput = {
   env?: Record<string, McpEnvValue>;
   description?: string;
   packageName?: string;
-  marketEntryId?: string;
 };
 
 export type McpConfigFile = {
@@ -236,7 +234,6 @@ function normalizeServerBase(
     ...(isRecord(input.env) ? { env: normalizeEnv(input.env, id) } : {}),
     ...(typeof input.description === 'string' && input.description.trim() ? { description: input.description.trim() } : {}),
     ...(typeof input.packageName === 'string' && input.packageName.trim() ? { packageName: input.packageName.trim() } : {}),
-    ...(typeof input.marketEntryId === 'string' && input.marketEntryId.trim() ? { marketEntryId: input.marketEntryId.trim() } : {}),
     installedAt: installedAt ?? now,
     updatedAt: now,
   };
@@ -276,7 +273,6 @@ function mergeServerInput(
   assignDefined(merged, 'env', input.env ?? current?.env);
   assignDefined(merged, 'description', input.description ?? current?.description);
   assignDefined(merged, 'packageName', input.packageName ?? current?.packageName);
-  assignDefined(merged, 'marketEntryId', input.marketEntryId ?? current?.marketEntryId);
   assignDefined(merged, 'installedAt', current?.installedAt);
   return merged;
 }
@@ -320,8 +316,8 @@ function normalizeId(value: unknown): string {
 }
 
 function normalizeSource(value: unknown): McpServerSource {
-  if (value === 'builtin' || value === 'market') return value;
-  return 'user';
+  if (value === 'builtin') return value;
+  return 'imported';
 }
 
 function normalizeTransport(value: unknown): McpTransport {

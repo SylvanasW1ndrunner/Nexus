@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe('AgentCheckpointStore', () => {
-  it('persists and updates iteration checkpoints for recovery', async () => {
+  it('persists and updates current iteration checkpoints', async () => {
     const store = new AgentCheckpointStore(await checkpointPath());
     const session = testSession('session_recover');
 

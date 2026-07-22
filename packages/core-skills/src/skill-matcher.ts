@@ -8,27 +8,23 @@ import type {
   SkillMatchReason,
 } from './types.js';
 
-const DEFAULT_MIN_SCORE = 1;
-const KEYWORD_SCORE = 10;
-const SIGNAL_SCORE = 8;
-const NAME_SCORE = 6;
-const TITLE_SCORE = 6;
-const DESCRIPTION_SCORE = 4;
+const SCORES = { keyword: 10, signal: 8, name: 6, title: 6, description: 4 } as const;
 
-export function findMatchingSkills(skills: SkillDefinition[], options: SkillMatchOptions): SkillMatchCandidate[] {
+export function findMatchingSkills(
+  skills: SkillDefinition[],
+  options: SkillMatchOptions,
+): SkillMatchCandidate[] {
   const userInput = normalizeText(options.userInput);
   if (!userInput) return [];
-
   const availableTools = new Set(options.availableTools ?? []);
   const signals = new Set([
-    ...(options.signals ?? []).map(normalizeSignal),
-    ...((options.inferSignals ?? true) ? inferSkillSignals(options.userInput).map(normalizeSignal) : []),
+    ...(options.signals ?? []).map(normalizeText),
+    ...((options.inferSignals ?? true) ? inferSkillSignals(options.userInput) : []).map(normalizeText),
   ]);
-  const minScore = options.minScore ?? DEFAULT_MIN_SCORE;
 
   return skills
     .map((skill) => matchSkill(skill, userInput, availableTools, signals))
-    .filter((candidate) => candidate.score >= minScore)
+    .filter((candidate) => candidate.score >= (options.minScore ?? 1))
     .filter((candidate) => options.includeIneligible === true || candidate.eligible)
     .sort(compareCandidates)
     .slice(0, options.maxResults ?? Number.POSITIVE_INFINITY);
@@ -38,37 +34,22 @@ export function createAutoExecutionPlan(
   skills: SkillDefinition[],
   options: SkillMatchOptions,
 ): SkillAutoExecutionPlan | undefined {
-  const [candidate] = findMatchingSkills(skills, { ...options, maxResults: 1 });
-  if (!candidate) return undefined;
-  return {
-    candidate,
-    plan: createPlanFromCandidate(candidate, options.userInput),
-  };
+  const candidate = findMatchingSkills(skills, { ...options, maxResults: 1 })[0];
+  return candidate
+    ? { candidate, plan: createPlanFromCandidate(candidate, options.userInput) }
+    : undefined;
 }
 
 export function inferSkillSignals(userInput: string): SkillAutoInjectSignal[] {
   const text = normalizeText(userInput);
-  const signals = new Set<SkillAutoInjectSignal>();
-
-  if (containsAny(text, ['可视化', '图表', '画图', '趋势图', '折线图', '柱状图', 'plot', 'chart', 'visualize'])) {
-    signals.add('requires_visualization');
-  }
-  if (containsAny(text, ['python', '脚本', 'notebook', 'pandas', 'numpy', '机器学习', '建模', '预测', '聚类', '训练'])) {
-    signals.add('requires_python');
-  }
-  if (containsAny(text, ['机器学习', '建模', '预测', '聚类', '分类', '回归', '训练', 'model', 'forecast'])) {
-    signals.add('requires_modeling');
-  }
-  if (containsAny(text, ['流水线', '多步骤', 'etl', 'pipeline', '清洗', '特征工程', '自动化报告'])) {
-    signals.add('requires_multi_step_pipeline');
-  }
-  if (containsAny(text, ['schema 文档', '表结构文档', '数据字典', '字段说明', 'schema documentation'])) {
-    signals.add('requires_schema_documentation');
-  }
-  if (containsAny(text, ['sql 优化', 'explain', '慢查询', '为什么慢', '优化查询', 'query plan'])) {
-    signals.add('requires_sql_optimization');
-  }
-
+  const signals = new Set<string>();
+  addSignal(signals, text, 'requires_nl2sql', ['sql', '查询', '查一下', '统计', '多少', 'natural language']);
+  addSignal(signals, text, 'requires_schema_context', ['schema', '表结构', '字段', '业务口径', '数据字典']);
+  addSignal(signals, text, 'requires_sql_explain', ['explain', '执行计划', 'sql 优化', '查询很慢']);
+  addSignal(signals, text, 'requires_health_check', ['健康检查', '数据库健康', 'health check']);
+  addSignal(signals, text, 'requires_slow_query_diagnosis', ['慢查询', 'slow query', 'pg_stat_statements']);
+  addSignal(signals, text, 'requires_lock_diagnosis', ['锁等待', '死锁', '阻塞', 'blocked query', 'lock']);
+  addSignal(signals, text, 'requires_long_transaction_diagnosis', ['长事务', 'long transaction', 'idle in transaction']);
   return [...signals];
 }
 
@@ -80,48 +61,51 @@ function matchSkill(
 ): SkillMatchCandidate {
   const reasons: SkillMatchReason[] = [];
   for (const keyword of skill.naturalLanguageKeywords) {
-    const normalized = normalizeText(keyword);
-    if (normalized && userInput.includes(normalized)) {
-      reasons.push({ type: 'keyword', value: keyword, score: KEYWORD_SCORE });
+    if (userInput.includes(normalizeText(keyword))) {
+      reasons.push({ type: 'keyword', value: keyword, score: SCORES.keyword });
     }
   }
-
   for (const signal of skill.autoInjectWhen) {
-    const normalized = normalizeSignal(signal);
-    if (signals.has(normalized)) {
-      reasons.push({ type: 'auto_inject_signal', value: signal, score: SIGNAL_SCORE });
+    if (signals.has(normalizeText(signal))) {
+      reasons.push({ type: 'auto_inject_signal', value: signal, score: SCORES.signal });
     }
   }
-
   if (userInput.includes(normalizeText(skill.name))) {
-    reasons.push({ type: 'name', value: skill.name, score: NAME_SCORE });
+    reasons.push({ type: 'name', value: skill.name, score: SCORES.name });
   }
   if (skill.title && userInput.includes(normalizeText(skill.title))) {
-    reasons.push({ type: 'title', value: skill.title, score: TITLE_SCORE });
+    reasons.push({ type: 'title', value: skill.title, score: SCORES.title });
   }
-  if (skill.description && containsMeaningfulToken(userInput, skill.description)) {
-    reasons.push({ type: 'description', value: skill.description, score: DESCRIPTION_SCORE });
+  if (descriptionMatches(userInput, skill.description)) {
+    reasons.push({ type: 'description', value: skill.description, score: SCORES.description });
   }
 
-  const available = skill.allowedTools.filter((tool) => availableTools.size === 0 || availableTools.has(tool));
-  const missing = availableTools.size === 0 ? [] : skill.allowedTools.filter((tool) => !availableTools.has(tool));
-
+  const checkAvailability = availableTools.size > 0;
+  const available = skill.allowedTools.filter((tool) => !checkAvailability || availableTools.has(tool));
+  const missing = checkAvailability
+    ? skill.allowedTools.filter((tool) => !availableTools.has(tool))
+    : [];
   return {
     skill,
-    score: reasons.reduce((total, reason) => total + reason.score, 0),
+    score: reasons.reduce((sum, reason) => sum + reason.score, 0),
     reasons,
-    matchedSignals: skill.autoInjectWhen.filter((signal) => signals.has(normalizeSignal(signal))),
+    matchedSignals: skill.autoInjectWhen.filter((signal) => signals.has(normalizeText(signal))),
     availableTools: available,
     missingTools: missing,
     eligible: missing.length === 0,
   };
 }
 
-function createPlanFromCandidate(candidate: SkillMatchCandidate, userInput: string): SkillExecutionPlan {
+function createPlanFromCandidate(
+  candidate: SkillMatchCandidate,
+  userInput: string,
+): SkillExecutionPlan {
   return {
     skill: candidate.skill,
     userInput: renderDefaults(userInput, candidate.skill.defaults),
-    ...(candidate.skill.systemAddition ? { systemAddition: candidate.skill.systemAddition } : {}),
+    ...(candidate.skill.systemAddition
+      ? { systemAddition: candidate.skill.systemAddition }
+      : {}),
     allowedTools: candidate.availableTools,
     steps: candidate.skill.steps,
     outputFormat: candidate.skill.outputFormat,
@@ -131,32 +115,33 @@ function createPlanFromCandidate(candidate: SkillMatchCandidate, userInput: stri
 function compareCandidates(left: SkillMatchCandidate, right: SkillMatchCandidate): number {
   if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
   if (right.score !== left.score) return right.score - left.score;
-  if (right.availableTools.length !== left.availableTools.length) {
-    return right.availableTools.length - left.availableTools.length;
-  }
   return left.skill.name.localeCompare(right.skill.name);
 }
 
-function containsMeaningfulToken(userInput: string, value: string): boolean {
-  return normalizeText(value)
+function addSignal(
+  signals: Set<string>,
+  text: string,
+  signal: string,
+  keywords: string[],
+): void {
+  if (keywords.some((keyword) => text.includes(normalizeText(keyword)))) signals.add(signal);
+}
+
+function descriptionMatches(userInput: string, description: string): boolean {
+  return normalizeText(description)
     .split(/\s+/)
     .filter((token) => token.length >= 3)
     .some((token) => userInput.includes(token));
 }
 
-function containsAny(text: string, candidates: string[]): boolean {
-  return candidates.some((candidate) => text.includes(normalizeText(candidate)));
-}
-
 function normalizeText(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ');
+  return value.trim().toLocaleLowerCase().replace(/\s+/g, ' ');
 }
 
-function normalizeSignal(signal: string): string {
-  return signal.trim().toLowerCase();
-}
-
-function renderDefaults(input: string, defaults: Record<string, string | number | boolean>): string {
+function renderDefaults(
+  input: string,
+  defaults: Record<string, string | number | boolean>,
+): string {
   return input.replace(/\{([A-Za-z0-9_]+)\}/g, (match, key: string) =>
     defaults[key] === undefined ? match : String(defaults[key]),
   );

@@ -212,8 +212,8 @@ async function handleRequest(
 
 function defaultProviderFactory(input: LlmSetupInput): LlmProvider {
   return new OpenAICompatibleProvider({
-    id: 'mvp-openai-compatible',
-    name: 'MVP OpenAI-compatible',
+    id: 'default-openai-compatible',
+    name: 'OpenAI-compatible',
     apiKey: input.apiKey,
     baseUrl: input.baseUrl,
   });
@@ -387,7 +387,7 @@ function assertLoopbackHost(host: string): void {
   if (normalized !== '127.0.0.1' && normalized !== '::1' && normalized !== 'localhost') {
     throw new DatabaseAgentError(
       'INVALID_INPUT',
-      'MVP Server 只允许监听 127.0.0.1、::1 或 localhost。',
+      'DBAgent Server 只允许监听 127.0.0.1、::1 或 localhost。',
       false,
     );
   }

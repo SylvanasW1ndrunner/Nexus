@@ -15,7 +15,6 @@ export type DiagnosticReportInput = {
     platform: string;
     arch: string;
     nodeVersion?: string;
-    electronVersion?: string;
   };
   configs?: DiagnosticTextEntry[];
   logs?: DiagnosticTextEntry[];

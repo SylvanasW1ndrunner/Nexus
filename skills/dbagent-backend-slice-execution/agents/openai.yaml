@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent 后端切片执行"
-  short_description: "按产品文档执行后端优先的功能切片开发"
-  default_prompt: "Use $dbagent-backend-slice-execution to implement the next DBAgent backend feature slice without rebuilding renderer UI."

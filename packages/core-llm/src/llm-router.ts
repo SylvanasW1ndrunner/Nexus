@@ -1,12 +1,11 @@
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
 import type { LlmChatRequest, LlmChatResponse, LlmChatStreamEvent, LlmProvider } from './types.js';
 
-export type LlmRouteMode = 'byok' | 'subscription';
+export type LlmRouteMode = 'byok' | 'managed';
 
 export type LlmRouteDecision = {
   mode: LlmRouteMode;
   endpointDescription: string;
-  requiresLogin: boolean;
 };
 
 export type LlmChatOptions = {
@@ -27,17 +26,15 @@ export class LlmRouter {
 
   async decide(mode: LlmRouteMode): Promise<LlmRouteDecision> {
     await this.usageTracker.current();
-    if (mode === 'subscription') {
+    if (mode === 'managed') {
       return {
         mode,
-        endpointDescription: 'DBAgent Gateway',
-        requiresLogin: true,
+        endpointDescription: 'Organization-managed OpenAI-compatible endpoint',
       };
     }
     return {
       mode,
       endpointDescription: 'User configured OpenAI-compatible endpoint',
-      requiresLogin: false,
     };
   }
 
@@ -54,8 +51,8 @@ export class LlmRouter {
     const response = await provider.chat(request);
     if (response.usage && options.round) {
       await this.usageTracker.recordLlmCall(options.round, response.usage);
-    } else if (response.usage?.totalTokens) {
-      await this.usageTracker.recordByokTokens(response.usage.totalTokens);
+    } else if (response.usage) {
+      await this.usageTracker.recordTokens('byok', response.usage);
     }
     return response;
   }
@@ -89,8 +86,8 @@ export class LlmRouter {
 
     if (finalResponse?.usage && options.round) {
       await this.usageTracker.recordLlmCall(options.round, finalResponse.usage);
-    } else if (finalResponse?.usage?.totalTokens) {
-      await this.usageTracker.recordByokTokens(finalResponse.usage.totalTokens);
+    } else if (finalResponse?.usage) {
+      await this.usageTracker.recordTokens('byok', finalResponse.usage);
     }
   }
 }

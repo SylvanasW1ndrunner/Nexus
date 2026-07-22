@@ -19,7 +19,7 @@ export function analyzeSqlPerformance(sql: string): SqlPerformanceWarning[] {
     warnings.push({
       code: 'MISSING_LIMIT',
       severity: 'warning',
-      message: 'Query has no LIMIT; exploratory reads should cap rows before loading results into the desktop app.',
+      message: 'Query has no LIMIT; exploratory reads should cap rows before returning data to an API or client.',
     });
   }
 

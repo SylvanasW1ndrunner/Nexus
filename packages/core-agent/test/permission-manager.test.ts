@@ -87,4 +87,27 @@ describe('PermissionManager', () => {
     });
     expect(approved).toEqual({ decision: 'allow', source: 'approval-provider' });
   });
+
+  it('preserves structured approval provenance from the provider', async () => {
+    const approved = await new PermissionManager(() => ({
+      approved: true,
+      requestId: 'approval_1',
+      approvedAt: '2026-07-10T01:00:00.000Z',
+      approvedBy: 'tester',
+      reason: '业务确认',
+    })).checkDetailed({
+      mode: 'ask',
+      tool: { name: 'execute_sql', description: '', inputSchema: { type: 'object' }, dangerLevel: 'high' },
+      toolCall: { id: 'call_approved', name: 'execute_sql', arguments: {} },
+    });
+
+    expect(approved).toEqual({
+      decision: 'allow',
+      source: 'approval-provider',
+      approvalRequestId: 'approval_1',
+      approvedAt: '2026-07-10T01:00:00.000Z',
+      approvedBy: 'tester',
+      reason: '业务确认',
+    });
+  });
 });

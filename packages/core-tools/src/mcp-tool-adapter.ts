@@ -6,7 +6,7 @@ import {
   type McpToolTimeoutOptions,
 } from './mcp-health.js';
 
-export type McpToolSource = 'user-mcp' | 'market-mcp';
+export type McpToolSource = 'user-mcp';
 
 export type McpToolAnnotations = {
   readOnlyHint?: boolean;
@@ -111,6 +111,7 @@ export function inferMcpToolRisk(
   tool: Pick<McpToolSpec, 'name' | 'description' | 'annotations'>,
   source: McpToolSource,
 ): { dangerLevel: ToolDangerLevel; readonly: boolean } {
+  void source;
   const text = `${tool.name} ${tool.description ?? ''}`.toLowerCase().replace(/[_-]+/g, ' ');
 
   if (tool.annotations?.destructiveHint) return { dangerLevel: 'high', readonly: false };
@@ -128,9 +129,7 @@ export function inferMcpToolRisk(
     return { dangerLevel: 'safe', readonly: true };
   }
 
-  return source === 'market-mcp'
-    ? { dangerLevel: 'high', readonly: false }
-    : { dangerLevel: 'medium', readonly: false };
+  return { dangerLevel: 'medium', readonly: false };
 }
 
 export function namespacedToolName(serverId: string, toolName: string): string {

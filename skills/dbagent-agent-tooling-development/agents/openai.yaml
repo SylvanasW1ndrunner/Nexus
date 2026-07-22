@@ -1,6 +1,0 @@
-interface:
-  display_name: "DBAgent Agent 工具开发"
-  short_description: "实现 Agent 运行时、工具注册和权限边界"
-  default_prompt: "Use $dbagent-agent-tooling-development to implement an Agent runtime or tool capability for DBAgent."
-policy:
-  allow_implicit_invocation: true

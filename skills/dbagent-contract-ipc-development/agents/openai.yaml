@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent 合同与 IPC 开发"
-  short_description: "设计 typed contracts、IPC、preload 和服务边界"
-  default_prompt: "Use $dbagent-contract-ipc-development to add or change typed contracts and IPC boundaries for DBAgent backend capabilities."

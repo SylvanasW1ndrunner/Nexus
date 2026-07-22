@@ -53,7 +53,7 @@ describe('McpConfigStore', () => {
       name: 'Company Tools',
       source: 'user',
       transport: 'stdio',
-      command: 'python',
+      command: 'node',
       args: ['-m', 'company_mcp.server'],
       env: {
         ENCRYPT_KEY: { ref: 'mcp:company-tools:env:ENCRYPT_KEY' },
@@ -66,7 +66,7 @@ describe('McpConfigStore', () => {
       id: 'company-tools',
       name: 'Company Tools',
       transport: 'stdio',
-      command: 'python',
+      command: 'node',
       args: ['-m', 'company_mcp.server'],
       autoStart: true,
       enabled: true,
@@ -183,7 +183,7 @@ describe('McpConfigStore', () => {
     await store.upsert({
       id: 'company-tools',
       name: 'Company Tools',
-      command: 'python',
+      command: 'node',
       env: {
         ENCRYPT_KEY: { ref: 'mcp:company-tools:env:ENCRYPT_KEY' },
       },
@@ -197,7 +197,7 @@ describe('McpConfigStore', () => {
     await store.upsert({
       id: 'company-tools',
       name: 'Company Tools',
-      command: 'python',
+      command: 'node',
       env: {
         ENCRYPT_KEY: { ref: 'mcp:company-tools:env:ENCRYPT_KEY' },
       },

@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent 文档差距审计"
-  short_description: "对照产品文档审计后端实现缺口"
-  default_prompt: "Use $dbagent-doc-gap-audit to audit docs/product against current backend implementation and produce the next actionable gap list."

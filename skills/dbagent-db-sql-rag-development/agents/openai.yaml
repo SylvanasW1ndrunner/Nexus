@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent 数据库与 RAG 开发"
-  short_description: "开发数据库、SQL 执行、Schema RAG 与性能能力"
-  default_prompt: "Use $dbagent-db-sql-rag-development to implement DBAgent database, SQL, and Schema RAG features."

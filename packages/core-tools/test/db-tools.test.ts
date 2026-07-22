@@ -213,7 +213,7 @@ describe('registerDatabaseTools', () => {
     });
   });
 
-  it('exposes local SQL history as a readonly Agent tool for recovery', async () => {
+  it('exposes local SQL history as a readonly Agent tool for incident analysis', async () => {
     const registry = new ToolRegistry();
     const driver = fakeDriver();
     const historyCalls: unknown[] = [];

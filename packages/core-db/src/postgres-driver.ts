@@ -24,7 +24,7 @@ import {
   classifyPostgresConnectionError,
   classifyPostgresRuntimeError,
 } from './postgres-errors.js';
-import { splitSqlStatements } from './sql-editor-statements.js';
+import { splitSqlStatements } from './sql-statements.js';
 import { analyzeSqlSafety, stripSqlComments } from './sql-safety.js';
 import type {
   DatabaseConnectionConfig,

@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent 功能切片设计"
-  short_description: "先定义后端功能切片合同与验收"
-  default_prompt: "Use $dbagent-slice-design to turn a docs/product requirement into a backend-only implementation slice with contracts and acceptance criteria."

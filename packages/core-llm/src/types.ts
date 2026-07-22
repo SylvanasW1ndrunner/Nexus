@@ -1,4 +1,4 @@
-export type LlmProviderMode = 'byok' | 'subscription';
+export type LlmProviderMode = 'byok' | 'managed';
 
 export type LlmMessageRole = 'system' | 'user' | 'assistant' | 'tool';
 

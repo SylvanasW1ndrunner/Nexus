@@ -361,8 +361,8 @@ function formatObservedToolDetail(
 
 function formatSuiteSource(source: AgentBehaviorEvaluationReportInput['suiteSource']): string {
   if (source === undefined) return 'manual';
-  if (source.kind === 'official') return `official:${source.pluginId ?? 'unknown'}`;
-  if (source.kind === 'workspace') return `workspace:${source.relativePath ?? 'unknown'}`;
+  if (source.kind === 'builtin') return `builtin:${source.skillName ?? 'runtime'}`;
+  if (source.kind === 'imported') return `imported:${source.path ?? 'unknown'}`;
   return source.kind;
 }
 

@@ -53,9 +53,9 @@ describe('MCP tool adapter', () => {
     });
   });
 
-  it('uses conservative defaults for unknown market tools and dangerous names', () => {
-    expect(inferMcpToolRisk({ name: 'summarize', description: 'custom action' }, 'market-mcp')).toEqual({
-      dangerLevel: 'high',
+  it('uses conservative defaults for unknown imported tools and dangerous names', () => {
+    expect(inferMcpToolRisk({ name: 'summarize', description: 'custom action' }, 'user-mcp')).toEqual({
+      dangerLevel: 'medium',
       readonly: false,
     });
     expect(inferMcpToolRisk({ name: 'delete_records', description: 'Delete rows' }, 'user-mcp')).toEqual({
@@ -69,7 +69,10 @@ describe('MCP tool adapter', () => {
   });
 
   it('keeps long names within provider limits and resolves collisions deterministically', () => {
-    const longName = namespacedToolName('very long server name that comes from smithery marketplace', 'read customer table');
+    const longName = namespacedToolName(
+      'very long imported database operations server name for enterprise environments',
+      'read customer table with extended metadata',
+    );
 
     expect(longName.length).toBeLessThanOrEqual(64);
     expect(longName).toMatch(/__[a-f0-9]{8}$/);

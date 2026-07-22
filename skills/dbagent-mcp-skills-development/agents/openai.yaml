@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent MCP and Skills"
+  short_description: "Build MCP and importable Skills"
+  default_prompt: "Use $dbagent-mcp-skills-development to implement DBAgent MCP or Skill support."

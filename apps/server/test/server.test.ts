@@ -33,7 +33,7 @@ describe('DBAgent local server', () => {
 
     const page = await fetch(started.url);
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain('DBAgent Headless MVP');
+    expect(await page.text()).toContain('<h1>DBAgent</h1>');
 
     const health = await getJson(started.url, '/health');
     expect(health).toMatchObject({ status: 'ok', service: 'dbagent-server' });
@@ -116,7 +116,7 @@ describe('DBAgent local server', () => {
     expect(await unknown.json()).toMatchObject({ error: { code: 'NOT_FOUND' } });
   });
 
-  it('refuses non-loopback listening addresses in the MVP', async () => {
+  it('refuses non-loopback listening addresses', async () => {
     await expect(startDatabaseAgentServer({ host: '0.0.0.0', port: 0 })).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     });

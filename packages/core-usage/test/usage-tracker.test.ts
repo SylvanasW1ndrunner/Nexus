@@ -23,8 +23,8 @@ describe('UsageTracker', () => {
 
     expect(current).toMatchObject({
       mode: 'byok',
-      usedRounds: 0,
-      byokTokenEstimate: 0,
+      completedRounds: 0,
+      totalTokens: 0,
     });
     expect(Date.parse(current.windowStartedAt)).not.toBeNaN();
   });
@@ -60,18 +60,26 @@ describe('UsageTracker', () => {
     expect(history.at(-1)).toEqual(snapshot(2));
   });
 
-  it('records BYOK token estimates without incrementing conversation rounds', async () => {
+  it('records provider token usage without incrementing conversation rounds', async () => {
     const path = await historyPath();
     await saveHistory(path, [snapshot(5)]);
 
     const tracker = new UsageTracker(path);
-    await expect(tracker.recordByokTokens(37.8)).resolves.toEqual({
+    await expect(
+      tracker.recordTokens('byok', { promptTokens: 30.8, completionTokens: 7.9, totalTokens: 37.8 }),
+    ).resolves.toEqual({
       ...snapshot(5),
-      byokTokenEstimate: 37,
+      promptTokens: 30,
+      completionTokens: 7,
+      totalTokens: 37,
     });
-    await expect(tracker.recordByokTokens(-10)).resolves.toEqual({
+    await expect(
+      tracker.recordTokens('byok', { promptTokens: -1, completionTokens: -2, totalTokens: -10 }),
+    ).resolves.toEqual({
       ...snapshot(5),
-      byokTokenEstimate: 37,
+      promptTokens: 30,
+      completionTokens: 7,
+      totalTokens: 37,
     });
   });
 
@@ -84,8 +92,10 @@ describe('UsageTracker', () => {
     await tracker.recordLlmCall(round, { promptTokens: 20, completionTokens: 8, totalTokens: 28 });
     await expect(tracker.endConversationRound(round, 'success')).resolves.toMatchObject({
       mode: 'byok',
-      usedRounds: 1,
-      byokTokenEstimate: 43,
+      completedRounds: 1,
+      promptTokens: 30,
+      completionTokens: 13,
+      totalTokens: 43,
     });
 
     await expect(tracker.roundHistory()).resolves.toMatchObject([
@@ -101,7 +111,7 @@ describe('UsageTracker', () => {
     ]);
   });
 
-  it('counts user-aborted rounds but does not count system-failed rounds', async () => {
+  it('counts completed and user-aborted rounds but not system-failed rounds', async () => {
     const path = await historyPath();
     const tracker = new UsageTracker(path, fixedUsageOptions());
 
@@ -111,7 +121,7 @@ describe('UsageTracker', () => {
     await tracker.endConversationRound(failed, 'failed', 'provider timeout');
 
     await expect(tracker.current()).resolves.toMatchObject({
-      usedRounds: 1,
+      completedRounds: 1,
     });
     await expect(tracker.roundHistory()).resolves.toMatchObject([
       { sessionId: 'session_failed', status: 'failed', errorMessage: 'provider timeout' },
@@ -119,37 +129,16 @@ describe('UsageTracker', () => {
     ]);
   });
 
-  it('reports subscription quota status from completed billable rounds', async () => {
-    const path = await historyPath();
-    const tracker = new UsageTracker(path, { ...fixedUsageOptions(), subscriptionRoundLimit: 1 });
-
-    await expect(tracker.getCurrentQuota('subscription')).resolves.toMatchObject({
-      mode: 'subscription',
-      roundsUsed: 0,
-      roundLimit: 1,
-      remainingRounds: 1,
-      exceeded: false,
-    });
-
-    const round = await tracker.startConversationRound('session_subscription', 'subscription');
-    await tracker.endConversationRound(round, 'success');
-
-    await expect(tracker.getCurrentQuota('subscription')).resolves.toMatchObject({
-      mode: 'subscription',
-      roundsUsed: 1,
-      roundLimit: 1,
-      remainingRounds: 0,
-      exceeded: true,
-    });
-  });
 });
 
-function snapshot(usedRounds: number): UsageSnapshot {
+function snapshot(completedRounds: number): UsageSnapshot {
   return {
     mode: 'byok',
     windowStartedAt: '2026-06-08T00:00:00.000Z',
-    usedRounds,
-    byokTokenEstimate: 0,
+    completedRounds,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
   };
 }
 

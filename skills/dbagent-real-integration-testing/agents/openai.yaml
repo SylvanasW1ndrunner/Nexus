@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent 真实集成测试"
-  short_description: "为 PostgreSQL、进程、LLM 门控等真实依赖设计测试"
-  default_prompt: "Use $dbagent-real-integration-testing to validate DBAgent functionality against real dependencies and user workflows."

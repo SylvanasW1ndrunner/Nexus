@@ -1,7 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
-import { extname, join } from 'node:path';
-import { parseSkillDefinition } from './skill-parser.js';
+import { dirname, extname, join } from 'node:path';
 import { createAutoExecutionPlan, findMatchingSkills } from './skill-matcher.js';
+import { parseSkillDefinition, parseSkillDocument } from './skill-parser.js';
 import type {
   SkillAutoExecutionPlan,
   SkillDefinition,
@@ -19,6 +19,10 @@ export class SkillRegistry {
     this.skills.set(skill.name, skill);
   }
 
+  unregister(name: string): boolean {
+    return this.skills.delete(name);
+  }
+
   get(name: string): SkillDefinition | undefined {
     return this.skills.get(name);
   }
@@ -28,12 +32,15 @@ export class SkillRegistry {
   }
 
   filterToolsForSkill(skillName: string, availableTools: string[]): string[] {
-    const skill = this.requireSkill(skillName);
     const available = new Set(availableTools);
-    return skill.allowedTools.filter((tool) => available.has(tool));
+    return this.requireSkill(skillName).allowedTools.filter((tool) => available.has(tool));
   }
 
-  createExecutionPlan(skillName: string, userInput: string, availableTools: string[]): SkillExecutionPlan {
+  createExecutionPlan(
+    skillName: string,
+    userInput: string,
+    availableTools: string[],
+  ): SkillExecutionPlan {
     const skill = this.requireSkill(skillName);
     return {
       skill,
@@ -65,31 +72,58 @@ export async function loadSkillsFromDirectories(
 ): Promise<SkillLoadResult> {
   const registry = new SkillRegistry();
   const errors: SkillLoadResult['errors'] = [];
-
   for (const directory of directories) {
-    let entries: string[];
-    try {
-      entries = await readdir(directory.path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
-    }
-
-    for (const entry of entries.sort()) {
-      if (!['.yaml', '.yml', '.json'].includes(extname(entry))) continue;
-      const path = join(directory.path, entry);
+    const candidates = await discoverSkillFiles(directory.path);
+    for (const path of candidates) {
       try {
-        registry.register(parseSkillDefinition(await readFile(path, 'utf8'), directory.source, path));
+        const content = await readFile(path, 'utf8');
+        registry.register(
+          path.endsWith('SKILL.md')
+            ? parseSkillDocument(content, directory.source, path, dirname(path))
+            : parseSkillDefinition(content, directory.source, path),
+        );
       } catch (error) {
         errors.push({ path, message: error instanceof Error ? error.message : String(error) });
       }
     }
   }
-
   return { skills: registry.list(), errors };
 }
 
-function renderDefaults(input: string, defaults: Record<string, string | number | boolean>): string {
+async function discoverSkillFiles(root: string): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+
+  const candidates: string[] = [];
+  if (entries.some((entry) => entry.isFile() && entry.name === 'SKILL.md')) {
+    candidates.push(join(root, 'SKILL.md'));
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && ['.yaml', '.yml', '.json'].includes(extname(entry.name))) {
+      candidates.push(join(root, entry.name));
+    }
+    if (entry.isDirectory()) {
+      const bundle = join(root, entry.name, 'SKILL.md');
+      try {
+        await readFile(bundle, 'utf8');
+        candidates.push(bundle);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+  }
+  return candidates.sort((left, right) => left.localeCompare(right));
+}
+
+function renderDefaults(
+  input: string,
+  defaults: Record<string, string | number | boolean>,
+): string {
   return input.replace(/\{([A-Za-z0-9_]+)\}/g, (match, key: string) =>
     defaults[key] === undefined ? match : String(defaults[key]),
   );

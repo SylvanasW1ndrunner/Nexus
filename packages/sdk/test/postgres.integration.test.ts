@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { DatabaseAgentRuntime } from '../src/index.js';
 
 const runPostgresTests = process.env.DBAGENT_RUN_POSTGRES_TESTS === '1';
-const runLiveMvp = process.env.DBAGENT_RUN_SDK_MVP_LIVE === '1';
+const runLiveModel = process.env.DBAGENT_RUN_SDK_LIVE === '1';
 
 describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL integration', () => {
   it('indexes the real catalog and executes an explicitly approved generated query', async () => {
@@ -64,7 +64,7 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL integra
   });
 });
 
-describe.skipIf(!runLiveMvp)('DatabaseAgentRuntime live model + PostgreSQL integration', () => {
+describe.skipIf(!runLiveModel)('DatabaseAgentRuntime live model + PostgreSQL integration', () => {
   it('uses a real OpenAI-compatible model to generate and execute a schema-grounded query', async () => {
     const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
     expect(apiKey, '需要 TEST_SILICONFLOW_API_KEY 或 DBAGENT_LLM_API_KEY').toBeTruthy();
@@ -73,8 +73,8 @@ describe.skipIf(!runLiveMvp)('DatabaseAgentRuntime live model + PostgreSQL integ
       process.env.DBAGENT_LLM_MODEL ??
       'deepseek-ai/DeepSeek-V4-Pro';
     const provider = new OpenAICompatibleProvider({
-      id: 'sdk-mvp-live',
-      name: 'SDK MVP live provider',
+      id: 'sdk-live',
+      name: 'SDK live provider',
       apiKey: apiKey!,
       baseUrl: process.env.DBAGENT_LLM_BASE_URL ?? 'https://api.siliconflow.cn/v1',
       timeoutMs: 120_000,
@@ -83,7 +83,7 @@ describe.skipIf(!runLiveMvp)('DatabaseAgentRuntime live model + PostgreSQL integ
     const runtime = new DatabaseAgentRuntime({ provider, model });
 
     await runtime.connect({
-      name: 'SDK MVP live PostgreSQL',
+      name: 'SDK live PostgreSQL',
       host: process.env.DBAGENT_TEST_PG_HOST ?? '127.0.0.1',
       port: Number(process.env.DBAGENT_TEST_PG_PORT ?? 5432),
       database: process.env.DBAGENT_TEST_PG_DATABASE ?? 'dbagent_core_db_test',

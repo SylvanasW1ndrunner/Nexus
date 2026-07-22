@@ -1,6 +1,6 @@
 import type { QuerySafetyReport } from '@dbagent/shared';
 import { analyzeSqlPerformance } from './sql-performance.js';
-import { splitSqlStatements } from './sql-editor-statements.js';
+import { splitSqlStatements } from './sql-statements.js';
 
 const dangerousKinds = new Set(['DROP', 'TRUNCATE', 'ALTER', 'CREATE']);
 const writeKinds = new Set(['INSERT', 'UPDATE', 'DELETE', 'MERGE', 'CALL']);

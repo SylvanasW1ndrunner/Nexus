@@ -12,23 +12,21 @@ afterEach(async () => {
 });
 
 describe('LlmRouter', () => {
-  it('keeps BYOK mode login-free', async () => {
+  it('routes BYOK mode to a user-configured endpoint', async () => {
     const router = new LlmRouter(new UsageTracker(await usagePath()));
 
     await expect(router.decide('byok')).resolves.toEqual({
       mode: 'byok',
       endpointDescription: 'User configured OpenAI-compatible endpoint',
-      requiresLogin: false,
     });
   });
 
-  it('routes subscription mode through the gateway contract', async () => {
+  it('routes managed mode to an organization endpoint', async () => {
     const router = new LlmRouter(new UsageTracker(await usagePath()));
 
-    await expect(router.decide('subscription')).resolves.toEqual({
-      mode: 'subscription',
-      endpointDescription: 'DBAgent Gateway',
-      requiresLogin: true,
+    await expect(router.decide('managed')).resolves.toEqual({
+      mode: 'managed',
+      endpointDescription: 'Organization-managed OpenAI-compatible endpoint',
     });
   });
 
@@ -44,7 +42,9 @@ describe('LlmRouter', () => {
     expect(response.text).toBe('ok');
     await expect(tracker.current()).resolves.toMatchObject({
       mode: 'byok',
-      byokTokenEstimate: 37,
+      promptTokens: 36,
+      completionTokens: 1,
+      totalTokens: 37,
     });
   });
 
@@ -67,8 +67,8 @@ describe('LlmRouter', () => {
     await tracker.endConversationRound(round, 'success');
 
     await expect(tracker.current()).resolves.toMatchObject({
-      usedRounds: 1,
-      byokTokenEstimate: 37,
+      completedRounds: 1,
+      totalTokens: 37,
     });
     await expect(tracker.roundHistory()).resolves.toMatchObject([
       {
@@ -101,8 +101,8 @@ describe('LlmRouter', () => {
     await tracker.endConversationRound(round, 'failed', 'provider timeout');
 
     await expect(tracker.current()).resolves.toMatchObject({
-      usedRounds: 0,
-      byokTokenEstimate: 0,
+      completedRounds: 0,
+      totalTokens: 0,
     });
   });
 
@@ -132,8 +132,8 @@ describe('LlmRouter', () => {
       { type: 'finish', response: { text: 'hello' } },
     ]);
     await expect(tracker.current()).resolves.toMatchObject({
-      usedRounds: 1,
-      byokTokenEstimate: 6,
+      completedRounds: 1,
+      totalTokens: 6,
     });
   });
 
@@ -153,7 +153,7 @@ describe('LlmRouter', () => {
       { type: 'usage', usage: { totalTokens: 9 } },
       { type: 'finish', response: { text: 'ok' } },
     ]);
-    await expect(tracker.current()).resolves.toMatchObject({ byokTokenEstimate: 9 });
+    await expect(tracker.current()).resolves.toMatchObject({ totalTokens: 9 });
   });
 
   it('fails clearly when provider is missing', async () => {

@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent Schema RAG 开发"
-  short_description: "开发结构化 Schema 检索、索引、图扩展与上下文构建"
-  default_prompt: "Use $dbagent-schema-rag-development to implement DBAgent Schema RAG extraction, indexing, retrieval, and context-building features."

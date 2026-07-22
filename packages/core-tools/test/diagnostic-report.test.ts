@@ -14,7 +14,6 @@ describe('diagnostic report', () => {
         platform: 'win32',
         arch: 'x64',
         nodeVersion: '24.14.0',
-        electronVersion: '33.0.0',
       },
       configs: [
         {

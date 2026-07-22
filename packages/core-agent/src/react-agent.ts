@@ -24,6 +24,8 @@ import type {
   AgentRunOptions,
   AgentRunResult,
   AgentToolContext,
+  AgentToolApproval,
+  AgentToolApprovalRecord,
   AgentToolExecutionRecord,
   AgentToolHandler,
   AgentContextCompressionReport,
@@ -104,21 +106,6 @@ export class ReactAgent {
     const toolExecutions: AgentToolExecutionRecord[] = [];
     const contextCompression: AgentContextCompressionReport[] = [];
     let finalText = '';
-
-    if (usageMode === 'subscription') {
-      const quota = await this.usageTracker.getCurrentQuota('subscription');
-      if (quota.exceeded) {
-        await finishRunAudit('quota_exceeded', 0, 'Usage quota exceeded.');
-        return {
-          status: 'quota_exceeded',
-          session,
-          finalText: 'Usage quota exceeded.',
-          iterations: 0,
-          toolExecutions: [],
-          contextCompression,
-        };
-      }
-    }
 
     const safety = assessAgentTaskSafety(options.userMessage, options.taskSafety);
     if (safety.blocked) {
@@ -369,6 +356,9 @@ export class ReactAgent {
             mode: session.mode,
             tool,
             toolCall,
+            sessionId: session.id,
+            sessionTitle: session.title,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
 
           if (permission.decision !== 'allow') {
@@ -416,21 +406,26 @@ export class ReactAgent {
             continue;
           }
 
+          const approval =
+            permission.source === 'approval-provider'
+              ? ({
+                  granted: true,
+                  source: permission.source,
+                  toolCallId: toolCall.id,
+                  toolName: tool.name,
+                  approvedAt: permission.approvedAt ?? this.now(),
+                  ...(permission.approvalRequestId === undefined ? {} : { requestId: permission.approvalRequestId }),
+                  ...(permission.approvedBy === undefined ? {} : { approvedBy: permission.approvedBy }),
+                  ...(permission.reason === undefined ? {} : { reason: permission.reason }),
+                } satisfies AgentToolApproval)
+              : undefined;
+          const approvalMetadata = approvalRecord(approval);
+
           try {
             const context = {
               session,
               ...(options.signal === undefined ? {} : { signal: options.signal }),
-              ...(permission.source === 'approval-provider'
-                ? {
-                    approval: {
-                      granted: true,
-                      source: permission.source,
-                      toolCallId: toolCall.id,
-                      toolName: tool.name,
-                      approvedAt: this.now(),
-                    } as const,
-                  }
-                : {}),
+              ...(approval === undefined ? {} : { approval }),
             };
             const result = await executeToolWithTimeout(
               tool.name,
@@ -447,6 +442,7 @@ export class ReactAgent {
                 failure: { failureKind: 'output_safety', retryable: true },
                 blocked: true,
                 redactionReasons: safeResult.reasons,
+                ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
               });
               toolExecutions.push(record);
               await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -487,6 +483,7 @@ export class ReactAgent {
               outputSafety: options.outputSafety,
               redacted: safeResult.redacted,
               redactionReasons: safeResult.reasons,
+              ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
             });
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -514,7 +511,11 @@ export class ReactAgent {
               startedAt,
               toolCall.arguments,
               message,
-              { failure: classifyAgentToolFailure(message), outputSafety: options.outputSafety },
+              {
+                failure: classifyAgentToolFailure(message),
+                outputSafety: options.outputSafety,
+                ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
+              },
             );
             toolExecutions.push(record);
             await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
@@ -705,6 +706,7 @@ function executionRecord(
     ...(metadata.redactionReasons && metadata.redactionReasons.length > 0
       ? { redactionReasons: metadata.redactionReasons }
       : {}),
+    ...(metadata.approval === undefined ? {} : { approval: metadata.approval }),
   };
 }
 
@@ -714,7 +716,19 @@ type ExecutionRecordMetadata = {
   redacted?: boolean;
   blocked?: boolean;
   redactionReasons?: AgentOutputRedactionReason[];
+  approval?: AgentToolApprovalRecord;
 };
+
+function approvalRecord(approval: AgentToolApproval | undefined): AgentToolApprovalRecord | undefined {
+  if (!approval) return undefined;
+  return {
+    source: approval.source,
+    ...(approval.requestId === undefined ? {} : { requestId: approval.requestId }),
+    approvedAt: approval.approvedAt,
+    ...(approval.approvedBy === undefined ? {} : { approvedBy: approval.approvedBy }),
+    ...(approval.reason === undefined ? {} : { reason: approval.reason }),
+  };
+}
 
 function toolFinishedAuditEvent(
   sessionId: string,
@@ -737,6 +751,7 @@ function toolFinishedAuditEvent(
     ...(record.redacted === undefined ? {} : { redacted: record.redacted }),
     ...(record.blocked === undefined ? {} : { blocked: record.blocked }),
     ...(record.redactionReasons === undefined ? {} : { redactionReasons: record.redactionReasons }),
+    ...(record.approval === undefined ? {} : { approval: record.approval }),
   };
 }
 

@@ -76,6 +76,7 @@ export type AgentAuditEvent =
       redacted?: boolean;
       blocked?: boolean;
       redactionReasons?: AgentToolExecutionRecord['redactionReasons'];
+      approval?: AgentToolExecutionRecord['approval'];
     }
   | {
       type: 'run_finished';

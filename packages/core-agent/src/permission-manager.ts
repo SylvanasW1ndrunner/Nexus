@@ -1,6 +1,7 @@
 import type {
   AgentMode,
   ApprovalProvider,
+  ApprovalProviderResult,
   PermissionRequest,
   ToolPermissionDecision,
 } from './types.js';
@@ -10,6 +11,10 @@ export type PermissionCheckSource = 'automatic' | 'approval-provider' | 'missing
 export type PermissionCheckResult = {
   decision: ToolPermissionDecision;
   source: PermissionCheckSource;
+  approvalRequestId?: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  reason?: string;
 };
 
 export class PermissionManager {
@@ -23,11 +28,27 @@ export class PermissionManager {
     const automatic = decideAutomaticPermission(request.mode, request.tool);
     if (automatic !== 'ask') return { decision: automatic, source: 'automatic' };
     if (!this.approvalProvider) return { decision: 'ask', source: 'missing-approval-provider' };
+    const approval = normalizeApprovalProviderResult(await this.approvalProvider(request));
     return {
-      decision: (await this.approvalProvider(request)) ? 'allow' : 'deny',
+      decision: approval.approved ? 'allow' : 'deny',
       source: 'approval-provider',
+      ...(approval.requestId === undefined ? {} : { approvalRequestId: approval.requestId }),
+      ...(approval.approvedAt === undefined ? {} : { approvedAt: approval.approvedAt }),
+      ...(approval.approvedBy === undefined ? {} : { approvedBy: approval.approvedBy }),
+      ...(approval.reason === undefined ? {} : { reason: approval.reason }),
     };
   }
+}
+
+function normalizeApprovalProviderResult(result: ApprovalProviderResult): {
+  approved: boolean;
+  requestId?: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  reason?: string;
+} {
+  if (typeof result === 'boolean') return { approved: result };
+  return result;
 }
 
 export function decideAutomaticPermission(

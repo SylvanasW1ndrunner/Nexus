@@ -1,9 +1,12 @@
-export type SkillSource = 'builtin' | 'user' | 'workspace';
+export type SkillSource = 'builtin' | 'imported' | 'organization';
 
 export type SkillDefinition = {
   name: string;
   title?: string;
   description: string;
+  version?: string;
+  author?: string;
+  tags: string[];
   systemAddition?: string;
   allowedTools: string[];
   defaults: Record<string, string | number | boolean>;
@@ -13,6 +16,7 @@ export type SkillDefinition = {
   autoInjectWhen: string[];
   source: SkillSource;
   sourcePath?: string;
+  bundleRoot?: string;
 };
 
 export type SkillLoadResult = {

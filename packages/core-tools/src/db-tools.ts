@@ -176,7 +176,7 @@ export function registerDatabaseTools(dependencies: DbToolDependencies): void {
       {
         name: 'read_query_history',
         description:
-          'Read local SQL execution history for recovery, rerun planning, and incident investigation. This does not execute SQL.',
+          'Read local SQL execution history for rerun planning and incident investigation. This does not execute SQL.',
         inputSchema: objectSchema({
           connectionId: { type: 'string' },
           searchText: { type: 'string' },

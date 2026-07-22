@@ -6,12 +6,13 @@ const root = process.cwd();
 const required = [
   'package.json',
   'pnpm-workspace.yaml',
-  'apps/desktop/package.json',
-  'packages/shared/src/ipc.ts',
+  'apps/server/package.json',
+  'packages/sdk/src/runtime.ts',
+  'packages/shared/src/runtime-contracts.ts',
   'packages/core-db/src/sql-safety.ts',
-  'docs/product/README.md',
-  'docs/engineering/interfaces.md',
-  'docs/engineering/test-strategy.md',
+  'packages/core-skills/src/skill-registry.ts',
+  'packages/core-tools/src/mcp-runtime-manager.ts',
+  'docs/product-functional-overview.md',
 ];
 
 for (const path of required) {
@@ -23,9 +24,9 @@ for (const keyword of ['DELETE', 'DROP', 'TRUNCATE', 'readOnly']) {
   assert.ok(sqlSafety.includes(keyword), `sql safety should mention ${keyword}`);
 }
 
-const ipc = readFileSync(join(root, 'packages/shared/src/ipc.ts'), 'utf8');
-for (const channel of ['connection:test', 'connection:create', 'db:execute-query', 'usage:history']) {
-  assert.ok(ipc.includes(channel), `ipc contract should include ${channel}`);
+const contracts = readFileSync(join(root, 'packages/shared/src/runtime-contracts.ts'), 'utf8');
+for (const contract of ['SavedConnection', 'QueryRequest', 'QueryExecutionResult', 'QuerySafetyReport']) {
+  assert.ok(contracts.includes(contract), `runtime contracts should include ${contract}`);
 }
 
 console.log('Smoke checks passed.');

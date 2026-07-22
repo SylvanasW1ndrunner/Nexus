@@ -173,7 +173,7 @@ describe('PostgresDriver runtime errors', () => {
     });
   });
 
-  it('limits returned rows and reports truncation metadata before results cross IPC boundaries', async () => {
+  it('limits returned rows and reports truncation metadata before results cross public API boundaries', async () => {
     const driver = new PostgresDriver();
     const pool = {
       connect() {

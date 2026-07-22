@@ -1,6 +1,0 @@
-interface:
-  display_name: "DBAgent 工作空间 Python 发布"
-  short_description: "实现工作空间、Python、终端、诊断和发布能力"
-  default_prompt: "Use $dbagent-workspace-python-release-development to implement workspace, Python, terminal, packaging, or release behavior."
-policy:
-  allow_implicit_invocation: true

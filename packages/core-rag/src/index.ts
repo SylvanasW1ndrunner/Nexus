@@ -6,5 +6,4 @@ export * from './schema-rag-snapshot-store.js';
 export * from './progressive-schema-rag-indexer.js';
 export * from './schema-catalog-indexer.js';
 export * from './retrieval-evaluation.js';
-export * from './er-diagram.js';
 export * from './types.js';

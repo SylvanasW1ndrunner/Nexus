@@ -2,17 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { parseAgentEvalSuiteManifest, parseAgentEvalSuiteManifestJson } from '../src/index.js';
 
 describe('Agent eval suite manifest parser', () => {
-  it('parses a workspace or official-plugin suite manifest into a runnable suite contract', () => {
+  it('parses an imported evaluation suite manifest into a runnable contract', () => {
     const suite = parseAgentEvalSuiteManifest({
       version: 1,
       suite: {
-        suiteId: 'agent-rag-workspace-eval',
-        suiteName: 'Agent/RAG 工作区验收',
+        suiteId: 'agent-rag-database-eval',
+        suiteName: 'Agent/RAG 导入清单验收',
         environment: 'postgres',
-        notes: ['从工作区 manifest 加载，不包含 provider、model 或 secret。'],
+        notes: ['从导入的 manifest 加载，不包含 provider、model 或 secret。'],
         cases: [
           {
-            id: 'WORKSPACE-EVAL-001',
+            id: 'DATABASE-EVAL-001',
             userTask: '按渠道统计 GMV 和 ROI。',
             expectedStatus: 'done',
             requiredToolCalls: ['search_schema', 'query_database'],
@@ -47,14 +47,14 @@ describe('Agent eval suite manifest parser', () => {
     });
 
     expect(suite).toMatchObject({
-      suiteId: 'agent-rag-workspace-eval',
-      suiteName: 'Agent/RAG 工作区验收',
+      suiteId: 'agent-rag-database-eval',
+      suiteName: 'Agent/RAG 导入清单验收',
       environment: 'postgres',
-      notes: ['从工作区 manifest 加载，不包含 provider、model 或 secret。'],
+      notes: ['从导入的 manifest 加载，不包含 provider、model 或 secret。'],
       cases: [
         {
           case: {
-            id: 'WORKSPACE-EVAL-001',
+            id: 'DATABASE-EVAL-001',
             userTask: '按渠道统计 GMV 和 ROI。',
             expectedStatus: 'done',
             requiredToolCalls: ['search_schema', 'query_database'],

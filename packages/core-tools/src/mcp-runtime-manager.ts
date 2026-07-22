@@ -71,7 +71,7 @@ export class McpRuntimeManager {
       const specs = await client.listTools();
       const registered = this.options.tools.registerServerTools({
         serverId: server.id,
-        source: server.source === 'market' ? 'market-mcp' : 'user-mcp',
+        source: 'user-mcp',
         tools: specs,
         health: this.options.health,
         callTool: ({ toolName, args, signal }) => client.callTool(toolName, args, signal),

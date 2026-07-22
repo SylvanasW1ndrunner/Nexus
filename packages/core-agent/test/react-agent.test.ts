@@ -12,6 +12,7 @@ import {
 import { UsageTracker } from '@dbagent/core-usage';
 import {
   AgentAuditLogStore,
+  AgentToolApprovalBroker,
   AgentCheckpointStore,
   AgentStreamStore,
   appendMessage,
@@ -77,8 +78,8 @@ describe('ReactAgent', () => {
     ]);
     expect(result.session.tokenUsage.totalTokens).toBe(43);
     await expect(usage.current()).resolves.toMatchObject({
-      usedRounds: 1,
-      byokTokenEstimate: 43,
+      completedRounds: 1,
+      totalTokens: 43,
     });
   });
 
@@ -505,7 +506,7 @@ describe('ReactAgent', () => {
     expect(result.toolExecutions).toEqual([]);
     expect(result.finalText).toContain('敏感个人信息');
     expect(calls).toEqual([]);
-    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0, byokTokenEstimate: 0 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0, totalTokens: 0 });
     await expect(auditLog.readAll()).resolves.toMatchObject([
       { type: 'run_started' },
       { type: 'run_finished', status: 'safety_blocked', iterations: 0 },
@@ -517,8 +518,8 @@ describe('ReactAgent', () => {
     const registry = new ToolRegistry();
     registry.register(
       {
-        name: 'write_workspace_file',
-        description: 'Write a workspace artifact',
+        name: 'execute_maintenance_action',
+        description: 'Execute a database maintenance action',
         inputSchema: { type: 'object' },
         dangerLevel: 'medium',
       },
@@ -533,7 +534,7 @@ describe('ReactAgent', () => {
         scriptedProvider([
           {
             text: '',
-            toolCalls: [{ id: 'call_file', name: 'write_workspace_file', arguments: { path: 'report.md' } }],
+            toolCalls: [{ id: 'call_action', name: 'execute_maintenance_action', arguments: { action: 'vacuum' } }],
           },
           {
             text: '需要用户批准后才能写入文件。',
@@ -563,6 +564,7 @@ describe('ReactAgent', () => {
 
   it('passes approval provenance to tools only after the approval provider allows execution', async () => {
     let approvalSeen: AgentToolApproval | undefined;
+    const auditLog = new AgentAuditLogStore(await auditPath());
     const registry = new ToolRegistry();
     registry.register(
       {
@@ -593,8 +595,14 @@ describe('ReactAgent', () => {
       ]),
       registry,
       usage,
-      () => true,
-      fixedDependencies(),
+      () => ({
+        approved: true,
+        requestId: 'approval_1',
+        approvedAt: '2026-07-10T01:00:00.000Z',
+        approvedBy: 'tester',
+        reason: '业务确认',
+      }),
+      { ...fixedDependencies(), auditLog },
     );
 
     const result = await agent.run({
@@ -611,6 +619,107 @@ describe('ReactAgent', () => {
       source: 'approval-provider',
       toolCallId: 'call_write',
       toolName: 'execute_sql',
+      requestId: 'approval_1',
+      approvedAt: '2026-07-10T01:00:00.000Z',
+      approvedBy: 'tester',
+    });
+    expect(result.toolExecutions[0]?.approval).toEqual({
+      source: 'approval-provider',
+      requestId: 'approval_1',
+      approvedAt: '2026-07-10T01:00:00.000Z',
+      approvedBy: 'tester',
+      reason: '业务确认',
+    });
+    const events = await auditLog.readAll();
+    expect(events.find((event) => event.type === 'tool_call_finished')).toMatchObject({
+      approval: { requestId: 'approval_1', approvedBy: 'tester' },
+    });
+  });
+
+  it('waits for a broker approval request before executing ask-mode tools', async () => {
+    let executed = false;
+    let approvalSeen: AgentToolApproval | undefined;
+    const broker = new AgentToolApprovalBroker({
+      now: sequenceNow([
+        '2026-07-10T01:00:00.000Z',
+        '2026-07-10T01:00:02.000Z',
+      ]),
+      createRequestId: () => 'approval_pending',
+      approvalTimeoutMs: 5_000,
+    });
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'execute_sql',
+        description: 'Execute SQL with possible writes',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+        readonly: false,
+      },
+      (_args, context) => {
+        executed = true;
+        approvalSeen = context.approval;
+        return { ok: true };
+      },
+    );
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'call_write',
+                name: 'execute_sql',
+                arguments: { sql: 'delete from orders', password: 'secret-pass' },
+              },
+            ],
+          },
+          {
+            text: '已执行。',
+            toolCalls: [],
+          },
+        ]),
+      ]),
+      registry,
+      usage,
+      broker.createProvider(),
+      fixedDependencies(),
+    );
+
+    const runPromise = agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '删除订单',
+      mode: 'ask',
+      maxIterations: 2,
+    });
+
+    await waitFor(() => broker.listPending().length === 1);
+    expect(executed).toBe(false);
+    expect(broker.listPending()[0]).toMatchObject({
+      id: 'approval_pending',
+      toolCallId: 'call_write',
+      toolName: 'execute_sql',
+    });
+    expect(typeof broker.listPending()[0]?.sessionId).toBe('string');
+    expect(broker.listPending()[0]?.argumentPreview).not.toContain('secret-pass');
+
+    broker.approve('approval_pending', { resolvedBy: 'tester', reason: '人工确认' });
+    const result = await runPromise;
+
+    expect(result.status).toBe('done');
+    expect(executed).toBe(true);
+    expect(approvalSeen).toMatchObject({
+      requestId: 'approval_pending',
+      approvedBy: 'tester',
+      reason: '人工确认',
+    });
+    expect(result.toolExecutions[0]?.approval).toMatchObject({
+      requestId: 'approval_pending',
+      approvedBy: 'tester',
+      reason: '人工确认',
     });
   });
 
@@ -796,7 +905,7 @@ describe('ReactAgent', () => {
         errorMessage: expect.stringContaining('工具 query_database 执行超时'),
       },
     ]);
-    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0 });
   });
 
   it('stops after repeated tool failures instead of wasting the full iteration budget', async () => {
@@ -865,7 +974,7 @@ describe('ReactAgent', () => {
       { iteration: 3, status: 'failed', errorMessage: expect.stringContaining('连续 3 次工具执行失败') },
     ]);
     await expect(checkpointStore.listRecoverable()).resolves.toEqual([]);
-    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0 });
     await expect(usage.roundHistory()).resolves.toMatchObject([
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       { sessionId: 'session_test', status: 'failed', errorMessage: expect.stringContaining('连续 3 次工具执行失败') },
@@ -989,7 +1098,7 @@ describe('ReactAgent', () => {
       text: '订单总数是 42。',
       chunks: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }],
     }]);
-    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 1, byokTokenEstimate: 16 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 1, totalTokens: 16 });
   });
 
   it('keeps partial model stream output recoverable when an Agent run fails mid-stream', async () => {
@@ -1020,7 +1129,7 @@ describe('ReactAgent', () => {
         errorMessage: 'stream network reset',
       },
     ]);
-    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0 });
     await expect(usage.roundHistory()).resolves.toMatchObject([{ status: 'failed' }]);
   });
 
@@ -1233,35 +1342,6 @@ describe('ReactAgent', () => {
     ]);
   });
 
-  it('stops subscription Agent runs before calling the model when quota is exhausted', async () => {
-    const usage = new UsageTracker(await usagePath(), { subscriptionRoundLimit: 0 });
-    const { provider, calls } = scriptedProviderWithCalls([
-      {
-        text: 'should not run',
-        toolCalls: [],
-      },
-    ]);
-    const agent = new ReactAgent(
-      new LlmRouter(usage, [provider]),
-      registryWithQueryTool(),
-      usage,
-      undefined,
-      fixedDependencies(),
-    );
-
-    const result = await agent.run({
-      providerId: 'fake',
-      model: 'fake-model',
-      userMessage: 'Run subscription task.',
-      mode: 'readonly',
-      usageMode: 'subscription',
-    });
-
-    expect(result.status).toBe('quota_exceeded');
-    expect(calls).toHaveLength(0);
-    await expect(usage.roundHistory()).resolves.toEqual([]);
-  });
-
   it('counts user-aborted Agent rounds without calling the model', async () => {
     const usage = new UsageTracker(await usagePath());
     const { provider, calls } = scriptedProviderWithCalls([
@@ -1289,11 +1369,11 @@ describe('ReactAgent', () => {
 
     expect(result.status).toBe('aborted');
     expect(calls).toHaveLength(0);
-    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 1 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 1 });
     await expect(usage.roundHistory()).resolves.toMatchObject([{ status: 'aborted' }]);
   });
 
-  it('does not count provider infrastructure failures as billable Agent rounds', async () => {
+  it('does not count provider infrastructure failures as completed Agent rounds', async () => {
     const usage = new UsageTracker(await usagePath());
     const agent = new ReactAgent(
       new LlmRouter(usage, [throwingProvider('provider timeout')]),
@@ -1312,7 +1392,7 @@ describe('ReactAgent', () => {
       }),
     ).rejects.toThrow('provider timeout');
 
-    await expect(usage.current()).resolves.toMatchObject({ usedRounds: 0 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0 });
     await expect(usage.roundHistory()).resolves.toMatchObject([
       { sessionId: 'session_test', status: 'failed', errorMessage: 'provider timeout' },
     ]);
@@ -1460,6 +1540,19 @@ function fixedDependencies() {
     now: () => '2026-06-17T00:00:00.000Z',
     createSessionId: () => 'session_test',
   };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error('Timed out waiting for condition.');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function sequenceNow(values: string[]): () => string {
+  let index = 0;
+  return () => values[Math.min(index++, values.length - 1)] ?? values[values.length - 1] ?? '';
 }
 
 function longRestoredSession() {

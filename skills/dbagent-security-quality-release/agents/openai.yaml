@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBAgent Security and Release"
+  short_description: "Validate security quality and releases"
+  default_prompt: "Use $dbagent-security-quality-release to review and release a DBAgent change safely."

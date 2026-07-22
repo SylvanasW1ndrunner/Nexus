@@ -7,7 +7,7 @@ import type { AgentStreamStore } from './stream-store.js';
 
 export type AgentMode = 'ask' | 'auto' | 'full-auto' | 'readonly';
 
-export type AgentStrategy = 'react' | 'plan-execute';
+export type AgentStrategy = 'react';
 
 export type AgentMessage =
   | { role: 'user'; content: string; createdAt: string }
@@ -37,8 +37,7 @@ export type AgentRunStatus =
   | 'max_iterations_reached'
   | 'permission_denied'
   | 'safety_blocked'
-  | 'tool_failed'
-  | 'quota_exceeded';
+  | 'tool_failed';
 
 export type AgentRunResult = {
   status: AgentRunStatus;
@@ -70,72 +69,6 @@ export type AgentRunOptions = {
   signal?: AbortSignal;
 };
 
-export type AgentPlanStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
-
-export type AgentPlanStep = {
-  id: string;
-  title: string;
-  instruction: string;
-  status: AgentPlanStepStatus;
-  dependsOn?: string[];
-  resultSummary?: string;
-  failureReason?: string;
-  runStatus?: AgentRunStatus;
-  iterations?: number;
-  toolExecutions?: AgentToolExecutionRecord[];
-};
-
-export type AgentPlan = {
-  id: string;
-  title: string;
-  goal: string;
-  createdAt: string;
-  steps: AgentPlanStep[];
-  plannerModelText: string;
-};
-
-export type AgentPlanExecutionStatus = 'done' | 'aborted' | 'failed' | 'planning_failed';
-
-export type AgentPlanExecuteOptions = AgentRunOptions & {
-  maxPlanSteps?: number;
-  stopOnStepFailure?: boolean;
-  initialPlan?: AgentPlan;
-  initialExecutedSteps?: number;
-  initialTotalIterations?: number;
-};
-
-export type AgentPlanExecuteResult = {
-  status: AgentPlanExecutionStatus;
-  plan: AgentPlan;
-  session?: AgentSession;
-  finalText: string;
-  executedSteps: number;
-  totalIterations: number;
-  toolExecutions: AgentToolExecutionRecord[];
-  contextCompression?: AgentContextCompressionReport[];
-};
-
-export type AgentPlanExecutionSnapshotStatus =
-  | AgentPlanExecutionStatus
-  | 'running'
-  | 'abandoned';
-
-export type AgentPlanExecutionSnapshot = {
-  planId: string;
-  status: AgentPlanExecutionSnapshotStatus;
-  plan: AgentPlan;
-  session?: AgentSession;
-  finalText: string;
-  executedSteps: number;
-  totalIterations: number;
-  toolExecutions: AgentToolExecutionRecord[];
-  contextCompression?: AgentContextCompressionReport[];
-  errorMessage?: string;
-  createdAt: string;
-  updatedAt: string;
-  finishedAt?: string;
-};
-
 export type AgentTaskSafetyPolicy =
   | false
   | {
@@ -162,12 +95,9 @@ export type ToolPermissionDecision = 'allow' | 'deny' | 'ask';
 export type AgentToolSource =
   | 'database'
   | 'schema-rag'
-  | 'workspace'
-  | 'workspace-script'
   | 'user-mcp'
-  | 'market-mcp'
   | 'skill'
-  | 'official'
+  | 'builtin'
   | 'unknown';
 
 export type AgentToolDefinition = LlmTool & {
@@ -184,6 +114,9 @@ export type AgentToolApproval = {
   toolCallId: string;
   toolName: string;
   approvedAt: string;
+  requestId?: string;
+  approvedBy?: string;
+  reason?: string;
 };
 
 export type AgentToolContext = {
@@ -213,6 +146,15 @@ export type AgentToolExecutionRecord = {
   redacted?: boolean;
   blocked?: boolean;
   redactionReasons?: AgentOutputRedactionReason[];
+  approval?: AgentToolApprovalRecord;
+};
+
+export type AgentToolApprovalRecord = {
+  source: 'approval-provider';
+  requestId?: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  reason?: string;
 };
 
 export type AgentOutputRedactionReason =
@@ -236,9 +178,24 @@ export type PermissionRequest = {
   mode: AgentMode;
   tool: AgentToolDefinition;
   toolCall: LlmToolCall;
+  sessionId?: string;
+  sessionTitle?: string;
+  signal?: AbortSignal;
 };
 
-export type ApprovalProvider = (request: PermissionRequest) => Promise<boolean> | boolean;
+export type ApprovalProviderResult =
+  | boolean
+  | {
+      approved: boolean;
+      requestId?: string;
+      approvedAt?: string;
+      approvedBy?: string;
+      reason?: string;
+    };
+
+export type ApprovalProvider = (
+  request: PermissionRequest,
+) => Promise<ApprovalProviderResult> | ApprovalProviderResult;
 
 export type AgentRunDependencies = {
   now?: () => string;
@@ -359,9 +316,9 @@ export type AgentBehaviorEvaluationReportInput = {
   generatedAt?: string;
   environment?: 'unit' | 'integration' | 'postgres' | 'llm-live' | 'manual';
   suiteSource?: {
-    kind: 'official' | 'workspace' | 'manual';
-    pluginId?: string;
-    relativePath?: string;
+    kind: 'builtin' | 'imported' | 'manual';
+    skillName?: string;
+    path?: string;
   };
   run?: {
     providerId?: string;

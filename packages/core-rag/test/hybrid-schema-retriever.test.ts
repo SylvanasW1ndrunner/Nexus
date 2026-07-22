@@ -107,7 +107,7 @@ describe('hybrid schema retriever', () => {
       glossary: [
         {
           term: 'GMV',
-          description: 'Traffic workspace should not expose commerce order revenue documents.',
+          description: 'Traffic catalog should not expose commerce order revenue documents.',
           documentIds: ['table:analytics.campaign_events'],
         },
       ],

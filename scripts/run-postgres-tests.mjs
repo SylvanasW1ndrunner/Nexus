@@ -19,16 +19,6 @@ await prepareDatabases();
 await runVitest('packages/core-db/test/postgres.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
-await runVitest('apps/desktop/src/main/query-workflow.postgres.integration.test.ts', {
-  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
-});
-await runVitest('packages/core-auth/test/postgres.integration.test.ts', {
-  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_auth_test',
-  DBAGENT_TEST_AUTH_DATABASE_URL: databaseUrl('dbagent_core_auth_test'),
-});
-await runVitest('packages/core-tools/test/agent-rag-business-scenario.test.ts', {
-  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_tools_test',
-});
 await runVitest('packages/sdk/test/postgres.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
@@ -46,7 +36,7 @@ async function assertPostgresReachable() {
     [
       `PostgreSQL test database is not reachable at ${host}:${port}.`,
       'Start the local fixture or set DBAGENT_TEST_PG_HOST / DBAGENT_TEST_PG_PORT / DBAGENT_TEST_PG_DATABASE / DBAGENT_TEST_PG_USER / DBAGENT_TEST_PG_PASSWORD.',
-      'Auth tests can also use DBAGENT_TEST_AUTH_DATABASE_URL for a dedicated account database.',
+      'The runner recreates only the dedicated dbagent_core_db_test database.',
     ].join('\n'),
   );
   process.exit(1);
@@ -71,7 +61,7 @@ function canOpenTcpConnection(host, port, timeoutMs) {
 }
 
 async function prepareDatabases() {
-  const databases = ['dbagent_core_db_test', 'dbagent_core_auth_test', 'dbagent_core_tools_test'];
+  const databases = ['dbagent_core_db_test'];
   const maintenance = new Client(connectionConfig(process.env.DBAGENT_TEST_PG_MAINTENANCE_DATABASE ?? 'postgres'));
   await maintenance.connect();
   try {
@@ -112,11 +102,6 @@ function connectionConfig(database) {
     user: process.env.DBAGENT_TEST_PG_USER ?? 'postgres',
     password: process.env.DBAGENT_TEST_PG_PASSWORD ?? 'postgres',
   };
-}
-
-function databaseUrl(database) {
-  const config = connectionConfig(database);
-  return `postgres://${encodeURIComponent(config.user)}:${encodeURIComponent(config.password)}@${config.host}:${config.port}/${database}`;
 }
 
 function runVitest(testFile, env) {

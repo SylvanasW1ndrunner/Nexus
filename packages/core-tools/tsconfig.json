@@ -12,8 +12,7 @@
     { "path": "../core-agent" },
     { "path": "../core-db" },
     { "path": "../core-rag" },
-    { "path": "../core-skills" },
-    { "path": "../core-workspace" }
+    { "path": "../core-skills" }
   ],
   "include": ["src/**/*.ts"]
 }

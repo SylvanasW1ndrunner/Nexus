@@ -341,7 +341,7 @@ describe('evaluateAgentBehavior', () => {
       suiteName: 'Agent/RAG 业务验收',
       generatedAt: '2026-06-29T00:00:00.000Z',
       environment: 'llm-live',
-      suiteSource: { kind: 'official', pluginId: 'official.agent-rag-eval' },
+      suiteSource: { kind: 'builtin', skillName: 'nl2sql_query' },
       run: {
         providerId: 'siliconflow',
         model: 'deepseek-ai/DeepSeek-V4-Pro',
@@ -365,7 +365,7 @@ describe('evaluateAgentBehavior', () => {
     ]);
     const combined = report.files.map((file) => file.content).join('\n');
     expect(combined).toContain('Agent/RAG 业务验收');
-    expect(combined).toContain('official.agent-rag-eval');
+    expect(combined).toContain('nl2sql_query');
     expect(combined).toContain('query_database');
     expect(combined).toContain('Tool Details');
     expect(combined).toContain('sk-[REDACTED]');
@@ -373,7 +373,7 @@ describe('evaluateAgentBehavior', () => {
     expect(combined).not.toContain(apiKey);
     expect(combined).not.toContain('tester:secret@');
     expect(report.files.every((file) => file.bytes > 0)).toBe(true);
-    expect(report.suiteSource).toEqual({ kind: 'official', pluginId: 'official.agent-rag-eval' });
+    expect(report.suiteSource).toEqual({ kind: 'builtin', skillName: 'nl2sql_query' });
   });
 
   it('redacts user data from evaluation report artifacts even when raw Agent results are passed in', () => {
