@@ -402,50 +402,6 @@ describe('OpenAICompatibleProvider', () => {
   });
 });
 
-describe('SiliconFlow live integration', () => {
-  const runLive = process.env.DBAGENT_RUN_LLM_INTEGRATION === '1';
-  const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
-  const model = process.env.TEST_SILICONFLOW_MODEL ?? 'deepseek-ai/DeepSeek-V4-Pro';
-
-  it.skipIf(!runLive || !apiKey)(
-    'calls DeepSeek-V4-Pro through the configured SiliconFlow API key',
-    async () => {
-      const provider = createSiliconFlowProvider({ apiKey: apiKey!, timeoutMs: 60_000 });
-
-      const response = await provider.chat({
-        model,
-        messages: [{ role: 'user', content: '只回答四个字：连接正常' }],
-        maxTokens: 16,
-        temperature: 0,
-      });
-
-      expect(response.text.length).toBeGreaterThan(0);
-      expect(response.usage?.totalTokens ?? 0).toBeGreaterThan(0);
-    },
-    90_000,
-  );
-
-  it.skipIf(!runLive || !apiKey)(
-    'streams DeepSeek-V4-Pro through the configured SiliconFlow API key',
-    async () => {
-      const provider = createSiliconFlowProvider({ apiKey: apiKey!, timeoutMs: 60_000 });
-
-      const events = await collect(
-        provider.stream({
-          model,
-          messages: [{ role: 'user', content: '只回答四个字：流式正常' }],
-          maxTokens: 16,
-          temperature: 0,
-        }),
-      );
-
-      expect(events.some((event) => event.type === 'text-delta')).toBe(true);
-      expect(events.at(-1)).toMatchObject({ type: 'finish' });
-    },
-    90_000,
-  );
-});
-
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,

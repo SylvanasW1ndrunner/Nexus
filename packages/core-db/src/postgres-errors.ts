@@ -72,6 +72,27 @@ export function classifyPostgresRuntimeError(error: unknown): AppError {
   const code = getErrorCode(error);
   const message = error instanceof Error ? error.message : String(error);
 
+  if (code === 'DBAGENT_QUERY_TIMEOUT') {
+    return {
+      code: 'QUERY_TIMEOUT',
+      message: 'PostgreSQL query exceeded its execution timeout.',
+      detail: getErrorDetail(error) ?? message,
+      retryable: false,
+    };
+  }
+
+  if (
+    (code === '57014' && /statement timeout/i.test(message)) ||
+    /query read timeout/i.test(message)
+  ) {
+    return {
+      code: 'QUERY_TIMEOUT',
+      message: 'PostgreSQL query exceeded its execution timeout.',
+      detail: message,
+      retryable: false,
+    };
+  }
+
   if (code && retryableNetworkCodes.has(code)) {
     return classifyPostgresConnectionError(error);
   }
@@ -101,4 +122,10 @@ function getErrorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
   const code = (error as { code?: unknown }).code;
   return typeof code === 'string' ? code : undefined;
+}
+
+function getErrorDetail(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('detail' in error)) return undefined;
+  const detail = (error as { detail?: unknown }).detail;
+  return typeof detail === 'string' ? detail : undefined;
 }

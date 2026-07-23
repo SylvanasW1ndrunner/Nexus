@@ -166,6 +166,94 @@ order by total_amount desc`,
     expect(runtime.schemaStatus().stage).toBe('not_connected');
     expect(runtime.getRun(run.runId)).toBeUndefined();
   });
+
+  it('closes legacy and unified database resources idempotently', async () => {
+    const driver = new FakeDatabaseDriver();
+    const runtime = createRuntime(
+      driver,
+      new FakeProvider('{"sql":"select 1","explanation":"probe","assumptions":[]}'),
+    );
+    await runtime.connect(connectionInput());
+
+    await runtime.close();
+    await runtime.close();
+
+    expect(runtime.status().connected).toBe(false);
+    expect(driver.disconnectCount).toBe(1);
+  });
+
+  it('exposes one product-wide resource runtime through SDK and database access', () => {
+    const runtime = createRuntime(
+      new FakeDatabaseDriver(),
+      new FakeProvider('{"sql":"select 1","explanation":"ok","assumptions":[]}'),
+    );
+    runtime.resources.upsertResource({
+      id: 'resource-sdk-test',
+      kind: 'database',
+      nativeId: 'analytics',
+      canonicalName: 'analytics',
+      engine: 'mock',
+      version: 1,
+      firstSeenAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+      sources: [
+        {
+          sourceId: 'sdk-test',
+          sourceType: 'manual',
+          observedAt: '2026-07-23T00:00:00.000Z',
+        },
+      ],
+    });
+
+    expect(runtime.resources).toBe(runtime.database.resources);
+    expect(runtime.resources.query({ kinds: ['database'] }).items).toEqual([
+      expect.objectContaining({ id: 'resource-sdk-test' }),
+    ]);
+    expect(runtime.resources.state('resource-sdk-test')).toMatchObject({
+      status: 'unknown',
+      freshness: 'unknown',
+      lifecycle: 'active',
+    });
+  });
+
+  it('builds the model catalog from metadata APIs without sending a chat request', async () => {
+    let chatCalls = 0;
+    const provider: LlmProvider = {
+      id: 'ollama',
+      name: 'Ollama',
+      mode: 'private',
+      capabilities: { chat: 'supported', streaming: 'supported', toolCalling: 'unknown' },
+      chat() {
+        chatCalls += 1;
+        return Promise.resolve({ text: 'unexpected', toolCalls: [] });
+      },
+      listModels() {
+        return Promise.resolve(['qwen2.5-coder:14b', 'embedding-model']);
+      },
+      getModelMetadata(model) {
+        return Promise.resolve({
+          model,
+          source: 'provider-api',
+          capabilities: { toolCalling: 'supported', reasoning: 'unsupported' },
+          contextTokens: 32_768,
+        });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({ provider, model: 'qwen2.5-coder:14b' });
+
+    const models = await runtime.discoverLlmModels();
+
+    expect(chatCalls).toBe(0);
+    expect(models).toHaveLength(2);
+    expect(models.find((item) => item.model === 'qwen2.5-coder:14b')).toMatchObject({
+      capabilities: { toolCalling: 'supported', reasoning: 'unsupported' },
+      limits: { contextTokens: 32_768 },
+      discovery: { source: 'provider-api' },
+    });
+  });
 });
 
 function createRuntime(driver: FakeDatabaseDriver, provider: LlmProvider): DatabaseAgentRuntime {
@@ -221,6 +309,7 @@ class FakeDatabaseDriver implements IDatabaseDriver {
   };
   lastConnectConfig?: DatabaseConnectionConfig;
   executedSql: string[] = [];
+  disconnectCount = 0;
   throwOnExecute?: Error;
   private connection?: SavedConnection;
 
@@ -247,6 +336,7 @@ class FakeDatabaseDriver implements IDatabaseDriver {
   }
 
   disconnect(): Promise<Result<void>> {
+    this.disconnectCount += 1;
     this.connection = undefined;
     return Promise.resolve(ok(undefined));
   }

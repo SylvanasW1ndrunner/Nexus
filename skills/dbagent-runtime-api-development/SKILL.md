@@ -12,6 +12,6 @@ description: Implement or refactor DBAgent Runtime, TypeScript SDK, REST API, CL
 5. Propagate request IDs, AbortSignal, timeouts, connection identity, permission context, and audit context.
 6. Never return Secrets from status/list endpoints.
 7. Add SDK and REST contract tests for the same scenario.
-8. Run type checks, relevant unit tests, server tests, smoke checks, and npm clean-install validation when packaging changes.
+8. Run type checks, relevant unit tests, real SDK/REST functional tests, applicable performance tests, and npm clean-install validation when packaging changes.
 
 Keep the WebUI intentionally simple and dependent only on public REST contracts.

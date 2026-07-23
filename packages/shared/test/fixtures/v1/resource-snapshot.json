@@ -1,0 +1,36 @@
+{
+  "contract": "dbagent.resource-registry.snapshot",
+  "version": "1.0",
+  "payload": {
+    "contractVersion": "1.0",
+    "createdAt": "2026-07-23T00:00:00.000Z",
+    "resources": [
+      {
+        "id": "resource-database",
+        "kind": "database",
+        "nativeId": "analytics",
+        "canonicalName": "analytics",
+        "engine": "postgres",
+        "scope": {
+          "tenantId": "team-a",
+          "environment": "production"
+        },
+        "version": 1,
+        "firstSeenAt": "2026-07-23T00:00:00.000Z",
+        "updatedAt": "2026-07-23T00:00:00.000Z",
+        "sources": [
+          {
+            "sourceId": "postgres-native",
+            "sourceType": "connector",
+            "observedAt": "2026-07-23T00:00:00.000Z"
+          }
+        ]
+      }
+    ],
+    "relations": [],
+    "observations": [],
+    "events": [],
+    "sourceVersions": {},
+    "lastEventSequence": 0
+  }
+}

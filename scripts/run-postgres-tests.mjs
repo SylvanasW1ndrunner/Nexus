@@ -5,8 +5,13 @@ import { Socket } from 'node:net';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { loadEnvFile } from './load-env.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+if (process.argv.includes('--live-llm')) {
+  await loadEnvFile(join(root, '.env'));
+  process.env.DBAGENT_RUN_SDK_LIVE = '1';
+}
 const require = createRequire(join(root, 'packages', 'core-db', 'package.json'));
 const { Client } = require('pg');
 const localVitest = join(root, 'node_modules', 'vitest', 'vitest.mjs');
@@ -17,6 +22,9 @@ await assertPostgresReachable();
 await prepareDatabases();
 
 await runVitest('packages/core-db/test/postgres.integration.test.ts', {
+  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
+});
+await runVitest('packages/core-db/test/postgres-connector.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
 await runVitest('packages/sdk/test/postgres.integration.test.ts', {

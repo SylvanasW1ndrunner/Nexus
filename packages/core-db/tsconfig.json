@@ -7,7 +7,10 @@
     "declaration": true,
     "declarationMap": true
   },
-  "references": [{ "path": "../shared" }],
+  "references": [
+    { "path": "../shared" },
+    { "path": "../core-resource" }
+  ],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]
 }

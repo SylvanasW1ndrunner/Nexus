@@ -16,6 +16,7 @@
     "@dbagent/core-db": "workspace:*",
     "@dbagent/core-llm": "workspace:*",
     "@dbagent/core-rag": "workspace:*",
+    "@dbagent/core-resource": "workspace:*",
     "@dbagent/shared": "workspace:*"
   },
   "devDependencies": {

@@ -195,6 +195,7 @@ describe('AgentSessionStore', () => {
     });
 
     expect(result.status).toBe('done');
+    expect(result.session.tokenUsage.totalTokens).toBeGreaterThan(0);
     await expect(store.load('session_agent_run')).resolves.toMatchObject({
       id: 'session_agent_run',
       messages: [
@@ -209,7 +210,7 @@ describe('AgentSessionStore', () => {
         id: 'session_agent_run',
         messageCount: 4,
         toolMessageCount: 1,
-        tokenUsage: { totalTokens: 0 },
+        tokenUsage: { totalTokens: result.session.tokenUsage.totalTokens },
       },
     ]);
   });

@@ -1,7 +1,13 @@
 export type ConnectionId = string;
 export type QueryId = string;
 
-export type DatabaseEngine = 'postgres';
+/**
+ * Engine identifiers are connector-owned values such as `postgres`, `mysql`,
+ * `clickhouse` or a vendor warehouse identifier.  Keeping this open is
+ * intentional: adding a connector must not require changing the shared
+ * contract package.
+ */
+export type DatabaseEngine = string;
 
 export type ExecutionMode = 'ask' | 'auto';
 
@@ -18,8 +24,9 @@ export type DbColumnValue =
   | boolean
   | null
   | Date
-  | Buffer
-  | Record<string, unknown>;
+  | Uint8Array
+  | DbColumnValue[]
+  | { [key: string]: DbColumnValue };
 
 export type QueryResultRow = Record<string, DbColumnValue>;
 

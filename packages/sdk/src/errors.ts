@@ -1,3 +1,5 @@
+import { LlmProviderError } from '@dbagent/core-llm';
+
 export type DatabaseAgentErrorCode =
   | 'INVALID_INPUT'
   | 'NOT_CONFIGURED'
@@ -26,6 +28,15 @@ export class DatabaseAgentError extends Error {
 
 export function asDatabaseAgentError(error: unknown): DatabaseAgentError {
   if (error instanceof DatabaseAgentError) return error;
+  if (error instanceof LlmProviderError) {
+    if (error.code === 'LLM_ABORTED') {
+      return new DatabaseAgentError('ABORTED', '任务已取消。', false);
+    }
+    if (error.code === 'LLM_STRUCTURED_OUTPUT_INVALID' || error.code === 'LLM_BAD_RESPONSE') {
+      return new DatabaseAgentError('LLM_RESPONSE_INVALID', error.message, error.retryable);
+    }
+    return new DatabaseAgentError('LLM_REQUEST_FAILED', error.message, error.retryable);
+  }
   if (isAbortLike(error)) {
     return new DatabaseAgentError('ABORTED', '任务已取消。', false);
   }

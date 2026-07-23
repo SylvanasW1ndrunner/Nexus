@@ -1,0 +1,13 @@
+{
+  "contract": "dbagent.database.error",
+  "version": "1.0",
+  "payload": {
+    "code": "QUERY_TIMEOUT",
+    "category": "timeout",
+    "message": "Query timed out.",
+    "stage": "execute",
+    "retryable": true,
+    "outcome": "unchanged",
+    "recovery": "Use a bounded higher timeout."
+  }
+}

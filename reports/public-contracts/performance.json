@@ -1,0 +1,91 @@
+{
+  "kind": "public-contracts-performance",
+  "status": "passed",
+  "generatedAt": "2026-07-23T12:04:17.867Z",
+  "environment": {
+    "node": "v24.14.0",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "cpuCount": 32,
+    "memory": {
+      "rssMiB": 105.84,
+      "heapUsedMiB": 29.07
+    }
+  },
+  "dataset": {
+    "contractValidationSamples": 10000,
+    "ordinaryEncodingSamples": 10000,
+    "mixedResultRows": 1000,
+    "mixedResultSamples": 1000,
+    "largePayloadBytes": 10485774,
+    "fixtures": 4
+  },
+  "thresholds": {
+    "resourceValidationP95Ms": 1,
+    "queryValidationP95Ms": 1,
+    "ordinaryEncodingP95Ms": 1,
+    "mixedThousandRowEncodingP95Ms": 10,
+    "tenMegabyteEncodingMs": 250,
+    "fixtureCompatibilityRate": 1
+  },
+  "metrics": {
+    "resourceValidationP95Ms": 0.01480000000000814,
+    "queryValidationP95Ms": 0.004400000000003956,
+    "ordinaryEncodingP95Ms": 0.0034999999999740794,
+    "mixedThousandRowEncodingP95Ms": 3.5590000000001965,
+    "tenMegabyteEncodingMs": 10.005599999999959,
+    "fixtureCompatibilityRate": 1
+  },
+  "checks": {
+    "resourceValidationP95Ms": {
+      "actual": 0.01480000000000814,
+      "maximum": 1,
+      "passed": true
+    },
+    "queryValidationP95Ms": {
+      "actual": 0.004400000000003956,
+      "maximum": 1,
+      "passed": true
+    },
+    "ordinaryEncodingP95Ms": {
+      "actual": 0.0034999999999740794,
+      "maximum": 1,
+      "passed": true
+    },
+    "mixedThousandRowEncodingP95Ms": {
+      "actual": 3.5590000000001965,
+      "maximum": 10,
+      "passed": true
+    },
+    "tenMegabyteEncodingMs": {
+      "actual": 10.005599999999959,
+      "maximum": 250,
+      "passed": true
+    },
+    "fixtureCompatibilityRate": {
+      "actual": 1,
+      "minimum": 1,
+      "passed": true
+    }
+  },
+  "fixtureChecks": [
+    {
+      "fixture": "connection-profile.json",
+      "passed": true
+    },
+    {
+      "fixture": "database-error.json",
+      "passed": true
+    },
+    {
+      "fixture": "query-submission.json",
+      "passed": true
+    },
+    {
+      "fixture": "resource-snapshot.json",
+      "passed": true
+    }
+  ],
+  "measurement": "In-process public contract validation and transport encoding; business runtime, database and network time excluded."
+}

@@ -10,7 +10,7 @@ description: Review DBAgent security boundaries, dependencies, tests, PostgreSQL
 3. Trace the user scenario through SDK/API, Runtime, policy, database, storage, and observability.
 4. Check SQL safety, read-only enforcement, permission, approval provenance, Secret/PII redaction, cancellation, limits, and recovery.
 5. Review new dependencies for necessity, maintenance, license, native binaries, install scripts, package size, and private-data behavior.
-6. Run type checks, full unit tests, relevant real PostgreSQL/model/MCP tests, smoke checks, and clean npm package installation in proportion to risk.
+6. Run type checks, full unit tests, relevant real PostgreSQL/model/MCP functional tests, performance tests, and clean npm package installation in proportion to risk.
 7. Inspect the tarball contents and verify CLI, REST health, and SDK import.
 8. Ensure docs distinguish implemented and planned capabilities without migration history.
 

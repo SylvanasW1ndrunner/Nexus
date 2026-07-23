@@ -19,8 +19,8 @@ export const WEB_UI_HTML = `<!doctype html>
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
     section { border: 1px solid #202a36; background: #111821; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
     label { display: grid; gap: 7px; color: #b8c4d1; font-size: 13px; margin-bottom: 12px; }
-    input, textarea { width: 100%; border: 1px solid #2a3645; border-radius: 8px; background: #0c1219; color: #f4f7fb; padding: 10px 11px; font: inherit; outline: none; }
-    input:focus, textarea:focus { border-color: #5588ff; box-shadow: 0 0 0 3px rgba(85, 136, 255, .14); }
+    input, textarea, select { width: 100%; border: 1px solid #2a3645; border-radius: 8px; background: #0c1219; color: #f4f7fb; padding: 10px 11px; font: inherit; outline: none; }
+    input:focus, textarea:focus, select:focus { border-color: #5588ff; box-shadow: 0 0 0 3px rgba(85, 136, 255, .14); }
     textarea { min-height: 96px; resize: vertical; }
     .check { display: flex; align-items: center; gap: 8px; }
     .check input { width: auto; }
@@ -68,7 +68,13 @@ export const WEB_UI_HTML = `<!doctype html>
       <h2>1. 本地配置</h2>
       <div class="grid">
         <div>
-          <label>OpenAI-compatible Base URL
+          <label>模型协议
+            <select id="llmProtocol">
+              <option value="openai-compatible">OpenAI-compatible</option>
+              <option value="anthropic-messages">Anthropic Messages</option>
+            </select>
+          </label>
+          <label>模型 Base URL
             <input id="baseUrl" value="https://api.siliconflow.cn/v1" autocomplete="url">
           </label>
           <label>API Key
@@ -77,6 +83,7 @@ export const WEB_UI_HTML = `<!doctype html>
           <label>模型名
             <input id="model" placeholder="例如 deepseek-ai/DeepSeek-V3">
           </label>
+          <label class="check"><input id="llmUnauthenticated" type="checkbox"> 本地或私有 Endpoint 无鉴权</label>
         </div>
         <div>
           <div class="grid">
@@ -90,14 +97,39 @@ export const WEB_UI_HTML = `<!doctype html>
         </div>
       </div>
       <div class="actions">
-        <button id="setupButton">测试并连接</button>
+        <button id="setupButton">连接数据库</button>
         <button id="indexButton" class="secondary" disabled>索引 Schema</button>
         <span class="hint">连接强制只读；密钥和密码不会写入浏览器存储。</span>
       </div>
     </section>
 
     <section>
-      <h2>2. 自然语言生成 SQL</h2>
+      <h2>2. 模型管理</h2>
+      <div class="actions">
+        <button id="llmSetupButton">保存模型配置</button>
+        <button id="llmRefreshButton" class="secondary">刷新档案与指标</button>
+      </div>
+      <div class="grid" style="margin-top: 16px">
+        <div><div class="meta-title">模型档案</div><pre id="llmModelsOutput">尚未配置</pre></div>
+        <div><div class="meta-title">调用指标</div><pre id="llmMetricsOutput">暂无调用</pre></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>3. 数据库接入管理</h2>
+      <div class="actions">
+        <button id="databaseRefreshButton" class="secondary">刷新状态</button>
+        <button id="databaseDiscoverButton" class="secondary">发现资源</button>
+        <span class="hint">这里只展示 Connector、连接档案、资源与运行指标；复杂查询仍建议使用 SDK 或 API。</span>
+      </div>
+      <div class="grid" style="margin-top: 16px">
+        <div><div class="meta-title">Connector 与连接档案</div><pre id="databaseProfilesOutput">加载中</pre></div>
+        <div><div class="meta-title">资源与访问指标</div><pre id="databaseResourcesOutput">加载中</pre></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>4. 自然语言生成 SQL</h2>
       <label>问题
         <textarea id="question" placeholder="例如：每个城市的订单总金额是多少？"></textarea>
       </label>
@@ -105,7 +137,7 @@ export const WEB_UI_HTML = `<!doctype html>
     </section>
 
     <section id="runSection" hidden>
-      <h2>3. 审核</h2>
+      <h2>5. 审核</h2>
       <div class="run-grid">
         <div>
           <pre id="sqlOutput"></pre>
@@ -125,7 +157,7 @@ export const WEB_UI_HTML = `<!doctype html>
     </section>
 
     <section id="resultSection" hidden>
-      <h2>4. 查询结果</h2>
+      <h2>6. 查询结果</h2>
       <p id="resultSummary"></p>
       <div class="table-wrap"><table><thead id="resultHead"></thead><tbody id="resultBody"></tbody></table></div>
     </section>
@@ -136,6 +168,11 @@ export const WEB_UI_HTML = `<!doctype html>
     const byId = (id) => document.getElementById(id);
     const errorBox = byId('errorBox');
     const setupButton = byId('setupButton');
+    const llmSetupButton = byId('llmSetupButton');
+    const llmRefreshButton = byId('llmRefreshButton');
+    const databaseRefreshButton = byId('databaseRefreshButton');
+    const databaseDiscoverButton = byId('databaseDiscoverButton');
+    const llmProtocol = byId('llmProtocol');
     const indexButton = byId('indexButton');
     const generateButton = byId('generateButton');
     const executeButton = byId('executeButton');
@@ -177,17 +214,124 @@ export const WEB_UI_HTML = `<!doctype html>
         if (status.schema.ready) byId('schemaStatus').classList.add('ready');
         indexButton.disabled = !status.connected;
         generateButton.disabled = !status.schema.ready;
+        await Promise.all([refreshLlmManagement(), refreshDatabaseManagement()]);
       } catch (error) { showError(error); }
     }
+
+    async function refreshLlmManagement() {
+      const [models, metrics] = await Promise.all([api('/v1/llm/models'), api('/v1/llm/metrics')]);
+      byId('llmModelsOutput').textContent = models.length
+        ? models.map((item) => [
+            item.providerId + ' / ' + item.model,
+            'Tool ' + item.capabilities.toolCalling + ' · Thinking ' + item.capabilities.reasoning +
+              ' · Structured ' + item.capabilities.structuredOutput,
+            item.discovery ? '来源 ' + item.discovery.source : '来源 provider-declaration'
+          ].join('\\n')).join('\\n\\n')
+        : '尚未配置';
+      byId('llmMetricsOutput').textContent = [
+        '请求 ' + metrics.requests + ' · 成功 ' + metrics.completed + ' · 失败 ' + metrics.failed,
+        'Token ' + (metrics.totalPromptTokens + metrics.totalCompletionTokens),
+        'P95 ' + Number(metrics.latencyMs.p95).toFixed(2) + ' ms · 缓存命中 ' + metrics.cacheHits
+      ].join('\\n');
+    }
+
+    async function refreshDatabaseManagement() {
+      const [connectors, profiles, metrics, resources] = await Promise.all([
+        api('/v1/database/connectors'),
+        api('/v1/database/profiles'),
+        api('/v1/database/metrics'),
+        api('/v1/database/resources?limit=20')
+      ]);
+      byId('databaseProfilesOutput').textContent = [
+        'Connector: ' + (connectors.length
+          ? connectors.map((item) => item.id + ' (' + item.engine + ')').join(', ')
+          : '无'),
+        '',
+        profiles.length
+          ? profiles.map((item) => item.name + '\\n' + item.id + ' · ' + item.engine + ' · ' + item.purpose).join('\\n\\n')
+          : '暂无连接档案'
+      ].join('\\n');
+      byId('databaseResourcesOutput').textContent = [
+        '连接档案 ' + metrics.profiles + ' · 已连接 ' + metrics.connectedSessions,
+        '资源 ' + metrics.resources + ' · 关系 ' + metrics.relations,
+        '查询任务 ' + metrics.submittedQueries + ' · 取消 ' + metrics.cancelledQueries,
+        '',
+        resources.items.length
+          ? resources.items.map((item) => item.kind + ' · ' + item.canonicalName).join('\\n')
+          : '尚未发现资源'
+      ].join('\\n');
+      databaseDiscoverButton.disabled = !profiles.length;
+      databaseDiscoverButton.dataset.profileId = profiles[0] ? profiles[0].id : '';
+    }
+
+    databaseRefreshButton.addEventListener('click', async () => {
+      setBusy(databaseRefreshButton, true, '刷新中…');
+      try { await refreshDatabaseManagement(); }
+      catch (error) { showError(error); }
+      finally { setBusy(databaseRefreshButton, false, ''); }
+    });
+
+    databaseDiscoverButton.addEventListener('click', async () => {
+      const profileId = databaseDiscoverButton.dataset.profileId;
+      if (!profileId) return;
+      setBusy(databaseDiscoverButton, true, '发现中…');
+      try {
+        await api('/v1/database/profiles/' + encodeURIComponent(profileId) + '/discover', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}'
+        });
+        await refreshDatabaseManagement();
+      } catch (error) { showError(error); }
+      finally { setBusy(databaseDiscoverButton, false, ''); }
+    });
+
+    llmProtocol.addEventListener('change', () => {
+      const baseUrl = byId('baseUrl');
+      const unauthenticated = byId('llmUnauthenticated');
+      if (llmProtocol.value === 'anthropic-messages') {
+        if (baseUrl.value === 'https://api.siliconflow.cn/v1') baseUrl.value = 'https://api.anthropic.com/v1';
+        unauthenticated.checked = false;
+        unauthenticated.disabled = true;
+      } else {
+        if (baseUrl.value === 'https://api.anthropic.com/v1') baseUrl.value = 'https://api.siliconflow.cn/v1';
+        unauthenticated.disabled = false;
+      }
+    });
+
+    llmSetupButton.addEventListener('click', async () => {
+      setBusy(llmSetupButton, true, '保存中…');
+      try {
+        await api('/v1/llm/setup', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            protocol: byId('llmProtocol').value,
+            baseUrl: byId('baseUrl').value,
+            apiKey: byId('apiKey').value,
+            model: byId('model').value,
+            allowUnauthenticated: byId('llmUnauthenticated').checked
+          })
+        });
+        byId('apiKey').value = '';
+        await refreshStatus();
+      } catch (error) { showError(error); }
+      finally { setBusy(llmSetupButton, false, ''); }
+    });
+
+    llmRefreshButton.addEventListener('click', async () => {
+      setBusy(llmRefreshButton, true, '刷新中…');
+      try { await refreshLlmManagement(); }
+      catch (error) { showError(error); }
+      finally { setBusy(llmRefreshButton, false, ''); }
+    });
 
     setupButton.addEventListener('click', async () => {
       setBusy(setupButton, true, '连接中…');
       try {
-        await api('/v1/setup', {
+        await api('/v1/database/connect', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            llm: { baseUrl: byId('baseUrl').value, apiKey: byId('apiKey').value, model: byId('model').value },
             database: {
               host: byId('dbHost').value,
               port: Number(byId('dbPort').value),
@@ -198,7 +342,6 @@ export const WEB_UI_HTML = `<!doctype html>
             }
           })
         });
-        byId('apiKey').value = '';
         byId('dbPassword').value = '';
         await refreshStatus();
       } catch (error) { showError(error); }

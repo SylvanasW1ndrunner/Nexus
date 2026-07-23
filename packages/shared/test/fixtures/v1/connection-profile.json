@@ -1,0 +1,27 @@
+{
+  "contract": "dbagent.database.connection-profile",
+  "version": "1.0",
+  "payload": {
+    "id": "profile-1",
+    "name": "Analytics",
+    "connectorId": "postgres-native",
+    "engine": "postgres",
+    "endpoints": [
+      {
+        "transport": "tcp",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "database": "analytics"
+      }
+    ],
+    "credentialRef": {
+      "provider": "environment",
+      "reference": "DB_PASSWORD"
+    },
+    "principal": "readonly",
+    "purpose": "read-only",
+    "readOnly": true,
+    "createdAt": "2026-07-23T00:00:00.000Z",
+    "updatedAt": "2026-07-23T00:00:00.000Z"
+  }
+}

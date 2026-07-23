@@ -1,13 +1,38 @@
-import type { IDatabaseDriver } from '@dbagent/core-db';
-import type { LlmProvider, LlmUsage } from '@dbagent/core-llm';
+import type {
+  ConnectorRegistry,
+  CredentialResolver,
+  DatabaseAccessRuntime,
+  DatabaseAuditSink,
+  DatabaseConnector,
+  IDatabaseDriver,
+} from '@dbagent/core-db';
+import type { ResourceRegistry } from '@dbagent/core-resource';
+import type {
+  LlmGateway,
+  LlmGatewayChatRequest,
+  LlmPolicyLayers,
+  LlmBudgetLimits,
+  LlmMetricsSnapshot,
+  LlmProvider,
+  LlmUsage,
+  RegisteredLlmModel,
+} from '@dbagent/core-llm';
 import type { SchemaRagEngine } from '@dbagent/core-rag';
 import type { QueryExecutionResult, QuerySafetyReport, SavedConnection } from '@dbagent/shared';
 import type { DatabaseAgentErrorCode } from './errors.js';
 
 export type DatabaseAgentRuntimeOptions = {
   provider?: LlmProvider;
+  gateway?: LlmGateway;
   model?: string;
+  tenantId?: string;
   driver?: IDatabaseDriver;
+  databaseAccess?: DatabaseAccessRuntime;
+  connectors?: DatabaseConnector[];
+  connectorRegistry?: ConnectorRegistry;
+  resourceRegistry?: ResourceRegistry;
+  credentialResolver?: CredentialResolver;
+  databaseAuditSink?: DatabaseAuditSink;
   rag?: SchemaRagEngine;
   createRunId?: () => string;
   createConnectionId?: () => string;
@@ -23,7 +48,7 @@ export type PostgresConnectionInput = {
   database: string;
   username: string;
   password?: string;
-  ssl?: boolean;
+  ssl?: boolean | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
   connectionTimeoutMs?: number;
   statementTimeoutMs?: number;
 };
@@ -111,12 +136,37 @@ export type ExecutedSqlRun = SqlRunSnapshot & {
 
 export type RuntimeStatus = {
   providerConfigured: boolean;
+  providerId?: string;
   model?: string;
   connected: boolean;
   connection?: SavedConnection;
   schema: SchemaIndexSnapshot;
   runCount: number;
+  llm: {
+    modelCount: number;
+    metrics: LlmMetricsSnapshot;
+  };
 };
+
+export type LlmRuntimeStatus = {
+  providerId?: string;
+  model?: string;
+  models: RegisteredLlmModel[];
+  metrics: LlmMetricsSnapshot;
+};
+
+export type LlmRuntimeCallOptions = {
+  taskType?: string;
+  userId?: string;
+  policies?: LlmPolicyLayers;
+  budget?: LlmBudgetLimits;
+  timeoutMs?: number;
+  maxRetries?: number;
+  maxFallbacks?: number;
+  cache?: { enabled: boolean; ttlMs?: number; namespace?: string };
+};
+
+export type LlmRuntimeChatRequest = Omit<LlmGatewayChatRequest, 'model'>;
 
 export type ParsedGeneratedSql = {
   sql: string;

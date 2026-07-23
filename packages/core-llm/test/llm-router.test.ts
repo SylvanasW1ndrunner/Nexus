@@ -100,10 +100,9 @@ describe('LlmRouter', () => {
     ).rejects.toThrow('provider timeout');
     await tracker.endConversationRound(round, 'failed', 'provider timeout');
 
-    await expect(tracker.current()).resolves.toMatchObject({
-      completedRounds: 0,
-      totalTokens: 0,
-    });
+    const snapshot = await tracker.current();
+    expect(snapshot.completedRounds).toBe(0);
+    expect(snapshot.totalTokens).toBeGreaterThan(0);
   });
 
   it('streams through providers and records final usage on the active Agent round', async () => {

@@ -43,7 +43,7 @@ describe('DatabaseDriverRegistry', () => {
     const registration: DatabaseDriverRegistration = {
       engine: 'postgres',
       capabilities: {
-        engine: 'mysql' as 'postgres',
+        engine: 'mysql',
         supportsTransactions: true,
         supportsExplain: false,
         supportsSchemas: false,

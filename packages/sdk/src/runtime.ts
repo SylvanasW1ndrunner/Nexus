@@ -1,13 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import {
+  ConnectorRegistry,
+  DatabaseAccessRuntime,
+  DatabaseAccessRuntimeError,
+  PostgresConnector,
   PostgresDriver,
   analyzeSqlSafety,
   type DatabaseConnectionConfig,
   type IDatabaseDriver,
 } from '@dbagent/core-db';
-import { LlmProviderError, type LlmProvider } from '@dbagent/core-llm';
+import { ResourceRegistry } from '@dbagent/core-resource';
+import {
+  LlmGateway,
+  LlmProviderError,
+  type LlmAsyncJob,
+  type LlmChatResponse,
+  type LlmChatStreamEvent,
+  type LlmGatewayResult,
+  type LlmMetricsSnapshot,
+  type LlmProvider,
+  type RegisteredLlmModel,
+} from '@dbagent/core-llm';
 import { SchemaRagEngine } from '@dbagent/core-rag';
-import type { QuerySafetyReport, SavedConnection } from '@dbagent/shared';
+import type { ConnectionProfile, QuerySafetyReport, SavedConnection } from '@dbagent/shared';
 import { DatabaseAgentError, asDatabaseAgentError } from './errors.js';
 import { parseGeneratedSqlResponse } from './parse-generation.js';
 import type {
@@ -19,6 +34,8 @@ import type {
   GeneratedSqlEvidence,
   GeneratedSqlRun,
   IndexSchemaOptions,
+  LlmRuntimeCallOptions,
+  LlmRuntimeChatRequest,
   PostgresConnectionInput,
   RuntimeStatus,
   SchemaIndexSnapshot,
@@ -43,15 +60,57 @@ export class DatabaseAgentRuntime {
   private readonly createConnectionId: () => string;
   private readonly now: () => string;
   private readonly defaultRowLimit: number;
+  private readonly llmGateway: LlmGateway;
+  /**
+   * Unified database/warehouse/cluster access API. Connector registration,
+   * resources, capabilities, query jobs, transactions and operations all live
+   * behind this stable SDK entrypoint.
+   */
+  readonly database: DatabaseAccessRuntime;
+  /** Product-wide resource, graph, observation and state runtime. */
+  readonly resources: ResourceRegistry;
+  private readonly tenantId: string;
   private readonly runs = new Map<string, SqlRunSnapshot>();
-  private provider?: LlmProvider;
+  private providerId?: string;
   private model?: string;
   private connection: SavedConnection | undefined;
+  private readonly postgresConnector: PostgresConnector | undefined;
+  private readonly legacyUsesDatabaseAccess: boolean;
+  private legacyProfileId: string | undefined;
   private indexTruncated = false;
 
   constructor(options: DatabaseAgentRuntimeOptions = {}) {
-    this.driver = options.driver ?? new PostgresDriver();
+    const defaultDriver = options.driver ?? new PostgresDriver();
+    this.driver = defaultDriver;
+    if (options.databaseAccess) {
+      this.database = options.databaseAccess;
+      this.postgresConnector = undefined;
+      this.legacyUsesDatabaseAccess = false;
+    } else {
+      const connectors = options.connectorRegistry ?? new ConnectorRegistry();
+      const resources = options.resourceRegistry ?? new ResourceRegistry();
+      const postgresDriver =
+        defaultDriver instanceof PostgresDriver ? defaultDriver : new PostgresDriver();
+      const postgresConnector = new PostgresConnector(postgresDriver);
+      if (connectors.find({ engine: 'postgres', transport: 'tcp' }).length === 0) {
+        connectors.register(postgresConnector);
+      }
+      for (const connector of options.connectors ?? []) {
+        connectors.replace(connector);
+      }
+      this.database = new DatabaseAccessRuntime({
+        connectors,
+        resources,
+        ...(options.credentialResolver ? { credentialResolver: options.credentialResolver } : {}),
+        ...(options.databaseAuditSink ? { auditSink: options.databaseAuditSink } : {}),
+      });
+      this.postgresConnector = postgresConnector;
+      this.legacyUsesDatabaseAccess = options.driver === undefined;
+    }
+    this.resources = this.database.resources;
     this.rag = options.rag ?? new SchemaRagEngine();
+    this.llmGateway = options.gateway ?? new LlmGateway();
+    this.tenantId = options.tenantId?.trim() || 'local-default';
     this.createRunId = options.createRunId ?? randomUUID;
     this.createConnectionId = options.createConnectionId ?? randomUUID;
     this.now = options.now ?? (() => new Date().toISOString());
@@ -65,19 +124,35 @@ export class DatabaseAgentRuntime {
       if (!options.provider || !options.model?.trim()) {
         throw new DatabaseAgentError('INVALID_INPUT', 'provider 和 model 必须同时配置。', false);
       }
-      this.provider = options.provider;
-      this.model = options.model.trim();
+      this.configureProvider(options.provider, options.model);
     }
   }
 
   configureProvider(provider: LlmProvider, model: string): void {
     const normalizedModel = requireText(model, 'model', 300);
-    this.provider = provider;
+    this.llmGateway.registerProvider(provider);
+    this.llmGateway.registerModel({ providerId: provider.id, model: normalizedModel });
+    this.providerId = provider.id;
     this.model = normalizedModel;
   }
 
   async testConnection(input: PostgresConnectionInput): Promise<ConnectionTestResult> {
     const config = normalizeConnection(input, input.id ?? 'connection-test');
+    if (this.legacyUsesDatabaseAccess) {
+      const profile = toPostgresProfile(config, this.now());
+      this.database.createProfile(profile);
+      try {
+        const result = await this.database.testProfile(profile.id, {
+          username: config.username,
+          ...(config.password ? { password: config.password } : {}),
+        });
+        return { latencyMs: result.latencyMs ?? 0, readOnly: true };
+      } catch (error) {
+        throw mapDatabaseAccessError(error);
+      } finally {
+        this.database.deleteProfile(profile.id);
+      }
+    }
     const result = await this.driver.test(config);
     if (!result.ok) {
       throw new DatabaseAgentError(
@@ -93,6 +168,31 @@ export class DatabaseAgentRuntime {
   async connect(input: PostgresConnectionInput): Promise<SavedConnection> {
     if (this.connection) await this.disconnect();
     const config = normalizeConnection(input, input.id ?? this.createConnectionId());
+    if (this.legacyUsesDatabaseAccess) {
+      const profile = toPostgresProfile(config, this.now());
+      this.database.createProfile(profile);
+      try {
+        await this.database.connect(profile.id, {
+          username: config.username,
+          ...(config.password ? { password: config.password } : {}),
+        });
+        const connection = this.postgresConnector?.getLegacyConnection(profile.id);
+        if (!connection) {
+          throw new DatabaseAgentError(
+            'CONNECTION_FAILED',
+            'PostgreSQL Connector did not expose the active driver connection.',
+            false,
+          );
+        }
+        this.connection = connection;
+        this.legacyProfileId = profile.id;
+        this.indexTruncated = false;
+        return cloneConnection(connection);
+      } catch (error) {
+        this.database.deleteProfile(profile.id);
+        throw mapDatabaseAccessError(error);
+      }
+    }
     const result = await this.driver.connect(config);
     if (!result.ok) {
       throw new DatabaseAgentError(
@@ -110,19 +210,50 @@ export class DatabaseAgentRuntime {
   async disconnect(): Promise<void> {
     const current = this.connection;
     if (!current) return;
-    const result = await this.driver.disconnect(current.id);
-    if (!result.ok) {
-      throw new DatabaseAgentError(
-        'CONNECTION_FAILED',
-        result.error.message,
-        result.error.retryable ?? true,
-        result.error.detail,
-      );
+    if (this.legacyUsesDatabaseAccess && this.legacyProfileId) {
+      const profileId = this.legacyProfileId;
+      try {
+        await this.database.disconnect(profileId);
+        this.database.deleteProfile(profileId);
+      } catch (error) {
+        throw mapDatabaseAccessError(error);
+      }
+      this.legacyProfileId = undefined;
+    } else {
+      const result = await this.driver.disconnect(current.id);
+      if (!result.ok) {
+        throw new DatabaseAgentError(
+          'CONNECTION_FAILED',
+          result.error.message,
+          result.error.retryable ?? true,
+          result.error.detail,
+        );
+      }
     }
     this.rag.clear(current.id);
     this.connection = undefined;
     this.indexTruncated = false;
     this.runs.clear();
+  }
+
+  async close(): Promise<void> {
+    const failures: unknown[] = [];
+    if (this.connection) {
+      try {
+        await this.disconnect();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    try {
+      await this.database.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    this.runs.clear();
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'DBAgent runtime did not close cleanly.');
+    }
   }
 
   async indexSchema(options: IndexSchemaOptions = {}): Promise<SchemaIndexSnapshot> {
@@ -187,18 +318,22 @@ export class DatabaseAgentRuntime {
 
   status(): RuntimeStatus {
     return {
-      providerConfigured: Boolean(this.provider && this.model),
+      providerConfigured: Boolean(this.providerId && this.model),
+      ...(this.providerId === undefined ? {} : { providerId: this.providerId }),
       ...(this.model === undefined ? {} : { model: this.model }),
       connected: Boolean(this.connection),
       ...(this.connection === undefined ? {} : { connection: cloneConnection(this.connection) }),
       schema: this.schemaStatus(),
       runCount: this.runs.size,
+      llm: {
+        modelCount: this.llmGateway.registry.listModels().length,
+        metrics: this.llmGateway.metricsSnapshot(),
+      },
     };
   }
 
   async generate(input: GenerateSqlInput): Promise<GeneratedSqlRun> {
-    const provider = this.requireProvider();
-    const model = this.model!;
+    const { providerId, model } = this.requireModelConfiguration();
     const connection = this.requireConnection();
     if (!this.rag.hasIndex(connection.id)) {
       throw new DatabaseAgentError('SCHEMA_NOT_INDEXED', '请先索引数据库 Schema。', true);
@@ -224,18 +359,24 @@ export class DatabaseAgentRuntime {
 
     let response;
     try {
-      response = await provider.chat({
-        model,
-        temperature: 0,
-        maxTokens: 1_200,
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-        messages: [
+      response = await this.llmGateway.chat({
+        providerId,
+        request: {
+          model,
+          temperature: 0,
+          maxTokens: 1_200,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+          messages: [
           { role: 'system', content: buildSystemPrompt() },
           {
             role: 'user',
             content: `用户问题：\n${question}\n\n可用 PostgreSQL Schema：\n${contextText}`,
           },
-        ],
+          ],
+        },
+        context: { tenantId: this.tenantId, taskType: 'nl2sql-generation' },
+        maxRetries: 1,
+        maxFallbacks: 0,
       });
     } catch (error) {
       throw mapLlmError(error);
@@ -364,11 +505,132 @@ export class DatabaseAgentRuntime {
     return run ? cloneRun(run) : undefined;
   }
 
-  private requireProvider(): LlmProvider {
-    if (!this.provider || !this.model) {
+  async llmChat(request: LlmRuntimeChatRequest, options: LlmRuntimeCallOptions = {}): Promise<LlmChatResponse> {
+    const { providerId, model } = this.requireModelConfiguration();
+    return await this.llmGateway.chat({
+      providerId,
+      request: { ...request, model },
+      context: {
+        tenantId: this.tenantId,
+        taskType: options.taskType?.trim() || 'sdk-chat',
+        ...(options.userId === undefined ? {} : { userId: options.userId }),
+      },
+      ...(options.policies === undefined ? {} : { policies: options.policies }),
+      ...(options.budget === undefined ? {} : { budget: options.budget }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
+      ...(options.maxFallbacks === undefined ? {} : { maxFallbacks: options.maxFallbacks }),
+      ...(options.cache === undefined ? {} : { cache: options.cache }),
+    });
+  }
+
+  async *llmStream(
+    request: LlmRuntimeChatRequest,
+    options: LlmRuntimeCallOptions = {},
+  ): AsyncIterable<LlmChatStreamEvent> {
+    const { providerId, model } = this.requireModelConfiguration();
+    yield* this.llmGateway.stream({
+      providerId,
+      request: { ...request, model },
+      context: {
+        tenantId: this.tenantId,
+        taskType: options.taskType?.trim() || 'sdk-stream',
+        ...(options.userId === undefined ? {} : { userId: options.userId }),
+      },
+      ...(options.policies === undefined ? {} : { policies: options.policies }),
+      ...(options.budget === undefined ? {} : { budget: options.budget }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
+      ...(options.maxFallbacks === undefined ? {} : { maxFallbacks: options.maxFallbacks }),
+    });
+  }
+
+  submitLlmBatch(
+    requests: LlmRuntimeChatRequest[],
+    options: LlmRuntimeCallOptions & { concurrency?: number } = {},
+  ): LlmAsyncJob<LlmGatewayResult> {
+    const { providerId, model } = this.requireModelConfiguration();
+    const inputs = requests.map((request) => ({
+      providerId,
+      request: { ...request, model },
+      context: {
+        tenantId: this.tenantId,
+        taskType: options.taskType?.trim() || 'sdk-batch',
+        ...(options.userId === undefined ? {} : { userId: options.userId }),
+      },
+      ...(options.policies === undefined ? {} : { policies: options.policies }),
+      ...(options.budget === undefined ? {} : { budget: options.budget }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
+      ...(options.maxFallbacks === undefined ? {} : { maxFallbacks: options.maxFallbacks }),
+    }));
+    return this.llmGateway.submitBatch(
+      inputs,
+      options.concurrency === undefined ? {} : { concurrency: options.concurrency },
+    );
+  }
+
+  getLlmJob(id: string): LlmAsyncJob<LlmGatewayResult> | undefined {
+    return this.llmGateway.getJob(id);
+  }
+
+  cancelLlmJob(id: string): LlmAsyncJob<LlmGatewayResult> | undefined {
+    return this.llmGateway.cancelJob(id);
+  }
+
+  llmModels(): RegisteredLlmModel[] {
+    return this.llmGateway.registry.listModels();
+  }
+
+  async discoverLlmModels(): Promise<RegisteredLlmModel[]> {
+    const { providerId, model } = this.requireModelConfiguration();
+    const provider = this.llmGateway.registry.provider(providerId);
+    if (!provider) throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM Provider is not registered.', true);
+    const selected = this.llmGateway.registry.find(providerId, model);
+    if (!selected) throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM model is not registered.', true);
+    this.llmGateway.registry.applyModelMetadata(selected.id, {
+      model,
+      source: 'provider-declaration',
+      capabilities: { ...provider.capabilities },
+    });
+    if (!provider.listModels) return this.llmModels();
+    try {
+      const remoteModels = await provider.listModels();
+      for (const remoteModel of remoteModels) {
+        const registered =
+          this.llmGateway.registry.find(providerId, remoteModel) ??
+          this.llmGateway.registerModel({ providerId, model: remoteModel });
+        this.llmGateway.registry.applyModelMetadata(registered.id, {
+          model: remoteModel,
+          source: 'provider-declaration',
+          capabilities: { ...provider.capabilities },
+        });
+      }
+      if (remoteModels.includes(model) && provider.getModelMetadata) {
+        this.llmGateway.registry.applyModelMetadata(
+          selected.id,
+          await provider.getModelMetadata(model),
+        );
+      }
+    } catch (error) {
+      this.llmGateway.registry.updateHealth(selected.id, {
+        state: 'unknown',
+        checkedAt: new Date().toISOString(),
+        detail: `Model metadata discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+    return this.llmModels();
+  }
+
+  llmMetrics(): LlmMetricsSnapshot {
+    return this.llmGateway.metricsSnapshot();
+  }
+
+  private requireModelConfiguration(): { providerId: string; model: string } {
+    if (!this.providerId || !this.model) {
       throw new DatabaseAgentError('NOT_CONFIGURED', '请先配置模型 Provider 和模型名。', true);
     }
-    return this.provider;
+    return { providerId: this.providerId, model: this.model };
   }
 
   private requireConnection(): SavedConnection {
@@ -434,6 +696,54 @@ function normalizeConnection(input: PostgresConnectionInput, id: string): Databa
       3_600_000,
     ),
   };
+}
+
+function toPostgresProfile(
+  config: DatabaseConnectionConfig,
+  now: string,
+): ConnectionProfile {
+  return {
+    id: config.id!,
+    name: config.name,
+    connectorId: 'postgres-native',
+    engine: 'postgres',
+    endpoints: [
+      {
+        transport: 'tcp',
+        host: config.host,
+        port: config.port,
+        database: config.database,
+        ...(config.ssl !== undefined ? { ssl: config.ssl } : {}),
+      },
+    ],
+    principal: config.username,
+    purpose: 'read-only',
+    readOnly: true,
+    network: {
+      ...(config.connectionTimeoutMs
+        ? { connectTimeoutMs: config.connectionTimeoutMs }
+        : {}),
+      ...(config.statementTimeoutMs
+        ? { statementTimeoutMs: config.statementTimeoutMs }
+        : {}),
+    },
+    pool: { max: config.maxClients ?? 5 },
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function mapDatabaseAccessError(error: unknown): DatabaseAgentError {
+  if (error instanceof DatabaseAgentError) return error;
+  if (error instanceof DatabaseAccessRuntimeError) {
+    return new DatabaseAgentError(
+      'CONNECTION_FAILED',
+      error.error.message,
+      error.error.retryable,
+      error.error.detail,
+    );
+  }
+  return asDatabaseAgentError(error);
 }
 
 function buildSystemPrompt(): string {

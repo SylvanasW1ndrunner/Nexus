@@ -1,0 +1,11 @@
+{
+  "contract": "dbagent.database.query-submission",
+  "version": "1.0",
+  "payload": {
+    "profileId": "profile-1",
+    "sql": "select current_database()",
+    "executionMode": "sync",
+    "timeoutMs": 5000,
+    "rowLimit": 100
+  }
+}

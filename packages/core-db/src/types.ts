@@ -18,7 +18,7 @@ export type DatabaseConnectionConfig = {
   database: string;
   username: string;
   password?: string;
-  ssl?: boolean;
+  ssl?: boolean | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
   readOnly: boolean;
   maxClients?: number;
   connectionTimeoutMs?: number;

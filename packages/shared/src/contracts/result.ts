@@ -21,18 +21,22 @@ export type AppErrorCode =
   | 'DB_PORT_CLOSED'
   | 'QUERY_FAILED'
   | 'QUERY_CANCELLED'
+  | 'QUERY_TIMEOUT'
   | 'CONFIRMATION_REQUIRED'
   | 'PERMISSION_DENIED'
   | 'READ_ONLY_VIOLATION'
+  | 'CAPABILITY_UNAVAILABLE'
+  | 'RESOURCE_CONFLICT'
+  | 'QUERY_JOB_EXPIRED'
+  | 'RATE_LIMITED'
+  | 'QUOTA_EXCEEDED'
+  | 'OUTCOME_UNKNOWN'
   | 'UNSUPPORTED_OPERATION'
   | 'NOT_FOUND'
   | 'INTERNAL_ERROR';
 
-export type AppError = {
+export type AppError = Omit<PublicErrorBase, 'code'> & {
   code: AppErrorCode;
-  message: string;
-  detail?: string;
-  retryable?: boolean;
 };
 
 export function ok<T>(data: T): Ok<T> {
@@ -42,3 +46,4 @@ export function ok<T>(data: T): Ok<T> {
 export function err(error: AppError): Err {
   return { ok: false, error };
 }
+import type { PublicErrorBase } from './common.js';

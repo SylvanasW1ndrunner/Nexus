@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { QueryExecutionResult, SavedConnection } from '../src/runtime-contracts.js';
+import type { QueryExecutionResult, SavedConnection } from '../src/index.js';
 
 describe('runtime contracts', () => {
   it('describes the public database connection and query result boundary', () => {

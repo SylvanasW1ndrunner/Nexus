@@ -9,6 +9,7 @@
   },
   "references": [
     { "path": "../shared" },
+    { "path": "../core-resource" },
     { "path": "../core-db" },
     { "path": "../core-llm" },
     { "path": "../core-rag" }

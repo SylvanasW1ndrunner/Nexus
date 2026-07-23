@@ -67,4 +67,30 @@ describe('classifyPostgresRuntimeError', () => {
       retryable: false,
     });
   });
+
+  it('classifies server and client query timeouts separately from network timeouts', () => {
+    expect(
+      classifyPostgresRuntimeError(
+        pgError('57014', 'canceling statement due to statement timeout'),
+      ),
+    ).toMatchObject({
+      code: 'QUERY_TIMEOUT',
+      retryable: false,
+    });
+    expect(classifyPostgresRuntimeError(new Error('Query read timeout'))).toMatchObject({
+      code: 'QUERY_TIMEOUT',
+      retryable: false,
+    });
+    expect(
+      classifyPostgresRuntimeError(
+        Object.assign(new Error('localized timeout'), {
+          code: 'DBAGENT_QUERY_TIMEOUT',
+          detail: '由于语句执行超时，正在取消查询命令',
+        }),
+      ),
+    ).toMatchObject({
+      code: 'QUERY_TIMEOUT',
+      detail: '由于语句执行超时，正在取消查询命令',
+    });
+  });
 });

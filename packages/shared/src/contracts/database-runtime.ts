@@ -5,7 +5,7 @@ import type {
   QueryResultRow,
   QueryRiskLevel,
   UsageMode,
-} from './domain.js';
+} from './database-sdk.js';
 
 export type SavedConnection = {
   id: ConnectionId;
@@ -44,6 +44,7 @@ export type QueryRequest = {
   sql: string;
   params?: unknown[];
   limit?: number;
+  timeoutMs?: number;
   dryRun?: boolean;
   confirmed?: boolean;
   transactionMode?: QueryTransactionMode;

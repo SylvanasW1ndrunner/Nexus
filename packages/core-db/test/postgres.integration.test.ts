@@ -4,7 +4,7 @@ import type { DatabaseConnectionConfig } from '../src/index.js';
 
 const runPostgresTests = process.env.DBAGENT_RUN_POSTGRES_TESTS === '1';
 
-const config: DatabaseConnectionConfig = {
+const config = {
   id: 'integration-postgres',
   name: 'Integration PostgreSQL',
   engine: 'postgres',
@@ -15,7 +15,7 @@ const config: DatabaseConnectionConfig = {
   password: process.env.DBAGENT_TEST_PG_PASSWORD ?? 'postgres',
   readOnly: true,
   maxClients: 2,
-};
+} satisfies DatabaseConnectionConfig;
 
 describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration', () => {
   it('connects, lists schema objects, executes a realistic join, blocks read-only writes, and disconnects', async () => {

@@ -1,0 +1,127 @@
+{
+  "kind": "llm-platform-performance",
+  "status": "passed",
+  "generatedAt": "2026-07-23T06:42:49.404Z",
+  "samples": 1000,
+  "concurrency": 50,
+  "environment": {
+    "node": "v24.14.0",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "cpuCount": 32,
+    "memory": {
+      "rssMiB": 109.9,
+      "heapUsedMiB": 44.29
+    }
+  },
+  "measurement": "Platform path with an in-process deterministic provider; external model and network latency excluded.",
+  "thresholds": {
+    "routeDecisionP95Ms": 20,
+    "tokenEstimationP95Ms": 5,
+    "structuredValidationP95Ms": 5,
+    "gatewayP95Ms": 50,
+    "streamForwardP95Ms": 50,
+    "asyncSubmissionP95Ms": 50,
+    "cancellationPropagationP95Ms": 100
+  },
+  "checks": {
+    "routeDecision": true,
+    "tokenEstimation": true,
+    "structuredValidation": true,
+    "gateway": true,
+    "streamForward": true,
+    "asyncSubmission": true,
+    "cancellationPropagation": true
+  },
+  "metrics": {
+    "routeDecisionMs": {
+      "samples": 1000,
+      "min": 0.009999999999990905,
+      "p50": 0.013499999999993406,
+      "p95": 0.019199999999997885,
+      "p99": 0.05540000000000589,
+      "max": 0.11570000000000391,
+      "mean": 0.014783400000000255
+    },
+    "tokenEstimationMs": {
+      "samples": 1000,
+      "min": 0.0981999999999914,
+      "p50": 0.11509999999998399,
+      "p95": 0.17019999999999413,
+      "p99": 0.21240000000000236,
+      "max": 0.4128000000000043,
+      "mean": 0.12698930000000005
+    },
+    "structuredValidationMs": {
+      "samples": 1000,
+      "min": 0.005400000000008731,
+      "p50": 0.006299999999981765,
+      "p95": 0.013300000000015189,
+      "p99": 0.02600000000001046,
+      "max": 0.47509999999999764,
+      "mean": 0.00852969999999982
+    },
+    "gatewayTotalMs": {
+      "samples": 1000,
+      "min": 0.41390000000001237,
+      "p50": 0.9051000000000045,
+      "p95": 2.2317999999999643,
+      "p99": 3.943399999999997,
+      "max": 5.4214000000000055,
+      "mean": 1.0676209
+    },
+    "streamForwardMs": {
+      "samples": 1000,
+      "min": 0.00029999999998153726,
+      "p50": 0.00050000000004502,
+      "p95": 0.0013999999999896318,
+      "p99": 0.002999999999985903,
+      "max": 0.20990000000000464,
+      "mean": 0.0008711000000003538
+    },
+    "asyncSubmissionMs": {
+      "samples": 1000,
+      "min": 0.001099999999951251,
+      "p50": 0.0014999999999645297,
+      "p95": 0.0036000000000058208,
+      "p99": 0.009799999999984266,
+      "max": 0.23259999999999081,
+      "mean": 0.0025527000000008116
+    },
+    "cancellationPropagationMs": {
+      "samples": 1000,
+      "min": 0.005999999999971806,
+      "p50": 0.014000000000010004,
+      "p95": 0.022600000000011278,
+      "p99": 0.044399999999996,
+      "max": 0.21940000000000737,
+      "mean": 0.01434200000000027
+    }
+  },
+  "gatewayMetrics": {
+    "requests": 2001,
+    "completed": 2001,
+    "failed": 0,
+    "cancelled": 0,
+    "cacheHits": 0,
+    "retries": 0,
+    "fallbacks": 0,
+    "totalPromptTokens": 8004,
+    "totalCompletionTokens": 5000,
+    "totalCost": 0.018003999999999964,
+    "latencyMs": {
+      "p50": 3.569500000000005,
+      "p95": 27.990700000000004,
+      "p99": 28.502599999999973,
+      "max": 28.845500000000015
+    },
+    "byModel": {
+      "benchmark-provider:benchmark-model": {
+        "attempts": 2001,
+        "completed": 2001,
+        "failed": 0
+      }
+    }
+  }
+}

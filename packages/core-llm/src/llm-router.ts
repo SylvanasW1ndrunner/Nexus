@@ -1,9 +1,10 @@
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
-import type { LlmChatRequest, LlmChatResponse, LlmChatStreamEvent, LlmProvider } from './types.js';
+import { LlmGateway } from './llm-gateway.js';
+import type { LlmChatRequest, LlmChatResponse, LlmChatStreamEvent, LlmProvider, LlmProviderCapabilities } from './types.js';
 
 export type LlmRouteMode = 'byok' | 'managed';
 
-export type LlmRouteDecision = {
+export type LlmLegacyRouteDecision = {
   mode: LlmRouteMode;
   endpointDescription: string;
 };
@@ -12,49 +13,44 @@ export type LlmChatOptions = {
   round?: RoundContext;
 };
 
+/**
+ * Backwards-compatible facade. New code should depend on LlmGateway directly.
+ * Every legacy call is still executed through the gateway policy, accounting,
+ * reliability, validation and telemetry pipeline.
+ */
 export class LlmRouter {
-  private readonly providers = new Map<string, LlmProvider>();
+  readonly gateway: LlmGateway;
 
   constructor(
     private readonly usageTracker: UsageTracker,
     providers: LlmProvider[] = [],
   ) {
-    for (const provider of providers) {
-      this.registerProvider(provider);
-    }
+    this.gateway = new LlmGateway({ usageTracker });
+    for (const provider of providers) this.registerProvider(provider);
   }
 
-  async decide(mode: LlmRouteMode): Promise<LlmRouteDecision> {
+  async decide(mode: LlmRouteMode): Promise<LlmLegacyRouteDecision> {
     await this.usageTracker.current();
-    if (mode === 'managed') {
-      return {
-        mode,
-        endpointDescription: 'Organization-managed OpenAI-compatible endpoint',
-      };
-    }
-    return {
-      mode,
-      endpointDescription: 'User configured OpenAI-compatible endpoint',
-    };
+    return mode === 'managed'
+      ? { mode, endpointDescription: 'Organization-managed OpenAI-compatible endpoint' }
+      : { mode, endpointDescription: 'User configured OpenAI-compatible endpoint' };
   }
 
   registerProvider(provider: LlmProvider): void {
-    this.providers.set(provider.id, provider);
+    this.gateway.registerProvider(provider);
   }
 
   async chat(providerId: string, request: LlmChatRequest, options: LlmChatOptions = {}): Promise<LlmChatResponse> {
-    const provider = this.providers.get(providerId);
-    if (!provider) {
-      throw new Error(`LLM provider is not registered: ${providerId}`);
-    }
-
-    const response = await provider.chat(request);
-    if (response.usage && options.round) {
-      await this.usageTracker.recordLlmCall(options.round, response.usage);
-    } else if (response.usage) {
-      await this.usageTracker.recordTokens('byok', response.usage);
-    }
-    return response;
+    this.registerLegacyModel(providerId, request, false);
+    return await this.gateway.chat({
+      providerId,
+      request,
+      context: { tenantId: 'legacy-local', taskType: 'legacy-chat' },
+      ...(options.round === undefined ? {} : { round: options.round }),
+      maxRetries: 0,
+      maxFallbacks: 0,
+      validateToolCalls: false,
+    });
   }
 
   async *stream(
@@ -62,32 +58,30 @@ export class LlmRouter {
     request: LlmChatRequest,
     options: LlmChatOptions = {},
   ): AsyncIterable<LlmChatStreamEvent> {
-    const provider = this.providers.get(providerId);
-    if (!provider) {
-      throw new Error(`LLM provider is not registered: ${providerId}`);
-    }
+    this.registerLegacyModel(providerId, request, true);
+    yield* this.gateway.stream({
+      providerId,
+      request,
+      context: { tenantId: 'legacy-local', taskType: 'legacy-stream' },
+      ...(options.round === undefined ? {} : { round: options.round }),
+      maxRetries: 0,
+      maxFallbacks: 0,
+      validateToolCalls: false,
+    });
+  }
 
-    if (!provider.stream) {
-      const response = await this.chat(providerId, request, options);
-      if (response.text) yield { type: 'text-delta', text: response.text };
-      for (const toolCall of response.toolCalls) {
-        yield { type: 'tool-call', toolCall };
-      }
-      if (response.usage) yield { type: 'usage', usage: response.usage };
-      yield { type: 'finish', response };
-      return;
-    }
-
-    let finalResponse: LlmChatResponse | undefined;
-    for await (const event of provider.stream(request)) {
-      if (event.type === 'finish') finalResponse = event.response;
-      yield event;
-    }
-
-    if (finalResponse?.usage && options.round) {
-      await this.usageTracker.recordLlmCall(options.round, finalResponse.usage);
-    } else if (finalResponse?.usage) {
-      await this.usageTracker.recordTokens('byok', finalResponse.usage);
-    }
+  private registerLegacyModel(providerId: string, request: LlmChatRequest, streaming: boolean): void {
+    const provider = this.gateway.registry.provider(providerId);
+    if (!provider) throw new Error(`LLM provider is not registered: ${providerId}`);
+    const capabilities: Partial<LlmProviderCapabilities> = {
+      ...(request.tools?.length ? { toolCalling: 'supported' } : {}),
+      ...(request.responseFormat && request.responseFormat.type !== 'text' ? { structuredOutput: 'supported' } : {}),
+      ...(streaming ? { streaming: 'supported' } : {}),
+    };
+    this.gateway.registerModel({
+      providerId,
+      model: request.model,
+      capabilities,
+    });
   }
 }

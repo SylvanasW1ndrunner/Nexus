@@ -1,0 +1,70 @@
+{
+  "generatedAt": "2026-07-23T10:16:03.153Z",
+  "dataset": {
+    "resources": 100000,
+    "relations": 100000,
+    "lookupSamples": 2000,
+    "jobSamples": 1000,
+    "streamedRows": 1000000
+  },
+  "metrics": {
+    "resourceIdLookupP95Ms": 0.009799999999813735,
+    "singleHopRelationP95Ms": 0.009600000000318687,
+    "capabilityResolutionP95Ms": 0.0036000000000058208,
+    "querySubmissionP95Ms": 0.1471000000001368,
+    "cancellationPropagationP95Ms": 0.043400000000019645,
+    "millionRowStreamMemoryDeltaMiB": 17.104949951171875,
+    "millionRowStreamElapsedMs": 633.1259,
+    "millionRowStreamBatches": 1000,
+    "incrementalSingleResourceUpdateMs": 0.7653000000000247,
+    "connectorCapabilityCoverage": 1
+  },
+  "thresholds": {
+    "resourceIdLookupP95Ms": 10,
+    "singleHopRelationP95Ms": 50,
+    "capabilityResolutionP95Ms": 5,
+    "querySubmissionP95Ms": 20,
+    "cancellationPropagationP95Ms": 100,
+    "millionRowStreamMemoryDeltaMiB": 64,
+    "connectorCapabilityCoverage": 1
+  },
+  "assertions": {
+    "resourceIdLookupP95Ms": {
+      "passed": true,
+      "actual": 0.009799999999813735,
+      "maximum": 10
+    },
+    "singleHopRelationP95Ms": {
+      "passed": true,
+      "actual": 0.009600000000318687,
+      "maximum": 50
+    },
+    "capabilityResolutionP95Ms": {
+      "passed": true,
+      "actual": 0.0036000000000058208,
+      "maximum": 5
+    },
+    "querySubmissionP95Ms": {
+      "passed": true,
+      "actual": 0.1471000000001368,
+      "maximum": 20
+    },
+    "cancellationPropagationP95Ms": {
+      "passed": true,
+      "actual": 0.043400000000019645,
+      "maximum": 100
+    },
+    "millionRowStreamMemoryDeltaMiB": {
+      "passed": true,
+      "actual": 17.104949951171875,
+      "maximum": 64
+    },
+    "connectorCapabilityCoverage": {
+      "passed": true,
+      "actual": 1,
+      "maximum": 1
+    }
+  },
+  "missingPostgresCapabilities": [],
+  "passed": true
+}

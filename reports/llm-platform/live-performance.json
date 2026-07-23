@@ -1,0 +1,33 @@
+{
+  "kind": "llm-live-performance",
+  "status": "passed",
+  "generatedAt": "2026-07-23T06:52:46.011Z",
+  "provider": "siliconflow",
+  "model": "deepseek-ai/DeepSeek-V4-Pro",
+  "sampleCount": 3,
+  "sync": {
+    "latencyMs": {
+      "min": 1813.82,
+      "p50": 4073.79,
+      "p95": 69924,
+      "max": 69924,
+      "mean": 25270.54
+    },
+    "usage": {
+      "promptTokens": 284,
+      "completionTokens": 2030,
+      "totalTokens": 2314
+    },
+    "allUsageReportedByProvider": true
+  },
+  "stream": {
+    "firstTokenMs": 93409.93,
+    "totalLatencyMs": 93484.22,
+    "usage": {
+      "promptTokens": 97,
+      "completionTokens": 3363,
+      "totalTokens": 3460
+    }
+  },
+  "note": "真实 Endpoint 小样本，仅用于当前环境基线，不代表供应商 SLA 或并发容量。"
+}

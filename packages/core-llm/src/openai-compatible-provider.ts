@@ -3,9 +3,15 @@ import {
   type LlmChatRequest,
   type LlmChatResponse,
   type LlmChatStreamEvent,
+  type LlmEmbeddingRequest,
+  type LlmEmbeddingResponse,
+  type LlmModelMetadata,
   type LlmProvider,
   type LlmProviderAvailability,
+  type LlmProviderCapabilities,
   type LlmProviderMode,
+  type LlmRerankRequest,
+  type LlmRerankResponse,
   type LlmToolCall,
   type LlmUsage,
 } from './types.js';
@@ -17,15 +23,21 @@ type StreamResponse = {
   cleanup: () => void;
 };
 
-type OpenAICompatibleProviderConfig = {
+export type OpenAICompatibleProviderConfig = {
   id: string;
   name: string;
-  apiKey: string;
+  apiKey?: string;
   baseUrl: string;
   mode?: LlmProviderMode;
+  allowUnauthenticated?: boolean;
   timeoutMs?: number;
   maxRetries?: number;
   retryDelayBaseMs?: number;
+  embeddingsPath?: string;
+  rerankPath?: string;
+  modelsPath?: string;
+  metadataSource?: 'openai-compatible' | 'ollama';
+  capabilities?: Partial<LlmProviderCapabilities>;
   defaultHeaders?: Record<string, string>;
   fetch?: FetchLike;
 };
@@ -95,31 +107,77 @@ type OpenAIChatResponse = {
   };
 };
 
+type OpenAIEmbeddingResponse = {
+  data?: Array<{ index?: number; embedding?: number[] }>;
+  model?: string;
+  usage?: OpenAIUsage & { prompt_tokens?: number; total_tokens?: number };
+};
+
+type OpenAIRerankResponse = {
+  results?: Array<{ index?: number; relevance_score?: number; score?: number; document?: string }>;
+  model?: string;
+  usage?: OpenAIUsage;
+};
+
+type OpenAIModelsResponse = {
+  data?: Array<{ id?: string }>;
+};
+
+type OllamaShowResponse = {
+  capabilities?: string[];
+  details?: {
+    family?: string;
+    parameter_size?: string;
+    quantization_level?: string;
+  };
+  model_info?: Record<string, unknown>;
+};
+
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly id: string;
   readonly name: string;
   readonly mode: LlmProviderMode;
+  readonly protocol = 'openai-compatible';
+  readonly capabilities: Partial<LlmProviderCapabilities>;
 
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryDelayBaseMs: number;
+  private readonly embeddingsPath: string;
+  private readonly rerankPath: string;
+  private readonly modelsPath: string;
+  private readonly metadataSource: 'openai-compatible' | 'ollama';
   private readonly defaultHeaders: Record<string, string>;
   private readonly fetchImpl: FetchLike;
 
   constructor(config: OpenAICompatibleProviderConfig) {
-    if (!config.apiKey.trim()) {
+    if (!config.apiKey?.trim() && !config.allowUnauthenticated) {
       throw new LlmProviderError('LLM_AUTH_FAILED', 'LLM API key is required.', false, 401);
     }
     this.id = config.id;
     this.name = config.name;
     this.mode = config.mode ?? 'byok';
-    this.apiKey = config.apiKey;
+    this.apiKey = config.apiKey?.trim() ?? '';
     this.baseUrl = normalizeBaseUrl(config.baseUrl);
     this.timeoutMs = config.timeoutMs ?? 60_000;
-    this.maxRetries = config.maxRetries ?? 2;
+    this.maxRetries = config.maxRetries ?? 0;
     this.retryDelayBaseMs = config.retryDelayBaseMs ?? 100;
+    this.embeddingsPath = normalizePath(config.embeddingsPath ?? '/embeddings');
+    this.rerankPath = normalizePath(config.rerankPath ?? '/rerank');
+    this.modelsPath = normalizePath(config.modelsPath ?? '/models');
+    this.metadataSource = config.metadataSource ?? 'openai-compatible';
+    this.capabilities = {
+      chat: 'supported',
+      streaming: 'supported',
+      toolCalling: 'unknown',
+      structuredOutput: 'unknown',
+      reasoning: 'unknown',
+      embeddings: 'unknown',
+      rerank: 'unknown',
+      ...config.capabilities,
+    };
     this.defaultHeaders = config.defaultHeaders ?? {};
     this.fetchImpl = config.fetch ?? fetch;
   }
@@ -129,6 +187,86 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
     const response = await this.requestJson('/chat/completions', payload, request.signal);
     return parseChatResponse(response);
+  }
+
+  async embed(request: LlmEmbeddingRequest): Promise<LlmEmbeddingResponse> {
+    if (request.input.length === 0) throw new Error('Embedding input cannot be empty.');
+    const response = await this.requestJson<OpenAIEmbeddingResponse>(
+      this.embeddingsPath,
+      {
+        model: request.model,
+        input: request.input,
+        ...(request.dimensions === undefined ? {} : { dimensions: request.dimensions }),
+      },
+      request.signal,
+    );
+    const sorted = [...(response.data ?? [])].sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+    const embeddings = sorted.map((item) => item.embedding ?? []);
+    if (embeddings.length !== request.input.length || embeddings.some((embedding) => embedding.length === 0)) {
+      throw new LlmProviderError('LLM_BAD_RESPONSE', 'Embedding provider returned an invalid vector batch.', false);
+    }
+    const dimensions = embeddings[0]?.length ?? 0;
+    if (embeddings.some((embedding) => embedding.length !== dimensions)) {
+      throw new LlmProviderError('LLM_BAD_RESPONSE', 'Embedding vectors have inconsistent dimensions.', false);
+    }
+    const usage = parseEmbeddingUsage(response.usage);
+    return {
+      embeddings,
+      ...(usage === undefined ? {} : { usage }),
+      ...(response.model === undefined ? {} : { model: response.model }),
+    };
+  }
+
+  async rerank(request: LlmRerankRequest): Promise<LlmRerankResponse> {
+    if (request.documents.length === 0) throw new Error('Rerank documents cannot be empty.');
+    const response = await this.requestJson<OpenAIRerankResponse>(
+      this.rerankPath,
+      {
+        model: request.model,
+        query: request.query,
+        documents: request.documents,
+        ...(request.topN === undefined ? {} : { top_n: request.topN }),
+      },
+      request.signal,
+    );
+    const results = (response.results ?? []).map((result) => ({
+      index: result.index ?? -1,
+      score: result.relevance_score ?? result.score ?? 0,
+      ...(typeof result.document === 'string' ? { document: result.document } : {}),
+    }));
+    if (results.some((result) => result.index < 0 || result.index >= request.documents.length || !Number.isFinite(result.score))) {
+      throw new LlmProviderError('LLM_BAD_RESPONSE', 'Rerank provider returned invalid result indexes or scores.', false);
+    }
+    const usage = parseEmbeddingUsage(response.usage);
+    return {
+      results,
+      ...(usage === undefined ? {} : { usage }),
+      ...(response.model === undefined ? {} : { model: response.model }),
+    };
+  }
+
+  async listModels(signal?: AbortSignal): Promise<string[]> {
+    const response = await this.requestGetJson<OpenAIModelsResponse>(this.modelsPath, signal);
+    return (response.data ?? [])
+      .map((item) => item.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  }
+
+  async getModelMetadata(model: string, signal?: AbortSignal): Promise<LlmModelMetadata> {
+    if (this.metadataSource !== 'ollama') {
+      return {
+        model,
+        source: 'provider-declaration',
+        capabilities: { ...this.capabilities },
+      };
+    }
+    const response = await this.requestJson<OllamaShowResponse>(
+      `${ollamaApiRoot(this.baseUrl)}/api/show`,
+      { model },
+      signal,
+      { maxRetries: 0 },
+    );
+    return parseOllamaModelMetadata(model, response, this.capabilities);
   }
 
   async *stream(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent> {
@@ -190,37 +328,34 @@ export class OpenAICompatibleProvider implements LlmProvider {
     yield finishEvent(response, state.finishReason);
   }
 
-  async isAvailable(): Promise<LlmProviderAvailability> {
+  async isAvailable(model?: string, signal?: AbortSignal): Promise<LlmProviderAvailability> {
+    const startedAt = performance.now();
     try {
-      await this.requestJson(
-        '/chat/completions',
-        {
-          model: 'availability-check',
-          messages: [{ role: 'user', content: 'ping' }],
-          max_tokens: 1,
-        },
-        undefined,
-        { maxRetries: 0 },
-      );
-      return { available: true };
+      const models = await this.listModels(signal);
+      const available = model === undefined || models.includes(model);
+      return {
+        available,
+        latencyMs: performance.now() - startedAt,
+        ...(available || model === undefined ? {} : { detail: `Model is not advertised by the Provider: ${model}` }),
+      };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      return { available: false, detail };
+      return { available: false, latencyMs: performance.now() - startedAt, detail };
     }
   }
 
-  private async requestJson(
+  private async requestJson<T = OpenAIChatResponse>(
     path: string,
     payload: Record<string, unknown>,
     signal?: AbortSignal,
     options?: { maxRetries?: number },
-  ): Promise<OpenAIChatResponse> {
+  ): Promise<T> {
     const maxRetries = options?.maxRetries ?? this.maxRetries;
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
-        return await this.requestOnce(path, payload, signal);
+        return await this.requestOnce<T>(path, payload, signal);
       } catch (error) {
         lastError = error;
         if (!isRetryable(error) || attempt === maxRetries) throw error;
@@ -231,11 +366,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
     throw lastError;
   }
 
-  private async requestOnce(
+  private async requestOnce<T>(
     path: string,
     payload: Record<string, unknown>,
     signal?: AbortSignal,
-  ): Promise<OpenAIChatResponse> {
+  ): Promise<T> {
     const controller = new AbortController();
     let timedOut = false;
     const timeout = setTimeout(() => {
@@ -247,13 +382,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
     if (signal?.aborted) controller.abort();
 
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      const response = await this.fetchImpl(resolveEndpoint(this.baseUrl, path), {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${this.apiKey}`,
-          ...this.defaultHeaders,
-        },
+        headers: this.headers({ 'content-type': 'application/json' }),
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
@@ -267,7 +398,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       if (!json || typeof json !== 'object') {
         throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM provider returned an empty response.', false);
       }
-      return json;
+      return json as T;
     } catch (error) {
       if (isAbortError(error)) {
         if (!timedOut && signal?.aborted) {
@@ -275,7 +406,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         }
         throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
       }
-      if (error instanceof LlmProviderError) throw error;
+      if (error instanceof LlmProviderError) throw redactProviderError(error, this.apiKey);
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
         error instanceof Error ? error.message : 'LLM network request failed.',
@@ -285,6 +416,66 @@ export class OpenAICompatibleProvider implements LlmProvider {
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
     }
+  }
+
+  private async requestGetJson<T>(
+    path: string,
+    signal?: AbortSignal,
+    options?: { maxRetries?: number },
+  ): Promise<T> {
+    const maxRetries = options?.maxRetries ?? this.maxRetries;
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        return await this.requestGetOnce<T>(path, signal);
+      } catch (error) {
+        lastError = error;
+        if (!isRetryable(error) || attempt === maxRetries) throw error;
+        await sleep(this.retryDelayBaseMs * 2 ** attempt, signal);
+      }
+    }
+    throw lastError;
+  }
+
+  private async requestGetOnce<T>(path: string, signal?: AbortSignal): Promise<T> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeoutMs);
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method: 'GET',
+        headers: this.headers(),
+        signal: controller.signal,
+      });
+      const body = parseJson(await response.text());
+      if (!response.ok) throw httpError(response.status, body);
+      if (!body || typeof body !== 'object') throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM provider returned an empty response.', false);
+      return body as T;
+    } catch (error) {
+      if (isAbortError(error)) {
+        if (!timedOut && signal?.aborted) throw new LlmProviderError('LLM_ABORTED', 'LLM request was aborted by the user.', false);
+        throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
+      }
+      if (error instanceof LlmProviderError) throw redactProviderError(error, this.apiKey);
+      throw new LlmProviderError('LLM_NETWORK_ERROR', error instanceof Error ? error.message : 'LLM network request failed.', true);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+    }
+  }
+
+  private headers(extra: Record<string, string> = {}): Record<string, string> {
+    return {
+      ...extra,
+      ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+      ...this.defaultHeaders,
+    };
   }
 
   private async requestStream(
@@ -327,11 +518,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${this.apiKey}`,
-          ...this.defaultHeaders,
-        },
+        headers: this.headers({ 'content-type': 'application/json' }),
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
@@ -352,7 +539,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         }
         throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
       }
-      if (error instanceof LlmProviderError) throw error;
+      if (error instanceof LlmProviderError) throw redactProviderError(error, this.apiKey);
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
         error instanceof Error ? error.message : 'LLM stream request failed.',
@@ -391,6 +578,9 @@ function parseChatResponse(response: OpenAIChatResponse): LlmChatResponse {
   const parsed: LlmChatResponse = {
     text: message.content ?? '',
     toolCalls: (message.tool_calls ?? []).map(parseToolCall),
+    ...(choice?.finish_reason === undefined || choice.finish_reason === null
+      ? {}
+      : { finishReason: choice.finish_reason }),
   };
   const usage = parseUsage(response.usage);
   if (usage) parsed.usage = usage;
@@ -422,6 +612,23 @@ function buildChatPayload(request: LlmChatRequest): Record<string, unknown> {
       : {}),
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
     ...(request.maxTokens === undefined ? {} : { max_tokens: request.maxTokens }),
+    ...(request.stop === undefined ? {} : { stop: request.stop }),
+    ...(request.seed === undefined ? {} : { seed: request.seed }),
+    ...(request.reasoning?.effort === undefined ? {} : { reasoning_effort: request.reasoning.effort }),
+    ...(request.responseFormat === undefined || request.responseFormat.type === 'text'
+      ? {}
+      : request.responseFormat.type === 'json_object'
+        ? { response_format: { type: 'json_object' } }
+        : {
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
+                name: request.responseFormat.name,
+                schema: request.responseFormat.schema,
+                strict: request.responseFormat.strict ?? true,
+              },
+            },
+          }),
   };
 }
 
@@ -461,6 +668,7 @@ function streamStateToResponse(state: StreamState): LlmChatResponse {
   if (state.usage) response.usage = state.usage;
   if (state.providerResponseId) response.providerResponseId = state.providerResponseId;
   if (state.model) response.model = state.model;
+  if (state.finishReason) response.finishReason = state.finishReason;
   return response;
 }
 
@@ -544,8 +752,66 @@ function parseUsage(usage?: OpenAIUsage): LlmUsage | undefined {
   };
 }
 
+function parseEmbeddingUsage(usage?: OpenAIUsage): LlmUsage | undefined {
+  if (!usage) return undefined;
+  const promptTokens = usage.prompt_tokens ?? usage.total_tokens ?? 0;
+  return {
+    promptTokens,
+    completionTokens: usage.completion_tokens ?? 0,
+    totalTokens: usage.total_tokens ?? promptTokens + (usage.completion_tokens ?? 0),
+  };
+}
+
 function normalizeBaseUrl(baseUrl: string): string {
+  if (!baseUrl.trim()) throw new Error('LLM baseUrl is required.');
   return baseUrl.replace(/\/+$/, '');
+}
+
+function normalizePath(path: string): string {
+  return path.startsWith('/') ? path : `/${path}`;
+}
+
+function resolveEndpoint(baseUrl: string, path: string): string {
+  return /^https?:\/\//i.test(path) ? path : `${baseUrl}${path}`;
+}
+
+function ollamaApiRoot(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = url.pathname.replace(/\/v1\/?$/, '');
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/+$/, '');
+}
+
+function parseOllamaModelMetadata(
+  model: string,
+  response: OllamaShowResponse,
+  declared: Partial<LlmProviderCapabilities>,
+): LlmModelMetadata {
+  const advertised = Array.isArray(response.capabilities);
+  const capabilities = new Set(response.capabilities ?? []);
+  const contextTokens = Object.entries(response.model_info ?? {}).find(
+    ([key, value]) => key.endsWith('.context_length') && Number.isInteger(value) && Number(value) > 0,
+  )?.[1];
+  return {
+    model,
+    source: 'provider-api',
+    capabilities: {
+      ...declared,
+      ...(advertised
+        ? {
+            chat: capabilities.has('completion') ? 'supported' : 'unsupported',
+            toolCalling: capabilities.has('tools') ? 'supported' : 'unsupported',
+            reasoning: capabilities.has('thinking') ? 'supported' : 'unsupported',
+            embeddings: capabilities.has('embedding') ? 'supported' : 'unsupported',
+          }
+        : {}),
+    },
+    ...(typeof contextTokens === 'number' ? { contextTokens } : {}),
+    ...(response.details?.family ? { family: response.details.family } : {}),
+    ...(response.details?.parameter_size ? { parameterSize: response.details.parameter_size } : {}),
+    ...(response.details?.quantization_level ? { quantization: response.details.quantization_level } : {}),
+  };
 }
 
 function parseJson(text: string): unknown {
@@ -577,6 +843,17 @@ function isAbortError(error: unknown): boolean {
 
 function isRetryable(error: unknown): boolean {
   return error instanceof LlmProviderError && error.retryable;
+}
+
+function redactProviderError(error: LlmProviderError, secret: string): LlmProviderError {
+  if (!secret || !error.message.includes(secret)) return error;
+  return new LlmProviderError(
+    error.code,
+    error.message.split(secret).join('[REDACTED]'),
+    error.retryable,
+    error.statusCode,
+    error.detail,
+  );
 }
 
 async function sleep(ms: number, signal?: AbortSignal): Promise<void> {

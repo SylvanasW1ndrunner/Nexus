@@ -1,0 +1,99 @@
+{
+  "kind": "resource-state-performance",
+  "status": "passed",
+  "generatedAt": "2026-07-23T12:04:56.583Z",
+  "environment": {
+    "node": "v24.14.0",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "cpuCount": 32,
+    "memory": {
+      "rssMiB": 673.05,
+      "heapUsedMiB": 443.35
+    }
+  },
+  "dataset": {
+    "resources": 100000,
+    "relations": 100000,
+    "validObservations": 100000,
+    "idLookupSamples": 2000,
+    "relationLookupSamples": 2000,
+    "traversalSamples": 1000,
+    "querySamples": 1000,
+    "updateSamples": 10000,
+    "stateSamples": 2000,
+    "boundedObservationWrites": 1000000
+  },
+  "thresholds": {
+    "resourceIdLookupP95Ms": 10,
+    "singleHopRelationP95Ms": 50,
+    "twoHopTraversalP95Ms": 100,
+    "scopeAndKindQueryP95Ms": 50,
+    "incrementalUpdateP95Ms": 5,
+    "stateDerivationP95Ms": 10,
+    "snapshotRestoreMs": 5000,
+    "retainedObservations": 32,
+    "retainedEvents": 64
+  },
+  "metrics": {
+    "resourceIdLookupP95Ms": 0.010800000000017462,
+    "singleHopRelationP95Ms": 0.02269999999953143,
+    "twoHopTraversalP95Ms": 0.05529999999998836,
+    "scopeAndKindQueryP95Ms": 0.8659999999999854,
+    "incrementalUpdateP95Ms": 0.07210000000122818,
+    "stateDerivationP95Ms": 0.008499999999912689,
+    "snapshotRestoreMs": 3368.2046999999993,
+    "retainedObservations": 32,
+    "retainedEvents": 64,
+    "boundedObservationElapsedMs": 18736.2836
+  },
+  "checks": {
+    "resourceIdLookupP95Ms": {
+      "actual": 0.010800000000017462,
+      "maximum": 10,
+      "passed": true
+    },
+    "singleHopRelationP95Ms": {
+      "actual": 0.02269999999953143,
+      "maximum": 50,
+      "passed": true
+    },
+    "twoHopTraversalP95Ms": {
+      "actual": 0.05529999999998836,
+      "maximum": 100,
+      "passed": true
+    },
+    "scopeAndKindQueryP95Ms": {
+      "actual": 0.8659999999999854,
+      "maximum": 50,
+      "passed": true
+    },
+    "incrementalUpdateP95Ms": {
+      "actual": 0.07210000000122818,
+      "maximum": 5,
+      "passed": true
+    },
+    "stateDerivationP95Ms": {
+      "actual": 0.008499999999912689,
+      "maximum": 10,
+      "passed": true
+    },
+    "snapshotRestoreMs": {
+      "actual": 3368.2046999999993,
+      "maximum": 5000,
+      "passed": true
+    },
+    "retainedObservations": {
+      "actual": 32,
+      "maximum": 32,
+      "passed": true
+    },
+    "retainedEvents": {
+      "actual": 64,
+      "maximum": 64,
+      "passed": true
+    }
+  },
+  "measurement": "Deterministic in-memory resource runtime; external database, disk and network time excluded."
+}

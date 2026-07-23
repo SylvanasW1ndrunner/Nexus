@@ -56,9 +56,9 @@ select audit_touch();
     const statements = splitSqlStatements(sql);
 
     expect(statements).toHaveLength(2);
-    expect(statements[0].statementKind).toBe('CREATE');
-    expect(statements[0].text).toContain("values ('before;after');");
-    expect(statements[1].text).toBe('select audit_touch()');
+    expect(statements[0]!.statementKind).toBe('CREATE');
+    expect(statements[0]!.text).toContain("values ('before;after');");
+    expect(statements[1]!.text).toBe('select audit_touch()');
   });
 
   it('ignores semicolons inside comments and skips comment-only input', () => {
@@ -70,7 +70,7 @@ select * from orders limit 20;
 
     expect(splitSqlStatements('-- only comment;\n/* no sql; */')).toEqual([]);
     expect(splitSqlStatements(sql)).toHaveLength(1);
-    expect(splitSqlStatements(sql)[0].text).toContain('select * from orders limit 20');
+    expect(splitSqlStatements(sql)[0]!.text).toContain('select * from orders limit 20');
   });
 
   it('improves safety multi-statement detection for semicolons in strings', () => {

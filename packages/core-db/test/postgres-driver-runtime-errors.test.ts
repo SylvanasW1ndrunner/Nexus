@@ -129,10 +129,72 @@ describe('PostgresDriver runtime errors', () => {
     expect(calls).toEqual([
       ['BEGIN READ ONLY'],
       [expect.stringMatching(/^DECLARE dbagent_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select email from users where email like \$1 limit 10$/), ["%' OR 1=1 --"]],
-      [expect.stringMatching(/^FETCH FORWARD 10001 FROM dbagent_cursor_[a-f0-9]+$/)],
+      [expect.stringMatching(/^FETCH FORWARD 10001 FROM dbagent_cursor_[a-f0-9]+$/), undefined],
       [expect.stringMatching(/^CLOSE dbagent_cursor_[a-f0-9]+$/)],
       ['COMMIT'],
     ]);
+  });
+
+  it('applies a positive per-query timeout inside the server-side read transaction', async () => {
+    const calls: unknown[][] = [];
+    const driver = new PostgresDriver();
+    const pool = {
+      connect() {
+        return Promise.resolve({
+          processID: 1201,
+          query(...args: unknown[]) {
+            calls.push(args);
+            return Promise.resolve({
+              command: 'SELECT',
+              rowCount: 1,
+              oid: 0,
+              fields: [{ name: 'value', dataTypeID: 23 }],
+              rows: [{ value: 1 }],
+            });
+          },
+          release() {},
+        });
+      },
+    };
+    (driver as unknown as { pools: Map<string, unknown> }).pools.set(connection.id, pool);
+
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: 'select 1 as value',
+        timeoutMs: 250,
+      },
+      { ...connection, statementTimeoutMs: 5_000 },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([
+      ['BEGIN READ ONLY'],
+      ["select set_config('statement_timeout', $1, true)", ['250ms']],
+      [expect.stringMatching(/^DECLARE dbagent_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select 1 as value$/), undefined],
+      [expect.stringMatching(/^FETCH FORWARD 10001 FROM dbagent_cursor_[a-f0-9]+$/), undefined],
+      [expect.stringMatching(/^CLOSE dbagent_cursor_[a-f0-9]+$/)],
+      ['COMMIT'],
+    ]);
+  });
+
+  it('rejects invalid per-query timeouts before acquiring a PostgreSQL client', async () => {
+    const driver = driverWithQueryError(pgError('ECONNRESET'));
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: 'select 1',
+        timeoutMs: 0,
+      },
+      connection,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+      },
+    });
   });
 
   it('preserves caller-provided query id in execution result', async () => {
