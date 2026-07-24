@@ -1,4 +1,4 @@
-export * from './db-tools.js';
+export * from './ai-sql-tools.js';
 export * from './database-operations-tools.js';
 export * from './diagnostic-report.js';
 export * from './mcp-config-store.js';

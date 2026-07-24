@@ -7,8 +7,17 @@ import {
   type SkillAgentRunOptionsForAgent,
 } from '../src/index.js';
 
+const tools = [
+  'resource_list',
+  'resource_get',
+  'knowledge_search',
+  'sql_execute',
+  'sql_explain',
+  'result_read',
+];
+
 describe('Auto Skill Agent runner', () => {
-  it('selects an eligible imported-style workflow from runtime tools', async () => {
+  it('selects a generic query workflow and applies its iteration limit', async () => {
     const calls: SkillAgentRunOptionsForAgent[] = [];
     const agent: SkillAgent = {
       run(options) {
@@ -20,17 +29,27 @@ describe('Auto Skill Agent runner', () => {
     const output = await runAutoSkillAgent(agent, {
       providerId: 'fake',
       model: 'fake-model',
-      userInput: '检查数据库里有没有长事务',
+      userInput: '统计过去七天的订单数和支付金额趋势',
       skills: createDefaultBuiltinSkills(),
       toolPolicy: {
-        runtimeTools: [
-          { name: 'diagnose_long_transactions', dangerLevel: 'safe', readonly: true, source: 'database' },
-        ],
+        runtimeTools: tools.map((name) => ({
+          name,
+          dangerLevel: name === 'sql_execute' ? ('high' as const) : ('safe' as const),
+          readonly: name !== 'sql_execute',
+          source: name.startsWith('resource') || name === 'knowledge_search'
+            ? ('schema-rag' as const)
+            : ('database' as const),
+        })),
       },
+      mode: 'read',
     });
 
-    expect(output.autoPlan.candidate.skill.name).toBe('long_transaction_diagnosis');
-    expect(calls[0]?.allowedTools).toEqual(['diagnose_long_transactions']);
+    expect(output.autoPlan.candidate.skill.name).toBe('query-and-answer');
+    expect(calls[0]?.allowedTools).toEqual(tools);
+    expect(calls[0]).toMatchObject({
+      mode: 'read',
+      maxIterations: 12,
+    });
   });
 });
 
@@ -40,7 +59,7 @@ function doneResult(): AgentRunResult {
     session: {
       id: 'session',
       title: 'skill',
-      mode: 'ask',
+      mode: 'read',
       strategy: 'react',
       messages: [],
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },

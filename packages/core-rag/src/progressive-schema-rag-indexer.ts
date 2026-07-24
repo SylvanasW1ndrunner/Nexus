@@ -50,21 +50,22 @@ export class ProgressiveSchemaRagIndexer {
     options: SchemaRagProgressiveIndexOptions = {},
   ): Promise<ProgressiveSchemaRagIndexResult> {
     const startedAt = new Date().toISOString();
-    const stages = buildInitialStages(input.tables.length, options.hotTableLimit, startedAt);
+    const tableCount = input.tables?.length ?? 0;
+    const stages = buildInitialStages(tableCount, options.hotTableLimit, startedAt);
     this.setStatus(input.connectionId, 'skeleton', false, stages, startedAt);
 
     try {
-      completeStage(stages, 'skeleton', input.tables.length, startedAt);
+      completeStage(stages, 'skeleton', tableCount, startedAt);
       completeStage(
         stages,
         'hot_tables',
-        Math.min(input.tables.length, options.hotTableLimit ?? 50),
+        Math.min(tableCount, options.hotTableLimit ?? 50),
         startedAt,
       );
       completeStage(
         stages,
         'long_tail',
-        Math.max(0, input.tables.length - (options.hotTableLimit ?? 50)),
+        Math.max(0, tableCount - (options.hotTableLimit ?? 50)),
         startedAt,
       );
 
@@ -98,7 +99,7 @@ export class ProgressiveSchemaRagIndexer {
       index,
       'ready',
       true,
-      buildUpsertStages(input.tables.length),
+      buildUpsertStages(input.tables?.length ?? 0),
       new Date().toISOString(),
     );
     this.statuses.set(input.connectionId, status);

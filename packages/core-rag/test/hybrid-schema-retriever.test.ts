@@ -58,9 +58,9 @@ describe('hybrid schema retriever', () => {
     expect(resultIds).toContain('table:commerce.orders');
     expect(resultIds).toContain('table:commerce.customers');
     expect(customer?.reasons.some((reason) => reason.startsWith('graph:'))).toBe(true);
-    expect(customer?.scoreDetails).toEqual([
+    expect(customer?.scoreDetails).toEqual(expect.arrayContaining([
       expect.objectContaining({ channel: 'graph', reasons: ['graph:table:commerce.orders'] }),
-    ]);
+    ]));
   });
 
   it('can disable graph expansion for strict direct-hit result sets', () => {

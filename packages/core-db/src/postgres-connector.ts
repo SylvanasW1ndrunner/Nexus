@@ -325,6 +325,18 @@ export class PostgresConnector implements DatabaseConnector {
       relations.push(
         createRelation('contains', parent.id, resource.id, source, observedAt),
       );
+      if (entry.kind === 'constraint') {
+        relations.push(
+          ...this.#foreignKeyRelations(
+            connected,
+            entry,
+            resource,
+            parent.id,
+            source,
+            observedAt,
+          ),
+        );
+      }
     }
     const complete = !page.data.hasMore;
     return {
@@ -791,6 +803,52 @@ export class PostgresConnector implements DatabaseConnector {
     );
   }
 
+  #foreignKeyRelations(
+    connected: ConnectedPostgres,
+    entry: PostgresCatalogEntry,
+    constraint: ResourceDescriptor,
+    sourceTableId: string,
+    source: ResourceRelation['sources'][number],
+    observedAt: string,
+  ): ResourceRelation[] {
+    const referencedTableNativeId = entry.attributes.referencedTableNativeId;
+    if (typeof referencedTableNativeId !== 'string') return [];
+    const referencedTable = connected.nativeResources.get(referencedTableNativeId);
+    if (!referencedTable) return [];
+
+    const relations = [
+      ...(sourceTableId === referencedTable.id
+        ? []
+        : [createRelation('references', sourceTableId, referencedTable.id, source, observedAt)]),
+      createRelation('references', constraint.id, referencedTable.id, source, observedAt),
+    ];
+    const sourceColumns = portableStringArray(entry.attributes.sourceColumns);
+    const targetColumns = portableStringArray(entry.attributes.targetColumns);
+    for (let index = 0; index < sourceColumns.length; index += 1) {
+      const sourceColumn = connected.nativeResources.get(
+        `${entry.parentNativeId}.${sourceColumns[index]}`,
+      );
+      if (!sourceColumn) continue;
+      const targetColumnName = targetColumns[index];
+      const targetColumn = targetColumnName
+        ? connected.nativeResources.get(`${referencedTableNativeId}.${targetColumnName}`)
+        : undefined;
+      const targetResourceId = targetColumn?.id ?? referencedTable.id;
+      if (sourceColumn.id !== targetResourceId) {
+        relations.push(
+          createRelation(
+            'references',
+            sourceColumn.id,
+            targetResourceId,
+            source,
+            observedAt,
+          ),
+        );
+      }
+    }
+    return relations;
+  }
+
   #makeResource(
     profile: ConnectionProfile,
     connected: ConnectedPostgres,
@@ -1118,6 +1176,11 @@ function createRelation(
     updatedAt: observedAt,
     sources: [source],
   };
+}
+
+function portableStringArray(value: PortableValue | undefined): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string');
 }
 
 function encodeOffset(offset: number): string {

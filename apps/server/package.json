@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "dbagent-server": "dist/cli.js"
+    "schemanaut-server": "dist/cli.js"
   },
   "files": ["dist", "package.json"],
   "scripts": {

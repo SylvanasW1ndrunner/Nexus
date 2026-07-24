@@ -10,6 +10,7 @@ import type {
   QueryRequest,
   QueryResultSet,
   QueryTransactionReport,
+  PortableValue,
   SavedConnection,
   TableConstraintSummary,
   TableDetail,
@@ -56,7 +57,7 @@ export type PostgresCatalogEntry = {
   canonicalName: string;
   displayName: string;
   parentNativeId: string;
-  attributes: Record<string, string | number | boolean | null>;
+  attributes: Record<string, PortableValue>;
 };
 
 export type PostgresCatalogPage = {
@@ -676,7 +677,7 @@ export class PostgresDriver implements IDatabaseDriver {
         canonical_name: string;
         display_name: string;
         parent_native_id: string;
-        attributes: Record<string, string | number | boolean | null>;
+        attributes: Record<string, PortableValue>;
       }>(
         `
           with database_context as (
@@ -804,11 +805,42 @@ export class PostgresDriver implements IDatabaseDriver {
                 'constraintType', constraint_info.contype,
                 'definition', pg_get_constraintdef(constraint_info.oid, true),
                 'validated', constraint_info.convalidated,
-                'deferrable', constraint_info.condeferrable
+                'deferrable', constraint_info.condeferrable,
+                'referencedTableNativeId', case
+                  when constraint_info.contype = 'f' then
+                    context.database_name || '.' || referenced_namespace.nspname || '.' ||
+                    referenced_relation.relname
+                  else null
+                end,
+                'sourceColumns', case
+                  when constraint_info.contype = 'f' then (
+                    select jsonb_agg(source_attribute.attname order by source_key.ordinality)
+                    from unnest(constraint_info.conkey) with ordinality as source_key(attnum, ordinality)
+                    join pg_attribute source_attribute
+                      on source_attribute.attrelid = constraint_info.conrelid
+                      and source_attribute.attnum = source_key.attnum
+                  )
+                  else null
+                end,
+                'targetColumns', case
+                  when constraint_info.contype = 'f' then (
+                    select jsonb_agg(target_attribute.attname order by target_key.ordinality)
+                    from unnest(constraint_info.confkey) with ordinality as target_key(attnum, ordinality)
+                    join pg_attribute target_attribute
+                      on target_attribute.attrelid = constraint_info.confrelid
+                      and target_attribute.attnum = target_key.attnum
+                  )
+                  else null
+                end
               ) as attributes
             from pg_constraint constraint_info
             join pg_class relation on relation.oid = constraint_info.conrelid
             join pg_namespace namespace on namespace.oid = relation.relnamespace
+            left join pg_class referenced_relation
+              on referenced_relation.oid = constraint_info.confrelid
+              and constraint_info.contype = 'f'
+            left join pg_namespace referenced_namespace
+              on referenced_namespace.oid = referenced_relation.relnamespace
             cross join database_context context
             where namespace.nspname not like 'pg_toast%'
               and namespace.nspname not in ('pg_catalog', 'information_schema')

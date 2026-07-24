@@ -49,6 +49,9 @@ function normalizeSkill(
   const version = optionalString(raw.version);
   const author = optionalString(raw.author);
   const systemAddition = optionalString(raw.system_addition ?? raw.systemAddition);
+  const executionLimits = normalizeExecutionLimits(
+    raw.execution_limits ?? raw.executionLimits,
+  );
   return {
     name,
     ...(title === undefined ? {} : { title }),
@@ -58,8 +61,27 @@ function normalizeSkill(
     tags: stringArray(raw.tags, 'tags'),
     ...(systemAddition === undefined ? {} : { systemAddition }),
     allowedTools: unique(stringArray(raw.allowed_tools ?? raw.allowedTools, 'allowed_tools')),
+    ...(raw.recommended_tools === undefined && raw.recommendedTools === undefined
+      ? {}
+      : {
+          recommendedTools: unique(
+            stringArray(
+              raw.recommended_tools ?? raw.recommendedTools,
+              'recommended_tools',
+            ),
+          ),
+        }),
     defaults: normalizeDefaults(raw.defaults),
     steps: stringArray(raw.steps, 'steps'),
+    ...(raw.stop_conditions === undefined && raw.stopConditions === undefined
+      ? {}
+      : {
+          stopConditions: stringArray(
+            raw.stop_conditions ?? raw.stopConditions,
+            'stop_conditions',
+          ),
+        }),
+    ...(executionLimits === undefined ? {} : { executionLimits }),
     outputFormat: normalizeOutputFormat(raw.output_format ?? raw.outputFormat),
     naturalLanguageKeywords: unique(
       stringArray(
@@ -189,6 +211,36 @@ function normalizeDefaults(value: unknown): Record<string, string | number | boo
     }
   }
   return output;
+}
+
+function normalizeExecutionLimits(
+  value: unknown,
+): SkillDefinition['executionLimits'] {
+  if (value === undefined || (Array.isArray(value) && value.length === 0)) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Skill "execution_limits" must be an object.');
+  }
+  const source = value as Record<string, unknown>;
+  const output: NonNullable<SkillDefinition['executionLimits']> = {};
+  copyPositiveInteger(source, output, 'max_iterations', 'maxIterations');
+  copyPositiveInteger(source, output, 'maxIterations', 'maxIterations');
+  copyPositiveInteger(source, output, 'max_sql_attempts', 'maxSqlAttempts');
+  copyPositiveInteger(source, output, 'maxSqlAttempts', 'maxSqlAttempts');
+  return output;
+}
+
+function copyPositiveInteger(
+  source: Record<string, unknown>,
+  output: NonNullable<SkillDefinition['executionLimits']>,
+  sourceKey: string,
+  targetKey: keyof NonNullable<SkillDefinition['executionLimits']>,
+): void {
+  const value = source[sourceKey];
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new Error(`Skill "execution_limits.${sourceKey}" must be a positive integer.`);
+  }
+  output[targetKey] = value as number;
 }
 
 function normalizeOutputFormat(value: unknown): SkillDefinition['outputFormat'] {

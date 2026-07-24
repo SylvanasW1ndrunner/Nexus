@@ -5,15 +5,21 @@ export function createAgentSession(input: {
   id: string;
   title: string;
   mode: AgentSession['mode'];
+  userId?: string;
+  knowledgeSnapshot?: AgentSession['knowledgeSnapshot'];
   now: () => string;
 }): AgentSession {
   return {
     id: input.id,
     title: input.title,
+    ...(input.userId === undefined ? {} : { userId: input.userId }),
     mode: input.mode,
     strategy: 'react',
     messages: [],
     tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    ...(input.knowledgeSnapshot === undefined
+      ? {}
+      : { knowledgeSnapshot: structuredClone(input.knowledgeSnapshot) }),
     aborted: false,
   };
 }

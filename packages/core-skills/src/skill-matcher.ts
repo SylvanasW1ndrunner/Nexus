@@ -19,7 +19,9 @@ export function findMatchingSkills(
   const availableTools = new Set(options.availableTools ?? []);
   const signals = new Set([
     ...(options.signals ?? []).map(normalizeText),
-    ...((options.inferSignals ?? true) ? inferSkillSignals(options.userInput) : []).map(normalizeText),
+    ...((options.inferSignals ?? true) ? inferSkillSignals(options.userInput) : []).map(
+      normalizeText,
+    ),
   ]);
 
   return skills
@@ -43,13 +45,53 @@ export function createAutoExecutionPlan(
 export function inferSkillSignals(userInput: string): SkillAutoInjectSignal[] {
   const text = normalizeText(userInput);
   const signals = new Set<string>();
-  addSignal(signals, text, 'requires_nl2sql', ['sql', '查询', '查一下', '统计', '多少', 'natural language']);
-  addSignal(signals, text, 'requires_schema_context', ['schema', '表结构', '字段', '业务口径', '数据字典']);
-  addSignal(signals, text, 'requires_sql_explain', ['explain', '执行计划', 'sql 优化', '查询很慢']);
-  addSignal(signals, text, 'requires_health_check', ['健康检查', '数据库健康', 'health check']);
-  addSignal(signals, text, 'requires_slow_query_diagnosis', ['慢查询', 'slow query', 'pg_stat_statements']);
-  addSignal(signals, text, 'requires_lock_diagnosis', ['锁等待', '死锁', '阻塞', 'blocked query', 'lock']);
-  addSignal(signals, text, 'requires_long_transaction_diagnosis', ['长事务', 'long transaction', 'idle in transaction']);
+  addSignal(signals, text, 'requires_query_and_answer', [
+    'sql',
+    '查询',
+    '统计',
+    '多少',
+    '对比',
+    '趋势',
+    '排名',
+    'query',
+    'count',
+  ]);
+  addSignal(signals, text, 'requires_schema_discovery', [
+    'schema',
+    '表结构',
+    '字段',
+    'json',
+    '枚举',
+    '数据粒度',
+    '数据长什么样',
+  ]);
+  addSignal(signals, text, 'requires_write_and_verify', [
+    '插入',
+    '新增',
+    '更新',
+    '修改',
+    '删除',
+    '建表',
+    '改表',
+    'insert',
+    'update',
+    'delete',
+    'merge',
+    'create table',
+    'alter table',
+    'drop table',
+  ]);
+  addSignal(signals, text, 'requires_sql_error_recovery', [
+    'sql 错误',
+    '执行失败',
+    '字段不存在',
+    '语法错误',
+    '类型不匹配',
+    'column does not exist',
+    'syntax error',
+    'relation does not exist',
+  ]);
+  if (text && signals.size === 0) signals.add('requires_query_and_answer');
   return [...signals];
 }
 
@@ -81,7 +123,9 @@ function matchSkill(
   }
 
   const checkAvailability = availableTools.size > 0;
-  const available = skill.allowedTools.filter((tool) => !checkAvailability || availableTools.has(tool));
+  const available = skill.allowedTools.filter(
+    (tool) => !checkAvailability || availableTools.has(tool),
+  );
   const missing = checkAvailability
     ? skill.allowedTools.filter((tool) => !availableTools.has(tool))
     : [];
@@ -89,7 +133,9 @@ function matchSkill(
     skill,
     score: reasons.reduce((sum, reason) => sum + reason.score, 0),
     reasons,
-    matchedSignals: skill.autoInjectWhen.filter((signal) => signals.has(normalizeText(signal))),
+    matchedSignals: skill.autoInjectWhen.filter((signal) =>
+      signals.has(normalizeText(signal)),
+    ),
     availableTools: available,
     missingTools: missing,
     eligible: missing.length === 0,
@@ -112,7 +158,10 @@ function createPlanFromCandidate(
   };
 }
 
-function compareCandidates(left: SkillMatchCandidate, right: SkillMatchCandidate): number {
+function compareCandidates(
+  left: SkillMatchCandidate,
+  right: SkillMatchCandidate,
+): number {
   if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
   if (right.score !== left.score) return right.score - left.score;
   return left.skill.name.localeCompare(right.skill.name);
@@ -124,7 +173,9 @@ function addSignal(
   signal: string,
   keywords: string[],
 ): void {
-  if (keywords.some((keyword) => text.includes(normalizeText(keyword)))) signals.add(signal);
+  if (keywords.some((keyword) => text.includes(normalizeText(keyword)))) {
+    signals.add(signal);
+  }
 }
 
 function descriptionMatches(userInput: string, description: string): boolean {

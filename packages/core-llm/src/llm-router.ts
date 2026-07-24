@@ -78,10 +78,22 @@ export class LlmRouter {
       ...(request.responseFormat && request.responseFormat.type !== 'text' ? { structuredOutput: 'supported' } : {}),
       ...(streaming ? { streaming: 'supported' } : {}),
     };
-    this.gateway.registerModel({
-      providerId,
-      model: request.model,
-      capabilities,
-    });
+    const existing = this.gateway.registry.find(providerId, request.model);
+    if (!existing) {
+      this.gateway.registerModel({
+        providerId,
+        model: request.model,
+        capabilities,
+      });
+      return;
+    }
+    for (const [name, status] of Object.entries(capabilities)) {
+      if (status === undefined) continue;
+      this.gateway.registry.updateCapability(
+        existing.id,
+        name as keyof LlmProviderCapabilities,
+        status,
+      );
+    }
   }
 }

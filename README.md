@@ -1,272 +1,222 @@
-# DBAgent
+<div align="center">
 
-DBAgent 是一个面向中国开发者和企业环境的 AI 数据库运行时，核心能力是自然语言转 SQL，以及安全边界内的数据库管理与运维诊断。
+# SchemaNaut
 
-产品以 TypeScript SDK 和 REST API 为核心。CLI 用来启动和诊断服务，WebUI 用来配置、试用和查看运行状态。
+### Navigate data. Generate SQL. Operate safely.
 
-## 当前版本
+**The open-source agent runtime for databases.**
 
-可以直接使用：
+[![Status: Alpha](https://img.shields.io/badge/status-alpha-f59e0b)](CHANGELOG.md)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
+[![Node.js 22.5+](https://img.shields.io/badge/node-%3E%3D22.5-339933?logo=nodedotjs&logoColor=white)](package.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](packages/sdk/src/index.ts)
 
-- 连接 PostgreSQL 只读账号。
-- 使用统一连接档案接入 TCP、JDBC、HTTP/云 SDK 和自定义 Connector。
-- 维护可追溯的数据库、数仓和集群资源关系图。
-- 动态描述 `supported / conditional / unsupported / unknown` 四态能力。
-- 通过同步或异步 Query Job 执行、轮询、取消和分批读取结果。
-- 使用粘性事务、Savepoint、提交、回滚及失败事务恢复。
-- 采集会话、活动查询、锁、容量和复制状态，并执行经过授权的原子运维动作。
-- 提取并索引 Schema。
-- 通过统一 Gateway 调用 OpenAI-compatible、国内云、本地私有模型和 Anthropic 原生协议。
-- 支持同步、流式、异步批量、Tool Calling、结构化输出、Embedding 和 Rerank 合同。
-- 接入时通过 Provider 模型目录与元数据构建能力档案，不发送验证 Prompt。
-- 提供策略路由、预算、缓存、重试、限流、熔断和调用指标。
-- 调用模型生成 SQL。
-- 返回 SQL、解释、假设、Schema 证据和安全报告。
-- 用户显式确认后执行单条只读 SQL。
-- 通过仓库内 SDK、REST API、CLI 和轻量 WebUI 访问。
+[中文](README.zh-CN.md) · [SDK Guide](docs/sdk/README.md) · [API Reference](docs/sdk/api-reference.md) · [Contributing](CONTRIBUTING.md)
 
-核心包已经包含 MCP stdio 接入、Skill 导入与匹配、Agent 权限审批、审计评测，以及健康、慢查询、锁和长事务诊断；这些能力还没有接入主 SDK/API。
+</div>
 
-当前版本不是生产就绪版本。配置和 Secret 仍主要保存在进程内存。
+SchemaNaut turns a database into a tool an AI Agent can understand and operate. It combines natural-language SQL, a versioned Schema knowledge catalog, safe execution, durable sessions, and database operations behind an embeddable TypeScript SDK and local REST service.
 
-## 本地运行
+It is designed for applications and automation—not as another database IDE. Start with PostgreSQL today, then extend the same resource, capability, and connector contracts to additional databases, warehouses, and clusters.
 
-要求 Node.js 20.11+、pnpm 9+、PostgreSQL 只读账号和一个 OpenAI-compatible 模型。
+> SchemaNaut is in alpha. The code is open for evaluation and development, but the current release is not production-ready.
+
+## Why SchemaNaut
+
+| Capability | What it provides |
+| --- | --- |
+| AI SQL Agent | ReAct-based planning, on-demand Schema retrieval, data-shape exploration, SQL generation, execution feedback, and repair |
+| Knowledge-aware retrieval | Hierarchical database → schema → relation → column catalog, business knowledge placement, hybrid retrieval, and Merkle-based version checks |
+| Explicit authority | Three progressive modes: `read`, `edit`, and `full`; out-of-mode actions request approval through your callback |
+| Database runtime | Connection profiles, query jobs, paged results, cancellation, sticky transactions, observations, operations, audit, and metrics |
+| Durable conversations | SQLite-backed session history, automatic context compaction near the model window, manual compaction, and recoverable checkpoints |
+| Model portability | OpenAI-compatible providers, SiliconFlow, DeepSeek, Zhipu, Moonshot, Ollama, vLLM, and native Anthropic Messages |
+| Extension foundations | Built-in tools and Skills today, with MCP and user-imported Skill foundations for future governance and operations |
+| Product surfaces | TypeScript SDK and REST API first; CLI and a lightweight local WebUI for startup, configuration, and evaluation |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    App["Your app / CLI / WebUI"] --> SDK["SchemaNaut SDK & REST API"]
+    SDK --> Agent["AI SQL Agent"]
+    Agent --> Knowledge["Schema knowledge & retrieval"]
+    Agent --> Tools["Built-in tools / Skills / MCP adapters"]
+    Tools --> Policy["read / edit / full policy"]
+    Policy --> DB["Database connectors"]
+    DB --> State["Resources, state, audit & metrics"]
+    State --> Agent
+    Model["Cloud or private LLM"] <--> Agent
+```
+
+## Quick start
+
+Requirements: Node.js 22.5+, pnpm 9+, PostgreSQL, and a model with tool-calling support for Agent runs.
+
+The public npm package is **not published yet**. Build the installable archive locally:
 
 ```bash
 pnpm install
+pnpm package:npm
+npm install ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+```
+
+The planned public package name is `@nwlworkshop/schemanaut`.
+
+### Run an AI SQL Agent
+
+```ts
+import {
+  DatabaseAgentRuntime,
+  createProviderFromPreset,
+} from '@nwlworkshop/schemanaut';
+
+const runtime = new DatabaseAgentRuntime({
+  tenantId: 'team-a',
+  provider: createProviderFromPreset('siliconflow', {
+    apiKey: process.env.LLM_API_KEY,
+  }),
+  model: process.env.LLM_MODEL!,
+  sessionDatabasePath: './data/schemanaut.db',
+  approvalProvider: async ({ mode, tool }) => {
+    // Connect this callback to your own dialog, workflow, or approval service.
+    console.log(`Approval requested: ${mode} -> ${tool.name}`);
+    return false;
+  },
+});
+
+await runtime.connect({
+  host: process.env.DB_HOST ?? '127.0.0.1',
+  port: Number(process.env.DB_PORT ?? 5432),
+  database: process.env.DB_NAME!,
+  username: process.env.DB_USER!,
+  password: process.env.DB_PASSWORD,
+  readOnly: true,
+});
+
+await runtime.indexSchema();
+
+const run = await runtime.runAgent({
+  userId: 'user-1',
+  message: 'Show daily paid order revenue for the last seven days.',
+  mode: 'read',
+});
+
+console.log(run.result.finalText);
+console.log(run.result.toolExecutions);
+await runtime.close();
+```
+
+SchemaNaut stores the complete session history. Continue a conversation with `sessionId`, or compact the model's working context without deleting the original transcript:
+
+```ts
+const sessionId = run.result.session.id;
+
+const continued = await runtime.runAgent({
+  sessionId,
+  message: 'Now compare it with the previous seven days.',
+  mode: 'read',
+});
+
+await runtime.compactAgentSession({
+  sessionId,
+  focus: 'Preserve executed SQL, exact results, decisions, and open tasks.',
+});
+```
+
+### Generate first, execute explicitly
+
+For a deterministic two-step flow, use `generate()` and `executeGenerated()`:
+
+```ts
+const generated = await runtime.generate({
+  question: 'Find the ten customers with the highest paid revenue this month.',
+});
+
+console.log(generated.sql, generated.safety, generated.evidence);
+
+if (generated.status === 'awaiting_execution') {
+  const executed = await runtime.executeGenerated(generated.runId, { limit: 100 });
+  console.table(executed.execution.rows);
+}
+```
+
+### Start the local API and WebUI
+
+From source:
+
+```bash
 pnpm dev
 ```
 
-打开 <http://127.0.0.1:3721>。更换端口：
+From the local archive:
 
 ```bash
-node apps/server/dist/cli.js --port 3722
+npx --yes --package ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz schemanaut
 ```
 
-## 测试
+Open <http://127.0.0.1:3721>. The server listens on loopback only. Use `--port 3722` to select another port.
 
-本地功能回归与平台性能：
+## Permission modes
+
+| Mode | Automatic authority | What happens outside the mode |
+| --- | --- | --- |
+| `read` | Inspect Schema and data; execute read-only SQL | Requests approval |
+| `edit` | Everything in `read`, plus `INSERT`, `UPDATE`, and other data edits | DDL, destructive, and administrative actions request approval |
+| `full` | Read, data edits, DDL, destructive, and administrative tools | Runs within the configured database account and Skill policies |
+
+The mode is an application policy, not a replacement for database permissions. Use a least-privilege database account and implement `approvalProvider` whenever an interactive or organizational approval is required.
+
+## Public surfaces
+
+- **SDK:** `DatabaseAgentRuntime`, unified database and resource runtimes, model providers, public contracts, errors, and portable transport helpers.
+- **REST API:** model setup and calls, connection profiles, discovery, resources, query jobs, transactions, operations, Agent sessions, SQL generation, and execution.
+- **CLI:** starts the local server and WebUI.
+- **WebUI:** a deliberately lightweight local evaluation and configuration surface.
+
+See the [complete SDK guide](docs/sdk/README.md) and [API reference](docs/sdk/api-reference.md).
+
+## Development and verification
 
 ```bash
+pnpm typecheck
+pnpm lint
 pnpm test
-pnpm test:llm-platform:performance
-pnpm test:database-platform:contracts
-pnpm test:database-platform:performance
-pnpm test:public-contracts
-pnpm test:public-contracts:performance
-pnpm test:resource-state
-pnpm test:resource-state:performance
+pnpm test:ai-sql
+pnpm test:ai-sql:performance
 pnpm test:npm-package:functional
 ```
 
-真实 PostgreSQL 功能验收：
+Real PostgreSQL and live-model suites are opt-in:
 
 ```bash
 pnpm test:postgres
-```
-
-需要真实 PostgreSQL 和硅基流动 API 的联合验收：
-
-```bash
 pnpm test:functional:live
 pnpm test:performance:live
 ```
 
-真实测试显式读取 `.env` 中的 `TEST_SILICONFLOW_API_KEY` 和 `TEST_SILICONFLOW_MODEL`，会产生模型费用；功能测试只重建专用的 `dbagent_core_db_test` 数据库。产品 SDK、API 和 WebUI 不提供主动模型验证入口。
+Live model tests can consume paid tokens. Credentials are read from ignored environment files and must never be committed.
 
-## npm 试用包
+## Current boundaries
 
-作为 Node.js SDK 安装：
+- PostgreSQL is the first complete reference connector. The contracts cover databases, warehouses, and clusters; additional production connectors remain roadmap work.
+- MCP and user-imported Skill foundations exist in the core, but are not yet exposed through every public SDK/API workflow.
+- Secrets are still primarily process-local. Multi-tenant authentication, persistent secret management, and production hardening are not complete.
+- Agent quality depends on the selected model's SQL reasoning and tool-calling behavior.
 
-```bash
-npm install @nwlworkshop/dbagent
-```
+## Documentation
 
-生成本地安装包：
+- [SDK Guide](docs/sdk/README.md)
+- [SDK API Reference](docs/sdk/api-reference.md)
+- [Product Functional Design](docs/product-functional-overview.md)
+- [AI SQL Engineering Documentation](docs/ai-sql/README.md)
+- [LLM Platform](docs/foundation/01-llm-platform.md)
+- [Database Access](docs/foundation/02-database-access.md)
+- [Unified Resource and State Model](docs/foundation/03-unified-resource-state.md)
+- [Public Types and Contracts](docs/foundation/04-public-types-and-contracts.md)
+- [Security Policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
 
-```bash
-pnpm package:npm
-```
+## License
 
-运行生成的包：
-
-```bash
-npx --yes --package ./release/DBAgent-v0.1.0/dbagent-v0.1.0.tgz dbagent
-```
-
-发布到 npm 后可直接运行：
-
-```bash
-npx --yes @nwlworkshop/dbagent
-```
-
-## REST API
-
-当前接口：
-
-| 接口 | 用途 |
-| --- | --- |
-| `GET /health` | 服务健康检查 |
-| `GET /v1/capabilities` | 能力与安全限制 |
-| `GET /v1/llm/provider-presets` | 获取模型 Provider 预设 |
-| `POST /v1/llm/setup` | 配置模型并读取模型目录与元数据 |
-| `GET /v1/llm/models` | 查看模型档案 |
-| `GET /v1/llm/metrics` | 查看 Token、成本和延迟指标 |
-| `POST /v1/llm/chat` | 同步模型调用 |
-| `POST /v1/llm/chat/stream` | SSE 流式模型调用 |
-| `POST /v1/llm/jobs` | 提交异步批量模型任务 |
-| `GET/DELETE /v1/llm/jobs/:id` | 查询或取消模型任务 |
-| `GET /v1/database/connectors` | 查看已注册 Connector 和能力 |
-| `GET/POST /v1/database/profiles` | 查询或创建连接档案 |
-| `GET/PATCH/DELETE /v1/database/profiles/:id` | 管理单个连接档案 |
-| `POST /v1/database/profiles/:id/test\|connect\|reconnect\|disconnect\|discover` | 连接生命周期与资源发现 |
-| `GET /v1/resources` | 按类型、引擎、范围和游标查询统一资源 |
-| `GET /v1/resources/:id` | 查询单个资源 |
-| `GET /v1/resources/:id/relations\|state\|observations` | 查询关系、派生状态和观测历史 |
-| `POST /v1/resources/traverse` | 执行有深度和数量上限的关系图遍历 |
-| `GET /v1/resource-events` | 分页查询资源变化事件 |
-| `GET /v1/database/resources` | 兼容接口：查询数据库发现资源 |
-| `POST /v1/database/queries` | 提交同步或异步 Query Job |
-| `GET/DELETE /v1/database/queries/:id` | 查询或取消 Query Job |
-| `GET /v1/database/results/:id` | 分页读取结果 |
-| `POST /v1/database/transactions` | 创建粘性事务 |
-| `POST /v1/database/observations` | 采集确定性运行状态 |
-| `POST /v1/database/operations` | 执行经过授权的原子运维动作 |
-| `GET /v1/database/audit\|metrics` | 查看审计和平台指标 |
-| `POST /v1/database/connect` | 连接 PostgreSQL |
-| `POST /v1/setup` | 兼容接口：配置模型并连接 PostgreSQL |
-| `POST /v1/schema/index` | 索引 Schema |
-| `POST /v1/query/generate` | 自然语言生成 SQL |
-| `POST /v1/query/execute` | 显式执行生成结果 |
-| `GET /v1/runs/:runId` | 查询运行记录 |
-
-配置示例：
-
-```bash
-curl -X POST http://127.0.0.1:3721/v1/setup \
-  -H "content-type: application/json" \
-  -d '{
-    "llm": {
-      "baseUrl": "https://your-endpoint/v1",
-      "apiKey": "YOUR_KEY",
-      "model": "YOUR_MODEL"
-    },
-    "database": {
-      "host": "127.0.0.1",
-      "port": 5432,
-      "database": "app",
-      "username": "dbagent_readonly",
-      "password": "YOUR_PASSWORD"
-    }
-  }'
-```
-
-## TypeScript SDK
-
-仓库内 SDK：
-
-```ts
-import { OpenAICompatibleProvider } from '@dbagent/core-llm';
-import { DatabaseAgentRuntime } from '@dbagent/sdk';
-
-const runtime = new DatabaseAgentRuntime({
-  tenantId: 'team-a',
-  provider: new OpenAICompatibleProvider({
-    id: 'primary',
-    name: 'Primary model',
-    baseUrl: process.env.LLM_BASE_URL!,
-    apiKey: process.env.LLM_API_KEY!,
-  }),
-  model: process.env.LLM_MODEL!,
-});
-
-const modelReply = await runtime.llmChat(
-  { messages: [{ role: 'user', content: '解释慢 SQL 的主要风险' }] },
-  { taskType: 'database-diagnosis', timeoutMs: 30_000, maxRetries: 1 },
-);
-
-await runtime.connect({
-  host: '127.0.0.1',
-  database: 'app',
-  username: 'dbagent_readonly',
-  password: process.env.DB_PASSWORD,
-});
-
-await runtime.indexSchema();
-const run = await runtime.generate({ question: '最近 7 天每天的已支付订单金额' });
-if (run.status === 'awaiting_execution') {
-  const result = await runtime.executeGenerated(run.runId);
-  console.log(result.execution.rows);
-}
-```
-
-统一数据库入口：
-
-```ts
-import { DatabaseAgentRuntime } from '@nwlworkshop/dbagent';
-
-const runtime = new DatabaseAgentRuntime();
-runtime.database.createProfile({
-  id: 'production-readonly',
-  name: 'Production PostgreSQL',
-  connectorId: 'postgres-native',
-  engine: 'postgres',
-  endpoints: [{
-    transport: 'tcp',
-    host: '127.0.0.1',
-    port: 5432,
-    database: 'app',
-  }],
-  principal: 'dbagent_readonly',
-  purpose: 'read-only',
-  readOnly: true,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-});
-
-await runtime.database.connect('production-readonly', {
-  username: 'dbagent_readonly',
-  password: process.env.DB_PASSWORD,
-});
-await runtime.database.discoverAll('production-readonly');
-
-const job = await runtime.database.submit({
-  profileId: 'production-readonly',
-  sql: 'select current_database() as database_name',
-  timeoutMs: 5_000,
-});
-if (job.result) {
-  console.log((await runtime.database.readResult(job.result.id)).rows);
-}
-
-const tables = runtime.resources.query({
-  kinds: ['table'],
-  engine: 'postgres',
-  limit: 100,
-});
-if (tables.items[0]) {
-  console.log(runtime.resources.state(tables.items[0].id));
-}
-
-await runtime.close();
-```
-
-## 安全默认值
-
-- 旧版 AI SQL 快捷入口强制只读；统一数据库入口按连接用途、能力、SQL 安全和授权上下文共同约束。
-- 生成和执行分离。
-- SQL 必须通过单语句、语句类型和风险检查。
-- 查询结果有行数限制。
-- Secret 不进入连接档案、资源、错误详情、审计和 API 响应。
-- 写入、DDL 和运维动作需要相应能力、显式确认或批准上下文。
-- MCP 工具经过命名空间、风险推断、权限和审批。
-- Skill 只能调用声明且已注册的工具。
-
-## 文档
-
-- [总体功能设计](docs/product-functional-overview.md)
-- [大模型能力工程文档](docs/foundation/01-llm-platform.md)
-- [数据库接入与能力描述工程文档](docs/foundation/02-database-access.md)
-- [统一资源与状态模型工程文档](docs/foundation/03-unified-resource-state.md)
-- [公共类型与合同工程文档](docs/foundation/04-public-types-and-contracts.md)
+SchemaNaut is licensed under the [Apache License 2.0](LICENSE).

@@ -116,8 +116,8 @@ function runVitest(testFile, env) {
   const cwd = resolveTestCwd(testFile);
   const relativeTestFile = testFile.slice(cwd.relative.length + 1).replaceAll('\\', '/');
   const args = hasLocalVitest
-    ? [localVitest, 'run', relativeTestFile, '--pool=forks']
-    : ['exec', 'vitest', 'run', relativeTestFile, '--pool=forks'];
+    ? [localVitest, 'run', relativeTestFile, '--pool=threads']
+    : ['exec', 'vitest', 'run', relativeTestFile, '--pool=threads'];
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: cwd.absolute,

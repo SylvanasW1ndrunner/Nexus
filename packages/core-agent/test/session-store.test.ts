@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LlmRouter, type LlmChatResponse, type LlmProvider } from '@dbagent/core-llm';
+import {
+  LlmRouter,
+  type LlmChatRequest,
+  type LlmChatResponse,
+  type LlmProvider,
+} from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
 import { AgentSessionStore, ReactAgent, ToolRegistry, type AgentSession } from '../src/index.js';
 
@@ -56,6 +61,82 @@ describe('AgentSessionStore', () => {
     await expect(store.list({ limit: 1, offset: 1 })).resolves.toMatchObject([{ id: 'session_orders' }]);
   });
 
+  it('appends new messages without rewriting or mutating prior history', async () => {
+    const store = new AgentSessionStore(await sessionPath());
+    const session = testSession('session_append_only', '追加式会话');
+    await store.save({
+      session,
+      now: '2026-07-24T00:00:00.000Z',
+    });
+    session.messages.push({
+      role: 'user',
+      content: '继续按地区分析。',
+      createdAt: '2026-07-24T00:00:01.000Z',
+    });
+    await store.save({
+      session,
+      now: '2026-07-24T00:00:02.000Z',
+    });
+
+    await expect(store.load(session.id)).resolves.toMatchObject({
+      messages: [
+        { content: '分析 GMV' },
+        { content: '请先查看 orders.total_amount。' },
+        { content: '继续按地区分析。' },
+      ],
+    });
+
+    session.messages[2] = {
+      role: 'assistant',
+      content: '试图改写历史。',
+      createdAt: '2026-07-24T00:00:01.000Z',
+    };
+    await expect(store.save({ session })).rejects.toThrow(
+      'append-only',
+    );
+  });
+
+  it('persists every context checkpoint while keeping only the active one on the session', async () => {
+    const store = new AgentSessionStore(await sessionPath());
+    const session = testSession('session_checkpoints', '压缩检查点');
+    session.contextCheckpoint = {
+      version: 1,
+      sequence: 1,
+      trigger: 'auto',
+      method: 'model',
+      summary: '第一阶段完成订单统计。',
+      coveredConversationMessageCount: 1,
+      sourceTokenEstimate: 1_000,
+      summaryTokenEstimate: 20,
+      modelContextTokens: 32_768,
+      createdAt: '2026-07-24T00:00:00.000Z',
+    };
+    await store.save({ session });
+    session.contextCheckpoint = {
+      ...session.contextCheckpoint,
+      sequence: 2,
+      trigger: 'manual',
+      summary: '第二阶段完成地区聚合。',
+      focus: '保留地区金额。',
+      createdAt: '2026-07-24T00:01:00.000Z',
+    };
+    await store.save({ session });
+
+    await expect(store.load(session.id)).resolves.toMatchObject({
+      contextCheckpoint: {
+        sequence: 2,
+        summary: '第二阶段完成地区聚合。',
+      },
+      messages: session.messages,
+    });
+    await expect(
+      store.listContextCheckpoints(session.id),
+    ).resolves.toMatchObject([
+      { sequence: 1, trigger: 'auto' },
+      { sequence: 2, trigger: 'manual', focus: '保留地区金额。' },
+    ]);
+  });
+
   it('forks a session from a selected message and exports json or markdown', async () => {
     const store = new AgentSessionStore(await sessionPath());
     await store.save({ session: testSession('session_1', '订单分析'), now: '2026-06-23T01:00:00.000Z' });
@@ -88,7 +169,7 @@ describe('AgentSessionStore', () => {
     await expect(store.list({ offset: -1 })).rejects.toThrow('offset must be a non-negative integer.');
   });
 
-  it('treats corrupt session JSON as empty so startup can continue', async () => {
+  it('quarantines a corrupt SQLite database so startup can continue', async () => {
     const filePath = await sessionPath();
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, '{ broken json', 'utf8');
@@ -96,6 +177,109 @@ describe('AgentSessionStore', () => {
 
     await expect(store.list()).resolves.toEqual([]);
     await expect(store.load('missing')).resolves.toBeUndefined();
+    const directory = dirname(filePath);
+    const { readdir } = await import('node:fs/promises');
+    await expect(readdir(directory)).resolves.toEqual(
+      expect.arrayContaining([expect.stringMatching(/agent-sessions\.db\.corrupt-/)]),
+    );
+  });
+
+  it('persists the knowledge snapshot and automatically distills stable user preferences', async () => {
+    const store = new AgentSessionStore(await sessionPath());
+    const session = testSession('session_preferences', '偏好测试');
+    session.userId = 'user-alice';
+    session.knowledgeSnapshot = {
+      connectionId: 'conn_1',
+      knowledgeSnapshotId: 'knowledge:root-1',
+      catalogRootHash: 'root-1',
+      retrievalProfileId: 'bilingual-profile',
+      indexVersion: 'index-1',
+    };
+    session.messages.push({
+      role: 'user',
+      content: '我希望默认使用只读模式。以后请先展示 SQL，再解释结果。',
+      createdAt: '2026-06-23T00:00:02.000Z',
+    });
+
+    await store.save({
+      session,
+      now: '2026-06-23T01:00:00.000Z',
+    });
+
+    await expect(store.load('session_preferences')).resolves.toMatchObject({
+      userId: 'user-alice',
+      knowledgeSnapshot: {
+        knowledgeSnapshotId: 'knowledge:root-1',
+        catalogRootHash: 'root-1',
+      },
+    });
+    const preferences = await store.listPreferences('user-alice');
+    expect(preferences.map((preference) => preference.value)).toEqual(
+      expect.arrayContaining([
+        '我希望默认使用只读模式',
+        '以后请先展示 SQL，再解释结果',
+      ]),
+    );
+    expect(preferences.every((preference) => preference.sourceSessionId === 'session_preferences')).toBe(
+      true,
+    );
+  });
+
+  it('injects cross-session preferences into a later Agent run without an extra model call', async () => {
+    const store = new AgentSessionStore(await sessionPath());
+    await store.upsertPreference({
+      userId: 'user-alice',
+      key: 'answer-format',
+      value: '默认先展示 SQL，再给出业务解释。',
+      confidence: 1,
+      now: '2026-06-23T00:00:00.000Z',
+    });
+    const usage = new UsageTracker(await usagePath());
+    const calls: LlmChatRequest[] = [];
+    const provider: LlmProvider = {
+      id: 'fake',
+      name: 'Fake Provider',
+      mode: 'byok',
+      chat(request) {
+        calls.push(request);
+        return Promise.resolve({
+          text: '已按偏好处理。',
+          toolCalls: [],
+          usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25 },
+        });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      new ToolRegistry(),
+      usage,
+      undefined,
+      {
+        now: () => '2026-06-23T00:00:01.000Z',
+        createSessionId: () => 'session-with-memory',
+        sessionStore: store,
+      },
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userId: 'user-alice',
+      userMessage: '统计订单数',
+      mode: 'read',
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.session.messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+    ]);
+    expect(calls[0]?.messages[0]?.role).toBe('system');
+    expect(calls[0]?.messages[0]?.content).toContain('默认先展示 SQL');
+    expect(result.iterations).toBe(1);
   });
 
   it('redacts secrets before persisting, loading, and exporting sessions', async () => {
@@ -250,7 +434,7 @@ function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
 async function sessionPath(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-sessions-'));
   tempDirs.push(dir);
-  return join(dir, 'nested', 'agent-sessions.json');
+  return join(dir, 'nested', 'agent-sessions.db');
 }
 
 async function usagePath(): Promise<string> {

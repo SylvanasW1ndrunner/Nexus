@@ -19,8 +19,9 @@ const DEFAULT_BLOCKED_FINAL_TEXT =
 const REDACTED_FIELD_PREFIX = 'redacted';
 
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-const PHONE_PATTERN = /(?<!\d)(?:\+?\d[\d()\-\s]{8,}\d)(?!\d)/g;
-const ID_CARD_PATTERN = /(?<!\d)\d{17}[\dXx](?!\d)/g;
+const PHONE_PATTERN =
+  /(?<![A-Za-z0-9_])(?:\+?\d[\d()\-\s]{8,}\d)(?![A-Za-z0-9_])/g;
+const ID_CARD_PATTERN = /(?<![A-Za-z0-9_])\d{17}[\dXx](?![A-Za-z0-9_])/g;
 const SECRET_PATTERN = /\b(?:sk|pk|ak)-[A-Za-z0-9_-]{8,}\b/g;
 const CIPHERTEXT_PATTERN = /\bciphertext-[A-Za-z0-9_-]{4,}\b/gi;
 const SENSITIVE_LABEL_VALUE_PATTERN =
@@ -122,6 +123,10 @@ function sanitizeValue(
   if (options.parentSensitive) {
     options.reasons.add('sensitive_key');
     return options.replacement;
+  }
+
+  if (value instanceof Date) {
+    return new Date(value.getTime());
   }
 
   if (value instanceof Uint8Array) {

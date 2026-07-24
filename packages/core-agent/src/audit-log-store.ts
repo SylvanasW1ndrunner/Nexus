@@ -5,6 +5,8 @@ import type { UsageMode } from '@dbagent/shared';
 import { redactPersistedAgentString, redactPersistedAgentValue } from './redaction.js';
 import type {
   AgentContextCompressionReport,
+  AgentContextCompactionMethod,
+  AgentContextCompactionTrigger,
   AgentMode,
   AgentRunStatus,
   AgentToolExecutionRecord,
@@ -34,10 +36,20 @@ export type AgentAuditEvent =
       toolCount: number;
     }
   | {
-      type: 'context_compression_applied';
+      type: 'context_compaction_observed';
       timestamp: string;
       sessionId: string;
       iteration: number;
+      compression: AgentContextCompressionReport;
+    }
+  | {
+      type: 'context_compaction_applied';
+      timestamp: string;
+      sessionId: string;
+      iteration?: number;
+      trigger: AgentContextCompactionTrigger;
+      method: AgentContextCompactionMethod;
+      durationMs: number;
       compression: AgentContextCompressionReport;
     }
   | {

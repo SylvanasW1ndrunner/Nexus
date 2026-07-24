@@ -1,6 +1,6 @@
-# DBAgent 公共基础能力：公共类型与合同
+﻿# SchemaNaut 公共基础能力：公共类型与合同
 
-> 上级文档：[DBAgent 总体功能设计](../product-functional-overview.md)
+> 上级文档：[SchemaNaut 总体功能设计](../product-functional-overview.md)
 >
 > 关联文档：[大模型能力](01-llm-platform.md)、[数据库接入与能力描述](02-database-access.md)、[统一资源与状态模型](03-unified-resource-state.md)
 >
@@ -9,7 +9,7 @@
 
 ## 1. 模块目的
 
-本模块定义 DBAgent 当前已经实现能力之间共享的数据语言，使 SDK、REST API、CLI、WebUI、数据库 Connector 和内部运行时对同一请求、状态、错误和结果保持一致。
+本模块定义 SchemaNaut 当前已经实现能力之间共享的数据语言，使 SDK、REST API、CLI、WebUI、数据库 Connector 和内部运行时对同一请求、状态、错误和结果保持一致。
 
 公共合同遵循“按开发增加”的原则：
 
@@ -161,7 +161,7 @@ Node.js 原生值使用显式标签编码：
 - 循环对象
 - 非普通对象实例
 
-解码只识别 DBAgent 自己的完整标签结构，普通业务对象不会被误解码。
+解码只识别 SchemaNaut 自己的完整标签结构，普通业务对象不会被误解码。
 
 ### 5.3 公共错误基础
 

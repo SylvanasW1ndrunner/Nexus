@@ -1,0 +1,89 @@
+{
+  "kind": "context-compaction-performance",
+  "status": "passed",
+  "generatedAt": "2026-07-24T17:56:04.277Z",
+  "environment": {
+    "node": "v24.14.0",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "cpuCount": 32,
+    "memory": {
+      "rssMiB": 263.08,
+      "heapUsedMiB": 98.35
+    }
+  },
+  "dataset": {
+    "originalMessages": 10000,
+    "checkpointCoveredMessages": 9987,
+    "retainedMessages": 13,
+    "samples": {
+      "compactedWorkingView": 100,
+      "automaticCompactionPlan": 12,
+      "sqliteIncrementalAppend": 30,
+      "sqliteRestore": 30
+    }
+  },
+  "measurement": "Local deterministic benchmark. It measures context construction, compaction planning and append-only SQLite persistence; model and network latency are excluded.",
+  "thresholds": {
+    "compactedWorkingViewP95Ms": 50,
+    "automaticCompactionPlanP95Ms": 100,
+    "sqliteInitialSaveMs": 500,
+    "sqliteIncrementalAppendP95Ms": 500,
+    "sqliteRestoreP95Ms": 500
+  },
+  "metrics": {
+    "compactedWorkingViewMs": {
+      "samples": 100,
+      "p50": 0.403,
+      "p95": 0.891,
+      "max": 2.523
+    },
+    "automaticCompactionPlanMs": {
+      "samples": 12,
+      "p50": 21.391,
+      "p95": 26.757,
+      "max": 26.757
+    },
+    "sqliteInitialSaveMs": 103.55,
+    "sqliteIncrementalAppendMs": {
+      "samples": 30,
+      "p50": 54.115,
+      "p95": 69.335,
+      "max": 69.35
+    },
+    "sqliteRestoreMs": {
+      "samples": 30,
+      "p50": 71.811,
+      "p95": 97.622,
+      "max": 105.807
+    }
+  },
+  "checks": {
+    "compactedWorkingView": {
+      "actual": 0.891,
+      "maximum": 50,
+      "passed": true
+    },
+    "automaticCompactionPlan": {
+      "actual": 26.757,
+      "maximum": 100,
+      "passed": true
+    },
+    "sqliteInitialSave": {
+      "actual": 103.55,
+      "maximum": 500,
+      "passed": true
+    },
+    "sqliteIncrementalAppend": {
+      "actual": 69.335,
+      "maximum": 500,
+      "passed": true
+    },
+    "sqliteRestore": {
+      "actual": 97.622,
+      "maximum": 500,
+      "passed": true
+    }
+  }
+}

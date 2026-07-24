@@ -1,6 +1,6 @@
-# DBAgent 公共基础能力：统一资源与状态模型
+﻿# SchemaNaut 公共基础能力：统一资源与状态模型
 
-> 上级文档：[DBAgent 总体功能设计](../product-functional-overview.md)
+> 上级文档：[SchemaNaut 总体功能设计](../product-functional-overview.md)
 >
 > 关联文档：[数据库接入与能力描述](02-database-access.md)、[公共类型与合同](04-public-types-and-contracts.md)
 >

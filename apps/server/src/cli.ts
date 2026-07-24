@@ -6,7 +6,7 @@ if (options.help) {
   printHelp();
 } else {
   const started = await startDatabaseAgentServer({ host: options.host, port: options.port });
-  process.stdout.write(`DBAgent 已启动：${started.url}\n`);
+  process.stdout.write(`SchemaNaut 已启动：${started.url}\n`);
   process.stdout.write('仅监听本机；模型密钥和数据库密码只保存在当前进程内存。\n');
 
   const shutdown = () => {
@@ -54,6 +54,6 @@ function requireValue(args: string[], index: number, option: string): string {
 }
 
 function printHelp(): void {
-  process.stdout.write(`DBAgent\n\n`);
-  process.stdout.write(`用法：dbagent [--host 127.0.0.1] [--port 3721]\n`);
+  process.stdout.write(`SchemaNaut\n\n`);
+  process.stdout.write(`Usage: schemanaut [--host 127.0.0.1] [--port 3721]\n`);
 }

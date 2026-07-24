@@ -1,0 +1,42 @@
+{
+  "kind": "context-compaction-live",
+  "status": "passed",
+  "generatedAt": "2026-07-24T15:10:27.756Z",
+  "provider": "siliconflow",
+  "model": "deepseek-ai/DeepSeek-V4-Pro",
+  "latencyMs": 26436.105,
+  "input": {
+    "fullSessionMessages": 62,
+    "coveredMessages": 55,
+    "retainedRecentMessages": 7,
+    "compactionRequests": 1
+  },
+  "tokens": {
+    "sourceEstimate": 9353,
+    "summaryEstimate": 1290,
+    "estimatedCompressionRatio": 7.25,
+    "providerReportedSessionUsage": {
+      "promptTokens": 3800,
+      "completionTokens": 1230,
+      "totalTokens": 5030
+    }
+  },
+  "checks": {
+    "modelSummaryUsed": true,
+    "exactFactsPreserved": {
+      "public.events": true,
+      "value.customer.province": true,
+      "value.amount": true,
+      "1726.50": true,
+      "\"供应链\".\"采购订单\"": true,
+      "56000.00": true,
+      "read": true
+    },
+    "fullSessionUnchanged": true,
+    "checkpointPersisted": true,
+    "internalMetadataExcluded": true,
+    "postCompactionContextFitsModel": true
+  },
+  "summary": "## Goal\n分析 `public.events` 的 JSONB 数据，提取 `value.customer.province` 和 `value.amount`，按省份汇总金额。同时分析 `\"供应链\".\"采购订单\"` 表，获取江苏的采购总额。权限为只读。\n\n## Decisions and constraints\n- 权限决定：`read`，禁止写入。\n- JSON 路径必须精确保留为 `value.customer.province` 和 `value.amount`。\n- 已确认的 SQL 语句：\n  - `SELECT value #>> '{customer,province}' AS province, sum((value #>> '{amount}')::numeric) AS total_amount FROM public.events GROUP BY 1`\n  - `SELECT \"供应商ID\", sum(\"含税金额\") FROM \"供应链\".\"采购订单\" GROUP BY 1`\n- 用户要求保留原始标识符和精确数值，不要把假设写成事实。\n\n## Database facts and SQL\n- 表 `public.events`：包含 JSONB 列 `value`，路径 `value.customer.province` 和 `value.amount`。\n- 表 `\"供应链\".\"采购订单\"`：包含列 `\"供应商ID\"`、`\"含税金额\"`，表名和列名使用中文及双引号。\n- 已执行 SQL 并观察到结果：\n  - `public.events`：省份 `Shanghai`，总金额 `1726.50`。\n  - `\"供应链\".\"采购订单\"`：省份 `江苏`，总金额 `56000.00`。\n\n## Actions and results\n- 多次执行上述两个查询，结果一致，无变化。\n- 未执行其他查询或修改操作。\n\n## Current state\n- 已获得 `public.events` 中上海的总金额 `1726.50`，以及 `\"供应链\".\"采购订单\"` 中江苏的总金额 `56000.00`。\n- 尚未分析退款事件对金额的影响。\n\n## Open items and next steps\n- **未完成事项**：核对退款事件是否应从金额中扣除。\n- **下一步**：需要查询 `public.events` 中可能存在的退款事件（例如通过事件类型字段），并决定是否调整金额计算。具体操作待定，但必须保持只读，且不引入假设。",
+  "note": "真实 Endpoint 单场景质量验证，不代表供应商 SLA；报告不包含 API Key。"
+}

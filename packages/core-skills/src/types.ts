@@ -9,8 +9,14 @@ export type SkillDefinition = {
   tags: string[];
   systemAddition?: string;
   allowedTools: string[];
+  recommendedTools?: string[];
   defaults: Record<string, string | number | boolean>;
   steps: string[];
+  stopConditions?: string[];
+  executionLimits?: {
+    maxIterations?: number;
+    maxSqlAttempts?: number;
+  };
   outputFormat: 'markdown' | 'json' | 'text';
   naturalLanguageKeywords: string[];
   autoInjectWhen: string[];

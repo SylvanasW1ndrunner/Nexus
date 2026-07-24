@@ -28,31 +28,52 @@ type CandidateHit = {
   scoreDetails: SchemaRagScoreDetail[];
 };
 
+type SearchRuntimeIndex = {
+  documentById: Map<string, SchemaRagDocument>;
+  normalizedTitles: Map<string, string>;
+  normalizedTables: Map<string, string>;
+  documentsByTitle: Map<string, Set<string>>;
+  documentsByTable: Map<string, Set<string>>;
+  documentsByQualifiedTable: Map<string, Set<string>>;
+  tokenCounts: Map<string, Map<string, number>>;
+  inverseDocumentFrequency: Map<string, number>;
+  postings: Map<string, Set<string>>;
+  lengthNormalizers: Map<string, number>;
+};
+
 const RRF_K = 60;
+const runtimeIndexes = new WeakMap<SchemaRagIndex, SearchRuntimeIndex>();
 
 export function searchSchemaRagIndex(
   index: SchemaRagIndex,
   request: SchemaRagSearchRequest,
 ): SchemaRagSearchResult[] {
+  const runtime = getSearchRuntimeIndex(index);
   const queryTokens = tokenize([request.query]);
   const explicitReferences = collectExplicitReferences(request);
   const limit = request.limit ?? 8;
   const includeRelations = request.includeRelations ?? true;
+  const channelCandidateLimit = Math.max(64, limit * 8);
 
   const channels: Array<{ name: SchemaRagRetrievalChannel; hits: ChannelHit[]; weight: number }> = [
     {
       name: 'explicit',
-      hits: explicitChannel(index.documents, explicitReferences),
+      hits: explicitChannel(runtime, explicitReferences),
       weight: 420,
     },
     {
       name: 'keyword',
-      hits: keywordChannel(index.documents, request.query, queryTokens),
+      hits: keywordChannel(
+        runtime,
+        request.query,
+        queryTokens,
+        channelCandidateLimit,
+      ),
       weight: 120,
     },
     {
       name: 'glossary',
-      hits: glossaryChannel(index.documents, index.glossary, request.query, queryTokens),
+      hits: glossaryChannel(runtime, index.glossary, request.query, queryTokens),
       weight: 180,
     },
   ];
@@ -92,12 +113,40 @@ export function searchSchemaRagIndex(
   }
 
   if (includeRelations) {
-    const expanded = expandGraph(index, ranked.slice(0, directLimit), request.expandHops ?? 1);
+    const expanded = expandGraph(
+      index,
+      runtime,
+      ranked.slice(0, directLimit),
+      request.expandHops ?? 1,
+    );
     for (const expansion of expanded) {
       for (const relationId of expansion.relationIds) {
+        const existing = selected.get(relationId);
+        if (existing) {
+          if (!existing.reasons.some((reason) => reason.startsWith('graph:'))) {
+            const graphScore = Math.max(
+              1,
+              expansion.source.score * Math.pow(0.35, expansion.hop),
+            );
+            existing.reasons.push(
+              `graph:${expansion.source.document.id}`,
+              'channel:graph',
+              `hop:${expansion.hop}`,
+            );
+            existing.scoreDetails = [
+              ...(existing.scoreDetails ?? []),
+              {
+                channel: 'graph',
+                score: graphScore,
+                rank: expansion.hop,
+                reasons: [`graph:${expansion.source.document.id}`],
+              },
+            ];
+          }
+          continue;
+        }
         if (selected.size >= limit) break;
-        if (selected.has(relationId)) continue;
-        const relation = index.documents.find((document) => document.id === relationId);
+        const relation = runtime.documentById.get(relationId);
         if (!relation) continue;
         const score = Math.max(1, expansion.source.score * Math.pow(0.35, expansion.hop));
         selected.set(relation.id, {
@@ -123,7 +172,10 @@ export function searchSchemaRagIndex(
     if (!selected.has(candidate.document.id)) selected.set(candidate.document.id, toSearchResult(candidate));
   }
 
-  return [...selected.values()].sort(compareResults).slice(0, limit);
+  return applyContextLimit(
+    [...selected.values()].sort(compareResults).slice(0, limit),
+    request.maxContextTokens,
+  );
 }
 
 function collectExplicitReferences(request: SchemaRagSearchRequest): SchemaRagExplicitReference[] {
@@ -141,11 +193,23 @@ function collectExplicitReferences(request: SchemaRagSearchRequest): SchemaRagEx
 }
 
 function explicitChannel(
-  documents: SchemaRagDocument[],
+  runtime: SearchRuntimeIndex,
   references: SchemaRagExplicitReference[],
 ): ChannelHit[] {
   if (references.length === 0) return [];
-  return documents
+  const candidateIds = new Set<string>();
+  for (const reference of references) {
+    const lookup =
+      reference.schema === undefined
+        ? runtime.documentsByTable.get(reference.table)
+        : runtime.documentsByQualifiedTable.get(
+            qualifiedTableKey(reference.schema, reference.table),
+          );
+    for (const documentId of lookup ?? []) candidateIds.add(documentId);
+  }
+  return [...candidateIds]
+    .map((documentId) => runtime.documentById.get(documentId))
+    .filter((document): document is SchemaRagDocument => document !== undefined)
     .map((document) => {
       const score = scoreExplicitReference(document, references);
       const reasons = explicitReasons(document, references);
@@ -156,34 +220,65 @@ function explicitChannel(
 }
 
 function keywordChannel(
-  documents: SchemaRagDocument[],
+  runtime: SearchRuntimeIndex,
   query: string,
   queryTokens: string[],
+  maxHits: number,
 ): ChannelHit[] {
   const normalizedQuery = query.toLowerCase().trim();
   if (!normalizedQuery && queryTokens.length === 0) return [];
-
-  return documents
-    .map((document) => scoreKeyword(document, normalizedQuery, queryTokens))
-    .filter((hit) => hit.score > 0)
-    .sort(compareChannelHits);
+  const candidateIds = new Set<string>();
+  for (const token of queryTokens) {
+    for (const documentId of runtime.postings.get(token) ?? []) {
+      candidateIds.add(documentId);
+    }
+  }
+  if (normalizedQuery.length > 1) {
+    for (const documentId of runtime.documentsByTitle.get(normalizedQuery) ?? []) {
+      candidateIds.add(documentId);
+    }
+    const hasTokenPosting = queryTokens.some(
+      (token) => (runtime.postings.get(token)?.size ?? 0) > 0,
+    );
+    if (!hasTokenPosting) {
+      for (const [documentId, normalizedTitle] of runtime.normalizedTitles) {
+        if (normalizedTitle.includes(normalizedQuery)) candidateIds.add(documentId);
+      }
+    }
+  }
+  const topHits: ChannelHit[] = [];
+  for (const documentId of candidateIds) {
+    const document = runtime.documentById.get(documentId);
+    if (!document) continue;
+    const hit = scoreKeyword(
+      document,
+      normalizedQuery,
+      queryTokens,
+      runtime.normalizedTitles.get(document.id) ?? document.title.toLowerCase(),
+      runtime.normalizedTables.get(document.id) ?? document.table.toLowerCase(),
+      runtime.tokenCounts.get(document.id) ?? new Map<string, number>(),
+      runtime.lengthNormalizers.get(document.id) ?? 1,
+      runtime.inverseDocumentFrequency,
+    );
+    if (hit.score > 0) addTopChannelHit(topHits, hit, maxHits);
+  }
+  return topHits.sort(compareChannelHits);
 }
 
 function glossaryChannel(
-  documents: SchemaRagDocument[],
+  runtime: SearchRuntimeIndex,
   glossary: SchemaRagGlossaryEntry[],
   query: string,
   queryTokens: string[],
 ): ChannelHit[] {
   const normalizedQuery = query.toLowerCase();
-  const byId = new Map(documents.map((document) => [document.id, document]));
   const hits = new Map<string, ChannelHit>();
 
   for (const entry of glossary) {
     const matchedTerm = findGlossaryMatch(entry, normalizedQuery, queryTokens);
     if (!matchedTerm) continue;
     for (const documentId of entry.documentIds) {
-      const document = byId.get(documentId);
+      const document = runtime.documentById.get(documentId);
       if (!document) continue;
       const existing = hits.get(documentId) ?? { document, score: 0, reasons: [] };
       existing.score += entry.weight ?? 30;
@@ -203,11 +298,14 @@ function scoreKeyword(
   document: SchemaRagDocument,
   normalizedQuery: string,
   queryTokens: string[],
+  normalizedTitle: string,
+  normalizedTable: string,
+  tokenCounts: Map<string, number>,
+  lengthNormalizer: number,
+  inverseDocumentFrequency: Map<string, number>,
 ): ChannelHit {
   const reasons: string[] = [];
   let score = 0;
-  const normalizedTitle = document.title.toLowerCase();
-  const normalizedText = document.text.toLowerCase();
 
   if (normalizedTitle === normalizedQuery) {
     score += 100;
@@ -218,13 +316,20 @@ function scoreKeyword(
   }
 
   for (const token of queryTokens) {
-    if (document.tokens.includes(token)) {
-      score += 10;
-      reasons.push(`token:${token}`);
-    } else if (normalizedText.includes(token)) {
-      score += 3;
-      reasons.push(`text:${token}`);
-    }
+    const termFrequency = tokenCounts.get(token) ?? 0;
+    if (termFrequency === 0) continue;
+    const denominator = termFrequency + lengthNormalizer;
+    score +=
+      (inverseDocumentFrequency.get(token) ?? 0) *
+      ((termFrequency * (1.2 + 1)) / Math.max(Number.EPSILON, denominator)) *
+      20;
+    reasons.push(`bm25:${token}`);
+    reasons.push(`token:${token}`);
+  }
+
+  if (document.kind === 'table' && normalizedTable === normalizedQuery) {
+    score += 100;
+    reasons.push('exact-table-name');
   }
 
   if (document.kind === 'table' && score > 0) {
@@ -233,6 +338,31 @@ function scoreKeyword(
   }
 
   return { document, score, reasons };
+}
+
+function applyContextLimit(
+  results: SchemaRagSearchResult[],
+  maxContextTokens: number | undefined,
+): SchemaRagSearchResult[] {
+  if (maxContextTokens === undefined) return results;
+  const contextLimit = Math.max(1, Math.floor(maxContextTokens));
+  const selected: SchemaRagSearchResult[] = [];
+  let consumed = 0;
+  for (const result of results) {
+    const estimatedTokens = Math.max(
+      1,
+      Math.ceil((result.document.title.length + result.document.text.length) / 3.5),
+    );
+    if (
+      selected.length > 0 &&
+      consumed + estimatedTokens > contextLimit
+    ) {
+      break;
+    }
+    selected.push(result);
+    consumed += estimatedTokens;
+  }
+  return selected;
 }
 
 function scoreExplicitReference(
@@ -297,6 +427,7 @@ function toSearchResult(candidate: CandidateHit): SchemaRagSearchResult {
 
 function expandGraph(
   index: SchemaRagIndex,
+  runtime: SearchRuntimeIndex,
   sources: CandidateHit[],
   expandHops: number,
 ): Array<{ source: CandidateHit; hop: number; relationIds: string[] }> {
@@ -310,6 +441,7 @@ function expandGraph(
     for (let hop = 1; hop <= normalizedHops && frontier.size > 0; hop += 1) {
       const relationIds = sortRelationIds(
         index,
+        runtime,
         source.document,
         [...frontier].filter((id) => !visited.has(id)),
       );
@@ -326,20 +458,106 @@ function expandGraph(
 
 function sortRelationIds(
   index: SchemaRagIndex,
+  runtime: SearchRuntimeIndex,
   source: SchemaRagDocument,
   relationIds: string[],
 ): string[] {
   return [...relationIds].sort((left, right) => {
-    const leftDocument = index.documents.find((document) => document.id === left);
-    const rightDocument = index.documents.find((document) => document.id === right);
+    const leftDocument = runtime.documentById.get(left);
+    const rightDocument = runtime.documentById.get(right);
     return relationRank(source, leftDocument) - relationRank(source, rightDocument);
   });
+}
+
+function getSearchRuntimeIndex(index: SchemaRagIndex): SearchRuntimeIndex {
+  const cached = runtimeIndexes.get(index);
+  if (cached) return cached;
+  const documentById = new Map(
+    index.documents.map((document) => [document.id, document]),
+  );
+  const normalizedTitles = new Map<string, string>();
+  const normalizedTables = new Map<string, string>();
+  const documentsByTitle = new Map<string, Set<string>>();
+  const documentsByTable = new Map<string, Set<string>>();
+  const documentsByQualifiedTable = new Map<string, Set<string>>();
+  const documentTokens = new Map<string, string[]>();
+  const tokenCounts = new Map<string, Map<string, number>>();
+  const documentFrequency = new Map<string, number>();
+  const postings = new Map<string, Set<string>>();
+  let totalLength = 0;
+
+  for (const document of index.documents) {
+    const normalizedTitle = document.title.toLowerCase();
+    normalizedTitles.set(document.id, normalizedTitle);
+    normalizedTables.set(document.id, document.table.toLowerCase());
+    addPosting(documentsByTitle, normalizedTitle, document.id);
+    if (document.table) {
+      addPosting(documentsByTable, document.table, document.id);
+      addPosting(
+        documentsByQualifiedTable,
+        qualifiedTableKey(document.schema, document.table),
+        document.id,
+      );
+    }
+    const tokens = tokenize([document.title, document.text]);
+    documentTokens.set(document.id, tokens);
+    totalLength += tokens.length;
+    const counts = new Map<string, number>();
+    for (const token of tokens) counts.set(token, (counts.get(token) ?? 0) + 1);
+    tokenCounts.set(document.id, counts);
+    for (const token of counts.keys()) {
+      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
+      const documentIds = postings.get(token) ?? new Set<string>();
+      documentIds.add(document.id);
+      postings.set(token, documentIds);
+    }
+  }
+
+  const documentCount = documentById.size;
+  const inverseDocumentFrequency = new Map(
+    [...documentFrequency].map(([token, frequency]) => [
+      token,
+      Math.log(
+        1 + (documentCount - frequency + 0.5) / (frequency + 0.5),
+      ),
+    ]),
+  );
+  const averageLength = totalLength / Math.max(1, index.documents.length);
+  const lengthNormalizers = new Map(
+    [...documentTokens].map(([documentId, tokens]) => [
+      documentId,
+      1.2 * (1 - 0.75 + 0.75 * (tokens.length / Math.max(1, averageLength))),
+    ]),
+  );
+  const runtime = {
+    documentById,
+    normalizedTitles,
+    normalizedTables,
+    documentsByTitle,
+    documentsByTable,
+    documentsByQualifiedTable,
+    tokenCounts,
+    inverseDocumentFrequency,
+    postings,
+    lengthNormalizers,
+  };
+  runtimeIndexes.set(index, runtime);
+  return runtime;
 }
 
 function relationRank(
   source: SchemaRagDocument,
   document: SchemaRagDocument | undefined,
 ): number {
+  if (document?.kind === 'column' && document.metadata.foreignKey) {
+    return -3;
+  }
+  if (
+    document?.kind === 'table' &&
+    (document.schema !== source.schema || document.table !== source.table)
+  ) {
+    return -2;
+  }
   if (
     document?.kind === 'column' &&
     document.schema === source.schema &&
@@ -358,6 +576,81 @@ function relationRank(
   if (document?.kind === 'relation') return 2;
   if (document?.kind === 'column') return 3;
   return 4;
+}
+
+function qualifiedTableKey(schema: string, table: string): string {
+  return `${schema}\u0000${table}`;
+}
+
+function addPosting(
+  index: Map<string, Set<string>>,
+  key: string,
+  documentId: string,
+): void {
+  const values = index.get(key) ?? new Set<string>();
+  values.add(documentId);
+  index.set(key, values);
+}
+
+function addTopChannelHit(
+  heap: ChannelHit[],
+  hit: ChannelHit,
+  limit: number,
+): void {
+  if (heap.length < limit) {
+    heap.push(hit);
+    siftWorstUp(heap, heap.length - 1);
+    return;
+  }
+  const worst = heap[0];
+  if (!worst || compareHitQuality(hit, worst) <= 0) return;
+  heap[0] = hit;
+  siftWorstDown(heap, 0);
+}
+
+function siftWorstUp(heap: ChannelHit[], startIndex: number): void {
+  let index = startIndex;
+  while (index > 0) {
+    const parentIndex = Math.floor((index - 1) / 2);
+    const parent = heap[parentIndex]!;
+    const current = heap[index]!;
+    if (compareHitQuality(current, parent) >= 0) return;
+    heap[parentIndex] = current;
+    heap[index] = parent;
+    index = parentIndex;
+  }
+}
+
+function siftWorstDown(heap: ChannelHit[], startIndex: number): void {
+  let index = startIndex;
+  while (true) {
+    const leftIndex = index * 2 + 1;
+    const rightIndex = leftIndex + 1;
+    if (leftIndex >= heap.length) return;
+    let worstChildIndex = leftIndex;
+    if (
+      rightIndex < heap.length &&
+      compareHitQuality(heap[rightIndex]!, heap[leftIndex]!) < 0
+    ) {
+      worstChildIndex = rightIndex;
+    }
+    if (
+      compareHitQuality(heap[index]!, heap[worstChildIndex]!) <= 0
+    ) {
+      return;
+    }
+    const current = heap[index]!;
+    heap[index] = heap[worstChildIndex]!;
+    heap[worstChildIndex] = current;
+    index = worstChildIndex;
+  }
+}
+
+function compareHitQuality(left: ChannelHit, right: ChannelHit): number {
+  return (
+    left.score - right.score ||
+    right.document.id.localeCompare(left.document.id)
+  );
 }
 
 function compareChannelHits(left: ChannelHit, right: ChannelHit): number {

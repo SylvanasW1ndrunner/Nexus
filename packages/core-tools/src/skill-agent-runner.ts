@@ -15,6 +15,11 @@ export type SkillAgentPlan = {
   systemAddition?: string;
   allowedTools: string[];
   steps?: string[];
+  stopConditions?: string[];
+  executionLimits?: {
+    maxIterations?: number;
+    maxSqlAttempts?: number;
+  };
   outputFormat?: 'markdown' | 'json' | 'text';
 };
 
@@ -63,17 +68,38 @@ export async function runSkillAgent(
   return { strategy: 'react', result, toolPolicy, toolPolicyReport, renderedUserMessage };
 }
 
-export function renderSkillAgentUserMessage(plan: SkillAgentPlan, prefix?: string): string {
+export function renderSkillAgentUserMessage(
+  plan: SkillAgentPlan,
+  prefix?: string,
+): string {
   const lines: string[] = [];
   if (prefix?.trim()) lines.push(prefix.trim(), '');
   if (plan.skill) {
     lines.push(`当前 Skill：${plan.skill.title ?? plan.skill.name}`);
-    if (plan.skill.description?.trim()) lines.push(`说明：${plan.skill.description.trim()}`);
+    if (plan.skill.description?.trim()) {
+      lines.push(`说明：${plan.skill.description.trim()}`);
+    }
     lines.push('');
   }
-  if (plan.systemAddition?.trim()) lines.push('约束与说明：', plan.systemAddition.trim(), '');
+  if (plan.systemAddition?.trim()) {
+    lines.push('约束与说明：', plan.systemAddition.trim(), '');
+  }
   if (plan.steps?.length) {
-    lines.push('建议步骤：', ...plan.steps.map((step, index) => `${index + 1}. ${step}`), '');
+    lines.push(
+      '推荐工作路径：',
+      ...plan.steps.map((step, index) => `${index + 1}. ${step}`),
+      '',
+    );
+  }
+  if (plan.stopConditions?.length) {
+    lines.push(
+      '停止条件：',
+      ...plan.stopConditions.map((condition) => `- ${condition}`),
+      '',
+    );
+  }
+  if (plan.executionLimits?.maxSqlAttempts) {
+    lines.push(`SQL 尝试上限：${plan.executionLimits.maxSqlAttempts}`, '');
   }
   if (plan.outputFormat) lines.push(`输出格式：${plan.outputFormat}`, '');
   lines.push('用户任务：', plan.userInput);
@@ -85,24 +111,42 @@ function buildRunOptions(
   userMessage: string,
   allowedTools: string[],
 ): SkillAgentRunOptionsForAgent {
+  const maxIterations =
+    options.maxIterations ?? options.skillPlan.executionLimits?.maxIterations;
   return {
     providerId: options.providerId,
     model: options.model,
     userMessage,
     allowedTools,
-    ...(options.initialSession === undefined ? {} : { initialSession: options.initialSession }),
-    ...(options.initialIteration === undefined ? {} : { initialIteration: options.initialIteration }),
+    ...(options.initialSession === undefined
+      ? {}
+      : { initialSession: options.initialSession }),
+    ...(options.initialIteration === undefined
+      ? {}
+      : { initialIteration: options.initialIteration }),
     ...(options.usageMode === undefined ? {} : { usageMode: options.usageMode }),
     ...(options.mode === undefined ? {} : { mode: options.mode }),
-    ...(options.maxIterations === undefined ? {} : { maxIterations: options.maxIterations }),
-    ...(options.tokenBudget === undefined ? {} : { tokenBudget: options.tokenBudget }),
-    ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens }),
-    ...(options.keepRecentMessages === undefined ? {} : { keepRecentMessages: options.keepRecentMessages }),
-    ...(options.maxToolResultChars === undefined ? {} : { maxToolResultChars: options.maxToolResultChars }),
-    ...(options.maxConsecutiveToolFailures === undefined ? {} : { maxConsecutiveToolFailures: options.maxConsecutiveToolFailures }),
-    ...(options.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: options.maxToolExecutionMs }),
+    ...(options.userId === undefined ? {} : { userId: options.userId }),
+    ...(maxIterations === undefined ? {} : { maxIterations }),
+    ...(options.keepRecentMessages === undefined
+      ? {}
+      : { keepRecentMessages: options.keepRecentMessages }),
+    ...(options.maxToolResultChars === undefined
+      ? {}
+      : { maxToolResultChars: options.maxToolResultChars }),
+    ...(options.maxConsecutiveToolFailures === undefined
+      ? {}
+      : { maxConsecutiveToolFailures: options.maxConsecutiveToolFailures }),
+    ...(options.maxToolExecutionMs === undefined
+      ? {}
+      : { maxToolExecutionMs: options.maxToolExecutionMs }),
     ...(options.taskSafety === undefined ? {} : { taskSafety: options.taskSafety }),
-    ...(options.outputSafety === undefined ? {} : { outputSafety: options.outputSafety }),
+    ...(options.outputSafety === undefined
+      ? {}
+      : { outputSafety: options.outputSafety }),
+    ...(options.knowledgeSnapshot === undefined
+      ? {}
+      : { knowledgeSnapshot: options.knowledgeSnapshot }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
 }

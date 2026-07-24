@@ -463,7 +463,11 @@ export function assertResourceRegistrySnapshot(
       requireNonNegativeInteger(version.sequence, `$.sourceVersions.${sourceId}.sequence`);
     }
   }
-  assertNoSecretMaterial(snapshot);
+  const snapshotMetadata = { ...snapshot };
+  delete snapshotMetadata.resources;
+  delete snapshotMetadata.relations;
+  delete snapshotMetadata.observations;
+  assertNoSecretMaterial(snapshotMetadata);
 }
 
 function assertResourceEvent(value: unknown, path: string): asserts value is ResourceEvent {

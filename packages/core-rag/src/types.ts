@@ -1,11 +1,20 @@
-import type { TableDetail } from '@dbagent/shared';
+import type {
+  ResourceDescriptor,
+  ResourceKind,
+  ResourceRelation,
+  TableDetail,
+} from '@dbagent/shared';
 
-export type SchemaRagDocumentKind = 'table' | 'column' | 'relation';
+export type SchemaRagDocumentKind =
+  | ResourceKind
+  | 'knowledge'
+  | 'relation';
 
 export type SchemaRagDocument = {
   id: string;
   connectionId: string;
   kind: SchemaRagDocumentKind;
+  resourceId?: string;
   schema: string;
   table: string;
   column?: string;
@@ -21,7 +30,172 @@ export type SchemaRagIndex = {
   documents: SchemaRagDocument[];
   graph: Map<string, Set<string>>;
   glossary: SchemaRagGlossaryEntry[];
+  catalog?: KnowledgeCatalog;
+  manifest?: SchemaRagIndexManifest;
+  retrievalProfile?: SchemaRagRetrievalProfile;
+  vectors?: Record<string, number[]>;
   indexedAt: string;
+};
+
+export type KnowledgeBindingMode = 'node' | 'subtree';
+
+export type BusinessKnowledgeSource = {
+  type: 'manual' | 'import' | 'mcp' | (string & {});
+  id: string;
+  version?: string;
+};
+
+export type BusinessKnowledgeItem = {
+  id: string;
+  connectionId: string;
+  title: string;
+  content: string;
+  contentHash: string;
+  tags: string[];
+  source: BusinessKnowledgeSource;
+  version: number;
+  updatedAt: string;
+};
+
+export type BusinessKnowledgeInput = Omit<
+  BusinessKnowledgeItem,
+  'connectionId' | 'contentHash' | 'tags'
+> & {
+  tags?: string[];
+};
+
+export type KnowledgeBinding = {
+  id: string;
+  connectionId: string;
+  knowledgeId: string;
+  resourceId: string;
+  mode: KnowledgeBindingMode;
+  version: number;
+  updatedAt: string;
+};
+
+export type KnowledgeBindingInput = Omit<KnowledgeBinding, 'connectionId'>;
+
+export type KnowledgeCatalogNode = {
+  resourceId: string;
+  connectionId: string;
+  kind: ResourceKind;
+  parentId?: string;
+  canonicalName: string;
+  displayName: string;
+  path: string;
+  ancestorIds: string[];
+  depth: number;
+  childIds: string[];
+  relationIds: string[];
+  knowledgeBindingIds: string[];
+  localFacts: Record<string, unknown>;
+  localHash: string;
+  childBlockHashes: string[];
+  subtreeHash: string;
+};
+
+export type KnowledgeCatalog = {
+  version: 1;
+  connectionId: string;
+  rootIds: string[];
+  nodes: Record<string, KnowledgeCatalogNode>;
+  relations: Record<string, ResourceRelation>;
+  knowledge: Record<string, BusinessKnowledgeItem>;
+  bindings: Record<string, KnowledgeBinding>;
+  sourceRevision?: string;
+  containmentRootHash: string;
+  relationRootHash: string;
+  knowledgeRootHash: string;
+  catalogRootHash: string;
+  snapshotId: string;
+  builtAt: string;
+};
+
+export type KnowledgeCatalogInput = {
+  connectionId: string;
+  resources: ResourceDescriptor[];
+  relations?: ResourceRelation[];
+  knowledge?: BusinessKnowledgeInput[];
+  bindings?: KnowledgeBindingInput[];
+  sourceRevision?: string;
+  builtAt?: string;
+};
+
+export type KnowledgeCatalogChange = {
+  resourceId: string;
+  kind: 'added' | 'removed' | 'changed';
+};
+
+export type KnowledgeCatalogDiff = {
+  equal: boolean;
+  previousRootHash: string;
+  nextRootHash: string;
+  changedResources: KnowledgeCatalogChange[];
+  changedRelationIds: string[];
+  changedKnowledgeIds: string[];
+};
+
+export type EmbeddingProfile = {
+  providerInstanceId: string;
+  modelId: string;
+  modelRevision?: string;
+  dimensions?: number;
+  normalization: 'none' | 'l2';
+  distanceMetric: 'cosine' | 'dot' | 'euclidean';
+  requestTemplateVersion: string;
+};
+
+export type RerankProfile = {
+  providerInstanceId: string;
+  modelId: string;
+  modelRevision?: string;
+  topN?: number;
+};
+
+export type RetrievalBackendProfile = {
+  type: 'memory' | (string & {});
+  bm25K1?: number;
+  bm25B?: number;
+};
+
+export type SchemaRagRetrievalProfile = {
+  id: string;
+  version: number;
+  backend: RetrievalBackendProfile;
+  embedding?: EmbeddingProfile;
+  reranker?: RerankProfile;
+  defaultLimit?: number;
+  defaultMaxContextTokens?: number;
+  graphHops?: number;
+  rrfK?: number;
+};
+
+export type SchemaRagIndexManifest = {
+  version: 1;
+  connectionId: string;
+  catalogRootHash: string;
+  retrievalProfileId: string;
+  retrievalProfileVersion: number;
+  embeddingFingerprint?: string;
+  documentCount: number;
+  indexVersion: string;
+  createdAt: string;
+};
+
+export type SchemaRagEmbeddingAdapter = {
+  embed(input: {
+    profile: EmbeddingProfile;
+    texts: string[];
+  }): Promise<number[][]>;
+};
+
+export type SchemaRagRerankAdapter = {
+  rerank(input: {
+    profile: RerankProfile;
+    query: string;
+    documents: Array<{ id: string; text: string }>;
+  }): Promise<Array<{ id: string; score: number }>>;
 };
 
 export type SchemaRagIndexStage =
@@ -70,7 +244,7 @@ export type SchemaRagSearchRequest = {
   limit?: number;
   includeRelations?: boolean;
   expandHops?: number;
-  tokenBudget?: number;
+  maxContextTokens?: number;
 };
 
 export type SchemaRagRetrievalChannel = 'explicit' | 'keyword' | 'glossary' | 'graph' | 'vector' | 'rerank';
@@ -147,7 +321,13 @@ export type SchemaRagRelationsResult = {
 
 export type SchemaRagIndexInput = {
   connectionId: string;
-  tables: TableDetail[];
+  tables?: TableDetail[];
+  resources?: ResourceDescriptor[];
+  relations?: ResourceRelation[];
+  knowledge?: BusinessKnowledgeInput[];
+  bindings?: KnowledgeBindingInput[];
+  sourceRevision?: string;
+  retrievalProfile?: SchemaRagRetrievalProfile;
   glossary?: SchemaRagGlossaryEntry[];
   indexedAt?: string;
 };

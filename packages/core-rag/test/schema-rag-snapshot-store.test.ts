@@ -19,11 +19,12 @@ describe('SchemaRagSnapshotStore', () => {
 
     await store.save(index);
     const raw = JSON.parse(await readFile(store.getSnapshotPath('production/ecommerce'), 'utf8')) as Record<string, unknown>;
-    expect(raw).toMatchObject({
-      version: 1,
-      connectionId: 'production/ecommerce',
-      indexedAt: '2026-06-24T00:00:00.000Z',
-    });
+    expect(raw.version).toBe(2);
+    expect(raw.connectionId).toBe('production/ecommerce');
+    expect(raw.indexedAt).toBe('2026-06-24T00:00:00.000Z');
+    const catalog = raw.catalog as Record<string, unknown>;
+    expect(catalog.version).toBe(1);
+    expect(catalog.connectionId).toBe('production/ecommerce');
 
     const restored = await store.load('production/ecommerce');
     expect(restored?.documents.map((document) => document.id)).toContain('column:public.orders.total_amount');
@@ -32,6 +33,7 @@ describe('SchemaRagSnapshotStore', () => {
         'column:public.orders.user_id',
         'column:public.orders.total_amount',
         'column:public.orders.id',
+        'resource:schema:public',
         'table:public.users',
       ]),
     );
@@ -63,7 +65,19 @@ describe('SchemaRagSnapshotStore', () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-diagnostic-'));
     const store = new SchemaRagSnapshotStore({ rootDir });
     const snapshotPath = store.getSnapshotPath('broken_connection');
-    await writeFile(snapshotPath, JSON.stringify({ version: 1, connectionId: 'other', documents: [], graph: [], glossary: [] }), 'utf8');
+    await writeFile(
+      snapshotPath,
+      JSON.stringify({
+        version: 2,
+        connectionId: 'other',
+        savedAt: '2026-07-08T00:00:00.000Z',
+        indexedAt: '2026-07-08T00:00:00.000Z',
+        documents: [],
+        graph: [],
+        glossary: [],
+      }),
+      'utf8',
+    );
 
     const result = await store.loadDetailed('broken_connection');
 
@@ -116,7 +130,7 @@ describe('SchemaRagSnapshotStore', () => {
           status: 'available',
           connectionId: 'production/ecommerce',
           indexedAt: '2026-07-08T00:00:00.000Z',
-          documentCount: 7,
+          documentCount: 10,
           tableCount: 2,
           columnCount: 5,
           relationCount: 0,

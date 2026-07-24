@@ -5,7 +5,18 @@ import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import type { AgentSessionWriter } from './session-store.js';
 import type { AgentStreamStore } from './stream-store.js';
 
-export type AgentMode = 'ask' | 'auto' | 'full-auto' | 'readonly';
+export type AgentAccessMode = 'read' | 'edit' | 'full';
+
+/**
+ * `ask`, `auto`, `full-auto`, and `readonly` remain accepted while callers
+ * migrate. New database-facing APIs should use read/edit/full.
+ */
+export type AgentMode =
+  | AgentAccessMode
+  | 'ask'
+  | 'auto'
+  | 'full-auto'
+  | 'readonly';
 
 export type AgentStrategy = 'react';
 
@@ -24,11 +35,22 @@ export type AgentMessageDraft =
 export type AgentSession = {
   id: string;
   title: string;
+  userId?: string;
   mode: AgentMode;
   strategy: AgentStrategy;
   messages: AgentMessage[];
   tokenUsage: LlmUsage;
+  knowledgeSnapshot?: AgentKnowledgeSnapshotReference;
+  contextCheckpoint?: AgentContextCheckpoint;
   aborted: boolean;
+};
+
+export type AgentKnowledgeSnapshotReference = {
+  connectionId: string;
+  knowledgeSnapshotId: string;
+  catalogRootHash: string;
+  retrievalProfileId: string;
+  indexVersion: string;
 };
 
 export type AgentRunStatus =
@@ -52,14 +74,14 @@ export type AgentRunOptions = {
   providerId: string;
   model: string;
   userMessage: string;
+  userId?: string;
   initialSession?: AgentSession;
   initialIteration?: number;
   allowedTools?: string[];
   usageMode?: UsageMode;
   mode?: AgentMode;
+  knowledgeSnapshot?: AgentKnowledgeSnapshotReference;
   maxIterations?: number;
-  tokenBudget?: number;
-  contextWindowTokens?: number;
   keepRecentMessages?: number;
   maxToolResultChars?: number;
   maxConsecutiveToolFailures?: number;
@@ -106,6 +128,10 @@ export type AgentToolDefinition = LlmTool & {
   source?: AgentToolSource;
   sourceId?: string;
   originalName?: string;
+  requiredPermission?: AgentAccessMode;
+  resolveRequiredPermission?: (
+    args: Record<string, unknown>,
+  ) => AgentAccessMode;
 };
 
 export type AgentToolApproval = {
@@ -206,17 +232,72 @@ export type AgentRunDependencies = {
   auditLog?: AgentAuditLogWriter;
 };
 
+export type AgentContextCompactionTrigger = 'auto' | 'manual';
+
+export type AgentContextCompactionMethod = 'model' | 'deterministic-fallback';
+
+/**
+ * The active semantic checkpoint used to build the model's working context.
+ *
+ * `coveredConversationMessageCount` counts non-system messages in the durable
+ * session history. The original messages remain untouched and exportable.
+ */
+export type AgentContextCheckpoint = {
+  version: 1;
+  sequence: number;
+  trigger: AgentContextCompactionTrigger;
+  method: AgentContextCompactionMethod;
+  summary: string;
+  coveredConversationMessageCount: number;
+  sourceTokenEstimate: number;
+  summaryTokenEstimate: number;
+  modelContextTokens: number;
+  createdAt: string;
+  focus?: string;
+};
+
+export type AgentManualContextCompactionOptions = {
+  providerId: string;
+  model: string;
+  session: AgentSession;
+  usageMode?: UsageMode;
+  focus?: string;
+  allowedTools?: string[];
+  keepRecentMessages?: number;
+  maxToolResultChars?: number;
+  signal?: AbortSignal;
+};
+
+export type AgentContextCompactionResult = {
+  status: 'compacted' | 'skipped';
+  session: AgentSession;
+  report: AgentContextCompressionReport;
+  checkpoint?: AgentContextCheckpoint;
+};
+
+export type AgentUserPreference = {
+  id: string;
+  userId: string;
+  key: string;
+  value: string;
+  confidence: number;
+  sourceSessionId?: string;
+  evidence?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AgentContextCompressionLevel =
   | 'none'
-  | 'tool-summary'
-  | 'archive-early-messages';
+  | 'tool-output-masking'
+  | 'conversation-checkpoint';
 
 export type AgentContextCompressionPhase =
   | 'healthy'
-  | 'warning'
-  | 'soft_compressed'
-  | 'hard_compressed'
-  | 'over_budget';
+  | 'approaching_limit'
+  | 'tool_outputs_masked'
+  | 'compacted'
+  | 'window_exceeded';
 
 export type AgentContextCompressionStep = {
   type: Exclude<AgentContextCompressionLevel, 'none'>;
@@ -228,16 +309,20 @@ export type AgentContextCompressionStep = {
 export type AgentContextCompressionReport = {
   phase: AgentContextCompressionPhase;
   level: AgentContextCompressionLevel;
+  trigger: AgentContextCompactionTrigger | 'none';
   originalTokenEstimate: number;
   finalTokenEstimate: number;
-  maxPromptTokens: number;
+  modelContextTokens: number;
+  reservedOutputTokens: number;
+  availablePromptTokens: number;
   warningThresholdTokens: number;
-  softCompressionThresholdTokens: number;
-  hardCompressionThresholdTokens: number;
+  compactionThresholdTokens: number;
   retainedMessageCount: number;
   toolCount: number;
-  archivedMessageCount: number;
-  summarizedToolResultCount: number;
+  coveredConversationMessageCount: number;
+  maskedToolResultCount: number;
+  activeCheckpointSequence?: number;
+  summaryTokenEstimate?: number;
   steps: AgentContextCompressionStep[];
   warnings: string[];
 };

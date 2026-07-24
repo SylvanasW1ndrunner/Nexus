@@ -10,69 +10,137 @@ export function registerDefaultBuiltinSkills(registry: {
   for (const skill of createDefaultBuiltinSkills()) registry.register(skill);
 }
 
+const ALL_AI_SQL_TOOLS = [
+  'resource_list',
+  'resource_get',
+  'knowledge_search',
+  'sql_execute',
+  'sql_explain',
+  'result_read',
+];
+
 const DEFAULT_BUILTIN_SKILLS: SkillDefinition[] = [
   skill({
-    name: 'nl2sql_query',
-    title: '自然语言查询',
-    description: '根据 Schema、业务口径和用户问题生成安全的只读 SQL，并返回可解释结果。',
-    allowedTools: ['search_schema', 'build_schema_context', 'audit_sql', 'query_database'],
-    steps: ['检索相关 Schema 与业务口径', '生成并审计只读 SQL', '执行查询', '说明口径、假设与结果'],
-    keywords: ['自然语言转 SQL', '帮我查询', '数据查询', 'text to sql'],
-    signals: ['requires_nl2sql'],
+    name: 'query-and-answer',
+    title: '查询与回答',
+    description:
+      '完成自然语言查询、统计、比较、聚合和数据解释；按需检索知识、浏览资源、执行 SQL，并根据真实结果回答。',
+    allowedTools: ALL_AI_SQL_TOOLS,
+    steps: [
+      '先判断已有上下文是否足够，不足时检索知识或浏览资源',
+      '生成与任务粒度相符的 SQL',
+      '执行 SQL；结果较大时通过结果句柄继续读取',
+      '根据真实执行结果回答，并明确必要的口径或假设',
+    ],
+    stopConditions: [
+      '用户问题已由真实结果回答',
+      '缺少无法通过现有工具获得的业务定义',
+      '数据库返回不可恢复错误或用户拒绝许可',
+    ],
+    keywords: ['查询', '统计', '多少', '对比', '趋势', '排名', '聚合', 'sql', 'query', 'count'],
+    signals: ['requires_query_and_answer'],
+    executionLimits: { maxIterations: 12, maxSqlAttempts: 3 },
   }),
   skill({
-    name: 'schema_context_enrichment',
-    title: 'Schema 与业务知识补全',
-    description: '检查表、字段、关系和业务术语，识别 NL2SQL 所需的上下文缺口。',
-    allowedTools: ['list_schemas', 'list_tables', 'describe_table', 'search_schema', 'build_schema_context'],
-    steps: ['定位相关对象', '核对字段与关系', '列出业务口径缺口', '形成可复用上下文建议'],
-    keywords: ['Schema 补全', '数据字典', '业务口径', '表结构'],
-    signals: ['requires_schema_context'],
+    name: 'discover-schema-and-shape',
+    title: '发现结构与数据形态',
+    description:
+      '在结构、JSON、枚举、时间范围或数据粒度不明确时，查询数据库资源并执行有限查询确认事实。',
+    allowedTools: [
+      'resource_list',
+      'resource_get',
+      'knowledge_search',
+      'sql_execute',
+      'result_read',
+    ],
+    steps: [
+      '通过知识检索或资源浏览定位候选对象',
+      '读取候选资源的字段、关系和业务知识',
+      '必要时只执行一次代表性小结果集查询，确认 JSON 结构、枚举、时间范围或数据粒度；避免重复计数或反复读取相同形态',
+      '确认目标字段后立即执行完成用户目标的查询，不停留在探索性 SQL',
+      '将确认后的事实用于当前任务，不自动写入长期知识库',
+    ],
+    stopConditions: [
+      '完成当前任务所需的结构和数据形态已经确认',
+      '候选对象全部排除',
+      '继续探索需要超出当前权限',
+    ],
+    keywords: ['表结构', '字段', 'schema', 'json', '枚举', '数据长什么样', '数据粒度', '从哪里来'],
+    signals: ['requires_schema_discovery'],
+    executionLimits: { maxIterations: 14, maxSqlAttempts: 4 },
   }),
   skill({
-    name: 'explain_sql',
-    title: 'SQL 执行计划分析',
-    description: '审计只读 SQL 并分析 PostgreSQL EXPLAIN 计划，给出可验证的优化建议。',
-    allowedTools: ['audit_sql', 'search_schema', 'explain_query'],
-    steps: ['审计 SQL', '获取执行计划', '识别扫描、连接与估算风险', '给出验证步骤'],
-    keywords: ['SQL 优化', '执行计划', 'EXPLAIN', '查询很慢'],
-    signals: ['requires_sql_explain'],
+    name: 'write-and-verify',
+    title: '写入并验证',
+    description:
+      '完成 INSERT、UPDATE、DELETE、MERGE 或 DDL；权限系统独立判断是否需要一次性许可，执行后验证影响行数或重新读取结构。',
+    allowedTools: ALL_AI_SQL_TOOLS,
+    steps: [
+      '定位目标资源并确认写入条件',
+      '生成范围明确的 DML 或 DDL',
+      '调用 SQL 执行工具，由权限系统处理许可',
+      '检查影响行数、返回值或重新读取最新结构',
+    ],
+    stopConditions: [
+      '写入成功且影响范围已验证',
+      '用户拒绝许可',
+      '数据库拒绝操作或验证结果与目标不一致',
+    ],
+    keywords: [
+      '插入',
+      '新增',
+      '更新',
+      '修改',
+      '删除',
+      '建表',
+      '改表',
+      'insert',
+      'update',
+      'delete',
+      'merge',
+      'create table',
+      'alter table',
+      'drop table',
+    ],
+    signals: ['requires_write_and_verify'],
+    executionLimits: { maxIterations: 12, maxSqlAttempts: 3 },
   }),
   skill({
-    name: 'database_health_check',
-    title: '数据库健康检查',
-    description: '汇总 PostgreSQL 连接、事务、缓存和活动会话指标并解释异常。',
-    allowedTools: ['database_health_snapshot'],
-    steps: ['采集健康快照', '识别异常指标', '区分事实与推断', '给出低风险处置建议'],
-    keywords: ['数据库健康检查', '数据库健康', 'health check'],
-    signals: ['requires_health_check'],
-  }),
-  skill({
-    name: 'slow_query_diagnosis',
-    title: '慢查询诊断',
-    description: '基于 pg_stat_statements 与执行上下文定位高耗时 SQL，并给出验证建议。',
-    allowedTools: ['diagnose_slow_queries', 'explain_query'],
-    steps: ['筛选高耗时查询', '分析调用次数与平均耗时', '检查执行计划', '给出优化与回归验证建议'],
-    keywords: ['慢查询', 'slow query', 'pg_stat_statements'],
-    signals: ['requires_slow_query_diagnosis'],
-  }),
-  skill({
-    name: 'lock_diagnosis',
-    title: '锁等待诊断',
-    description: '识别 PostgreSQL 锁等待、阻塞链和相关会话，不自动终止连接。',
-    allowedTools: ['diagnose_locks'],
-    steps: ['采集锁与会话', '构建阻塞关系', '标记影响范围', '给出需审批的处置选项'],
-    keywords: ['锁等待', '阻塞链', '死锁', 'blocked query'],
-    signals: ['requires_lock_diagnosis'],
-  }),
-  skill({
-    name: 'long_transaction_diagnosis',
-    title: '长事务诊断',
-    description: '识别运行时间过长或 idle in transaction 的会话并评估影响。',
-    allowedTools: ['diagnose_long_transactions'],
-    steps: ['采集长事务', '核对状态与持续时间', '评估锁和膨胀风险', '给出需审批的处置选项'],
-    keywords: ['长事务', 'long transaction', 'idle in transaction'],
-    signals: ['requires_long_transaction_diagnosis'],
+    name: 'recover-from-sql-error',
+    title: '从 SQL 错误恢复',
+    description:
+      'SQL 执行失败后读取数据库错误和最新结构，修正字段、方言、类型或对象引用，并在有限次数内重试。',
+    allowedTools: [
+      'resource_list',
+      'resource_get',
+      'knowledge_search',
+      'sql_execute',
+      'sql_explain',
+    ],
+    steps: [
+      '根据数据库错误定位可修复原因',
+      '读取最新结构或知识，避免凭空猜测字段',
+      '只修改与错误直接相关的 SQL 部分',
+      '在重试上限内再次执行；重复失败时停止并说明原因',
+    ],
+    stopConditions: [
+      '修正后的 SQL 成功执行',
+      '相同原因连续失败',
+      '达到重试上限',
+      '修正需要更高权限且用户拒绝许可',
+    ],
+    keywords: [
+      'sql 错误',
+      '执行失败',
+      '字段不存在',
+      '语法错误',
+      '类型不匹配',
+      'column does not exist',
+      'syntax error',
+      'relation does not exist',
+    ],
+    signals: ['requires_sql_error_recovery'],
+    executionLimits: { maxIterations: 8, maxSqlAttempts: 3 },
   }),
 ];
 
@@ -82,8 +150,10 @@ function skill(input: {
   description: string;
   allowedTools: string[];
   steps: string[];
+  stopConditions: string[];
   keywords: string[];
   signals: string[];
+  executionLimits: NonNullable<SkillDefinition['executionLimits']>;
 }): SkillDefinition {
   return {
     name: input.name,
@@ -91,11 +161,15 @@ function skill(input: {
     description: input.description,
     version: '1.0.0',
     author: 'DBAgent',
-    tags: ['database'],
-    systemAddition: '只陈述工具结果能够支持的事实；涉及写操作、终止会话或配置变更时必须请求显式审批。',
-    allowedTools: input.allowedTools,
+    tags: ['database', 'ai-sql', 'builtin'],
+    systemAddition:
+      '主动使用工具获得完成任务所需的事实。权限判断由运行时负责；不要因为可能需要许可而回避正确的工具调用。只陈述工具结果支持的事实，不输出隐藏推理过程。',
+    allowedTools: [...input.allowedTools],
+    recommendedTools: [...input.allowedTools],
     defaults: {},
     steps: input.steps,
+    stopConditions: input.stopConditions,
+    executionLimits: input.executionLimits,
     outputFormat: 'markdown',
     naturalLanguageKeywords: input.keywords,
     autoInjectWhen: input.signals,
@@ -108,8 +182,17 @@ function cloneSkill(skillDefinition: SkillDefinition): SkillDefinition {
     ...skillDefinition,
     tags: [...skillDefinition.tags],
     allowedTools: [...skillDefinition.allowedTools],
+    ...(skillDefinition.recommendedTools === undefined
+      ? {}
+      : { recommendedTools: [...skillDefinition.recommendedTools] }),
     defaults: { ...skillDefinition.defaults },
     steps: [...skillDefinition.steps],
+    ...(skillDefinition.stopConditions === undefined
+      ? {}
+      : { stopConditions: [...skillDefinition.stopConditions] }),
+    ...(skillDefinition.executionLimits === undefined
+      ? {}
+      : { executionLimits: { ...skillDefinition.executionLimits } }),
     naturalLanguageKeywords: [...skillDefinition.naturalLanguageKeywords],
     autoInjectWhen: [...skillDefinition.autoInjectWhen],
   };

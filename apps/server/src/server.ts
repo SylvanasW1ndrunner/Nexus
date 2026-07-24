@@ -35,10 +35,15 @@ import {
   type SqlRunSnapshot,
   type ExecutedSqlRun,
   type ConnectionProfile,
+  type AgentContextCheckpoint,
+  type AiSqlAgentRun,
+  type CompactAiSqlAgentSessionInput,
+  type CompactAiSqlAgentSessionResult,
   type DatabaseAccessRuntime,
   type DatabaseCredential,
   type DatabaseOperationRequest,
   type QuerySubmission,
+  type RunAiSqlAgentInput,
   type ResourceEventType,
   type ResourceKind,
   type ResourceQuery,
@@ -90,6 +95,14 @@ export type DatabaseAgentRuntimePort = {
   generate(input: GenerateSqlInput): Promise<GeneratedSqlRun>;
   executeGenerated(runId: string, options?: ExecuteGeneratedOptions): Promise<ExecutedSqlRun>;
   getRun(runId: string): SqlRunSnapshot | undefined;
+  runAgent?(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun>;
+  compactAgentSession?(
+    input: CompactAiSqlAgentSessionInput,
+  ): Promise<CompactAiSqlAgentSessionResult>;
+  agentContextCheckpoints?(
+    sessionId: string,
+    limit?: number,
+  ): Promise<AgentContextCheckpoint[]>;
   llmModels?(): RegisteredLlmModel[];
   discoverLlmModels?(): Promise<RegisteredLlmModel[]>;
   llmMetrics?(): LlmMetricsSnapshot;
@@ -192,7 +205,7 @@ async function handleRequest(
       return;
     }
     if (method === 'GET' && url.pathname === '/health') {
-      sendJson(response, 200, { status: 'ok', service: 'dbagent-server', version: '0.1.0' });
+      sendJson(response, 200, { status: 'ok', service: 'schemanaut-server', version: '0.1.0' });
       return;
     }
     if (method === 'GET' && url.pathname === '/v1/capabilities') {
@@ -200,6 +213,12 @@ async function handleRequest(
         databases: ['postgres'],
         llmProtocols: ['openai-compatible', 'anthropic-messages'],
         llmOperations: ['chat', 'stream', 'async-batch', 'tool-calling', 'structured-output', 'embeddings', 'rerank'],
+        agentOperations: [
+          'run',
+          'automatic-context-compaction',
+          'manual-context-compaction',
+          'context-checkpoint-history',
+        ],
         surfaces: ['typescript-sdk', 'rest', 'cli', 'webui'],
         safety: { readOnly: true, generatedSqlOnly: true, explicitExecution: true },
         limits: { defaultRows: 200, maxRows: 1000, maxRequestBytes: MAX_BODY_BYTES },
@@ -730,6 +749,94 @@ async function handleRequest(
     }
     if (method === 'GET' && url.pathname === '/v1/schema/status') {
       sendJson(response, 200, runtime.schemaStatus());
+      return;
+    }
+    if (method === 'POST' && url.pathname === '/v1/agent/run') {
+      if (!runtime.runAgent) {
+        throw new DatabaseAgentError(
+          'NOT_CONFIGURED',
+          '当前 Runtime 未启用 AI SQL Agent。',
+          true,
+        );
+      }
+      const body = requireRecord(await readJson(request), 'request');
+      const mode = optionalString(body, 'mode');
+      if (mode && mode !== 'read' && mode !== 'edit' && mode !== 'full') {
+        throw new DatabaseAgentError(
+          'INVALID_INPUT',
+          'mode 必须是 read、edit 或 full。',
+          false,
+        );
+      }
+      const agentMode =
+        mode === undefined
+          ? undefined
+          : (mode as 'read' | 'edit' | 'full');
+      const sessionId = optionalString(body, 'sessionId');
+      const userId = optionalString(body, 'userId');
+      const maxIterations = optionalInteger(body, 'maxIterations');
+      const result = await runtime.runAgent({
+        message: requireString(body, 'message'),
+        ...(agentMode === undefined ? {} : { mode: agentMode }),
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(userId === undefined ? {} : { userId }),
+        ...(maxIterations === undefined ? {} : { maxIterations }),
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+    const compactSessionMatch = url.pathname.match(
+      /^\/v1\/agent\/sessions\/([^/]+)\/compact$/,
+    );
+    if (method === 'POST' && compactSessionMatch?.[1]) {
+      if (!runtime.compactAgentSession) {
+        throw new DatabaseAgentError(
+          'NOT_CONFIGURED',
+          '当前 Runtime 未启用上下文压缩。',
+          true,
+        );
+      }
+      const body = await readOptionalJson(request);
+      const focus = optionalString(body, 'focus');
+      const result = await runtime.compactAgentSession({
+        sessionId: decodeURIComponent(compactSessionMatch[1]),
+        ...(focus === undefined ? {} : { focus }),
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+    const checkpointMatch = url.pathname.match(
+      /^\/v1\/agent\/sessions\/([^/]+)\/context-checkpoints$/,
+    );
+    if (method === 'GET' && checkpointMatch?.[1]) {
+      if (!runtime.agentContextCheckpoints) {
+        throw new DatabaseAgentError(
+          'NOT_CONFIGURED',
+          '当前 Runtime 未启用上下文检查点。',
+          true,
+        );
+      }
+      const limitText = url.searchParams.get('limit');
+      const limit =
+        limitText === null ? undefined : Number.parseInt(limitText, 10);
+      if (
+        limit !== undefined &&
+        (!Number.isSafeInteger(limit) || limit <= 0)
+      ) {
+        throw new DatabaseAgentError(
+          'INVALID_INPUT',
+          'limit 必须是正整数。',
+          false,
+        );
+      }
+      sendJson(
+        response,
+        200,
+        await runtime.agentContextCheckpoints(
+          decodeURIComponent(checkpointMatch[1]),
+          limit,
+        ),
+      );
       return;
     }
     if (method === 'POST' && url.pathname === '/v1/query/generate') {
@@ -1783,7 +1890,7 @@ function assertLoopbackHost(host: string): void {
   if (normalized !== '127.0.0.1' && normalized !== '::1' && normalized !== 'localhost') {
     throw new DatabaseAgentError(
       'INVALID_INPUT',
-      'DBAgent Server 只允许监听 127.0.0.1、::1 或 localhost。',
+      'SchemaNaut Server 只允许监听 127.0.0.1、::1 或 localhost。',
       false,
     );
   }

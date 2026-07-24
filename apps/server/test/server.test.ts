@@ -3,12 +3,17 @@ import { request as httpRequest } from 'node:http';
 import type { DatabaseAgentRuntimePort } from '../src/server.js';
 import type {
   CapabilityDescriptor,
+  AgentContextCheckpoint,
+  AiSqlAgentRun,
+  CompactAiSqlAgentSessionInput,
+  CompactAiSqlAgentSessionResult,
   DatabaseConnector,
   ExecutedSqlRun,
   GeneratedSqlRun,
   IndexSchemaOptions,
   PostgresConnectionInput,
   QueryJob,
+  RunAiSqlAgentInput,
   RuntimeStatus,
   SchemaIndexSnapshot,
   SqlRunSnapshot,
@@ -23,7 +28,7 @@ import type { SavedConnection } from '@dbagent/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startDatabaseAgentServer, type StartedDatabaseAgentServer } from '../src/index.js';
 
-describe('DBAgent local server', () => {
+describe('SchemaNaut local server', () => {
   let started: StartedDatabaseAgentServer | undefined;
 
   afterEach(async () => {
@@ -43,12 +48,12 @@ describe('DBAgent local server', () => {
     const page = await fetch(started.url);
     expect(page.status).toBe(200);
     const html = await page.text();
-    expect(html).toContain('<h1>DBAgent</h1>');
+    expect(html).toContain('<h1>SchemaNaut</h1>');
     expect(html).toContain('数据库接入管理');
     expect(html).toContain('/v1/database/connectors');
 
     const health = await getJson(started.url, '/health');
-    expect(health).toMatchObject({ status: 'ok', service: 'dbagent-server' });
+    expect(health).toMatchObject({ status: 'ok', service: 'schemanaut-server' });
 
     const setupResponse = await fetch(`${started.url}/v1/setup`, {
       method: 'POST',
@@ -102,6 +107,45 @@ describe('DBAgent local server', () => {
 
     const run = await getJson(started.url, '/v1/runs/run-1');
     expect(run).toMatchObject({ status: 'completed' });
+
+    const agent = await postJson(started.url, '/v1/agent/run', {
+      message: '继续分析订单',
+      mode: 'read',
+      sessionId: 'api-session',
+    });
+    expect(agent).toMatchObject({
+      selectedSkill: 'query-and-answer',
+      result: {
+        status: 'done',
+        session: { id: 'api-session' },
+      },
+    });
+    expect(runtime.lastAgentInput).toMatchObject({
+      message: '继续分析订单',
+      mode: 'read',
+      sessionId: 'api-session',
+    });
+
+    const compacted = await postJson(
+      started.url,
+      '/v1/agent/sessions/api-session/compact',
+      { focus: '保留 SQL 和精确结果' },
+    );
+    expect(compacted).toMatchObject({
+      status: 'compacted',
+      checkpoint: {
+        sequence: 1,
+        trigger: 'manual',
+        focus: '保留 SQL 和精确结果',
+      },
+    });
+    const checkpoints = await getJson(
+      started.url,
+      '/v1/agent/sessions/api-session/context-checkpoints',
+    );
+    expect(checkpoints).toMatchObject([
+      { sequence: 1, trigger: 'manual' },
+    ]);
   });
 
   it('returns stable errors for invalid JSON, missing runs, and unknown routes', async () => {
@@ -639,6 +683,7 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
   private indexed = false;
   private readonly runs = new Map<string, SqlRunSnapshot>();
   lastIndexOptions?: IndexSchemaOptions;
+  lastAgentInput?: RunAiSqlAgentInput;
 
   configureProvider(): void {
     this.configured = true;
@@ -707,6 +752,62 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
     };
   }
 
+  runAgent(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun> {
+    this.lastAgentInput = input;
+    return Promise.resolve({
+      selectedSkill: 'query-and-answer',
+      result: {
+        status: 'done',
+        session: fakeAgentSession(),
+        finalText: '已继续分析。',
+        iterations: 1,
+        toolExecutions: [],
+      },
+    });
+  }
+
+  compactAgentSession(
+    input: CompactAiSqlAgentSessionInput,
+  ): Promise<CompactAiSqlAgentSessionResult> {
+    const checkpoint = fakeContextCheckpoint(input.focus);
+    return Promise.resolve({
+      status: 'compacted',
+      session: fakeAgentSession(checkpoint),
+      report: {
+        phase: 'compacted',
+        level: 'conversation-checkpoint',
+        trigger: 'manual',
+        originalTokenEstimate: 20_000,
+        finalTokenEstimate: 2_000,
+        modelContextTokens: 32_768,
+        reservedOutputTokens: 4_096,
+        availablePromptTokens: 28_672,
+        warningThresholdTokens: 20_070,
+        compactionThresholdTokens: 24_371,
+        retainedMessageCount: 4,
+        toolCount: 6,
+        coveredConversationMessageCount: 12,
+        maskedToolResultCount: 2,
+        activeCheckpointSequence: 1,
+        summaryTokenEstimate: 300,
+        steps: [
+          {
+            type: 'conversation-checkpoint',
+            beforeTokenEstimate: 20_000,
+            afterTokenEstimate: 2_000,
+            affectedMessageCount: 12,
+          },
+        ],
+        warnings: [],
+      },
+      checkpoint,
+    });
+  }
+
+  agentContextCheckpoints(): Promise<AgentContextCheckpoint[]> {
+    return Promise.resolve([fakeContextCheckpoint('保留 SQL 和精确结果')]);
+  }
+
   generate(): Promise<GeneratedSqlRun> {
     const run: GeneratedSqlRun = {
       runId: 'run-1',
@@ -756,6 +857,54 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
   getRun(runId: string): SqlRunSnapshot | undefined {
     return this.runs.get(runId);
   }
+}
+
+function fakeAgentSession(
+  contextCheckpoint?: AgentContextCheckpoint,
+): AiSqlAgentRun['result']['session'] {
+  return {
+    id: 'api-session',
+    title: 'API Agent Session',
+    mode: 'read',
+    strategy: 'react',
+    messages: [
+      {
+        role: 'user',
+        content: '继续分析订单',
+        createdAt: '2026-07-24T00:00:00.000Z',
+      },
+      {
+        role: 'assistant',
+        content: '已继续分析。',
+        createdAt: '2026-07-24T00:00:01.000Z',
+      },
+    ],
+    tokenUsage: {
+      promptTokens: 100,
+      completionTokens: 20,
+      totalTokens: 120,
+    },
+    ...(contextCheckpoint === undefined ? {} : { contextCheckpoint }),
+    aborted: false,
+  };
+}
+
+function fakeContextCheckpoint(
+  focus?: string,
+): AgentContextCheckpoint {
+  return {
+    version: 1,
+    sequence: 1,
+    trigger: 'manual',
+    method: 'model',
+    summary: '已完成订单分析。',
+    coveredConversationMessageCount: 12,
+    sourceTokenEstimate: 20_000,
+    summaryTokenEstimate: 300,
+    modelContextTokens: 32_768,
+    createdAt: '2026-07-24T00:00:00.000Z',
+    ...(focus === undefined ? {} : { focus }),
+  };
 }
 
 function createApiTestConnector(): DatabaseConnector {

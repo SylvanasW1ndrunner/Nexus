@@ -1166,16 +1166,60 @@ describe('ReactAgent', () => {
   it('compresses long conversation context before model calls', async () => {
     const auditLog = new AgentAuditLogStore(await auditPath());
     const usage = new UsageTracker(await usagePath());
-    const { provider, calls } = scriptedProviderWithCalls([
-      {
-        text: '',
-        toolCalls: [{ id: 'large_result', name: 'query_database', arguments: { sql: 'select * from orders' } }],
+    const calls: LlmChatRequest[] = [];
+    let normalCall = 0;
+    const provider: LlmProvider = {
+      id: 'fake',
+      name: 'Fake Provider',
+      mode: 'byok',
+      chat(request) {
+        calls.push(request);
+        if (request.metadata?.purpose === 'context-compaction') {
+          return Promise.resolve({
+            text: [
+              '## Goal',
+              '分析订单。',
+              '## Database facts and SQL',
+              'orders.amount 是金额列，之前查询均为只读。',
+              '## Current state',
+              '继续处理最新用户任务。',
+            ].join('\n'),
+            toolCalls: [],
+            usage: {
+              promptTokens: 300,
+              completionTokens: 80,
+              totalTokens: 380,
+            },
+          });
+        }
+        normalCall += 1;
+        if (normalCall === 1) {
+          return Promise.resolve({
+            text: '',
+            toolCalls: [
+              {
+                id: 'large_result',
+                name: 'query_database',
+                arguments: { sql: 'select * from orders' },
+              },
+            ],
+          });
+        }
+        return Promise.resolve({
+          text: '已基于摘要继续分析。',
+          toolCalls: [],
+        });
       },
-      {
-        text: '已基于摘要继续分析。',
-        toolCalls: [],
+      isAvailable() {
+        return Promise.resolve({ available: true });
       },
-    ]);
+    };
+    const router = new LlmRouter(usage, [provider]);
+    router.gateway.registerModel({
+      providerId: 'fake',
+      model: 'fake-model',
+      limits: { contextTokens: 8_000, maxOutputTokens: 4_096 },
+    });
     const registry = new ToolRegistry();
     registry.register(
       {
@@ -1188,7 +1232,7 @@ describe('ReactAgent', () => {
       () => ({ rows: Array.from({ length: 200 }, (_, index) => ({ id: index, amount: index * 10 })) }),
     );
     const agent = new ReactAgent(
-      new LlmRouter(usage, [provider]),
+      router,
       registry,
       usage,
       undefined,
@@ -1202,31 +1246,314 @@ describe('ReactAgent', () => {
       mode: 'readonly',
       initialSession: longRestoredSession(),
       maxIterations: 2,
-      contextWindowTokens: 120,
+      keepRecentMessages: 4,
       maxToolResultChars: 240,
     });
 
     expect(result.status).toBe('done');
-    expect(calls).toHaveLength(2);
+    const compactionCalls = calls.filter(
+      (call) => call.metadata?.purpose === 'context-compaction',
+    );
+    const agentCalls = calls.filter(
+      (call) => call.metadata?.purpose !== 'context-compaction',
+    );
+    expect(compactionCalls.length).toBeGreaterThan(0);
+    expect(agentCalls).toHaveLength(2);
     expect(result.contextCompression).toHaveLength(2);
     expect(result.contextCompression?.[0]).toMatchObject({
-      summarizedToolResultCount: 1,
+      trigger: 'auto',
+      level: 'conversation-checkpoint',
+      activeCheckpointSequence: 1,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      steps: expect.arrayContaining([expect.objectContaining({ type: 'tool-summary' })]),
+      steps: expect.arrayContaining([
+        expect.objectContaining({ type: 'conversation-checkpoint' }),
+      ]),
     });
-    expect(result.contextCompression?.[0]?.phase).toMatch(/soft_compressed|hard_compressed|over_budget/);
+    expect(result.contextCompression?.[0]?.phase).toBe('compacted');
+    expect(result.session.contextCheckpoint).toMatchObject({
+      sequence: 1,
+      trigger: 'auto',
+      method: 'model',
+    });
     await expect(auditLog.readAll()).resolves.toContainEqual(
       expect.objectContaining({
-        type: 'context_compression_applied',
+        type: 'context_compaction_applied',
         sessionId: 'session_test',
         iteration: 1,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        compression: expect.objectContaining({
-          summarizedToolResultCount: 1,
-        }),
+        trigger: 'auto',
       }),
     );
-    expect(calls[1]?.messages.some((message) => message.content.includes('工具结果已在本地摘要'))).toBe(true);
+    expect(compactionCalls[0]?.metadata).toMatchObject({
+      purpose: 'context-compaction',
+      trigger: 'auto',
+    });
+    expect(compactionCalls[0]?.tools).toBeUndefined();
+    expect(
+      agentCalls[0]?.messages.some((message) =>
+        message.content.includes('<conversation_checkpoint>'),
+      ),
+    ).toBe(true);
+    expect(
+      agentCalls[0]?.messages.some((message) =>
+        message.content.includes('orders.amount 是金额列'),
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(agentCalls[0]?.messages)).not.toContain(
+      'coveredConversationMessageCount',
+    );
+  });
+
+  it('allows users to trigger context compaction manually with a focus', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const calls: LlmChatRequest[] = [];
+    const provider: LlmProvider = {
+      id: 'fake',
+      name: 'Fake Provider',
+      mode: 'byok',
+      chat(request) {
+        calls.push(request);
+        return Promise.resolve({
+          text: [
+          '## Goal',
+          '保留已执行 SQL 与精确金额。',
+          '## Actions and results',
+          'select sum(amount) from orders 已执行。',
+          ].join('\n'),
+          toolCalls: [],
+          usage: {
+            promptTokens: 200,
+            completionTokens: 50,
+            totalTokens: 250,
+          },
+        });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const router = new LlmRouter(usage, [provider]);
+    router.gateway.registerModel({
+      providerId: 'fake',
+      model: 'fake-model',
+      limits: { contextTokens: 2_000, maxOutputTokens: 300 },
+    });
+    const agent = new ReactAgent(
+      router,
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+    const session = longRestoredSession();
+    const originalMessages = structuredClone(session.messages);
+
+    const result = await agent.compact({
+      providerId: 'fake',
+      model: 'fake-model',
+      session,
+      focus: '重点保留已执行 SQL 和精确金额。',
+      keepRecentMessages: 4,
+    });
+
+    expect(result.status).toBe('compacted');
+    expect(result.checkpoint).toMatchObject({
+      sequence: 1,
+      trigger: 'manual',
+      method: 'model',
+      focus: '重点保留已执行 SQL 和精确金额。',
+    });
+    expect(result.session.messages).toEqual(originalMessages);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]?.messages[1]?.content).toContain('<manual_focus>');
+    expect(
+      calls.every(
+        (call) => !JSON.stringify(call.messages).includes('call_internal_'),
+      ),
+    ).toBe(true);
+  });
+
+  it('continues with a deterministic checkpoint when the compaction model returns no summary', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const calls: LlmChatRequest[] = [];
+    const provider: LlmProvider = {
+      id: 'fake',
+      name: 'Fake Provider',
+      mode: 'byok',
+      chat(request) {
+        calls.push(request);
+        if (request.metadata?.purpose === 'context-compaction') {
+          return Promise.resolve({ text: '', toolCalls: [] });
+        }
+        return Promise.resolve({
+          text: '已从恢复检查点继续处理。',
+          toolCalls: [],
+        });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const router = new LlmRouter(usage, [provider]);
+    router.gateway.registerModel({
+      providerId: 'fake',
+      model: 'fake-model',
+      limits: { contextTokens: 8_000, maxOutputTokens: 4_096 },
+    });
+    const agent = new ReactAgent(
+      router,
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '继续分析订单。',
+      mode: 'readonly',
+      initialSession: longRestoredSession(),
+      maxIterations: 1,
+      keepRecentMessages: 4,
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.session.contextCheckpoint).toMatchObject({
+      sequence: 1,
+      trigger: 'auto',
+      method: 'deterministic-fallback',
+    });
+    expect(result.contextCompression[0]?.warnings).toContain(
+      'The model summary failed, so a deterministic recovery checkpoint was used.',
+    );
+    const normalCall = calls.find(
+      (call) => call.metadata?.purpose !== 'context-compaction',
+    );
+    expect(
+      normalCall?.messages.some((message) =>
+        message.content.includes('Goal and user requirements'),
+      ),
+    ).toBe(true);
+    expect(result.session.contextCheckpoint?.summary).not.toContain(
+      'call_internal_',
+    );
+  });
+
+  it('carries the previous semantic checkpoint into a later automatic compaction', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const calls: LlmChatRequest[] = [];
+    let compactionCall = 0;
+    const provider: LlmProvider = {
+      id: 'fake',
+      name: 'Fake Provider',
+      mode: 'byok',
+      chat(request) {
+        calls.push(request);
+        if (request.metadata?.purpose === 'context-compaction') {
+          compactionCall += 1;
+          return Promise.resolve({
+            text:
+              compactionCall === 1
+                ? '## Current state\nPHASE_ONE：orders.amount 已确认。'
+                : '## Current state\nPHASE_ONE 与 PHASE_TWO_EXACT_1726_50 均已确认。',
+            toolCalls: [],
+            usage: {
+              promptTokens: 400,
+              completionTokens: 80,
+              totalTokens: 480,
+            },
+          });
+        }
+        return Promise.resolve({
+          text: '已基于累计检查点继续。',
+          toolCalls: [],
+        });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const router = new LlmRouter(usage, [provider]);
+    router.gateway.registerModel({
+      providerId: 'fake',
+      model: 'fake-model',
+      limits: { contextTokens: 12_000, maxOutputTokens: 4_096 },
+    });
+    const agent = new ReactAgent(
+      router,
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+    const first = await agent.compact({
+      providerId: 'fake',
+      model: 'fake-model',
+      session: longRestoredSession(),
+      keepRecentMessages: 2,
+    });
+    expect(first.status).toBe('compacted');
+    const phaseTwoSession = first.session;
+    for (let index = 1; index <= 30; index += 1) {
+      appendMessage(
+        phaseTwoSession,
+        createMessage(
+          {
+            role: index % 2 === 0 ? 'assistant' : 'user',
+            content: `PHASE_TWO_EXACT_1726_50 round ${index}: ${'新阶段数据库事实。'.repeat(45)}`,
+          },
+          fixedDependencies().now,
+        ),
+      );
+    }
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '继续第二阶段分析。',
+      mode: 'readonly',
+      initialSession: phaseTwoSession,
+      maxIterations: 1,
+      keepRecentMessages: 4,
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.session.contextCheckpoint?.sequence).toBe(2);
+    expect(result.session.contextCheckpoint?.trigger).toBe('auto');
+    expect(result.session.contextCheckpoint?.method).toBe('model');
+    expect(result.session.contextCheckpoint?.summary).toContain(
+      'PHASE_TWO_EXACT_1726_50',
+    );
+    const automaticCompactionCalls = calls.filter(
+      (call) =>
+        call.metadata?.purpose === 'context-compaction' &&
+        call.metadata?.trigger === 'auto',
+    );
+    expect(automaticCompactionCalls.length).toBeGreaterThan(0);
+    expect(
+      automaticCompactionCalls[0]?.messages.some((message) =>
+        message.content.includes('<previous_checkpoint>'),
+      ),
+    ).toBe(true);
+    expect(
+      automaticCompactionCalls.some((call) =>
+        call.messages.some((message) =>
+          message.content.includes('PHASE_TWO_EXACT_1726_50'),
+        ),
+      ),
+    ).toBe(true);
+    const normalCalls = calls.filter(
+      (call) => call.metadata?.purpose !== 'context-compaction',
+    );
+    const normalCall = normalCalls[normalCalls.length - 1];
+    expect(
+      normalCall?.messages.some((message) =>
+        message.content.includes('PHASE_ONE 与 PHASE_TWO_EXACT_1726_50'),
+      ),
+    ).toBe(true);
+    expect(result.session.messages.length).toBe(
+      phaseTwoSession.messages.length + 2,
+    );
   });
 
   it('bounds large tool results before persisting them into the session and model context', async () => {
@@ -1566,23 +1893,45 @@ function longRestoredSession() {
     session,
     createMessage({ role: 'user', content: 'Restore previous analysis.' }, fixedDependencies().now),
   );
-  appendMessage(
-    session,
-    createMessage(
-      {
-        role: 'tool',
-        toolCallId: 'restored_large_result',
-        toolName: 'query_database',
-        content: JSON.stringify({
-          rows: Array.from({ length: 300 }, (_, index) => ({
-            id: index,
-            amount: index * 10,
-            payload: 'x'.repeat(80),
-          })),
-        }),
-      },
-      fixedDependencies().now,
-    ),
-  );
+  for (let index = 1; index <= 10; index += 1) {
+    appendMessage(
+      session,
+      createMessage(
+        {
+          role: 'assistant',
+          content: `Previous analysis round ${index}.`,
+          toolCalls: [
+            {
+              id: `call_internal_${index}`,
+              name: 'query_database',
+              arguments: {
+                sql: `select ${index} as round_no, sum(amount) from orders`,
+              },
+            },
+          ],
+        },
+        fixedDependencies().now,
+      ),
+    );
+    appendMessage(
+      session,
+      createMessage(
+        {
+          role: 'tool',
+          toolCallId: `call_internal_${index}`,
+          toolName: 'query_database',
+          content: JSON.stringify({
+            round: index,
+            amount: index * 100,
+            rows: Array.from({ length: 12 }, (_, row) => ({
+              id: row,
+              payload: 'x'.repeat(80),
+            })),
+          }),
+        },
+        fixedDependencies().now,
+      ),
+    );
+  }
   return session;
 }

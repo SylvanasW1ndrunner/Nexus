@@ -45,6 +45,24 @@ describe('Agent output safety', () => {
     expect(result.value).toContain('[REDACTED_PII]');
   });
 
+  it('does not mistake numeric SQL identifiers, UUIDs, or hashes for phone numbers', () => {
+    const value =
+      'analytics.agent_refresh_probe_65652_1784890946584 result=cc3eecc6-6442-4a85-9c33-c5210e924956 hash=7842a8d5421c0dc69b36e9d390b8b495dc6c1d1dfc27a990c6fe359ccf61e54a';
+    const result = sanitizeAgentOutputText(value);
+
+    expect(result.redacted).toBe(false);
+    expect(result.value).toBe(value);
+  });
+
+  it('preserves Date values so database timestamps serialize as ISO strings', () => {
+    const timestamp = new Date('2026-07-24T12:34:56.000Z');
+    const result = sanitizeAgentOutputValue({ received_at: timestamp });
+
+    expect(result.redacted).toBe(false);
+    expect(result.value.received_at).toBeInstanceOf(Date);
+    expect(JSON.stringify(result.value)).toContain('2026-07-24T12:34:56.000Z');
+  });
+
   it('can be disabled for trusted offline diagnostics', () => {
     const result = sanitizeAgentOutputValue({ email: 'alice@example.com' }, false);
 

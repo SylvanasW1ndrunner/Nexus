@@ -4,6 +4,7 @@ import {
   assertResourceChangeSet,
   assertResourceDescriptor,
   assertResourceObservation,
+  assertResourceRegistrySnapshot,
   assertResourceRelation,
   type ResourceDescriptor,
   type ResourceSource,
@@ -137,6 +138,43 @@ describe('resource public contracts', () => {
         version: '2',
         sequence: -1,
         observedAt: time,
+      }),
+    ).toThrowError(ContractValidationError);
+  });
+
+  it('rejects secret material in snapshot metadata and events', () => {
+    const baseSnapshot = {
+      contractVersion: '1.0',
+      createdAt: time,
+      resources: [resource()],
+      relations: [],
+      observations: [],
+      events: [],
+      sourceVersions: {},
+      lastEventSequence: 0,
+    };
+
+    expect(() =>
+      assertResourceRegistrySnapshot({
+        ...baseSnapshot,
+        apiKey: 'should-never-be-persisted',
+      }),
+    ).toThrowError(ContractValidationError);
+    expect(() =>
+      assertResourceRegistrySnapshot({
+        ...baseSnapshot,
+        events: [
+          {
+            id: 'event-1',
+            sequence: 1,
+            type: 'resource-upserted',
+            occurredAt: time,
+            source,
+            resourceId: 'resource-1',
+            attributes: { password: 'should-never-be-persisted' },
+          },
+        ],
+        lastEventSequence: 1,
       }),
     ).toThrowError(ContractValidationError);
   });

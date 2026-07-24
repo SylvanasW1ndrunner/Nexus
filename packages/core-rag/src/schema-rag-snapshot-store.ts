@@ -1,8 +1,16 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { SchemaRagDocument, SchemaRagGlossaryEntry, SchemaRagIndex } from './types.js';
+import { verifyKnowledgeCatalog } from './merkle-catalog.js';
+import type {
+  KnowledgeCatalog,
+  SchemaRagDocument,
+  SchemaRagGlossaryEntry,
+  SchemaRagIndex,
+  SchemaRagIndexManifest,
+  SchemaRagRetrievalProfile,
+} from './types.js';
 
-const SNAPSHOT_VERSION = 1;
+const SNAPSHOT_VERSION = 2;
 
 type PersistedSchemaRagSnapshot = {
   version: number;
@@ -12,6 +20,10 @@ type PersistedSchemaRagSnapshot = {
   documents: SchemaRagDocument[];
   graph: Array<[string, string[]]>;
   glossary: SchemaRagGlossaryEntry[];
+  catalog?: KnowledgeCatalog;
+  manifest?: SchemaRagIndexManifest;
+  retrievalProfile?: SchemaRagRetrievalProfile;
+  vectors?: Record<string, number[]>;
 };
 
 export type SchemaRagSnapshotLoadResult =
@@ -91,6 +103,12 @@ export class SchemaRagSnapshotStore {
       documents: index.documents,
       graph: [...index.graph.entries()].map(([id, relationIds]) => [id, [...relationIds]]),
       glossary: index.glossary,
+      ...(index.catalog === undefined ? {} : { catalog: index.catalog }),
+      ...(index.manifest === undefined ? {} : { manifest: index.manifest }),
+      ...(index.retrievalProfile === undefined
+        ? {}
+        : { retrievalProfile: index.retrievalProfile }),
+      ...(index.vectors === undefined ? {} : { vectors: index.vectors }),
     };
 
     await writeFile(temp, `${JSON.stringify(snapshot)}\n`, 'utf8');
@@ -326,6 +344,34 @@ function deserializeSnapshot(value: unknown, expectedConnectionId: string): Dese
 
   const glossary = value.glossary.filter(isSchemaRagGlossaryEntry);
   if (glossary.length !== value.glossary.length) return invalidSnapshot('Snapshot contains invalid glossary entries.');
+  if (
+    value.catalog !== undefined &&
+    !isKnowledgeCatalog(value.catalog, expectedConnectionId)
+  ) {
+    return invalidSnapshot('Snapshot contains an invalid knowledge catalog.');
+  }
+  if (
+    value.manifest !== undefined &&
+    !isSchemaRagIndexManifest(value.manifest, expectedConnectionId)
+  ) {
+    return invalidSnapshot('Snapshot contains an invalid index manifest.');
+  }
+  if (
+    value.retrievalProfile !== undefined &&
+    !isRetrievalProfile(value.retrievalProfile)
+  ) {
+    return invalidSnapshot('Snapshot contains an invalid retrieval profile.');
+  }
+  if (value.vectors !== undefined && !isVectorRecord(value.vectors)) {
+    return invalidSnapshot('Snapshot contains invalid embedding vectors.');
+  }
+  if (
+    isKnowledgeCatalog(value.catalog, expectedConnectionId) &&
+    isSchemaRagIndexManifest(value.manifest, expectedConnectionId) &&
+    value.manifest.catalogRootHash !== value.catalog.catalogRootHash
+  ) {
+    return invalidSnapshot('Snapshot index manifest does not match the knowledge catalog.');
+  }
 
   return {
     status: 'loaded',
@@ -334,6 +380,16 @@ function deserializeSnapshot(value: unknown, expectedConnectionId: string): Dese
       documents,
       graph,
       glossary,
+      ...(isKnowledgeCatalog(value.catalog, expectedConnectionId)
+        ? { catalog: value.catalog }
+        : {}),
+      ...(isSchemaRagIndexManifest(value.manifest, expectedConnectionId)
+        ? { manifest: value.manifest }
+        : {}),
+      ...(isRetrievalProfile(value.retrievalProfile)
+        ? { retrievalProfile: value.retrievalProfile }
+        : {}),
+      ...(isVectorRecord(value.vectors) ? { vectors: value.vectors } : {}),
       indexedAt: value.indexedAt,
     },
   };
@@ -348,7 +404,7 @@ function isSchemaRagDocument(value: unknown): value is SchemaRagDocument {
     isRecord(value) &&
     typeof value.id === 'string' &&
     typeof value.connectionId === 'string' &&
-    (value.kind === 'table' || value.kind === 'column' || value.kind === 'relation') &&
+    typeof value.kind === 'string' &&
     typeof value.schema === 'string' &&
     typeof value.table === 'string' &&
     typeof value.title === 'string' &&
@@ -358,6 +414,71 @@ function isSchemaRagDocument(value: unknown): value is SchemaRagDocument {
     Array.isArray(value.relationIds) &&
     value.relationIds.every((relationId) => typeof relationId === 'string') &&
     isRecord(value.metadata)
+  );
+}
+
+function isKnowledgeCatalog(
+  value: unknown,
+  connectionId: string,
+): value is KnowledgeCatalog {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    value.connectionId !== connectionId ||
+    !Array.isArray(value.rootIds) ||
+    !isRecord(value.nodes) ||
+    !isRecord(value.relations) ||
+    !isRecord(value.knowledge) ||
+    !isRecord(value.bindings) ||
+    typeof value.catalogRootHash !== 'string' ||
+    typeof value.snapshotId !== 'string' ||
+    typeof value.builtAt !== 'string'
+  ) {
+    return false;
+  }
+  try {
+    return verifyKnowledgeCatalog(value as KnowledgeCatalog).valid;
+  } catch {
+    return false;
+  }
+}
+
+function isSchemaRagIndexManifest(
+  value: unknown,
+  connectionId: string,
+): value is SchemaRagIndexManifest {
+  return (
+    isRecord(value) &&
+    value.version === 1 &&
+    value.connectionId === connectionId &&
+    typeof value.catalogRootHash === 'string' &&
+    typeof value.retrievalProfileId === 'string' &&
+    typeof value.retrievalProfileVersion === 'number' &&
+    typeof value.documentCount === 'number' &&
+    typeof value.indexVersion === 'string' &&
+    typeof value.createdAt === 'string'
+  );
+}
+
+function isVectorRecord(value: unknown): value is Record<string, number[]> {
+  return (
+    isRecord(value) &&
+    Object.values(value).every(
+      (vector) =>
+        Array.isArray(vector) &&
+        vector.length > 0 &&
+        vector.every((item) => typeof item === 'number' && Number.isFinite(item)),
+    )
+  );
+}
+
+function isRetrievalProfile(value: unknown): value is SchemaRagRetrievalProfile {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.version === 'number' &&
+    isRecord(value.backend) &&
+    typeof value.backend.type === 'string'
   );
 }
 

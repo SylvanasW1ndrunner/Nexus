@@ -7,7 +7,6 @@ export * from './evaluation-report-store.js';
 export * from './output-safety.js';
 export * from './permission-manager.js';
 export * from './react-agent.js';
-export * from './schema-rag-tools.js';
 export * from './session.js';
 export * from './session-store.js';
 export * from './stream-store.js';

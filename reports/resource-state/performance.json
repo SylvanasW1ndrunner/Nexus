@@ -1,7 +1,7 @@
 {
   "kind": "resource-state-performance",
   "status": "passed",
-  "generatedAt": "2026-07-23T12:04:56.583Z",
+  "generatedAt": "2026-07-24T17:55:28.522Z",
   "environment": {
     "node": "v24.14.0",
     "platform": "win32",
@@ -9,8 +9,8 @@
     "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
     "cpuCount": 32,
     "memory": {
-      "rssMiB": 673.05,
-      "heapUsedMiB": 443.35
+      "rssMiB": 663.73,
+      "heapUsedMiB": 442.95
     }
   },
   "dataset": {
@@ -37,50 +37,50 @@
     "retainedEvents": 64
   },
   "metrics": {
-    "resourceIdLookupP95Ms": 0.010800000000017462,
-    "singleHopRelationP95Ms": 0.02269999999953143,
-    "twoHopTraversalP95Ms": 0.05529999999998836,
-    "scopeAndKindQueryP95Ms": 0.8659999999999854,
-    "incrementalUpdateP95Ms": 0.07210000000122818,
-    "stateDerivationP95Ms": 0.008499999999912689,
-    "snapshotRestoreMs": 3368.2046999999993,
+    "resourceIdLookupP95Ms": 0.012400000000525324,
+    "singleHopRelationP95Ms": 0.04029999999966094,
+    "twoHopTraversalP95Ms": 0.1517999999996391,
+    "scopeAndKindQueryP95Ms": 1.415899999999965,
+    "incrementalUpdateP95Ms": 0.21119999999791617,
+    "stateDerivationP95Ms": 0.018300000001545413,
+    "snapshotRestoreMs": 3766.300300000001,
     "retainedObservations": 32,
     "retainedEvents": 64,
-    "boundedObservationElapsedMs": 18736.2836
+    "boundedObservationElapsedMs": 42750.9674
   },
   "checks": {
     "resourceIdLookupP95Ms": {
-      "actual": 0.010800000000017462,
+      "actual": 0.012400000000525324,
       "maximum": 10,
       "passed": true
     },
     "singleHopRelationP95Ms": {
-      "actual": 0.02269999999953143,
+      "actual": 0.04029999999966094,
       "maximum": 50,
       "passed": true
     },
     "twoHopTraversalP95Ms": {
-      "actual": 0.05529999999998836,
+      "actual": 0.1517999999996391,
       "maximum": 100,
       "passed": true
     },
     "scopeAndKindQueryP95Ms": {
-      "actual": 0.8659999999999854,
+      "actual": 1.415899999999965,
       "maximum": 50,
       "passed": true
     },
     "incrementalUpdateP95Ms": {
-      "actual": 0.07210000000122818,
+      "actual": 0.21119999999791617,
       "maximum": 5,
       "passed": true
     },
     "stateDerivationP95Ms": {
-      "actual": 0.008499999999912689,
+      "actual": 0.018300000001545413,
       "maximum": 10,
       "passed": true
     },
     "snapshotRestoreMs": {
-      "actual": 3368.2046999999993,
+      "actual": 3766.300300000001,
       "maximum": 5000,
       "passed": true
     },

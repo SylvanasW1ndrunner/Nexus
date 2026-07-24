@@ -3,7 +3,7 @@ export const WEB_UI_HTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DBAgent</title>
+  <title>SchemaNaut</title>
   <style>
     :root { color-scheme: dark; font-family: Inter, "Microsoft YaHei", system-ui, sans-serif; background: #0b0f14; color: #e7edf5; }
     * { box-sizing: border-box; }
@@ -52,7 +52,7 @@ export const WEB_UI_HTML = `<!doctype html>
 <body>
   <main>
     <header>
-      <h1>DBAgent</h1>
+      <h1>SchemaNaut</h1>
       <p>连接只读 PostgreSQL，用自然语言生成 SQL；系统不会自动执行，只有你确认后才会查询数据库。</p>
       <div class="status">
         <span id="serverStatus" class="pill">Server 检查中</span>

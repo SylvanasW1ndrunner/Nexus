@@ -7,6 +7,34 @@ import {
 } from '../src/index.js';
 
 describe('decideAutomaticPermission', () => {
+  it('implements the product read/edit/full ladder independently of tool danger labels', () => {
+    const readTool = {
+      dangerLevel: 'high' as const,
+      readonly: false,
+      requiredPermission: 'read' as const,
+    };
+    const editTool = {
+      dangerLevel: 'safe' as const,
+      readonly: true,
+      requiredPermission: 'edit' as const,
+    };
+    const fullTool = {
+      dangerLevel: 'medium' as const,
+      readonly: false,
+      requiredPermission: 'full' as const,
+    };
+
+    expect(decideAutomaticPermission('read', readTool)).toBe('allow');
+    expect(decideAutomaticPermission('read', editTool)).toBe('ask');
+    expect(decideAutomaticPermission('read', fullTool)).toBe('ask');
+    expect(decideAutomaticPermission('edit', readTool)).toBe('allow');
+    expect(decideAutomaticPermission('edit', editTool)).toBe('allow');
+    expect(decideAutomaticPermission('edit', fullTool)).toBe('ask');
+    expect(decideAutomaticPermission('full', readTool)).toBe('allow');
+    expect(decideAutomaticPermission('full', editTool)).toBe('allow');
+    expect(decideAutomaticPermission('full', fullTool)).toBe('allow');
+  });
+
   it('keeps a stable mode and danger-level matrix for runtime tool decisions', () => {
     const cases: Array<{
       mode: AgentMode;
@@ -72,6 +100,43 @@ describe('decideAutomaticPermission', () => {
 });
 
 describe('PermissionManager', () => {
+  it('turns an operation above the selected access level into a one-time approval request', async () => {
+    const requests: string[] = [];
+    const manager = new PermissionManager((request) => {
+      requests.push(
+        `${request.mode}:${request.tool.requiredPermission}:${request.toolCall.id}`,
+      );
+      return {
+        approved: true,
+        requestId: 'permission-dialog-1',
+        approvedBy: 'user',
+      };
+    });
+    const result = await manager.checkDetailed({
+      mode: 'read',
+      tool: {
+        name: 'sql_execute',
+        description: '',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+        requiredPermission: 'edit',
+      },
+      toolCall: {
+        id: 'call-update',
+        name: 'sql_execute',
+        arguments: { sql: 'UPDATE orders SET status = \'paid\' WHERE id = 1' },
+      },
+    });
+
+    expect(requests).toEqual(['read:edit:call-update']);
+    expect(result).toMatchObject({
+      decision: 'allow',
+      source: 'approval-provider',
+      approvalRequestId: 'permission-dialog-1',
+      approvedBy: 'user',
+    });
+  });
+
   it('distinguishes automatic allow from approval-provider allow', async () => {
     const automatic = await new PermissionManager().checkDetailed({
       mode: 'full-auto',

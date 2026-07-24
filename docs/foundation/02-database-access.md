@@ -1,6 +1,6 @@
-# DBAgent 公共基础能力：数据库接入与能力描述
+﻿# SchemaNaut 公共基础能力：数据库接入与能力描述
 
-> 上级文档：[DBAgent 总体功能设计](../product-functional-overview.md)
+> 上级文档：[SchemaNaut 总体功能设计](../product-functional-overview.md)
 >
 > 文档性质：功能说明、工程架构与开发验收基线
 >
@@ -200,7 +200,7 @@ Connector 静态能力
 → 资源角色和运行状态
 → 连接用途和网络条件
 → 当前账号有效权限
-→ DBAgent 安全策略与批准
+→ SchemaNaut 安全策略与批准
 ```
 
 主要能力域：
@@ -374,7 +374,7 @@ Mock 验证内容：
 
 ### 7.4 初始性能目标
 
-以下只计算 DBAgent 平台处理时间，不包含外部数据库、网络和供应商排队：
+以下只计算 SchemaNaut 平台处理时间，不包含外部数据库、网络和供应商排队：
 
 | 维度 | 初始目标 | 本地实测 |
 |---|---:|---:|
@@ -390,7 +390,7 @@ Mock 验证内容：
 | 单项元数据变化触发全量重建 | 0 | 0；更新耗时 0.765 ms |
 | 公共 Connector 能力合同覆盖率 | 100% | 100% |
 
-本地实测由 [`run-database-access-benchmark.mjs`](../../scripts/run-database-access-benchmark.mjs) 产生，原始报告见 [`database-access-performance.json`](../../reports/database-access-performance.json)。数值只代表当前机器上的平台开销；真实数据库性能另行记录连接时间、首批结果、总耗时、扫描量和数据库执行时间，不能把数据库响应时间算作 DBAgent 平台开销。
+本地实测由 [`run-database-access-benchmark.mjs`](../../scripts/run-database-access-benchmark.mjs) 产生，原始报告见 [`database-access-performance.json`](../../reports/database-access-performance.json)。数值只代表当前机器上的平台开销；真实数据库性能另行记录连接时间、首批结果、总耗时、扫描量和数据库执行时间，不能把数据库响应时间算作 SchemaNaut 平台开销。
 
 ## 8. 安全与边界
 

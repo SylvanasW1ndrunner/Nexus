@@ -13,10 +13,14 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@dbagent/core-agent": "workspace:*",
     "@dbagent/core-db": "workspace:*",
     "@dbagent/core-llm": "workspace:*",
     "@dbagent/core-rag": "workspace:*",
     "@dbagent/core-resource": "workspace:*",
+    "@dbagent/core-skills": "workspace:*",
+    "@dbagent/core-tools": "workspace:*",
+    "@dbagent/core-usage": "workspace:*",
     "@dbagent/shared": "workspace:*"
   },
   "devDependencies": {

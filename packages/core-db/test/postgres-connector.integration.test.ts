@@ -168,6 +168,23 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
         connectorId: 'postgres-native',
         connectionProfileId: profile.id,
       });
+      const ordersResource = runtime
+        .queryResources({ text: 'public.orders', kinds: ['table'], limit: 100 })
+        .items.find((resource) => resource.canonicalName === 'public.orders');
+      const usersResource = runtime
+        .queryResources({ text: 'public.users', kinds: ['table'], limit: 100 })
+        .items.find((resource) => resource.canonicalName === 'public.users');
+      expect(ordersResource).toBeDefined();
+      expect(usersResource).toBeDefined();
+      expect(runtime.resourceRelations(ordersResource!.id)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'references',
+            fromResourceId: ordersResource!.id,
+            toResourceId: usersResource!.id,
+          }),
+        ]),
+      );
 
       const sizeBeforeRefresh = runtime.resources.size;
       const refreshed = await runtime.discoverAll(profile.id, { pageSize: 13 });

@@ -1,11 +1,16 @@
 {
-  "name": "dbagent",
+  "name": "schemanaut",
   "version": "0.1.0",
   "private": true,
-  "description": "Embeddable AI Database Agent Runtime for natural-language SQL and database operations.",
+  "description": "SchemaNaut — an embeddable AI database agent runtime for natural-language SQL, governance and operations.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SylvanasW1ndrunner/Nexus.git"
+  },
   "packageManager": "pnpm@9.15.4",
   "engines": {
-    "node": ">=20.11.0",
+    "node": ">=22.5.0",
     "pnpm": ">=9.0.0"
   },
   "scripts": {
@@ -27,6 +32,11 @@
     "test:public-contracts:performance": "pnpm build:server && node scripts/run-public-contracts-benchmark.mjs",
     "test:resource-state": "vitest run packages/core-resource --pool=forks",
     "test:resource-state:performance": "pnpm build:server && node --expose-gc scripts/run-resource-state-benchmark.mjs",
+    "test:ai-sql": "vitest run packages/core-rag packages/core-agent packages/core-skills packages/core-tools packages/sdk --pool=forks",
+    "test:ai-sql:performance": "pnpm build:server && node --expose-gc scripts/run-ai-sql-benchmark.mjs && node --expose-gc scripts/run-context-compaction-benchmark.mjs",
+    "test:ai-sql:context-performance": "pnpm build:server && node --expose-gc scripts/run-context-compaction-benchmark.mjs",
+    "test:ai-sql:live": "pnpm build:server && node scripts/run-postgres-tests.mjs --live-llm",
+    "test:ai-sql:context-live": "pnpm build:server && node scripts/run-context-compaction-live-test.mjs",
     "test:npm-package:functional": "pnpm package:npm && node scripts/verify-npm-package.mjs",
     "test:functional:live": "pnpm build:server && node scripts/run-postgres-tests.mjs --live-llm",
     "test:performance:live": "pnpm build:server && node scripts/run-llm-live-performance.mjs",
@@ -35,8 +45,8 @@
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
     "test": "turbo test",
-    "test:postgres": "node scripts/run-postgres-tests.mjs",
-    "ci": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:llm-platform:performance && pnpm test:database-platform:performance && pnpm test:public-contracts:performance && pnpm test:resource-state:performance && pnpm test:npm-package:functional",
+    "test:postgres": "pnpm build:server && node scripts/run-postgres-tests.mjs",
+    "ci": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:llm-platform:performance && pnpm test:database-platform:performance && pnpm test:public-contracts:performance && pnpm test:resource-state:performance && pnpm test:ai-sql:performance && pnpm test:npm-package:functional",
     "db:up": "docker compose -f scripts/dev-db/docker-compose.yml up -d",
     "db:down": "docker compose -f scripts/dev-db/docker-compose.yml down -v"
   },

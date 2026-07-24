@@ -899,18 +899,19 @@ export class ResourceRegistry {
     } catch (error) {
       throw contractError(error);
     }
+    const preparedSnapshot = structuredClone(snapshot);
     const preparedResources = new Map<ResourceId, ResourceDescriptor>();
-    for (const resource of snapshot.resources) {
+    for (const resource of preparedSnapshot.resources) {
       if (preparedResources.has(resource.id)) {
         throw new ResourceConflictError(
           `Snapshot contains duplicate resource ${resource.id}`,
           'RESOURCE_VALIDATION_FAILED',
         );
       }
-      preparedResources.set(resource.id, cloneResource(resource));
+      preparedResources.set(resource.id, resource);
     }
     const preparedRelations = new Map<ResourceRelationId, ResourceRelation>();
-    for (const relation of snapshot.relations) {
+    for (const relation of preparedSnapshot.relations) {
       if (preparedRelations.has(relation.id)) {
         throw new ResourceConflictError(
           `Snapshot contains duplicate relation ${relation.id}`,
@@ -925,7 +926,7 @@ export class ResourceRegistry {
           `Relation ${relation.id} references an unknown resource`,
         );
       }
-      preparedRelations.set(relation.id, cloneRelation(relation));
+      preparedRelations.set(relation.id, relation);
     }
     assertContainsGraphAcyclic(preparedRelations.values());
 
@@ -933,7 +934,7 @@ export class ResourceRegistry {
       ResourceId,
       Map<string, ResourceObservation>
     >();
-    for (const observation of snapshot.observations) {
+    for (const observation of preparedSnapshot.observations) {
       if (!preparedResources.has(observation.resourceId)) {
         throw new ResourceConflictError(
           `Observation ${observation.id} references unknown resource ${observation.resourceId}`,
@@ -948,18 +949,13 @@ export class ResourceRegistry {
           'RESOURCE_VALIDATION_FAILED',
         );
       }
-      observations.set(observation.id, cloneObservation(observation));
+      observations.set(observation.id, observation);
       compactObservations(observations, this.#maxObservationsPerResource);
       preparedObservations.set(observation.resourceId, observations);
     }
-    const preparedEvents = snapshot.events
-      .slice(-this.#maxEvents)
-      .map(cloneEvent);
+    const preparedEvents = preparedSnapshot.events.slice(-this.#maxEvents);
     const preparedSourceVersions = new Map(
-      Object.entries(snapshot.sourceVersions).map(([sourceId, version]) => [
-        sourceId,
-        { ...version },
-      ]),
+      Object.entries(preparedSnapshot.sourceVersions),
     );
 
     this.clear();
@@ -980,8 +976,8 @@ export class ResourceRegistry {
       this.#sourceVersions.set(sourceId, version);
     }
     this.#events.splice(0, this.#events.length, ...preparedEvents);
-    this.#lastEventSequence = snapshot.lastEventSequence;
-    this.#snapshotCreatedAt = snapshot.createdAt;
+    this.#lastEventSequence = preparedSnapshot.lastEventSequence;
+    this.#snapshotCreatedAt = preparedSnapshot.createdAt;
   }
 
   clear(): void {

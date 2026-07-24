@@ -17,7 +17,21 @@ import type {
   LlmUsage,
   RegisteredLlmModel,
 } from '@dbagent/core-llm';
-import type { SchemaRagEngine } from '@dbagent/core-rag';
+import type {
+  AgentMode,
+  AgentContextCompactionResult,
+  AgentRunDependencies,
+  AgentRunResult,
+  AgentSessionStore,
+  AgentSession,
+  ApprovalProvider,
+} from '@dbagent/core-agent';
+import type {
+  SchemaRagEngine,
+  SchemaRagRetrievalProfile,
+} from '@dbagent/core-rag';
+import type { AiSqlResultStore } from '@dbagent/core-tools';
+import type { UsageTracker } from '@dbagent/core-usage';
 import type { QueryExecutionResult, QuerySafetyReport, SavedConnection } from '@dbagent/shared';
 import type { DatabaseAgentErrorCode } from './errors.js';
 
@@ -34,10 +48,17 @@ export type DatabaseAgentRuntimeOptions = {
   credentialResolver?: CredentialResolver;
   databaseAuditSink?: DatabaseAuditSink;
   rag?: SchemaRagEngine;
+  retrievalProfile?: SchemaRagRetrievalProfile;
   createRunId?: () => string;
   createConnectionId?: () => string;
   now?: () => string;
   defaultRowLimit?: number;
+  usageTracker?: UsageTracker;
+  approvalProvider?: ApprovalProvider;
+  agentDependencies?: AgentRunDependencies;
+  sessionStore?: AgentSessionStore;
+  sessionDatabasePath?: string;
+  resultStore?: AiSqlResultStore;
 };
 
 export type PostgresConnectionInput = {
@@ -51,11 +72,12 @@ export type PostgresConnectionInput = {
   ssl?: boolean | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
   connectionTimeoutMs?: number;
   statementTimeoutMs?: number;
+  readOnly?: boolean;
 };
 
 export type ConnectionTestResult = {
   latencyMs: number;
-  readOnly: true;
+  readOnly: boolean;
 };
 
 export type IndexSchemaOptions = {
@@ -80,6 +102,31 @@ export type GenerateSqlInput = {
   question: string;
   maxContextChars?: number;
   signal?: AbortSignal;
+};
+
+export type RunAiSqlAgentInput = {
+  message: string;
+  userId?: string;
+  mode?: Extract<AgentMode, 'read' | 'edit' | 'full'>;
+  session?: AgentSession;
+  sessionId?: string;
+  maxIterations?: number;
+  maxToolExecutionMs?: number;
+  signal?: AbortSignal;
+};
+
+export type CompactAiSqlAgentSessionInput = {
+  session?: AgentSession;
+  sessionId?: string;
+  focus?: string;
+  signal?: AbortSignal;
+};
+
+export type CompactAiSqlAgentSessionResult = AgentContextCompactionResult;
+
+export type AiSqlAgentRun = {
+  selectedSkill: string;
+  result: AgentRunResult;
 };
 
 export type ExecuteGeneratedOptions = {

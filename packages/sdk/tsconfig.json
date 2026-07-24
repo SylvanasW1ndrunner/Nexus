@@ -10,9 +10,13 @@
   "references": [
     { "path": "../shared" },
     { "path": "../core-resource" },
+    { "path": "../core-agent" },
     { "path": "../core-db" },
     { "path": "../core-llm" },
-    { "path": "../core-rag" }
+    { "path": "../core-rag" },
+    { "path": "../core-skills" },
+    { "path": "../core-tools" },
+    { "path": "../core-usage" }
   ],
   "include": ["src/**/*.ts"]
 }

@@ -1,8 +1,23 @@
-import type { LlmChatRequest, LlmChatResponse, LlmRouter } from '@dbagent/core-llm';
+import type {
+  LlmChatRequest,
+  LlmChatResponse,
+  LlmMessage,
+  LlmRouter,
+  LlmTool,
+} from '@dbagent/core-llm';
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
 import type { AgentAuditLogWriter, AgentAuditRunStatus } from './audit-log-store.js';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
-import { buildAgentContext } from './context-manager.js';
+import {
+  buildAgentContext,
+  buildAgentContextCompactionRequest,
+  buildDeterministicContextSummary,
+  compactionAppliedReport,
+  createAgentContextCheckpoint,
+  createAgentContextCompactionPlan,
+  type AgentContextBuildOutput,
+  type AgentContextManagerOptions,
+} from './context-manager.js';
 import {
   blockedAgentFinalText,
   blockedAgentToolResultMessage,
@@ -29,12 +44,19 @@ import type {
   AgentToolExecutionRecord,
   AgentToolHandler,
   AgentContextCompressionReport,
+  AgentContextCompactionResult,
+  AgentManualContextCompactionOptions,
   AgentOutputRedactionReason,
   ApprovalProvider,
 } from './types.js';
 
 const DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS = 12_000;
 const DEFAULT_MAX_PERSISTED_TOOL_ARGUMENT_CHARS = 4_000;
+const DEFAULT_AGENT_USER_ID = 'local-user';
+const PREFERENCE_CONTEXT_PREFIX = '用户长期偏好（自动提炼，可由用户修改或删除）：';
+const MAX_AUTO_COMPACTIONS_PER_ITERATION = 2;
+const MIN_COMPACTION_REDUCTION_RATIO = 0.05;
+const MAX_COMPACTION_OUTPUT_TOKENS = 4_096;
 
 export class ReactAgent {
   private readonly permissionManager: PermissionManager;
@@ -68,10 +90,23 @@ export class ReactAgent {
         ? createAgentSession({
             id: this.createSessionId(),
             title: titleFromMessage(options.userMessage),
-            mode: options.mode ?? 'ask',
+            mode: options.mode ?? 'read',
+            ...(options.userId === undefined ? {} : { userId: options.userId }),
+            ...(options.knowledgeSnapshot === undefined
+              ? {}
+              : { knowledgeSnapshot: options.knowledgeSnapshot }),
             now: this.now,
           })
-        : cloneSessionForRun(options.initialSession, options.mode);
+        : cloneSessionForRun(
+            options.initialSession,
+            options.mode,
+            options.knowledgeSnapshot,
+            options.userId,
+          );
+    const pinnedPreferenceMessages = await loadStoredPreferenceMessages(
+      session,
+      this.sessionStore,
+    );
     appendMessage(session, createMessage({ role: 'user', content: options.userMessage }, this.now));
     await this.saveSession(session);
 
@@ -139,6 +174,21 @@ export class ReactAgent {
       DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS,
     );
     const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
+    const modelContext = this.resolveModelContext(
+      options.providerId,
+      options.model,
+    );
+    const contextOptions: AgentContextManagerOptions = {
+      ...modelContext,
+      ...(options.keepRecentMessages === undefined
+        ? {}
+        : { keepRecentMessages: options.keepRecentMessages }),
+      ...(options.maxToolResultChars === undefined
+        ? {}
+        : { maxToolResultChars: options.maxToolResultChars }),
+      pinnedMessages: pinnedPreferenceMessages,
+      activeTask: options.userMessage,
+    };
     let currentIteration = 0;
     let consecutiveToolFailures = 0;
     const saveCheckpoint = async (
@@ -170,20 +220,63 @@ export class ReactAgent {
         }
 
         await saveCheckpoint(checkpointIteration, 'running');
-        const context = buildAgentContext(session, this.toolRegistry.llmTools(options.allowedTools), {
-          ...(options.contextWindowTokens === undefined ? {} : { maxPromptTokens: options.contextWindowTokens }),
-          ...(options.keepRecentMessages === undefined ? {} : { keepRecentMessages: options.keepRecentMessages }),
-          ...(options.maxToolResultChars === undefined ? {} : { maxToolResultChars: options.maxToolResultChars }),
-        });
-        contextCompression.push(context.compression);
+        const llmTools = this.toolRegistry.llmTools(options.allowedTools);
+        let context = buildAgentContext(
+          session,
+          llmTools,
+          contextOptions,
+        );
+        const compressionReportCountBefore = contextCompression.length;
+        for (
+          let compactionAttempt = 0;
+          context.requiresCompaction &&
+          compactionAttempt < MAX_AUTO_COMPACTIONS_PER_ITERATION;
+          compactionAttempt += 1
+        ) {
+          const beforeTokens = context.compression.finalTokenEstimate;
+          const compacted = await this.compactSessionContext({
+            providerId: options.providerId,
+            model: options.model,
+            session,
+            round,
+            trigger: 'auto',
+            context,
+            contextOptions,
+            tools: llmTools,
+            iteration,
+            ...(options.signal === undefined
+              ? {}
+              : { signal: options.signal }),
+          });
+          context = compacted.context;
+          if (compacted.status === 'skipped') break;
+          contextCompression.push(compacted.report);
+          const reduction =
+            beforeTokens <= 0
+              ? 1
+              : (beforeTokens - context.compression.finalTokenEstimate) /
+                beforeTokens;
+          if (reduction < MIN_COMPACTION_REDUCTION_RATIO) break;
+        }
+        if (contextCompression.length === compressionReportCountBefore) {
+          contextCompression.push(context.compression);
+        }
         if (context.compression.phase !== 'healthy') {
           await this.auditLog?.append({
-            type: 'context_compression_applied',
+            type: 'context_compaction_observed',
             timestamp: this.now(),
             sessionId: session.id,
             iteration,
             compression: context.compression,
           });
+        }
+        if (
+          context.compression.finalTokenEstimate >
+          context.compression.availablePromptTokens
+        ) {
+          throw new Error(
+            'The active Agent context still exceeds the model input capacity after compaction.',
+          );
         }
         const request = {
           model: options.model,
@@ -228,22 +321,6 @@ export class ReactAgent {
         appendMessage(session, createMessage({ role: 'assistant', content: assistantText, toolCalls: safeToolCalls }, this.now));
         await this.saveSession(session);
         await saveCheckpoint(checkpointIteration, 'running');
-
-        if (response.usage?.totalTokens && options.tokenBudget && session.tokenUsage.totalTokens > options.tokenBudget) {
-          finalText = 'Token budget exceeded.';
-          await saveCheckpoint(checkpointIteration, 'done');
-          await this.saveSession(session);
-          await closeRound('success');
-          await finishRunAudit('max_iterations_reached', iteration, finalText);
-          return {
-            status: 'max_iterations_reached',
-            session,
-            finalText,
-            iterations: iteration,
-            toolExecutions,
-            contextCompression,
-          };
-        }
 
         if (response.toolCalls.length === 0) {
           finalText = safeResponseText.blocked ? blockedAgentFinalText(options.outputSafety) : safeResponseText.value;
@@ -352,9 +429,16 @@ export class ReactAgent {
             continue;
           }
 
+          const effectiveTool =
+            tool.resolveRequiredPermission === undefined
+              ? tool
+              : {
+                  ...tool,
+                  requiredPermission: tool.resolveRequiredPermission(toolCall.arguments),
+                };
           const permission = await this.permissionManager.checkDetailed({
             mode: session.mode,
-            tool,
+            tool: effectiveTool,
             toolCall,
             sessionId: session.id,
             sessionTitle: session.title,
@@ -577,6 +661,196 @@ export class ReactAgent {
     }
   }
 
+  async compact(
+    options: AgentManualContextCompactionOptions,
+  ): Promise<AgentContextCompactionResult> {
+    const session = cloneSessionForCompaction(options.session);
+    const pinnedPreferenceMessages = await loadStoredPreferenceMessages(
+      session,
+      this.sessionStore,
+    );
+    const tools = this.toolRegistry.llmTools(options.allowedTools);
+    const contextOptions: AgentContextManagerOptions = {
+      ...this.resolveModelContext(options.providerId, options.model),
+      ...(options.keepRecentMessages === undefined
+        ? {}
+        : { keepRecentMessages: options.keepRecentMessages }),
+      ...(options.maxToolResultChars === undefined
+        ? {}
+        : { maxToolResultChars: options.maxToolResultChars }),
+      pinnedMessages: pinnedPreferenceMessages,
+    };
+    const before = buildAgentContext(session, tools, contextOptions);
+    const round = await this.usageTracker.startConversationRound(
+      session.id,
+      options.usageMode ?? 'byok',
+    );
+    try {
+      const output = await this.compactSessionContext({
+        providerId: options.providerId,
+        model: options.model,
+        session,
+        round,
+        trigger: 'manual',
+        context: before,
+        contextOptions,
+        tools,
+        ...(options.focus?.trim() ? { focus: options.focus.trim() } : {}),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+      await this.usageTracker.endConversationRound(round, 'success');
+      return {
+        status: output.status,
+        session,
+        report:
+          output.status === 'skipped'
+            ? { ...output.report, trigger: 'manual' }
+            : output.report,
+        ...(output.checkpoint === undefined
+          ? {}
+          : { checkpoint: output.checkpoint }),
+      };
+    } catch (error) {
+      await this.usageTracker.endConversationRound(
+        round,
+        'failed',
+        error instanceof Error ? error.message : String(error),
+      );
+      throw error;
+    }
+  }
+
+  private resolveModelContext(
+    providerId: string,
+    model: string,
+  ): Pick<
+    AgentContextManagerOptions,
+    'modelContextTokens' | 'maxOutputTokens'
+  > {
+    const registered =
+      this.llmRouter.gateway.registry.find(providerId, model) ??
+      this.llmRouter.gateway.registerModel({ providerId, model });
+    return {
+      modelContextTokens: registered.limits.contextTokens,
+      maxOutputTokens: registered.limits.maxOutputTokens,
+    };
+  }
+
+  private async compactSessionContext(
+    input: InternalContextCompactionInput,
+  ): Promise<InternalContextCompactionOutput> {
+    const plan = createAgentContextCompactionPlan(
+      input.session,
+      input.contextOptions,
+      input.trigger,
+      input.focus,
+    );
+    if (!plan) {
+      return {
+        status: 'skipped',
+        context: input.context,
+        report: input.context.compression,
+      };
+    }
+
+    const startedAt = Date.now();
+    let summary = '';
+    let method: 'model' | 'deterministic-fallback' = 'model';
+    try {
+      const configuredOutput = input.contextOptions.maxOutputTokens ?? 4_096;
+      const maxTokens = Math.max(
+        1,
+        Math.min(
+          configuredOutput,
+          MAX_COMPACTION_OUTPUT_TOKENS,
+          Math.max(256, Math.floor(plan.availablePromptTokens * 0.2)),
+        ),
+      );
+      let rollingSummary = plan.previousSummary;
+      for (
+        let batchIndex = 0;
+        batchIndex < plan.sourceBatches.length;
+        batchIndex += 1
+      ) {
+        const sourceMessages = plan.sourceBatches[batchIndex] ?? [];
+        const response = await this.llmRouter.chat(
+          input.providerId,
+          {
+            model: input.model,
+            messages: buildAgentContextCompactionRequest({
+              ...(rollingSummary?.trim()
+                ? { previousSummary: rollingSummary.trim() }
+                : {}),
+              sourceMessages,
+              ...(plan.focus === undefined ? {} : { focus: plan.focus }),
+              maxToolResultChars: plan.requestMaxToolResultChars,
+              maxMessageTokens: plan.requestMaxMessageTokens,
+            }),
+            maxTokens,
+            temperature: 0,
+            ...(input.signal === undefined ? {} : { signal: input.signal }),
+            metadata: {
+              purpose: 'context-compaction',
+              trigger: input.trigger,
+              batch: `${batchIndex + 1}/${plan.sourceBatches.length}`,
+            },
+          },
+          { round: input.round },
+        );
+        addUsage(input.session, response.usage);
+        if (response.toolCalls.length > 0 || !response.text.trim()) {
+          throw new Error(
+            'Context compaction model returned no usable summary.',
+          );
+        }
+        rollingSummary = response.text;
+      }
+      summary = rollingSummary ?? '';
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      method = 'deterministic-fallback';
+      summary = buildDeterministicContextSummary(plan);
+    }
+
+    const checkpoint = createAgentContextCheckpoint({
+      session: input.session,
+      plan,
+      summary,
+      method,
+      now: this.now(),
+    });
+    input.session.contextCheckpoint = checkpoint;
+    await this.saveSession(input.session);
+    const context = buildAgentContext(
+      input.session,
+      input.tools,
+      input.contextOptions,
+    );
+    const report = compactionAppliedReport({
+      before: input.context,
+      after: context,
+      checkpoint,
+    });
+    await this.auditLog?.append({
+      type: 'context_compaction_applied',
+      timestamp: this.now(),
+      sessionId: input.session.id,
+      ...(input.iteration === undefined
+        ? {}
+        : { iteration: input.iteration }),
+      trigger: input.trigger,
+      method,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      compression: report,
+    });
+    return {
+      status: 'compacted',
+      context,
+      report,
+      checkpoint,
+    };
+  }
+
   private async saveSession(session: Parameters<AgentSessionWriter['save']>[0]['session']): Promise<void> {
     await this.sessionStore?.save({ session, now: this.now() });
   }
@@ -613,19 +887,99 @@ export class ReactAgent {
   }
 }
 
+type InternalContextCompactionInput = {
+  providerId: string;
+  model: string;
+  session: AgentSession;
+  round: RoundContext;
+  trigger: 'auto' | 'manual';
+  context: AgentContextBuildOutput;
+  contextOptions: AgentContextManagerOptions;
+  tools: LlmTool[];
+  focus?: string;
+  iteration?: number;
+  signal?: AbortSignal;
+};
+
+type InternalContextCompactionOutput = {
+  status: 'compacted' | 'skipped';
+  context: AgentContextBuildOutput;
+  report: AgentContextCompressionReport;
+  checkpoint?: AgentSession['contextCheckpoint'];
+};
+
 function titleFromMessage(message: string): string {
   const trimmed = message.trim().replace(/\s+/g, ' ');
   return trimmed.length > 24 ? `${trimmed.slice(0, 24)}...` : trimmed || '新会话';
 }
 
-function cloneSessionForRun(session: AgentSession, mode: AgentRunOptions['mode']): AgentSession {
+function cloneSessionForRun(
+  session: AgentSession,
+  mode: AgentRunOptions['mode'],
+  knowledgeSnapshot: AgentRunOptions['knowledgeSnapshot'],
+  userId: AgentRunOptions['userId'],
+): AgentSession {
+  if (session.userId && userId && session.userId !== userId) {
+    throw new Error('Agent session belongs to a different user.');
+  }
   return {
     ...session,
     mode: mode ?? session.mode,
+    ...(userId === undefined
+      ? session.userId === undefined
+        ? {}
+        : { userId: session.userId }
+      : { userId }),
+    ...(knowledgeSnapshot === undefined
+      ? session.knowledgeSnapshot === undefined
+        ? {}
+        : { knowledgeSnapshot: structuredClone(session.knowledgeSnapshot) }
+      : { knowledgeSnapshot: structuredClone(knowledgeSnapshot) }),
+    ...(session.contextCheckpoint === undefined
+      ? {}
+      : { contextCheckpoint: structuredClone(session.contextCheckpoint) }),
     messages: session.messages.map((message) => ({ ...message })),
     tokenUsage: { ...session.tokenUsage },
     aborted: false,
   };
+}
+
+function cloneSessionForCompaction(session: AgentSession): AgentSession {
+  return {
+    ...session,
+    messages: structuredClone(session.messages),
+    tokenUsage: { ...session.tokenUsage },
+    ...(session.knowledgeSnapshot === undefined
+      ? {}
+      : { knowledgeSnapshot: structuredClone(session.knowledgeSnapshot) }),
+    ...(session.contextCheckpoint === undefined
+      ? {}
+      : { contextCheckpoint: structuredClone(session.contextCheckpoint) }),
+  };
+}
+
+async function loadStoredPreferenceMessages(
+  session: AgentSession,
+  store: AgentSessionWriter | undefined,
+): Promise<LlmMessage[]> {
+  if (!store?.listPreferences) return [];
+  const preferences = await store.listPreferences(
+    session.userId ?? DEFAULT_AGENT_USER_ID,
+    50,
+  );
+  if (preferences.length === 0) return [];
+  return [
+    {
+      role: 'system',
+      content: [
+        PREFERENCE_CONTEXT_PREFIX,
+        ...preferences.map(
+          (preference) =>
+            `- ${preference.value}（置信度 ${preference.confidence.toFixed(2)}）`,
+        ),
+      ].join('\n'),
+    },
+  ];
 }
 
 function serializeToolResult(result: unknown, maxChars: number): string {

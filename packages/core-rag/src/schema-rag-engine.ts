@@ -1,6 +1,20 @@
-import { buildSchemaDocuments, tableDocumentId } from './schema-documents.js';
+import { tableDocumentId } from './schema-documents.js';
+import {
+  buildKnowledgeCatalog,
+  buildKnowledgeCatalogFromTables,
+  buildKnowledgeDocuments,
+} from './knowledge-catalog.js';
 import { searchSchemaRagIndex } from './hybrid-schema-retriever.js';
+import { searchSchemaRagIndexAsync } from './async-schema-retriever.js';
+import {
+  buildDocumentVectors,
+  createSchemaRagIndexManifest,
+  DEFAULT_RETRIEVAL_PROFILE,
+  normalizeRetrievalProfile,
+} from './retrieval-profile.js';
 import type {
+  KnowledgeCatalog,
+  KnowledgeCatalogNode,
   SchemaRagDocument,
   SchemaRagContext,
   SchemaRagContextRequest,
@@ -8,74 +22,152 @@ import type {
   SchemaRagIndex,
   SchemaRagIndexInput,
   SchemaRagIndexStatus,
+  SchemaRagEmbeddingAdapter,
   SchemaRagListTablesRequest,
   SchemaRagRelationsResult,
   SchemaRagSearchRequest,
   SchemaRagSearchResult,
+  SchemaRagRerankAdapter,
+  SchemaRagRetrievalProfile,
   SchemaRagTableDescription,
   SchemaRagTableRef,
   SchemaRagTableSummary,
 } from './types.js';
 
+export type SchemaRagEngineOptions = {
+  retrievalProfile?: SchemaRagRetrievalProfile;
+  embeddingAdapter?: SchemaRagEmbeddingAdapter;
+  rerankAdapter?: SchemaRagRerankAdapter;
+};
+
 export class SchemaRagEngine {
   private readonly indexes = new Map<string, SchemaRagIndex>();
+  private readonly legacyTables = new Map<string, Map<string, NonNullable<SchemaRagIndexInput['tables']>[number]>>();
+  private readonly profiles = new Map<string, SchemaRagRetrievalProfile>();
+  private readonly defaultProfile: SchemaRagRetrievalProfile;
+  private readonly embeddingAdapter: SchemaRagEmbeddingAdapter | undefined;
+  private readonly rerankAdapter: SchemaRagRerankAdapter | undefined;
+
+  constructor(options: SchemaRagEngineOptions = {}) {
+    this.defaultProfile = normalizeRetrievalProfile(
+      options.retrievalProfile ?? DEFAULT_RETRIEVAL_PROFILE,
+    );
+    this.embeddingAdapter = options.embeddingAdapter;
+    this.rerankAdapter = options.rerankAdapter;
+  }
 
   index(input: SchemaRagIndexInput): SchemaRagIndex {
-    const documents = buildSchemaDocuments({
-      connectionId: input.connectionId,
-      tables: input.tables,
-    });
+    const indexedAt = input.indexedAt ?? new Date().toISOString();
+    const catalog = input.resources
+      ? buildKnowledgeCatalog({
+          connectionId: input.connectionId,
+          resources: input.resources,
+          ...(input.relations === undefined ? {} : { relations: input.relations }),
+          ...(input.knowledge === undefined ? {} : { knowledge: input.knowledge }),
+          ...(input.bindings === undefined ? {} : { bindings: input.bindings }),
+          ...(input.sourceRevision === undefined
+            ? {}
+            : { sourceRevision: input.sourceRevision }),
+          builtAt: indexedAt,
+        })
+      : buildKnowledgeCatalogFromTables({
+          connectionId: input.connectionId,
+          tables: input.tables ?? [],
+          builtAt: indexedAt,
+        });
+    const documents = buildKnowledgeDocuments(catalog);
+    const retrievalProfile = normalizeRetrievalProfile(
+      input.retrievalProfile ?? this.defaultProfile,
+    );
     const index: SchemaRagIndex = {
       connectionId: input.connectionId,
       documents,
       graph: buildGraph(documents),
       glossary: normalizeGlossary(input.glossary ?? [], documents),
-      indexedAt: input.indexedAt ?? new Date().toISOString(),
+      catalog,
+      manifest: createSchemaRagIndexManifest({
+        catalog,
+        profile: retrievalProfile,
+        documentCount: documents.length,
+        createdAt: indexedAt,
+      }),
+      retrievalProfile,
+      indexedAt,
     };
+    if (input.tables) {
+      this.legacyTables.set(
+        input.connectionId,
+        new Map(
+          input.tables.map((table) => [
+            tableDocumentId(table.schema, table.name),
+            structuredClone(table),
+          ]),
+        ),
+      );
+    } else {
+      this.legacyTables.delete(input.connectionId);
+    }
     this.indexes.set(input.connectionId, index);
+    this.profiles.set(input.connectionId, retrievalProfile);
+    return index;
+  }
+
+  async indexAsync(input: SchemaRagIndexInput): Promise<SchemaRagIndex> {
+    const index = this.index(input);
+    const profile = this.profiles.get(input.connectionId)!;
+    if (profile.embedding) {
+      if (!this.embeddingAdapter) {
+        throw new Error(
+          `Retrieval profile ${profile.id} configures embeddings but no embedding adapter is available.`,
+        );
+      }
+      index.vectors = await buildDocumentVectors({
+        documents: index.documents,
+        profile: profile.embedding,
+        adapter: this.embeddingAdapter,
+      });
+    }
     return index;
   }
 
   upsertTables(input: SchemaRagIndexInput): SchemaRagIndex {
-    if (input.tables.length === 0) return this.requireIndex(input.connectionId);
+    if ((input.tables?.length ?? 0) === 0) return this.requireIndex(input.connectionId);
     const existing = this.indexes.get(input.connectionId);
     if (!existing) return this.index(input);
-
-    const affectedTables = new Set(
-      input.tables.map((table) => tableDocumentId(table.schema, table.name)),
-    );
-    const documents = buildSchemaDocuments({
+    const tables = this.legacyTables.get(input.connectionId);
+    if (!tables) {
+      throw new Error(
+        'Incremental TableDetail updates require an index originally built from TableDetail input.',
+      );
+    }
+    for (const table of input.tables ?? []) {
+      tables.set(tableDocumentId(table.schema, table.name), structuredClone(table));
+    }
+    return this.index({
       connectionId: input.connectionId,
-      tables: input.tables,
-    });
-    const replacementIds = new Set(documents.map((document) => document.id));
-    const retained = existing.documents.filter((document) => {
-      if (affectedTables.has(tableDocumentId(document.schema, document.table))) return false;
-      if (replacementIds.has(document.id)) return false;
-      return true;
-    });
-    const mergedDocuments = [...retained, ...documents].sort((left, right) =>
-      left.id.localeCompare(right.id),
-    );
-    const index: SchemaRagIndex = {
-      connectionId: input.connectionId,
-      documents: mergedDocuments,
-      graph: buildGraph(mergedDocuments),
-      glossary: normalizeGlossary(input.glossary ?? existing.glossary, mergedDocuments),
+      tables: [...tables.values()],
+      glossary: input.glossary ?? existing.glossary,
       indexedAt: input.indexedAt ?? existing.indexedAt,
-    };
-    this.indexes.set(input.connectionId, index);
-    return index;
+      ...(input.retrievalProfile === undefined
+        ? {}
+        : { retrievalProfile: input.retrievalProfile }),
+    });
   }
 
   loadIndex(index: SchemaRagIndex): SchemaRagIndex {
     assertRestoredIndex(index);
     this.indexes.set(index.connectionId, index);
+    this.profiles.set(
+      index.connectionId,
+      normalizeRetrievalProfile(index.retrievalProfile ?? this.defaultProfile),
+    );
     return index;
   }
 
   clear(connectionId: string): void {
     this.indexes.delete(connectionId);
+    this.legacyTables.delete(connectionId);
+    this.profiles.delete(connectionId);
   }
 
   hasIndex(connectionId: string): boolean {
@@ -91,6 +183,72 @@ export class SchemaRagEngine {
     } catch {
       return false;
     }
+  }
+
+  getCatalog(connectionId: string): KnowledgeCatalog {
+    return structuredClone(this.requireCatalog(connectionId));
+  }
+
+  getIndexManifest(connectionId: string): NonNullable<SchemaRagIndex['manifest']> {
+    const manifest = this.requireIndex(connectionId).manifest;
+    if (!manifest) {
+      throw new Error(`Schema RAG index manifest is not available for connection: ${connectionId}`);
+    }
+    return structuredClone(manifest);
+  }
+
+  listResources(input: {
+    connectionId: string;
+    parentId?: string;
+    kinds?: string[];
+    limit?: number;
+  }): KnowledgeCatalogNode[] {
+    const catalog = this.requireCatalog(input.connectionId);
+    const parentId = input.parentId ?? catalog.rootIds[0];
+    if (!parentId) return [];
+    const parent = catalog.nodes[parentId];
+    if (!parent) throw new Error(`Knowledge resource is not indexed: ${parentId}`);
+    const kindSet = input.kinds ? new Set(input.kinds) : undefined;
+    return parent.childIds
+      .map((id) => catalog.nodes[id])
+      .filter((node): node is KnowledgeCatalogNode => node !== undefined)
+      .filter((node) => !kindSet || kindSet.has(node.kind))
+      .slice(0, input.limit ?? 200)
+      .map((node) => structuredClone(node));
+  }
+
+  getResource(input: {
+    connectionId: string;
+    resourceId: string;
+  }): {
+    node: KnowledgeCatalogNode;
+    relations: KnowledgeCatalog['relations'][string][];
+    knowledge: KnowledgeCatalog['knowledge'][string][];
+  } {
+    const catalog = this.requireCatalog(input.connectionId);
+    const node = catalog.nodes[input.resourceId];
+    if (!node) throw new Error(`Knowledge resource is not indexed: ${input.resourceId}`);
+    const relationIds = new Set(node.relationIds);
+    const applicableResourceIds = new Set([node.resourceId, ...node.ancestorIds]);
+    const knowledgeIds = new Set(
+      Object.values(catalog.bindings)
+        .filter(
+          (binding) =>
+            binding.resourceId === node.resourceId ||
+            (binding.mode === 'subtree' &&
+              applicableResourceIds.has(binding.resourceId)),
+        )
+        .map((binding) => binding.knowledgeId),
+    );
+    return {
+      node: structuredClone(node),
+      relations: Object.values(catalog.relations)
+        .filter((relation) => relationIds.has(relation.id))
+        .map((relation) => structuredClone(relation)),
+      knowledge: Object.values(catalog.knowledge)
+        .filter((item) => knowledgeIds.has(item.id))
+        .map((item) => structuredClone(item)),
+    };
   }
 
   getIndexStatus(connectionId: string): SchemaRagIndexStatus {
@@ -126,7 +284,7 @@ export class SchemaRagEngine {
     const index = this.requireIndex(request.connectionId);
     const limit = request.limit ?? 200;
     return index.documents
-      .filter((document) => document.kind === 'table')
+      .filter(isTableDocument)
       .filter((document) => request.schema === undefined || document.schema === request.schema)
       .sort((left, right) => left.title.localeCompare(right.title))
       .slice(0, limit)
@@ -191,6 +349,22 @@ export class SchemaRagEngine {
     return searchSchemaRagIndex(index, request);
   }
 
+  async searchAsync(request: SchemaRagSearchRequest): Promise<SchemaRagSearchResult[]> {
+    const index = this.requireIndex(request.connectionId);
+    const profile = this.profiles.get(request.connectionId) ?? this.defaultProfile;
+    return searchSchemaRagIndexAsync({
+      index,
+      request,
+      profile,
+      ...(this.embeddingAdapter === undefined
+        ? {}
+        : { embeddingAdapter: this.embeddingAdapter }),
+      ...(this.rerankAdapter === undefined
+        ? {}
+        : { rerankAdapter: this.rerankAdapter }),
+    });
+  }
+
   buildContext(request: SchemaRagContextRequest): SchemaRagContext {
     const results = this.search({
       connectionId: request.connectionId,
@@ -202,26 +376,23 @@ export class SchemaRagEngine {
         : { explicitColumns: request.explicitColumns }),
       includeRelations: true,
     });
-    const maxChars = request.maxChars ?? 4_000;
-    const sections: string[] = [];
-    let truncated = false;
+    return formatContext(request.query, results, request.maxChars ?? 4_000);
+  }
 
-    for (const result of results) {
-      const section = `## ${result.document.title}\n${result.document.text}\n原因: ${result.reasons.join(', ')}`;
-      const candidate = [...sections, section].join('\n\n');
-      if (candidate.length > maxChars) {
-        truncated = true;
-        break;
-      }
-      sections.push(section);
-    }
-
-    return {
+  async buildContextAsync(request: SchemaRagContextRequest): Promise<SchemaRagContext> {
+    const results = await this.searchAsync({
+      connectionId: request.connectionId,
       query: request.query,
-      documents: results,
-      text: sections.join('\n\n'),
-      truncated,
-    };
+      ...(request.limit === undefined ? {} : { limit: request.limit }),
+      ...(request.explicitTables === undefined
+        ? {}
+        : { explicitTables: request.explicitTables }),
+      ...(request.explicitColumns === undefined
+        ? {}
+        : { explicitColumns: request.explicitColumns }),
+      includeRelations: true,
+    });
+    return formatContext(request.query, results, request.maxChars ?? 4_000);
   }
 
   private requireIndex(connectionId: string): SchemaRagIndex {
@@ -231,6 +402,43 @@ export class SchemaRagEngine {
     }
     return index;
   }
+
+  private requireCatalog(connectionId: string): KnowledgeCatalog {
+    const catalog = this.requireIndex(connectionId).catalog;
+    if (!catalog) {
+      throw new Error(`Knowledge catalog is not available for connection: ${connectionId}`);
+    }
+    return catalog;
+  }
+}
+
+function formatContext(
+  query: string,
+  results: SchemaRagSearchResult[],
+  maxChars: number,
+): SchemaRagContext {
+    const sections: string[] = [];
+    let truncated = false;
+
+    for (const result of results) {
+      const section = `## ${result.document.title}\n${result.document.text}\n原因: ${result.reasons.join(', ')}`;
+      const candidate = [...sections, section].join('\n\n');
+      if (candidate.length > maxChars) {
+        truncated = true;
+        if (sections.length === 0) {
+          sections.push(clipText(section, maxChars).text);
+        }
+        break;
+      }
+      sections.push(section);
+    }
+
+    return {
+      query,
+      documents: results,
+      text: sections.join('\n\n'),
+      truncated,
+    };
 }
 
 function assertRestoredIndex(index: SchemaRagIndex): void {
@@ -245,7 +453,7 @@ function assertRestoredIndex(index: SchemaRagIndex): void {
 }
 
 function buildReadyStatus(index: SchemaRagIndex, updatedAt: string): SchemaRagIndexStatus {
-  const tableCount = index.documents.filter((document) => document.kind === 'table').length;
+  const tableCount = index.documents.filter(isTableDocument).length;
   const columnCount = index.documents.filter((document) => document.kind === 'column').length;
   const relationCount = index.documents.filter((document) => document.kind === 'relation').length;
   return {
@@ -306,7 +514,7 @@ function resolveTable(index: SchemaRagIndex, request: SchemaRagTableRef): Schema
   const table = parsed.table;
   const matches = index.documents.filter(
     (document) =>
-      document.kind === 'table' &&
+      isTableDocument(document) &&
       document.table === table &&
       (schema === undefined || document.schema === schema),
   );
@@ -321,6 +529,10 @@ function resolveTable(index: SchemaRagIndex, request: SchemaRagTableRef): Schema
     );
   }
   return matches[0]!;
+}
+
+function isTableDocument(document: SchemaRagDocument): boolean {
+  return ['table', 'view', 'materialized-view', 'external-table'].includes(document.kind);
 }
 
 function parseTableRef(tableRef: string): { schema?: string; table: string } {

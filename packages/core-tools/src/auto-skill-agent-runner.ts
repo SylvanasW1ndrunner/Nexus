@@ -130,15 +130,17 @@ function commonSkillOptions(
     ...(options.initialIteration === undefined ? {} : { initialIteration: options.initialIteration }),
     ...(options.usageMode === undefined ? {} : { usageMode: options.usageMode }),
     ...(options.mode === undefined ? {} : { mode: options.mode }),
+    ...(options.userId === undefined ? {} : { userId: options.userId }),
     ...(options.maxIterations === undefined ? {} : { maxIterations: options.maxIterations }),
-    ...(options.tokenBudget === undefined ? {} : { tokenBudget: options.tokenBudget }),
-    ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens }),
     ...(options.keepRecentMessages === undefined ? {} : { keepRecentMessages: options.keepRecentMessages }),
     ...(options.maxToolResultChars === undefined ? {} : { maxToolResultChars: options.maxToolResultChars }),
     ...(options.maxConsecutiveToolFailures === undefined ? {} : { maxConsecutiveToolFailures: options.maxConsecutiveToolFailures }),
     ...(options.maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs: options.maxToolExecutionMs }),
     ...(options.taskSafety === undefined ? {} : { taskSafety: options.taskSafety }),
     ...(options.outputSafety === undefined ? {} : { outputSafety: options.outputSafety }),
+    ...(options.knowledgeSnapshot === undefined
+      ? {}
+      : { knowledgeSnapshot: options.knowledgeSnapshot }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
 }
@@ -155,6 +157,12 @@ function toAgentPlan(autoPlan: SkillAutoExecutionPlan): SkillAgentPlan {
     ...(systemAddition === undefined ? {} : { systemAddition }),
     allowedTools,
     steps,
+    ...(skill.stopConditions === undefined
+      ? {}
+      : { stopConditions: skill.stopConditions }),
+    ...(skill.executionLimits === undefined
+      ? {}
+      : { executionLimits: skill.executionLimits }),
     outputFormat,
   };
 }

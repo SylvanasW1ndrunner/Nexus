@@ -1,4 +1,9 @@
 export * from '@dbagent/core-llm';
+export type {
+  AgentContextCheckpoint,
+  AgentContextCompactionResult,
+  AgentSession,
+} from '@dbagent/core-agent';
 export * from './errors.js';
 export * from './parse-generation.js';
 export * from './runtime.js';

@@ -44,9 +44,10 @@ export class UsageTracker {
   private readonly now: () => Date;
   private readonly createRoundId: () => string;
   private readonly historyLimit: number;
+  private memoryState: UsageState = { version: 1, snapshots: [], rounds: [] };
 
   constructor(
-    private readonly historyPath: string,
+    private readonly historyPath?: string,
     options: UsageTrackerOptions = {},
   ) {
     this.now = options.now ?? (() => new Date());
@@ -206,6 +207,7 @@ export class UsageTracker {
   }
 
   private async loadState(): Promise<UsageState> {
+    if (!this.historyPath) return structuredClone(this.memoryState);
     try {
       const raw = await readFile(this.historyPath, 'utf8');
       const parsed = JSON.parse(raw) as UsageState | UsageSnapshot[];
@@ -224,6 +226,10 @@ export class UsageTracker {
   }
 
   private async saveState(state: UsageState): Promise<void> {
+    if (!this.historyPath) {
+      this.memoryState = structuredClone(state);
+      return;
+    }
     await mkdir(dirname(this.historyPath), { recursive: true });
     await writeFile(this.historyPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
   }

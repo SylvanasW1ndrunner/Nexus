@@ -1,0 +1,155 @@
+# Agent、Tools 与内置 Skills
+
+## 1. 目的
+
+让 Agent 像成熟编码 Agent 浏览代码一样，按需浏览数据库资源、检索知识、探索数据、执行 SQL 并根据结果继续行动，而不是在第一次模型调用前把整个 Schema 塞进 Prompt。
+
+## 2. Agent 运行方式
+
+Agent 使用 ReAct 循环：
+
+```text
+理解当前目标
+→ 选择工具
+→ 获得数据库事实或错误
+→ 更新判断
+→ 继续调用工具或给出最终结果
+```
+
+自主探索来自模型对工具的选择、当前观察结果和内置 Skill 的工作路径。Skills 不是工具，也不是业务知识。
+
+运行时控制最大轮数、SQL 尝试次数、工具结果大小、失败次数、超时、取消、Checkpoint 和审计。Token 与金额只记录用量，不设置默认消费上限。用户看到工具、参数摘要、数据库结果、审批状态和修正过程，但不展示模型隐藏思维链。
+
+## 3. 常驻内置工具
+
+| 工具 | 用途 | 最低权限 |
+|---|---|---|
+| `resource_list` | 在数据库、Schema 或表范围内列出可用资源 | 读 |
+| `resource_get` | 按表、列、约束、索引、关系和业务知识读取资源事实 | 读 |
+| `knowledge_search` | 精确、全文、向量和图融合检索 | 读 |
+| `sql_execute` | 统一执行 SELECT、DML 和 DDL；权限由 SQL 动态分类 | 动态 |
+| `sql_explain` | 获取查询计划，不执行写入 | 读 |
+| `result_read` | 分页或按范围读取大型结果 | 读 |
+
+当前连接由运行环境提供，模型不需要在每次调用中重复猜测 `connectionId`。工具输出默认紧凑，并支持 limit、cursor、range 和截断标记。
+
+Schema 新鲜度、SQL 权限分类、审批弹窗和 DDL 后知识更新是运行时内部行为，不暴露为模型工具。
+
+知识库的节点 ID、父子索引、关系索引、Merkle Hash、快照 ID、检索评分和命中原因只用于 Tool 内部检索、校验与审计，不属于 Tool 返回合同，也不能进入模型对话。`resource_get` 只返回数据库语义分组；`knowledge_search` 只返回命中的表、列、约束、注释和业务知识。
+
+## 4. 内置通用 Skills
+
+系统只保留四个默认 Skill：
+
+### 4.1 `query-and-answer`
+
+适用于查询、统计、对比、聚合和自然语言生成 SQL。优先检索知识，必要时浏览资源或探索数据，执行后根据结果回答。
+
+### 4.2 `discover-schema-and-shape`
+
+适用于不熟悉数据库结构、JSON、枚举、时间范围或数据粒度的任务。通过资源检索和有限查询逐步确认事实。
+
+### 4.3 `write-and-verify`
+
+适用于 INSERT、UPDATE、DELETE、MERGE 和 DDL。生成 SQL 后交给权限系统；执行完成后检查影响行数或新的 Schema 版本。
+
+### 4.4 `recover-from-sql-error`
+
+在 SQL 执行失败时激活。读取结构和错误信息、修正 SQL，并在运行时重试上限内再次执行。
+
+Skill 定义包含触发词、适用信号、推荐工具、可用工具范围、步骤、停止条件和运行上限。只注入当前选中的 Skill，不把全部 Skill 放入 Prompt。
+
+Skill 引用稳定工具能力名，不能引用实现文件和内部类名。确定性的安全与一致性要求必须写入代码，不能依赖 Skill 文本。
+
+## 5. 扩展层
+
+```text
+常驻 AI SQL 工具
+→ 按需加载的治理/运维能力包
+→ 用户 MCP Server
+→ 用户导入 Skills
+```
+
+当治理和运维工具数量增长时，运行时只向模型暴露当前任务需要的能力包。MCP 和用户 Skills 不得扩大当前数据库账号、系统权限或本次运行授权。
+
+## 6. Session、上下文压缩与知识引用
+
+Session 独立保存：
+
+- 用户和助手消息。
+- 工具调用与结果摘要。
+- SQL、审批和执行状态。
+- 上下文压缩检查点与 Token 使用量。
+- 当轮使用的 `knowledgeSnapshotId`、`catalogRootHash`、`retrievalProfileId` 和 `indexVersion`。
+
+上述知识版本字段只保存在运行时与审计记录中，不转换为模型消息。Session 不复制知识库内容；历史运行通过快照引用说明当时使用的知识版本，新一轮默认使用最新快照。
+
+### 6.1 压缩语义
+
+上下文压缩只解决模型物理窗口不足，不承担消费限额：
+
+1. 模型窗口来自大模型注册表和 Provider 元数据；可用输入窗口等于物理窗口减去输出预留，不由用户填写一个“对话预算”。
+2. 达到可用输入窗口 70% 时进入预警并优先缩短较早的 Tool 输出；原始 Tool 输出仍保存在 Session。
+3. 达到 85% 时，将“上一个检查点 + 新增历史”压缩为新的累积语义检查点。
+4. 模型下一轮读取“稳定系统上下文 + 用户偏好 + 语义检查点 + 当前任务/当前 Skill + 最近完整消息”。
+5. 新历史再次接近窗口时继续生成下一代累计检查点；多次压缩不删除、不覆盖原始消息。
+
+压缩边界按完整的 Assistant Tool Call 与 Tool Result 组合切分，不能留下孤立工具结果。摘要必须保留目标、决策、约束、数据库对象名、SQL、精确结果、错误、审批、当前状态和待办；不得包含知识库 Hash、节点 ID、树索引、检查点序号或 Tool Call ID。
+
+若一次待压缩历史仍超过模型窗口，运行时按完整工具轮次进行线性分批，并使用上一批摘要滚动处理下一批。单条极长历史消息只把有界的头尾送入压缩模型，完整原文仍在 Session。模型返回空摘要、Tool Call、超时或失败时，运行时使用按窗口限制的确定性恢复摘要，保证会话仍可继续，并在报告中标记降级。
+
+“无限会话”表示完整 Session 可持续追加，模型工作视图可反复压缩；它不表示语义摘要绝对无损。可能变化或已被省略的数据库事实必须通过 Tool 重新读取。
+
+### 6.2 自动与手动触发
+
+- 自动触发：达到当前模型可用输入窗口的压缩阈值。
+- SDK：`runtime.compactAgentSession({ sessionId, focus })`。
+- REST：`POST /v1/agent/sessions/:sessionId/compact`。
+- 检查点：`GET /v1/agent/sessions/:sessionId/context-checkpoints`。
+
+`focus` 用于要求本次压缩重点保留某类信息，例如“保留已执行 SQL、错误和精确金额”。手动与自动压缩使用同一套算法、存储、审计和恢复路径。
+
+```ts
+const compacted = await runtime.compactAgentSession({
+  sessionId,
+  focus: '重点保留已执行 SQL、数据库错误、审批决定和精确金额',
+});
+
+console.log(compacted.status);
+console.log(compacted.report.finalTokenEstimate);
+```
+
+```http
+POST /v1/agent/sessions/{sessionId}/compact
+content-type: application/json
+
+{"focus":"重点保留已执行 SQL、数据库错误、审批决定和精确金额"}
+```
+
+### 6.3 持久化
+
+Session 消息按序追加到 SQLite，压缩不会重写历史消息。Session 主记录只保存元数据和当前有效检查点；历次检查点保存在独立表中，可查询、恢复和审计。用户长期偏好作为独立派生上下文加载，不插入或改写原始对话。
+
+### 6.4 工程参考
+
+- [OpenAI Codex](https://github.com/openai/codex/blob/main/codex-rs/core/src/compact.rs)：自动与手动压缩共用流程，压缩后替换模型工作历史并重新注入稳定初始上下文，同时记录压缩前后 Token、耗时和触发原因。
+- [Claude Code](https://code.claude.com/docs/en/context-window)：先清理较旧 Tool 输出，再生成结构化摘要；完整 Transcript 留在磁盘，根级说明与 Skills 在压缩后重新加载，手动 `/compact` 可提供关注重点。
+- [MiniMax](https://agent.minimax.io/docs/techblog/agent-team)：公开工程材料强调 Session 不等于模型窗口，长期任务应把事件、产物和决定保存在窗口之外，仅把当前必要状态装入模型上下文。MiniMax 没有公开可直接复刻的具体压缩算法，因此这里只采用其长会话状态原则。
+
+本实现不是逐行复制任何产品，而是把以上公开原则落实为适合数据库 Agent 的“完整事件历史 + 累计语义检查点 + 最近原文 + 可重查数据库事实”。
+
+## 7. 工程路径
+
+- Agent 循环：[`packages/core-agent/src/react-agent.ts`](../../packages/core-agent/src/react-agent.ts)
+- 权限管理：[`packages/core-agent/src/permission-manager.ts`](../../packages/core-agent/src/permission-manager.ts)
+- 工具注册：[`packages/core-agent/src/tool-registry.ts`](../../packages/core-agent/src/tool-registry.ts)
+- 上下文窗口、自动/手动压缩：[`packages/core-agent/src/context-manager.ts`](../../packages/core-agent/src/context-manager.ts)
+- Session 与检查点存储：[`packages/core-agent/src/session-store.ts`](../../packages/core-agent/src/session-store.ts)
+- AI SQL 工具：[`packages/core-tools/src/ai-sql-tools.ts`](../../packages/core-tools/src/ai-sql-tools.ts)
+- Tool 语义返回边界：[`packages/core-tools/src/agent-knowledge-projection.ts`](../../packages/core-tools/src/agent-knowledge-projection.ts)
+- Skills：[`packages/core-skills/src/builtin-skills.ts`](../../packages/core-skills/src/builtin-skills.ts)
+- Skill 自动选择：[`packages/core-skills/src/skill-matcher.ts`](../../packages/core-skills/src/skill-matcher.ts)
+- SDK 手动压缩入口：[`packages/sdk/src/runtime.ts`](../../packages/sdk/src/runtime.ts)
+- REST 接口：[`apps/server/src/server.ts`](../../apps/server/src/server.ts)
+- 长会话性能基线：[`scripts/run-context-compaction-benchmark.mjs`](../../scripts/run-context-compaction-benchmark.mjs)
+- 真实模型压缩验收：[`scripts/run-context-compaction-live-test.mjs`](../../scripts/run-context-compaction-live-test.mjs)

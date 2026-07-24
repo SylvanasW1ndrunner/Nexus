@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DatabaseConnectionConfig, IDatabaseDriver, TableSummary } from '@dbagent/core-db';
 import type {
   LlmChatRequest,
@@ -14,8 +17,21 @@ import {
   type SavedConnection,
   type TableDetail,
 } from '@dbagent/shared';
-import { describe, expect, it } from 'vitest';
-import { DatabaseAgentRuntime } from '../src/index.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  DatabaseAgentRuntime,
+  type AgentSession,
+} from '../src/index.js';
+
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    tempDirs.splice(0).map((directory) =>
+      rm(directory, { recursive: true, force: true }),
+    ),
+  );
+});
 
 describe('DatabaseAgentRuntime', () => {
   it('connects, indexes, generates a safe query, and executes only after an explicit call', async () => {
@@ -34,8 +50,10 @@ order by total_amount desc`,
     const runtime = createRuntime(driver, provider);
 
     const connection = await runtime.connect(connectionInput());
-    expect(connection.readOnly).toBe(true);
-    expect(driver.lastConnectConfig?.readOnly).toBe(true);
+    // Database credentials remain writable by default; Agent read/edit/full
+    // permission is enforced independently at the tool boundary.
+    expect(connection.readOnly).toBe(false);
+    expect(driver.lastConnectConfig?.readOnly).toBe(false);
     expect(driver.lastConnectConfig?.connectionTimeoutMs).toBe(10_000);
     expect(driver.lastConnectConfig?.statementTimeoutMs).toBe(30_000);
 
@@ -254,6 +272,259 @@ order by total_amount desc`,
       discovery: { source: 'provider-api' },
     });
   });
+
+  it('runs the main multi-step AI SQL Agent with knowledge lookup, complex SQL, execution, and persisted session evidence', async () => {
+    const driver = new FakeDatabaseDriver();
+    const provider = new ScriptedAgentProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'tool-knowledge',
+            name: 'knowledge_search',
+            arguments: { query: 'orders amount users city', limit: 8 },
+          },
+        ],
+      },
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'tool-query',
+            name: 'sql_execute',
+            arguments: {
+              sql: `
+                WITH ranked_orders AS (
+                  SELECT
+                    u.city,
+                    o.amount,
+                    row_number() OVER (
+                      PARTITION BY u.city
+                      ORDER BY o.amount DESC
+                    ) AS amount_rank
+                  FROM public.orders o
+                  JOIN public.users u ON u.id = o.user_id
+                )
+                SELECT city, sum(amount) AS top_amount
+                FROM ranked_orders
+                WHERE amount_rank <= 3
+                GROUP BY city
+                ORDER BY top_amount DESC
+              `,
+              previewRows: 20,
+            },
+          },
+        ],
+      },
+      {
+        text: '上海前三笔订单合计金额为 188。',
+        toolCalls: [],
+      },
+    ]);
+    const directory = await mkdtemp(join(tmpdir(), 'dbagent-sdk-agent-'));
+    tempDirs.push(directory);
+    const runtime = new DatabaseAgentRuntime({
+      driver,
+      provider,
+      model: 'test-model',
+      sessionDatabasePath: join(directory, 'agent.db'),
+      createConnectionId: () => 'connection-1',
+      now: () => '2026-07-24T00:00:00.000Z',
+    });
+    await runtime.connect(connectionInput());
+    await runtime.indexSchema();
+
+    const output = await runtime.runAgent({
+      userId: 'user-alice',
+      message: '统计每个城市金额最高的三笔订单合计',
+      mode: 'read',
+    });
+
+    expect(output.selectedSkill).toBe('query-and-answer');
+    expect(output.result).toMatchObject({
+      status: 'done',
+      finalText: '上海前三笔订单合计金额为 188。',
+      session: {
+        userId: 'user-alice',
+        mode: 'read',
+      },
+      toolExecutions: [
+        { toolName: 'knowledge_search', status: 'success' },
+        { toolName: 'sql_execute', status: 'success' },
+      ],
+    });
+    expect(output.result.session.knowledgeSnapshot?.connectionId).toBe(
+      'connection-1',
+    );
+    expect(
+      output.result.session.knowledgeSnapshot?.knowledgeSnapshotId,
+    ).toMatch(/^knowledge:/);
+    expect(
+      typeof output.result.session.knowledgeSnapshot?.catalogRootHash,
+    ).toBe('string');
+    expect(
+      typeof output.result.session.knowledgeSnapshot?.indexVersion,
+    ).toBe('string');
+    expect(driver.executedSql[0]).toContain('row_number() OVER');
+    expect(provider.requests).toHaveLength(3);
+    await expect(runtime.sessions.load(output.result.session.id)).resolves.toMatchObject({
+      id: output.result.session.id,
+      userId: 'user-alice',
+      knowledgeSnapshot: {
+        catalogRootHash:
+          output.result.session.knowledgeSnapshot?.catalogRootHash,
+      },
+    });
+  });
+
+  it('manually compacts a persisted Agent session and exposes its checkpoint history', async () => {
+    const provider = new ScriptedAgentProvider([
+      {
+        text: [
+          '## Goal',
+          '持续分析订单。',
+          '## Decisions and constraints',
+          '保持只读，回答中保留精确 SQL。',
+          '## Current state',
+          '已完成前十轮分析。',
+        ].join('\n'),
+        toolCalls: [],
+      },
+    ]);
+    const directory = await mkdtemp(
+      join(tmpdir(), 'dbagent-sdk-manual-compact-'),
+    );
+    tempDirs.push(directory);
+    const runtime = new DatabaseAgentRuntime({
+      provider,
+      model: 'test-model',
+      sessionDatabasePath: join(directory, 'agent.db'),
+      now: () => '2026-07-24T01:00:00.000Z',
+    });
+    const session: AgentSession = {
+      id: 'session-manual-compact',
+      title: '订单长期分析',
+      userId: 'user-alice',
+      mode: 'read',
+      strategy: 'react',
+      messages: Array.from({ length: 10 }, (_, index) => [
+        {
+          role: 'user' as const,
+          content: `第 ${index + 1} 轮：分析订单指标`,
+          createdAt: `2026-07-24T00:${String(index).padStart(2, '0')}:00.000Z`,
+        },
+        {
+          role: 'assistant' as const,
+          content: `第 ${index + 1} 轮结果已确认。`,
+          createdAt: `2026-07-24T00:${String(index).padStart(2, '0')}:01.000Z`,
+        },
+      ]).flat(),
+      tokenUsage: {
+        promptTokens: 1_000,
+        completionTokens: 200,
+        totalTokens: 1_200,
+      },
+      aborted: false,
+    };
+
+    const compacted = await runtime.compactAgentSession({
+      session,
+      focus: '重点保留只读约束和已执行 SQL。',
+    });
+
+    expect(compacted.status).toBe('compacted');
+    expect(compacted.checkpoint).toMatchObject({
+      sequence: 1,
+      trigger: 'manual',
+      method: 'model',
+      focus: '重点保留只读约束和已执行 SQL。',
+    });
+    expect(compacted.session.messages).toEqual(session.messages);
+    const persisted = await runtime.sessions.load(session.id);
+    expect(persisted?.contextCheckpoint?.sequence).toBe(1);
+    expect(persisted?.contextCheckpoint?.summary).toContain('保持只读');
+    expect(persisted?.messages).toEqual(session.messages);
+    await expect(
+      runtime.agentContextCheckpoints(session.id),
+    ).resolves.toMatchObject([
+      { sequence: 1, trigger: 'manual', method: 'model' },
+    ]);
+    expect(provider.requests[0]?.metadata).toMatchObject({
+      purpose: 'context-compaction',
+      trigger: 'manual',
+    });
+  });
+
+  it('requests one-time approval when read mode attempts an edit and records the approval provenance', async () => {
+    const driver = new FakeDatabaseDriver();
+    const provider = new ScriptedAgentProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'tool-update',
+            name: 'sql_execute',
+            arguments: {
+              sql: "UPDATE public.orders SET amount = 200 WHERE id = 42",
+            },
+          },
+        ],
+      },
+      {
+        text: '订单 42 已更新。',
+        toolCalls: [],
+      },
+    ]);
+    const approvalRequests: Array<{ mode: string; requiredPermission?: string }> = [];
+    const directory = await mkdtemp(join(tmpdir(), 'dbagent-sdk-approval-'));
+    tempDirs.push(directory);
+    const runtime = new DatabaseAgentRuntime({
+      driver,
+      provider,
+      model: 'test-model',
+      sessionDatabasePath: join(directory, 'agent.db'),
+      createConnectionId: () => 'connection-1',
+      approvalProvider(request) {
+        approvalRequests.push({
+          mode: request.mode,
+          ...(request.tool.requiredPermission === undefined
+            ? {}
+            : { requiredPermission: request.tool.requiredPermission }),
+        });
+        return {
+          approved: true,
+          requestId: 'dialog-1',
+          approvedBy: 'user-alice',
+          reason: '本次允许',
+        };
+      },
+    });
+    await runtime.connect(connectionInput());
+    await runtime.indexSchema();
+
+    const output = await runtime.runAgent({
+      userId: 'user-alice',
+      message: '更新订单 42 的金额为 200',
+      mode: 'read',
+    });
+
+    expect(approvalRequests).toEqual([
+      { mode: 'read', requiredPermission: 'edit' },
+    ]);
+    expect(output.selectedSkill).toBe('write-and-verify');
+    expect(output.result.toolExecutions[0]).toMatchObject({
+      toolName: 'sql_execute',
+      status: 'success',
+      approval: {
+        requestId: 'dialog-1',
+        approvedBy: 'user-alice',
+        reason: '本次允许',
+      },
+    });
+    expect(driver.executedSql).toEqual([
+      "UPDATE public.orders SET amount = 200 WHERE id = 42",
+    ]);
+  });
 });
 
 function createRuntime(driver: FakeDatabaseDriver, provider: LlmProvider): DatabaseAgentRuntime {
@@ -300,6 +571,33 @@ class FakeProvider implements LlmProvider {
   }
 }
 
+class ScriptedAgentProvider implements LlmProvider {
+  readonly id = 'fake';
+  readonly name = 'Scripted Agent Provider';
+  readonly mode = 'byok' as const;
+  readonly requests: LlmChatRequest[] = [];
+
+  constructor(private readonly script: LlmChatResponse[]) {}
+
+  chat(request: LlmChatRequest): Promise<LlmChatResponse> {
+    this.requests.push(structuredClone(request));
+    const response = this.script.shift();
+    if (!response) throw new Error('No scripted Agent response remains.');
+    return Promise.resolve({
+      ...response,
+      usage: response.usage ?? {
+        promptTokens: 100,
+        completionTokens: 20,
+        totalTokens: 120,
+      },
+    });
+  }
+
+  isAvailable(): Promise<LlmProviderAvailability> {
+    return Promise.resolve({ available: true });
+  }
+}
+
 class FakeDatabaseDriver implements IDatabaseDriver {
   readonly capabilities = {
     engine: 'postgres' as const,
@@ -311,7 +609,7 @@ class FakeDatabaseDriver implements IDatabaseDriver {
   executedSql: string[] = [];
   disconnectCount = 0;
   throwOnExecute?: Error;
-  private connection?: SavedConnection;
+  private connection: SavedConnection | undefined;
 
   test(): Promise<Result<{ latencyMs: number }>> {
     return Promise.resolve(ok({ latencyMs: 3 }));

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-23T10:16:03.153Z",
+  "generatedAt": "2026-07-24T17:46:00.443Z",
   "dataset": {
     "resources": 100000,
     "relations": 100000,
@@ -8,15 +8,15 @@
     "streamedRows": 1000000
   },
   "metrics": {
-    "resourceIdLookupP95Ms": 0.009799999999813735,
-    "singleHopRelationP95Ms": 0.009600000000318687,
-    "capabilityResolutionP95Ms": 0.0036000000000058208,
-    "querySubmissionP95Ms": 0.1471000000001368,
-    "cancellationPropagationP95Ms": 0.043400000000019645,
-    "millionRowStreamMemoryDeltaMiB": 17.104949951171875,
-    "millionRowStreamElapsedMs": 633.1259,
+    "resourceIdLookupP95Ms": 0.010800000000017462,
+    "singleHopRelationP95Ms": 0.022500000002764864,
+    "capabilityResolutionP95Ms": 0.0054000000018277206,
+    "querySubmissionP95Ms": 0.24290000000110012,
+    "cancellationPropagationP95Ms": 0.05679999999847496,
+    "millionRowStreamMemoryDeltaMiB": 17.325439453125,
+    "millionRowStreamElapsedMs": 802.1933000000026,
     "millionRowStreamBatches": 1000,
-    "incrementalSingleResourceUpdateMs": 0.7653000000000247,
+    "incrementalSingleResourceUpdateMs": 181.9971000000005,
     "connectorCapabilityCoverage": 1
   },
   "thresholds": {
@@ -31,32 +31,32 @@
   "assertions": {
     "resourceIdLookupP95Ms": {
       "passed": true,
-      "actual": 0.009799999999813735,
+      "actual": 0.010800000000017462,
       "maximum": 10
     },
     "singleHopRelationP95Ms": {
       "passed": true,
-      "actual": 0.009600000000318687,
+      "actual": 0.022500000002764864,
       "maximum": 50
     },
     "capabilityResolutionP95Ms": {
       "passed": true,
-      "actual": 0.0036000000000058208,
+      "actual": 0.0054000000018277206,
       "maximum": 5
     },
     "querySubmissionP95Ms": {
       "passed": true,
-      "actual": 0.1471000000001368,
+      "actual": 0.24290000000110012,
       "maximum": 20
     },
     "cancellationPropagationP95Ms": {
       "passed": true,
-      "actual": 0.043400000000019645,
+      "actual": 0.05679999999847496,
       "maximum": 100
     },
     "millionRowStreamMemoryDeltaMiB": {
       "passed": true,
-      "actual": 17.104949951171875,
+      "actual": 17.325439453125,
       "maximum": 64
     },
     "connectorCapabilityCoverage": {

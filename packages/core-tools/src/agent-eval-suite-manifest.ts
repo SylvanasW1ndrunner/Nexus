@@ -58,8 +58,6 @@ export type SafeManifestRunOverride = Partial<
     | 'usageMode'
     | 'mode'
     | 'maxIterations'
-    | 'tokenBudget'
-    | 'contextWindowTokens'
     | 'keepRecentMessages'
     | 'maxToolResultChars'
     | 'maxConsecutiveToolFailures'
@@ -89,7 +87,15 @@ const TOOL_STATUSES = new Set([
   'failed',
 ] satisfies AgentToolExecutionRecord['status'][]);
 
-const AGENT_MODES = new Set(['ask', 'auto', 'full-auto', 'readonly'] satisfies AgentMode[]);
+const AGENT_MODES = new Set([
+  'read',
+  'edit',
+  'full',
+  'ask',
+  'auto',
+  'full-auto',
+  'readonly',
+] satisfies AgentMode[]);
 
 const USAGE_MODES = new Set(['byok', 'managed'] satisfies UsageMode[]);
 
@@ -248,8 +254,6 @@ function optionalRunOverride(
   const usageMode = optionalEnum(run, 'usageMode', USAGE_MODES, `${label} run`);
   const mode = optionalEnum(run, 'mode', AGENT_MODES, `${label} run`);
   const maxIterations = optionalPositiveInteger(run, 'maxIterations', `${label} run`);
-  const tokenBudget = optionalPositiveInteger(run, 'tokenBudget', `${label} run`);
-  const contextWindowTokens = optionalPositiveInteger(run, 'contextWindowTokens', `${label} run`);
   const keepRecentMessages = optionalPositiveInteger(run, 'keepRecentMessages', `${label} run`);
   const maxToolResultChars = optionalPositiveInteger(run, 'maxToolResultChars', `${label} run`);
   const maxConsecutiveToolFailures = optionalPositiveInteger(
@@ -264,8 +268,6 @@ function optionalRunOverride(
     ...(usageMode === undefined ? {} : { usageMode }),
     ...(mode === undefined ? {} : { mode }),
     ...(maxIterations === undefined ? {} : { maxIterations }),
-    ...(tokenBudget === undefined ? {} : { tokenBudget }),
-    ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
     ...(keepRecentMessages === undefined ? {} : { keepRecentMessages }),
     ...(maxToolResultChars === undefined ? {} : { maxToolResultChars }),
     ...(maxConsecutiveToolFailures === undefined ? {} : { maxConsecutiveToolFailures }),

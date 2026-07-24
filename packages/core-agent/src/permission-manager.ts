@@ -1,5 +1,6 @@
 import type {
   AgentMode,
+  AgentAccessMode,
   ApprovalProvider,
   ApprovalProviderResult,
   PermissionRequest,
@@ -53,8 +54,17 @@ function normalizeApprovalProviderResult(result: ApprovalProviderResult): {
 
 export function decideAutomaticPermission(
   mode: AgentMode,
-  tool: { dangerLevel: 'safe' | 'medium' | 'high' | 'critical'; readonly?: boolean },
+  tool: {
+    dangerLevel: 'safe' | 'medium' | 'high' | 'critical';
+    readonly?: boolean;
+    requiredPermission?: AgentAccessMode;
+  },
 ): ToolPermissionDecision {
+  if (mode === 'read' || mode === 'edit' || mode === 'full') {
+    const required = tool.requiredPermission ?? inferRequiredPermission(tool);
+    if (accessRank(mode) >= accessRank(required)) return 'allow';
+    return 'ask';
+  }
   if (mode === 'readonly' && !tool.readonly) return 'deny';
   if (mode === 'readonly' && tool.readonly) return 'allow';
   if (tool.dangerLevel === 'critical') return mode === 'full-auto' ? 'ask' : 'deny';
@@ -62,4 +72,19 @@ export function decideAutomaticPermission(
   if (mode === 'full-auto') return 'allow';
   if (mode === 'auto' && tool.dangerLevel === 'medium') return 'ask';
   return 'ask';
+}
+
+function inferRequiredPermission(tool: {
+  dangerLevel: 'safe' | 'medium' | 'high' | 'critical';
+  readonly?: boolean;
+}): AgentAccessMode {
+  if (tool.readonly || tool.dangerLevel === 'safe') return 'read';
+  if (tool.dangerLevel === 'medium') return 'edit';
+  return 'full';
+}
+
+function accessRank(mode: AgentAccessMode): number {
+  if (mode === 'read') return 0;
+  if (mode === 'edit') return 1;
+  return 2;
 }
