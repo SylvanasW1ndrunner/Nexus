@@ -86,6 +86,30 @@ export type ResourceDiscoveryResult = {
   observations: number;
 };
 
+export type ResourceRelationQueryOptions = {
+  direction?: 'outgoing' | 'incoming' | 'both';
+  kinds?: ResourceRelationKind[];
+  includeDeleted?: boolean;
+  scope?: ResourceScope;
+};
+
+export type ResourceObservationQueryOptions = {
+  includeExpired?: boolean;
+  category?: string;
+  at?: string;
+  limit?: number;
+  scope?: ResourceScope;
+};
+
+export type ResourceStateQueryOptions = {
+  asOf?: string;
+  scope?: ResourceScope;
+};
+
+export type ScopedResourceEventQuery = ResourceEventQuery & {
+  scope?: ResourceScope;
+};
+
 export function createStableResourceId(input: {
   sourceNamespace: string;
   kind: string;
@@ -143,10 +167,7 @@ export class ResourceRegistry {
   #sortedResourceIds: ResourceId[] | undefined;
 
   constructor(options: ResourceRegistryOptions = {}) {
-    this.#maxEvents = normalizeLimit(
-      options.maxEvents ?? DEFAULT_MAX_EVENTS,
-      'maxEvents',
-    );
+    this.#maxEvents = normalizeLimit(options.maxEvents ?? DEFAULT_MAX_EVENTS, 'maxEvents');
     this.#maxObservationsPerResource = normalizeLimit(
       options.maxObservationsPerResource ?? DEFAULT_MAX_OBSERVATIONS_PER_RESOURCE,
       'maxObservationsPerResource',
@@ -187,11 +208,7 @@ export class ResourceRegistry {
     if (
       relation.kind === 'contains' &&
       !relation.deletedAt &&
-      this.#wouldCreateContainsCycle(
-        relation.fromResourceId,
-        relation.toResourceId,
-        relation.id,
-      )
+      this.#wouldCreateContainsCycle(relation.fromResourceId, relation.toResourceId, relation.id)
     ) {
       throw new ResourceConflictError(
         `Relation ${relation.id} would create a contains cycle`,
@@ -227,13 +244,10 @@ export class ResourceRegistry {
       );
     }
     const byId =
-      this.#observations.get(observation.resourceId) ??
-      new Map<string, ResourceObservation>();
+      this.#observations.get(observation.resourceId) ?? new Map<string, ResourceObservation>();
     const existing = byId.get(observation.id);
     if (existing && existing.resourceId !== observation.resourceId) {
-      throw new ResourceConflictError(
-        `Observation ${observation.id} cannot change its resource`,
-      );
+      throw new ResourceConflictError(`Observation ${observation.id} cannot change its resource`);
     }
     const cloned = cloneObservation(observation);
     if (existing && isDeepStrictEqual(existing, cloned)) {
@@ -352,19 +366,25 @@ export class ResourceRegistry {
   getResource(
     id: ResourceId,
     includeDeleted = false,
+    scope?: ResourceScope,
   ): ResourceDescriptor | undefined {
     const resource = this.#resources.get(id);
-    if (!resource || (!includeDeleted && resource.deletedAt)) return undefined;
+    if (!resource || !this.#resourceVisible(resource, includeDeleted, scope)) return undefined;
     return cloneResource(resource);
   }
 
   getRelation(
     id: ResourceRelationId,
     includeDeleted = false,
+    scope?: ResourceScope,
   ): ResourceRelation | undefined {
     const relation = this.#relations.get(id);
-    if (!relation || !this.#relationVisible(relation, includeDeleted)) return undefined;
+    if (!relation || !this.#relationVisible(relation, includeDeleted, scope)) return undefined;
     return cloneRelation(relation);
+  }
+
+  scoped(scope: ResourceScope): ScopedResourceRegistryView {
+    return new ScopedResourceRegistryView(this, scope);
   }
 
   query(input: ResourceQuery = {}): ResourceQueryPage {
@@ -384,20 +404,13 @@ export class ResourceRegistry {
     }
     return {
       items: selected.map(cloneResource),
-      ...(hasMore && selected.at(-1)
-        ? { nextCursor: encodeCursor(selected.at(-1)!.id) }
-        : {}),
+      ...(hasMore && selected.at(-1) ? { nextCursor: encodeCursor(selected.at(-1)!.id) } : {}),
     };
   }
 
   relationsFor(
     resourceId: ResourceId,
-    options: {
-      direction?: 'outgoing' | 'incoming' | 'both';
-      kinds?: ResourceRelationKind[];
-      includeDeleted?: boolean;
-      scope?: ResourceScope;
-    } = {},
+    options: ResourceRelationQueryOptions = {},
   ): ResourceRelation[] {
     const resource = this.#resources.get(resourceId);
     if (
@@ -422,17 +435,10 @@ export class ResourceRegistry {
       .filter((relation) => !kindSet || kindSet.has(relation.kind))
       .filter((relation) => {
         const otherId =
-          relation.fromResourceId === resourceId
-            ? relation.toResourceId
-            : relation.fromResourceId;
+          relation.fromResourceId === resourceId ? relation.toResourceId : relation.fromResourceId;
         const other = this.#resources.get(otherId);
         return Boolean(
-          other &&
-            this.#resourceVisible(
-              other,
-              options.includeDeleted ?? false,
-              options.scope,
-            ),
+          other && this.#resourceVisible(other, options.includeDeleted ?? false, options.scope),
         );
       })
       .sort((left, right) => left.id.localeCompare(right.id))
@@ -441,12 +447,7 @@ export class ResourceRegistry {
 
   neighbors(
     resourceId: ResourceId,
-    options: {
-      direction?: 'outgoing' | 'incoming' | 'both';
-      kinds?: ResourceRelationKind[];
-      includeDeleted?: boolean;
-      scope?: ResourceScope;
-    } = {},
+    options: ResourceRelationQueryOptions = {},
   ): ResourceDescriptor[] {
     const ids = new Set<ResourceId>();
     for (const relation of this.relationsFor(resourceId, options)) {
@@ -457,11 +458,7 @@ export class ResourceRegistry {
       .map((id) => this.#resources.get(id))
       .filter((resource): resource is ResourceDescriptor => Boolean(resource))
       .filter((resource) =>
-        this.#resourceVisible(
-          resource,
-          options.includeDeleted ?? false,
-          options.scope,
-        ),
+        this.#resourceVisible(resource, options.includeDeleted ?? false, options.scope),
       )
       .sort((left, right) => left.id.localeCompare(right.id))
       .map(cloneResource);
@@ -479,11 +476,7 @@ export class ResourceRegistry {
       if (
         !resource ||
         visited.has(id) ||
-        !this.#resourceVisible(
-          resource,
-          request.includeDeleted ?? false,
-          request.scope,
-        )
+        !this.#resourceVisible(resource, request.includeDeleted ?? false, request.scope)
       ) {
         continue;
       }
@@ -507,16 +500,12 @@ export class ResourceRegistry {
       const adjacent = this.relationsFor(current.id, {
         direction: request.direction ?? 'both',
         ...(request.relationKinds ? { kinds: request.relationKinds } : {}),
-        ...(request.includeDeleted === undefined
-          ? {}
-          : { includeDeleted: request.includeDeleted }),
+        ...(request.includeDeleted === undefined ? {} : { includeDeleted: request.includeDeleted }),
         ...(request.scope ? { scope: request.scope } : {}),
       });
       for (const relation of adjacent) {
         const nextId =
-          relation.fromResourceId === current.id
-            ? relation.toResourceId
-            : relation.fromResourceId;
+          relation.fromResourceId === current.id ? relation.toResourceId : relation.fromResourceId;
         relations.set(relation.id, relation);
         if (visited.has(nextId)) continue;
         if (visited.size >= request.maxResources) {
@@ -533,22 +522,17 @@ export class ResourceRegistry {
     }
     return {
       nodes,
-      relations: [...relations.values()].sort((left, right) =>
-        left.id.localeCompare(right.id),
-      ),
+      relations: [...relations.values()].sort((left, right) => left.id.localeCompare(right.id)),
       truncated,
     };
   }
 
   observationsFor(
     resourceId: ResourceId,
-    options: {
-      includeExpired?: boolean;
-      category?: string;
-      at?: string;
-      limit?: number;
-    } = {},
+    options: ResourceObservationQueryOptions = {},
   ): ResourceObservation[] {
+    const resource = this.#resources.get(resourceId);
+    if (!resource || !this.#resourceVisible(resource, true, options.scope)) return [];
     const atText = options.at ?? this.#now();
     const at = Date.parse(requireCanonicalTime(atText, 'at'));
     const limit = Math.min(
@@ -580,10 +564,10 @@ export class ResourceRegistry {
 
   state(
     resourceId: ResourceId,
-    options: { asOf?: string } = {},
+    options: ResourceStateQueryOptions = {},
   ): ResourceStateSnapshot | undefined {
     const resource = this.#resources.get(resourceId);
-    if (!resource) return undefined;
+    if (!resource || !this.#resourceVisible(resource, true, options.scope)) return undefined;
     const asOf = requireCanonicalTime(options.asOf ?? this.#now(), 'asOf');
     const at = Date.parse(asOf);
     const observations = [...(this.#observations.get(resourceId)?.values() ?? [])]
@@ -598,25 +582,16 @@ export class ResourceRegistry {
     const categoryStates = [...categories.entries()]
       .map(([category, values]) => deriveCategoryState(category, values, at))
       .sort((left, right) => left.category.localeCompare(right.category));
-    const freshCategories = categoryStates.filter(
-      (category) => category.freshness === 'fresh',
-    );
-    const selectedCategories =
-      freshCategories.length > 0 ? freshCategories : categoryStates;
+    const freshCategories = categoryStates.filter((category) => category.freshness === 'fresh');
+    const selectedCategories = freshCategories.length > 0 ? freshCategories : categoryStates;
     const status =
       selectedCategories.length === 0
         ? 'unknown'
         : worstStatus(
-            selectedCategories.map((category) =>
-              normalizeStatusForOverallState(category.status),
-            ),
+            selectedCategories.map((category) => normalizeStatusForOverallState(category.status)),
           );
     const freshness: ResourceFreshness =
-      freshCategories.length > 0
-        ? 'fresh'
-        : categoryStates.length > 0
-          ? 'stale'
-          : 'unknown';
+      freshCategories.length > 0 ? 'fresh' : categoryStates.length > 0 ? 'stale' : 'unknown';
     return {
       resourceId,
       asOf,
@@ -630,7 +605,7 @@ export class ResourceRegistry {
     };
   }
 
-  events(input: ResourceEventQuery = {}): ResourceEventPage {
+  events(input: ScopedResourceEventQuery = {}): ResourceEventPage {
     const limit = Math.min(Math.max(input.limit ?? DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
     const typeSet = input.types ? new Set<ResourceEventType>(input.types) : undefined;
     const items = this.#events
@@ -641,6 +616,7 @@ export class ResourceRegistry {
           event.resourceId === input.resourceId ||
           event.relatedResourceId === input.resourceId,
       )
+      .filter((event) => !input.scope || this.#eventVisible(event, input.scope))
       .filter((event) => !typeSet || typeSet.has(event.type));
     const selected = items.slice(0, limit).map(cloneEvent);
     return {
@@ -651,11 +627,7 @@ export class ResourceRegistry {
     };
   }
 
-  markResourceDeleted(
-    id: ResourceId,
-    deletedAt = this.#now(),
-    source?: ResourceSource,
-  ): boolean {
+  markResourceDeleted(id: ResourceId, deletedAt = this.#now(), source?: ResourceSource): boolean {
     const resource = this.#resources.get(id);
     if (!resource || resource.deletedAt) return false;
     const timestamp = requireCanonicalTime(deletedAt, 'deletedAt');
@@ -682,11 +654,7 @@ export class ResourceRegistry {
     return true;
   }
 
-  restoreResource(
-    id: ResourceId,
-    restoredAt = this.#now(),
-    source?: ResourceSource,
-  ): boolean {
+  restoreResource(id: ResourceId, restoredAt = this.#now(), source?: ResourceSource): boolean {
     const resource = this.#resources.get(id);
     if (!resource?.deletedAt) return false;
     const timestamp = requireCanonicalTime(restoredAt, 'restoredAt');
@@ -762,11 +730,7 @@ export class ResourceRegistry {
     }
     if (
       relation.kind === 'contains' &&
-      this.#wouldCreateContainsCycle(
-        relation.fromResourceId,
-        relation.toResourceId,
-        relation.id,
-      )
+      this.#wouldCreateContainsCycle(relation.fromResourceId, relation.toResourceId, relation.id)
     ) {
       throw new ResourceConflictError(
         `Relation ${id} would create a contains cycle`,
@@ -922,18 +886,13 @@ export class ResourceRegistry {
         !preparedResources.has(relation.fromResourceId) ||
         !preparedResources.has(relation.toResourceId)
       ) {
-        throw new ResourceConflictError(
-          `Relation ${relation.id} references an unknown resource`,
-        );
+        throw new ResourceConflictError(`Relation ${relation.id} references an unknown resource`);
       }
       preparedRelations.set(relation.id, relation);
     }
     assertContainsGraphAcyclic(preparedRelations.values());
 
-    const preparedObservations = new Map<
-      ResourceId,
-      Map<string, ResourceObservation>
-    >();
+    const preparedObservations = new Map<ResourceId, Map<string, ResourceObservation>>();
     for (const observation of preparedSnapshot.observations) {
       if (!preparedResources.has(observation.resourceId)) {
         throw new ResourceConflictError(
@@ -941,8 +900,7 @@ export class ResourceRegistry {
         );
       }
       const observations =
-        preparedObservations.get(observation.resourceId) ??
-        new Map<string, ResourceObservation>();
+        preparedObservations.get(observation.resourceId) ?? new Map<string, ResourceObservation>();
       if (observations.has(observation.id)) {
         throw new ResourceConflictError(
           `Snapshot contains duplicate observation ${observation.id} for ${observation.resourceId}`,
@@ -954,9 +912,7 @@ export class ResourceRegistry {
       preparedObservations.set(observation.resourceId, observations);
     }
     const preparedEvents = preparedSnapshot.events.slice(-this.#maxEvents);
-    const preparedSourceVersions = new Map(
-      Object.entries(preparedSnapshot.sourceVersions),
-    );
+    const preparedSourceVersions = new Map(Object.entries(preparedSnapshot.sourceVersions));
 
     this.clear();
     for (const [id, resource] of preparedResources) {
@@ -1039,9 +995,7 @@ export class ResourceRegistry {
         !availableResources.has(relation.fromResourceId) ||
         !availableResources.has(relation.toResourceId)
       ) {
-        throw new ResourceConflictError(
-          `Relation ${relation.id} references an unknown resource`,
-        );
+        throw new ResourceConflictError(`Relation ${relation.id} references an unknown resource`);
       }
       this.#assertRelationIdentity(availableRelations.get(relation.id), relation);
       availableRelations.set(relation.id, cloneRelation(relation));
@@ -1068,11 +1022,7 @@ export class ResourceRegistry {
     }
     for (const id of changeSet.deleteResourceIds ?? []) {
       const resource = projectedResources.get(id);
-      if (
-        resource &&
-        !resource.deletedAt &&
-        changeSet.observedAt < resource.updatedAt
-      ) {
+      if (resource && !resource.deletedAt && changeSet.observedAt < resource.updatedAt) {
         throw new ResourceConflictError(
           `Resource ${id} cannot be deleted before its latest update`,
           'RESOURCE_VALIDATION_FAILED',
@@ -1081,10 +1031,7 @@ export class ResourceRegistry {
     }
     for (const id of changeSet.restoreResourceIds ?? []) {
       const resource = projectedResources.get(id);
-      if (
-        resource?.deletedAt &&
-        changeSet.observedAt < resource.deletedAt
-      ) {
+      if (resource?.deletedAt && changeSet.observedAt < resource.deletedAt) {
         throw new ResourceConflictError(
           `Resource ${id} cannot be restored before it was deleted`,
           'RESOURCE_VALIDATION_FAILED',
@@ -1102,11 +1049,7 @@ export class ResourceRegistry {
     }
     for (const id of changeSet.deleteRelationIds ?? []) {
       const relation = projectedRelations.get(id);
-      if (
-        relation &&
-        !relation.deletedAt &&
-        changeSet.observedAt < relation.updatedAt
-      ) {
+      if (relation && !relation.deletedAt && changeSet.observedAt < relation.updatedAt) {
         throw new ResourceConflictError(
           `Relation ${id} cannot be deleted before its latest update`,
           'RESOURCE_VALIDATION_FAILED',
@@ -1119,6 +1062,11 @@ export class ResourceRegistry {
     existing: ResourceDescriptor | undefined,
     incoming: ResourceDescriptor,
   ): void {
+    if (existing && !isDeepStrictEqual(existing.scope ?? {}, incoming.scope ?? {})) {
+      throw new ResourceConflictError(
+        `Resource ${incoming.id} cannot change scope after its identity has been registered`,
+      );
+    }
     if (
       existing &&
       (existing.kind !== incoming.kind ||
@@ -1142,9 +1090,7 @@ export class ResourceRegistry {
         existing.fromResourceId !== incoming.fromResourceId ||
         existing.toResourceId !== incoming.toResourceId)
     ) {
-      throw new ResourceConflictError(
-        `Relation ${incoming.id} cannot change its identity`,
-      );
+      throw new ResourceConflictError(`Relation ${incoming.id} cannot change its identity`);
     }
   }
 
@@ -1153,9 +1099,7 @@ export class ResourceRegistry {
       !this.#resources.has(relation.fromResourceId) ||
       !this.#resources.has(relation.toResourceId)
     ) {
-      throw new ResourceConflictError(
-        `Relation ${relation.id} references an unknown resource`,
-      );
+      throw new ResourceConflictError(`Relation ${relation.id} references an unknown resource`);
     }
   }
 
@@ -1210,9 +1154,7 @@ export class ResourceRegistry {
       return this.neighbors(input.parentResourceId, {
         direction: 'outgoing',
         kinds: ['contains'],
-        ...(input.includeDeleted === undefined
-          ? {}
-          : { includeDeleted: input.includeDeleted }),
+        ...(input.includeDeleted === undefined ? {} : { includeDeleted: input.includeDeleted }),
         ...(input.scope ? { scope: input.scope } : {}),
       }).map((item) => item.id);
     }
@@ -1266,22 +1208,44 @@ export class ResourceRegistry {
     scope?: ResourceScope,
   ): boolean {
     return (
-      (includeDeleted || !resource.deletedAt) &&
-      (!scope || scopeMatches(resource.scope, scope))
+      (includeDeleted || !resource.deletedAt) && (!scope || scopeMatches(resource.scope, scope))
     );
   }
 
-  #relationVisible(relation: ResourceRelation, includeDeleted: boolean): boolean {
+  #relationVisible(
+    relation: ResourceRelation,
+    includeDeleted: boolean,
+    scope?: ResourceScope,
+  ): boolean {
     if (!includeDeleted && relation.deletedAt) return false;
     const from = this.#resources.get(relation.fromResourceId);
     const to = this.#resources.get(relation.toResourceId);
     if (!from || !to) return false;
-    return includeDeleted || (!from.deletedAt && !to.deletedAt);
+    return (
+      this.#resourceVisible(from, includeDeleted, scope) &&
+      this.#resourceVisible(to, includeDeleted, scope)
+    );
   }
 
-  #recordEvent(
-    input: Omit<ResourceEvent, 'id' | 'sequence'>,
-  ): void {
+  #eventVisible(event: ResourceEvent, scope: ResourceScope): boolean {
+    const resourceIds = new Set<ResourceId>();
+    if (event.resourceId) resourceIds.add(event.resourceId);
+    if (event.relatedResourceId) resourceIds.add(event.relatedResourceId);
+    if (event.relationId) {
+      const relation = this.#relations.get(event.relationId);
+      if (relation) {
+        resourceIds.add(relation.fromResourceId);
+        resourceIds.add(relation.toResourceId);
+      }
+    }
+    if (resourceIds.size === 0) return false;
+    return [...resourceIds].every((resourceId) => {
+      const resource = this.#resources.get(resourceId);
+      return Boolean(resource && this.#resourceVisible(resource, true, scope));
+    });
+  }
+
+  #recordEvent(input: Omit<ResourceEvent, 'id' | 'sequence'>): void {
     const event: ResourceEvent = {
       ...input,
       id: this.#createEventId(),
@@ -1300,7 +1264,83 @@ export class ResourceRegistry {
       this.#snapshotCreatedAt,
     );
   }
+}
 
+/**
+ * A read-only facade that applies one caller-selected resource scope to every
+ * lookup. Authentication and scope selection remain the host application's
+ * responsibility; this view prevents a selected scope from being omitted on a
+ * later by-id, state, observation, event, relation, or graph read.
+ */
+export class ScopedResourceRegistryView {
+  readonly #scope: ResourceScope;
+
+  constructor(
+    private readonly registry: ResourceRegistry,
+    scope: ResourceScope,
+  ) {
+    this.#scope = structuredClone(scope);
+  }
+
+  getResource(id: ResourceId, includeDeleted = false): ResourceDescriptor | undefined {
+    return this.registry.getResource(id, includeDeleted, this.#scope);
+  }
+
+  getRelation(id: ResourceRelationId, includeDeleted = false): ResourceRelation | undefined {
+    return this.registry.getRelation(id, includeDeleted, this.#scope);
+  }
+
+  query(input: Omit<ResourceQuery, 'scope'> = {}): ResourceQueryPage {
+    return this.registry.query({ ...input, scope: this.#scope });
+  }
+
+  relationsFor(
+    resourceId: ResourceId,
+    options: Omit<ResourceRelationQueryOptions, 'scope'> = {},
+  ): ResourceRelation[] {
+    return this.registry.relationsFor(resourceId, {
+      ...options,
+      scope: this.#scope,
+    });
+  }
+
+  neighbors(
+    resourceId: ResourceId,
+    options: Omit<ResourceRelationQueryOptions, 'scope'> = {},
+  ): ResourceDescriptor[] {
+    return this.registry.neighbors(resourceId, {
+      ...options,
+      scope: this.#scope,
+    });
+  }
+
+  traverse(request: Omit<ResourceTraversalRequest, 'scope'>): ResourceTraversalResult {
+    return this.registry.traverse({ ...request, scope: this.#scope });
+  }
+
+  observationsFor(
+    resourceId: ResourceId,
+    options: Omit<ResourceObservationQueryOptions, 'scope'> = {},
+  ): ResourceObservation[] {
+    return this.registry.observationsFor(resourceId, {
+      ...options,
+      scope: this.#scope,
+    });
+  }
+
+  state(
+    resourceId: ResourceId,
+    options: Omit<ResourceStateQueryOptions, 'scope'> = {},
+  ): ResourceStateSnapshot | undefined {
+    return this.registry.state(resourceId, {
+      ...options,
+      scope: this.#scope,
+    });
+  }
+
+  events(input: Omit<ScopedResourceEventQuery, 'scope'> = {}): ResourceEventPage {
+    return this.registry.events({ ...input, scope: this.#scope });
+  }
 }
 
 function mergeResource(
@@ -1320,9 +1360,7 @@ function mergeResource(
     ...(facts ? { facts } : {}),
     sources: mergeSources([...existing.sources, ...incoming.sources]),
     firstSeenAt:
-      existing.firstSeenAt < incoming.firstSeenAt
-        ? existing.firstSeenAt
-        : incoming.firstSeenAt,
+      existing.firstSeenAt < incoming.firstSeenAt ? existing.firstSeenAt : incoming.firstSeenAt,
     updatedAt: laterTime(existing.updatedAt, incoming.updatedAt),
     version: Math.max(existing.version, incoming.version),
   };
@@ -1334,10 +1372,7 @@ function mergeResource(
   return merged;
 }
 
-function mergeRelation(
-  existing: ResourceRelation,
-  incoming: ResourceRelation,
-): ResourceRelation {
+function mergeRelation(existing: ResourceRelation, incoming: ResourceRelation): ResourceRelation {
   const incomingWins = incoming.updatedAt >= existing.updatedAt;
   const older = incomingWins ? existing : incoming;
   const newer = incomingWins ? incoming : existing;
@@ -1347,9 +1382,7 @@ function mergeRelation(
     attributes: { ...(older.attributes ?? {}), ...(newer.attributes ?? {}) },
     sources: mergeSources([...existing.sources, ...incoming.sources]),
     firstSeenAt:
-      existing.firstSeenAt < incoming.firstSeenAt
-        ? existing.firstSeenAt
-        : incoming.firstSeenAt,
+      existing.firstSeenAt < incoming.firstSeenAt ? existing.firstSeenAt : incoming.firstSeenAt,
     updatedAt: laterTime(existing.updatedAt, incoming.updatedAt),
     version: Math.max(existing.version, incoming.version),
   };
@@ -1406,8 +1439,7 @@ function compareFacts(left: ResourceFact, right: ResourceFact): number {
 
 function compareSourceRecency(left: ResourceSource, right: ResourceSource): number {
   return (
-    left.observedAt.localeCompare(right.observedAt) ||
-    (left.priority ?? 0) - (right.priority ?? 0)
+    left.observedAt.localeCompare(right.observedAt) || (left.priority ?? 0) - (right.priority ?? 0)
   );
 }
 
@@ -1433,9 +1465,7 @@ function eventSource(source: ResourceSource, observedAt: string): ResourceSource
     sourceId: source.sourceId,
     sourceType: source.sourceType,
     ...(source.connectorId ? { connectorId: source.connectorId } : {}),
-    ...(source.connectionProfileId
-      ? { connectionProfileId: source.connectionProfileId }
-      : {}),
+    ...(source.connectionProfileId ? { connectionProfileId: source.connectionProfileId } : {}),
     ...(source.priority === undefined ? {} : { priority: source.priority }),
     observedAt,
   };
@@ -1467,13 +1497,9 @@ function deriveCategoryState(
     category,
     status: statuses.length > 0 ? worstStatus(statuses) : 'unknown',
     freshness: fresh.length > 0 ? 'fresh' : selected.length > 0 ? 'stale' : 'unknown',
-    ...(newest
-      ? { observedAt: newest.observedAt, expiresAt: newest.expiresAt }
-      : {}),
+    ...(newest ? { observedAt: newest.observedAt, expiresAt: newest.expiresAt } : {}),
     observationIds: selected.map((observation) => observation.id).sort(),
-    sourceIds: selected
-      .map((observation) => observation.source.sourceId)
-      .sort(),
+    sourceIds: selected.map((observation) => observation.source.sourceId).sort(),
     conflicted: new Set(statuses).size > 1,
   };
 }
@@ -1486,35 +1512,26 @@ function worstStatus(statuses: ObservationStatus[]): ObservationStatus {
     ['degraded', 3],
     ['unavailable', 4],
   ]);
-  return [...statuses].sort(
-    (left, right) =>
-      (severity.get(right) ?? severity.get('unknown')!) -
-        (severity.get(left) ?? severity.get('unknown')!) ||
-      left.localeCompare(right),
-  )[0] ?? 'unknown';
+  return (
+    [...statuses].sort(
+      (left, right) =>
+        (severity.get(right) ?? severity.get('unknown')!) -
+          (severity.get(left) ?? severity.get('unknown')!) || left.localeCompare(right),
+    )[0] ?? 'unknown'
+  );
 }
 
-function normalizeStatusForOverallState(
-  status: ObservationStatus,
-): ObservationStatus {
-  return ['healthy', 'unknown', 'collecting', 'degraded', 'unavailable'].includes(
-    status,
-  )
+function normalizeStatusForOverallState(status: ObservationStatus): ObservationStatus {
+  return ['healthy', 'unknown', 'collecting', 'degraded', 'unavailable'].includes(status)
     ? status
     : 'unknown';
 }
 
-function compactObservations(
-  observations: Map<string, ResourceObservation>,
-  limit: number,
-): void {
+function compactObservations(observations: Map<string, ResourceObservation>, limit: number): void {
   while (observations.size > limit) {
     let oldest: ResourceObservation | undefined;
     for (const observation of observations.values()) {
-      if (
-        oldest === undefined ||
-        compareObservationsDescending(observation, oldest) > 0
-      ) {
+      if (oldest === undefined || compareObservationsDescending(observation, oldest) > 0) {
         oldest = observation;
       }
     }
@@ -1542,17 +1559,12 @@ function assertContainsGraphAcyclic(relations: Iterable<ResourceRelation>): void
     const targets = adjacency.get(relation.fromResourceId) ?? [];
     targets.push(relation.toResourceId);
     adjacency.set(relation.fromResourceId, targets);
-    indegree.set(
-      relation.toResourceId,
-      (indegree.get(relation.toResourceId) ?? 0) + 1,
-    );
+    indegree.set(relation.toResourceId, (indegree.get(relation.toResourceId) ?? 0) + 1);
     if (!indegree.has(relation.fromResourceId)) {
       indegree.set(relation.fromResourceId, 0);
     }
   }
-  const queue = [...indegree.entries()]
-    .filter(([, count]) => count === 0)
-    .map(([id]) => id);
+  const queue = [...indegree.entries()].filter(([, count]) => count === 0).map(([id]) => id);
   let cursor = 0;
   let visited = 0;
   while (cursor < queue.length) {
@@ -1565,8 +1577,7 @@ function assertContainsGraphAcyclic(relations: Iterable<ResourceRelation>): void
     }
   }
   if (visited !== indegree.size) {
-    const cycleAt =
-      [...indegree.entries()].find(([, count]) => count > 0)?.[0] ?? 'unknown';
+    const cycleAt = [...indegree.entries()].find(([, count]) => count > 0)?.[0] ?? 'unknown';
     throw new ResourceConflictError(
       `Contains hierarchy contains a cycle at ${cycleAt}`,
       'RELATION_CYCLE',
@@ -1605,10 +1616,7 @@ function validateTraversal(request: ResourceTraversalRequest): void {
 
 function scopeMatches(actual: ResourceScope | undefined, required: ResourceScope): boolean {
   for (const [key, value] of Object.entries(required)) {
-    if (
-      value !== undefined &&
-      actual?.[key as keyof ResourceScope] !== value
-    ) {
+    if (value !== undefined && actual?.[key as keyof ResourceScope] !== value) {
       return false;
     }
   }
@@ -1636,10 +1644,7 @@ function changedResourceFields(
   ]);
 }
 
-function changedRelationFields(
-  existing: ResourceRelation,
-  incoming: ResourceRelation,
-): string[] {
+function changedRelationFields(existing: ResourceRelation, incoming: ResourceRelation): string[] {
   return changedFields(existing, incoming, [
     'attributes',
     'version',
@@ -1654,9 +1659,7 @@ function changedFields<T extends object>(
   incoming: T,
   fields: Array<keyof T>,
 ): string[] {
-  return fields
-    .filter((field) => !isDeepStrictEqual(existing[field], incoming[field]))
-    .map(String);
+  return fields.filter((field) => !isDeepStrictEqual(existing[field], incoming[field])).map(String);
 }
 
 function stableValueKey(value: PortableValue): string {
@@ -1698,10 +1701,7 @@ function decodeCursor(cursor: string | undefined): ResourceId | undefined {
     }
     return decoded;
   } catch {
-    throw new ResourceConflictError(
-      'Invalid resource query cursor',
-      'INVALID_CURSOR',
-    );
+    throw new ResourceConflictError('Invalid resource query cursor', 'INVALID_CURSOR');
   }
 }
 
@@ -1763,10 +1763,7 @@ function validateChangeSetContract(changeSet: ResourceChangeSet): void {
 
 function contractError(error: unknown): ResourceConflictError {
   if (error instanceof ContractValidationError) {
-    return new ResourceConflictError(
-      error.message,
-      'RESOURCE_VALIDATION_FAILED',
-    );
+    return new ResourceConflictError(error.message, 'RESOURCE_VALIDATION_FAILED');
   }
   if (error instanceof ResourceConflictError) return error;
   return new ResourceConflictError(
@@ -1820,10 +1817,7 @@ function normalizeLimit(value: number, name: string): number {
 
 function requireIdentityPart(value: string, name: string): void {
   if (!value.trim()) {
-    throw new ResourceConflictError(
-      `${name} cannot be empty`,
-      'RESOURCE_VALIDATION_FAILED',
-    );
+    throw new ResourceConflictError(`${name} cannot be empty`, 'RESOURCE_VALIDATION_FAILED');
   }
 }
 

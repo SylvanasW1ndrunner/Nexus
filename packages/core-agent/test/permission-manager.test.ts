@@ -42,26 +42,19 @@ describe('decideAutomaticPermission', () => {
       readonly?: boolean;
       decision: 'allow' | 'deny' | 'ask';
     }> = [
-      { mode: 'readonly', dangerLevel: 'safe', readonly: true, decision: 'allow' },
-      { mode: 'readonly', dangerLevel: 'medium', readonly: true, decision: 'allow' },
-      { mode: 'readonly', dangerLevel: 'high', readonly: true, decision: 'allow' },
-      { mode: 'readonly', dangerLevel: 'critical', readonly: true, decision: 'allow' },
-      { mode: 'readonly', dangerLevel: 'safe', readonly: false, decision: 'deny' },
-      { mode: 'readonly', dangerLevel: 'medium', readonly: false, decision: 'deny' },
-      { mode: 'readonly', dangerLevel: 'high', readonly: false, decision: 'deny' },
-      { mode: 'readonly', dangerLevel: 'critical', readonly: false, decision: 'deny' },
-      { mode: 'ask', dangerLevel: 'safe', decision: 'allow' },
-      { mode: 'ask', dangerLevel: 'medium', decision: 'ask' },
-      { mode: 'ask', dangerLevel: 'high', decision: 'ask' },
-      { mode: 'ask', dangerLevel: 'critical', decision: 'deny' },
-      { mode: 'auto', dangerLevel: 'safe', decision: 'allow' },
-      { mode: 'auto', dangerLevel: 'medium', decision: 'ask' },
-      { mode: 'auto', dangerLevel: 'high', decision: 'ask' },
-      { mode: 'auto', dangerLevel: 'critical', decision: 'deny' },
-      { mode: 'full-auto', dangerLevel: 'safe', decision: 'allow' },
-      { mode: 'full-auto', dangerLevel: 'medium', decision: 'allow' },
-      { mode: 'full-auto', dangerLevel: 'high', decision: 'allow' },
-      { mode: 'full-auto', dangerLevel: 'critical', decision: 'ask' },
+      { mode: 'read', dangerLevel: 'safe', decision: 'allow' },
+      { mode: 'read', dangerLevel: 'medium', readonly: true, decision: 'allow' },
+      { mode: 'read', dangerLevel: 'medium', readonly: false, decision: 'ask' },
+      { mode: 'read', dangerLevel: 'high', decision: 'ask' },
+      { mode: 'read', dangerLevel: 'critical', decision: 'ask' },
+      { mode: 'edit', dangerLevel: 'safe', decision: 'allow' },
+      { mode: 'edit', dangerLevel: 'medium', decision: 'allow' },
+      { mode: 'edit', dangerLevel: 'high', decision: 'ask' },
+      { mode: 'edit', dangerLevel: 'critical', decision: 'ask' },
+      { mode: 'full', dangerLevel: 'safe', decision: 'allow' },
+      { mode: 'full', dangerLevel: 'medium', decision: 'allow' },
+      { mode: 'full', dangerLevel: 'high', decision: 'allow' },
+      { mode: 'full', dangerLevel: 'critical', decision: 'allow' },
     ];
 
     for (const item of cases) {
@@ -75,27 +68,23 @@ describe('decideAutomaticPermission', () => {
     }
   });
 
-  it('allows safe tools in every mode', () => {
-    expect(decideAutomaticPermission('readonly', { dangerLevel: 'safe', readonly: true })).toBe('allow');
-    expect(decideAutomaticPermission('ask', { dangerLevel: 'safe' })).toBe('allow');
+  it('allows safe tools in every access level', () => {
+    expect(decideAutomaticPermission('read', { dangerLevel: 'safe', readonly: true })).toBe(
+      'allow',
+    );
+    expect(decideAutomaticPermission('edit', { dangerLevel: 'safe' })).toBe('allow');
+    expect(decideAutomaticPermission('full', { dangerLevel: 'safe' })).toBe('allow');
   });
 
-  it('denies write-capable tools in readonly mode', () => {
-    expect(decideAutomaticPermission('readonly', { dangerLevel: 'medium', readonly: false })).toBe('deny');
+  it('asks once before using a write-capable tool above the selected level', () => {
+    expect(decideAutomaticPermission('read', { dangerLevel: 'medium', readonly: false })).toBe(
+      'ask',
+    );
+    expect(decideAutomaticPermission('edit', { dangerLevel: 'high' })).toBe('ask');
   });
 
-  it('allows readonly medium tools in readonly mode for SELECT-style work', () => {
-    expect(decideAutomaticPermission('readonly', { dangerLevel: 'medium', readonly: true })).toBe('allow');
-  });
-
-  it('keeps critical tools behind a hard approval boundary even in full-auto', () => {
-    expect(decideAutomaticPermission('full-auto', { dangerLevel: 'critical' })).toBe('ask');
-  });
-
-  it('allows high tools in full-auto but asks in normal modes', () => {
-    expect(decideAutomaticPermission('full-auto', { dangerLevel: 'high' })).toBe('allow');
-    expect(decideAutomaticPermission('auto', { dangerLevel: 'high' })).toBe('ask');
-    expect(decideAutomaticPermission('ask', { dangerLevel: 'high' })).toBe('ask');
+  it('allows every declared permission in full mode', () => {
+    expect(decideAutomaticPermission('full', { dangerLevel: 'critical' })).toBe('allow');
   });
 });
 
@@ -103,9 +92,7 @@ describe('PermissionManager', () => {
   it('turns an operation above the selected access level into a one-time approval request', async () => {
     const requests: string[] = [];
     const manager = new PermissionManager((request) => {
-      requests.push(
-        `${request.mode}:${request.tool.requiredPermission}:${request.toolCall.id}`,
-      );
+      requests.push(`${request.mode}:${request.tool.requiredPermission}:${request.toolCall.id}`);
       return {
         approved: true,
         requestId: 'permission-dialog-1',
@@ -124,7 +111,7 @@ describe('PermissionManager', () => {
       toolCall: {
         id: 'call-update',
         name: 'sql_execute',
-        arguments: { sql: 'UPDATE orders SET status = \'paid\' WHERE id = 1' },
+        arguments: { sql: "UPDATE orders SET status = 'paid' WHERE id = 1" },
       },
     });
 
@@ -139,15 +126,25 @@ describe('PermissionManager', () => {
 
   it('distinguishes automatic allow from approval-provider allow', async () => {
     const automatic = await new PermissionManager().checkDetailed({
-      mode: 'full-auto',
-      tool: { name: 'execute_sql', description: '', inputSchema: { type: 'object' }, dangerLevel: 'high' },
+      mode: 'full',
+      tool: {
+        name: 'execute_sql',
+        description: '',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+      },
       toolCall: { id: 'call_auto', name: 'execute_sql', arguments: {} },
     });
     expect(automatic).toEqual({ decision: 'allow', source: 'automatic' });
 
     const approved = await new PermissionManager(() => true).checkDetailed({
-      mode: 'ask',
-      tool: { name: 'execute_sql', description: '', inputSchema: { type: 'object' }, dangerLevel: 'high' },
+      mode: 'read',
+      tool: {
+        name: 'execute_sql',
+        description: '',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+      },
       toolCall: { id: 'call_approved', name: 'execute_sql', arguments: {} },
     });
     expect(approved).toEqual({ decision: 'allow', source: 'approval-provider' });
@@ -161,8 +158,13 @@ describe('PermissionManager', () => {
       approvedBy: 'tester',
       reason: '业务确认',
     })).checkDetailed({
-      mode: 'ask',
-      tool: { name: 'execute_sql', description: '', inputSchema: { type: 'object' }, dangerLevel: 'high' },
+      mode: 'read',
+      tool: {
+        name: 'execute_sql',
+        description: '',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+      },
       toolCall: { id: 'call_approved', name: 'execute_sql', arguments: {} },
     });
 

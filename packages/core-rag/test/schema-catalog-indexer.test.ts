@@ -223,13 +223,20 @@ function ordersTable(): TableDetail {
     primaryKey: ['id'],
     columns: [
       { name: 'id', ordinal: 1, dataType: 'uuid', nullable: false, isPrimaryKey: true },
-      { name: 'customer_id', ordinal: 2, dataType: 'uuid', nullable: false },
+      {
+        name: 'customer_id',
+        ordinal: 2,
+        dataType: 'uuid',
+        nullable: false,
+        isPrimaryKey: false,
+      },
       {
         name: 'total_amount',
         ordinal: 3,
         dataType: 'numeric',
         nullable: false,
         comment: 'GMV amount',
+        isPrimaryKey: false,
       },
     ],
   };
@@ -249,9 +256,16 @@ function trafficSessionsTable(): TableDetail {
         ordinal: 2,
         dataType: 'uuid',
         nullable: true,
+        isPrimaryKey: false,
         foreignKey: { schema: 'public', table: 'orders', column: 'id' },
       },
-      { name: 'utm_source', ordinal: 3, dataType: 'text', nullable: true },
+      {
+        name: 'utm_source',
+        ordinal: 3,
+        dataType: 'text',
+        nullable: true,
+        isPrimaryKey: false,
+      },
     ],
   };
 }
@@ -265,8 +279,20 @@ function refundsTable(): TableDetail {
     primaryKey: ['id'],
     columns: [
       { name: 'id', ordinal: 1, dataType: 'uuid', nullable: false, isPrimaryKey: true },
-      { name: 'order_id', ordinal: 2, dataType: 'uuid', nullable: false },
-      { name: 'refund_amount', ordinal: 3, dataType: 'numeric', nullable: false },
+      {
+        name: 'order_id',
+        ordinal: 2,
+        dataType: 'uuid',
+        nullable: false,
+        isPrimaryKey: false,
+      },
+      {
+        name: 'refund_amount',
+        ordinal: 3,
+        dataType: 'numeric',
+        nullable: false,
+        isPrimaryKey: false,
+      },
     ],
   };
 }
@@ -278,7 +304,15 @@ function reportingOrdersTable(): TableDetail {
     type: 'view',
     comment: 'reporting order view for analyst dashboards',
     primaryKey: [],
-    columns: [{ name: 'id', ordinal: 1, dataType: 'uuid', nullable: false }],
+    columns: [
+      {
+        name: 'id',
+        ordinal: 1,
+        dataType: 'uuid',
+        nullable: false,
+        isPrimaryKey: false,
+      },
+    ],
   };
 }
 

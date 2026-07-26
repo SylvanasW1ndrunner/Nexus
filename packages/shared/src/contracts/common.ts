@@ -13,15 +13,15 @@ export type PortableScalar = string | number | boolean | null;
 
 export type PortableTaggedValue =
   | {
-      $dbagentType: 'bigint';
+      $schemanautType: 'bigint';
       value: string;
     }
   | {
-      $dbagentType: 'datetime';
+      $schemanautType: 'datetime';
       value: string;
     }
   | {
-      $dbagentType: 'binary';
+      $schemanautType: 'binary';
       encoding: 'base64';
       value: string;
     };

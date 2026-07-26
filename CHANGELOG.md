@@ -22,5 +22,6 @@ SchemaNaut 的重要变更都会记录在这里。
 
 - PostgreSQL is the first complete reference connector.
 - MCP and user Skill extension foundations are not yet exposed through every public SDK/API path.
-- Secret persistence and multi-tenant service authentication are not production-ready.
+- SchemaNaut does not provide user accounts or sign-in; the embedding host application or gateway owns identity and API access control.
+- MCP and provider secrets must be supplied through host-managed references; SchemaNaut does not provide a credential vault.
 - The public npm package has not yet been published.

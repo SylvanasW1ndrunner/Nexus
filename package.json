@@ -2,7 +2,7 @@
   "name": "schemanaut",
   "version": "0.1.0",
   "private": true,
-  "description": "SchemaNaut — an embeddable AI database agent runtime for natural-language SQL, governance and operations.",
+  "description": "SchemaNaut — an embeddable AI SQL agent runtime with durable sessions, Skills, MCP and safe database execution.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -10,7 +10,7 @@
   },
   "packageManager": "pnpm@9.15.4",
   "engines": {
-    "node": ">=22.5.0",
+    "node": ">=22.13.0",
     "pnpm": ">=9.0.0"
   },
   "scripts": {
@@ -37,7 +37,8 @@
     "test:ai-sql:context-performance": "pnpm build:server && node --expose-gc scripts/run-context-compaction-benchmark.mjs",
     "test:ai-sql:live": "pnpm build:server && node scripts/run-postgres-tests.mjs --live-llm",
     "test:ai-sql:context-live": "pnpm build:server && node scripts/run-context-compaction-live-test.mjs",
-    "test:npm-package:functional": "pnpm package:npm && node scripts/verify-npm-package.mjs",
+    "test:release-gates": "node --test scripts/tests/release-gates.test.mjs scripts/tests/package-provenance.test.mjs",
+    "test:npm-package:functional": "pnpm test:release-gates && pnpm package:npm && node scripts/verify-npm-package.mjs",
     "test:functional:live": "pnpm build:server && node scripts/run-postgres-tests.mjs --live-llm",
     "test:performance:live": "pnpm build:server && node scripts/run-llm-live-performance.mjs",
     "package:npm": "node scripts/clean-public-build.mjs && tsc -b packages/shared packages/core-usage packages/core-llm packages/core-resource packages/core-db packages/core-rag packages/core-skills packages/core-agent packages/core-tools packages/sdk apps/server && node scripts/package-npm.mjs",

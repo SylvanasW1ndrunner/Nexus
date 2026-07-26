@@ -22,7 +22,11 @@ describe('AgentCheckpointStore', () => {
       toolExecutions: [],
       now: '2026-06-18T01:00:00.000Z',
     });
-    session.messages.push({ role: 'assistant', content: 'running tools', createdAt: '2026-06-18T01:00:01.000Z' });
+    session.messages.push({
+      role: 'assistant',
+      content: 'running tools',
+      createdAt: '2026-06-18T01:00:01.000Z',
+    });
     await store.save({
       session,
       iteration: 1,
@@ -102,7 +106,11 @@ describe('AgentCheckpointStore', () => {
     });
 
     await expect(
-      store.markInterrupted('session_interrupted', '应用重启前任务中断', '2026-06-18T01:10:00.000Z'),
+      store.markInterrupted(
+        'session_interrupted',
+        '应用重启前任务中断',
+        '2026-06-18T01:10:00.000Z',
+      ),
     ).resolves.toBe(1);
     await expect(store.listBySession('session_interrupted')).resolves.toMatchObject([
       { iteration: 1, status: 'failed', errorMessage: '应用重启前任务中断' },
@@ -173,7 +181,9 @@ describe('AgentCheckpointStore', () => {
     expect(serialized).not.toContain('localpass');
     expect(serialized).not.toContain('db-pass');
     expect(serialized).toContain('[REDACTED]');
-    expect(serialized).toContain('"tokenUsage":{"promptTokens":0,"completionTokens":0,"totalTokens":0}');
+    expect(serialized).toContain(
+      '"tokenUsage":{"promptTokens":0,"completionTokens":0,"totalTokens":0}',
+    );
   });
 
   it('redacts legacy raw checkpoint files when reading them', async () => {
@@ -216,8 +226,7 @@ function testSession(id: string): AgentSession {
   return {
     id,
     title: '测试任务',
-    mode: 'readonly',
-    strategy: 'react',
+    mode: 'read',
     messages: [{ role: 'user', content: '分析订单', createdAt: '2026-06-18T01:00:00.000Z' }],
     tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     aborted: false,

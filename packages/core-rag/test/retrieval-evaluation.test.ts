@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TableDetail } from '@dbagent/shared';
 import { evaluateSchemaRagRetrieval, SchemaRagEngine } from '../src/index.js';
+import { column } from './schema-fixtures.js';
 
 describe('evaluateSchemaRagRetrieval', () => {
   it('measures user-facing retrieval quality with required and optional schema hits', () => {
@@ -149,22 +150,4 @@ function fixtureTables(): TableDetail[] {
       columns: [column('sku', 1, 'text', false, '商品编码', true), column('name', 2, 'text', false, '商品名称')],
     },
   ];
-}
-
-function column(
-  name: string,
-  ordinal: number,
-  dataType: string,
-  nullable: boolean,
-  comment?: string,
-  isPrimaryKey = false,
-) {
-  return {
-    name,
-    ordinal,
-    dataType,
-    nullable,
-    comment,
-    isPrimaryKey,
-  };
 }

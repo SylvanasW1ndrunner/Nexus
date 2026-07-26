@@ -1,261 +1,204 @@
-import type { SkillDefinition, SkillSource } from './types.js';
+import { parseDocument } from 'yaml';
+import type { SkillDescriptor, SkillDocument, SkillFrontmatter, SkillScope } from './types.js';
 
-type RawSkill = Record<string, unknown>;
+const MAX_NAME_LENGTH = 64;
+const MAX_DESCRIPTION_LENGTH = 1_024;
+const MAX_COMPATIBILITY_LENGTH = 500;
+const NAME_PATTERN = /^(?!-)(?!.*--)[a-z0-9-]+(?<!-)$/;
+const STANDARD_FIELDS = new Set([
+  'name',
+  'description',
+  'license',
+  'compatibility',
+  'metadata',
+  'allowed-tools',
+]);
 
-export function parseSkillDefinition(
-  content: string,
-  source: SkillSource,
-  sourcePath?: string,
-  bundleRoot?: string,
-): SkillDefinition {
-  return normalizeSkill(parseStructuredSkill(content), source, sourcePath, bundleRoot);
+export type SkillParseContext = {
+  scope: SkillScope;
+  sourceId: string;
+  sourcePath: string;
+  bundleRoot: string;
+  sourceOrder: number;
+  expectedName?: string;
+  modifiedAtMs?: number;
+};
+
+export type ExtractedSkillParts = {
+  frontmatter: string;
+  body: string;
+};
+
+export function parseSkillMetadata(content: string, context: SkillParseContext): SkillDescriptor {
+  const { frontmatter } = extractSkillParts(content, false);
+  return toDescriptor(parseFrontmatter(frontmatter), context);
 }
 
-export function parseSkillDocument(
+export function parseSkillDocument(content: string, context: SkillParseContext): SkillDocument {
+  const { frontmatter, body } = extractSkillParts(content, true);
+  return {
+    ...toDescriptor(parseFrontmatter(frontmatter), context),
+    instructions: body.trim(),
+  };
+}
+
+export function extractSkillParts(
   content: string,
-  source: SkillSource,
-  sourcePath?: string,
-  bundleRoot?: string,
-): SkillDefinition {
-  const normalized = content.replace(/\r\n/g, '\n');
-  const match = normalized.match(/^---\n([\s\S]*?)\n---(?:\n([\s\S]*))?$/);
+  requireCompleteDocument = true,
+): ExtractedSkillParts {
+  const normalized = content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const match = normalized.match(/^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/);
   if (!match) {
-    throw new Error('SKILL.md must start with YAML front matter delimited by "---".');
+    if (!normalized.startsWith('---\n')) {
+      throw new Error('SKILL.md must start with YAML frontmatter delimited by "---".');
+    }
+    throw new Error('SKILL.md YAML frontmatter is missing its closing "---" delimiter.');
   }
-  const raw = parseStructuredSkill(match[1] ?? '');
-  const instructions = (match[2] ?? '').trim();
-  if (instructions && raw.system_addition === undefined && raw.systemAddition === undefined) {
-    raw.system_addition = instructions;
-  }
-  return normalizeSkill(raw, source, sourcePath, bundleRoot);
+
+  return {
+    frontmatter: match[1] ?? '',
+    body: requireCompleteDocument ? normalized.slice(match[0].length) : '',
+  };
 }
 
-export function parseStructuredSkill(content: string): RawSkill {
-  const trimmed = content.trim();
-  if (!trimmed) throw new Error('Skill file is empty.');
-  if (trimmed.startsWith('{')) return JSON.parse(trimmed) as RawSkill;
-  return parseYamlSubset(trimmed);
-}
+function parseFrontmatter(source: string): SkillFrontmatter {
+  const document = parseDocument(source, {
+    schema: 'core',
+    strict: true,
+    uniqueKeys: true,
+    prettyErrors: true,
+  });
+  if (document.errors.length > 0) {
+    throw new Error(`Invalid SKILL.md YAML frontmatter: ${document.errors[0]!.message}`);
+  }
 
-function normalizeSkill(
-  raw: RawSkill,
-  source: SkillSource,
-  sourcePath?: string,
-  bundleRoot?: string,
-): SkillDefinition {
-  const name = requiredName(raw.name);
-  const description = requiredString(raw.description, 'description');
-  const title = optionalString(raw.title);
-  const version = optionalString(raw.version);
-  const author = optionalString(raw.author);
-  const systemAddition = optionalString(raw.system_addition ?? raw.systemAddition);
-  const executionLimits = normalizeExecutionLimits(
-    raw.execution_limits ?? raw.executionLimits,
-  );
+  const parsed: unknown = document.toJS({ maxAliasCount: 0 });
+  if (!isRecord(parsed)) {
+    throw new Error('SKILL.md YAML frontmatter must be a mapping.');
+  }
+
+  const name = requiredString(parsed.name, 'name');
+  validateName(name);
+  const description = requiredString(parsed.description, 'description');
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    throw new Error(`Skill "description" must not exceed ${MAX_DESCRIPTION_LENGTH} characters.`);
+  }
+
+  const license = optionalString(parsed.license, 'license');
+  const compatibility = optionalString(parsed.compatibility, 'compatibility');
+  if (compatibility && compatibility.length > MAX_COMPATIBILITY_LENGTH) {
+    throw new Error(
+      `Skill "compatibility" must not exceed ${MAX_COMPATIBILITY_LENGTH} characters.`,
+    );
+  }
+
+  const metadata = parseMetadata(parsed.metadata);
+  const preapprovedTools = parsePreapprovedTools(parsed['allowed-tools']);
+  const extensions: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!STANDARD_FIELDS.has(key)) extensions[key] = value;
+  }
+
   return {
     name,
-    ...(title === undefined ? {} : { title }),
     description,
-    ...(version === undefined ? {} : { version }),
-    ...(author === undefined ? {} : { author }),
-    tags: stringArray(raw.tags, 'tags'),
-    ...(systemAddition === undefined ? {} : { systemAddition }),
-    allowedTools: unique(stringArray(raw.allowed_tools ?? raw.allowedTools, 'allowed_tools')),
-    ...(raw.recommended_tools === undefined && raw.recommendedTools === undefined
-      ? {}
-      : {
-          recommendedTools: unique(
-            stringArray(
-              raw.recommended_tools ?? raw.recommendedTools,
-              'recommended_tools',
-            ),
-          ),
-        }),
-    defaults: normalizeDefaults(raw.defaults),
-    steps: stringArray(raw.steps, 'steps'),
-    ...(raw.stop_conditions === undefined && raw.stopConditions === undefined
-      ? {}
-      : {
-          stopConditions: stringArray(
-            raw.stop_conditions ?? raw.stopConditions,
-            'stop_conditions',
-          ),
-        }),
-    ...(executionLimits === undefined ? {} : { executionLimits }),
-    outputFormat: normalizeOutputFormat(raw.output_format ?? raw.outputFormat),
-    naturalLanguageKeywords: unique(
-      stringArray(
-        raw.natural_language_keywords ?? raw.naturalLanguageKeywords,
-        'natural_language_keywords',
-      ),
-    ),
-    autoInjectWhen: unique(
-      stringArray(raw.auto_inject_when ?? raw.autoInjectWhen, 'auto_inject_when'),
-    ),
-    source,
-    ...(sourcePath ? { sourcePath } : {}),
-    ...(bundleRoot ? { bundleRoot } : {}),
+    ...(license === undefined ? {} : { license }),
+    ...(compatibility === undefined ? {} : { compatibility }),
+    metadata: Object.freeze(metadata),
+    preapprovedTools: Object.freeze(preapprovedTools),
+    extensions: Object.freeze(extensions),
   };
 }
 
-function parseYamlSubset(content: string): RawSkill {
-  const root: RawSkill = {};
-  let currentKey: string | undefined;
-  let blockKey: string | undefined;
-  let blockValue: string[] = [];
-
-  const flushBlock = () => {
-    if (!blockKey) return;
-    while (blockValue.at(-1) === '') blockValue.pop();
-    root[blockKey] = blockValue.join('\n');
-    blockKey = undefined;
-    blockValue = [];
+function toDescriptor(frontmatter: SkillFrontmatter, context: SkillParseContext): SkillDescriptor {
+  if (context.expectedName && frontmatter.name !== context.expectedName) {
+    throw new Error(
+      `Skill name "${frontmatter.name}" must match its parent directory "${context.expectedName}".`,
+    );
+  }
+  return {
+    ...frontmatter,
+    scope: context.scope,
+    sourceId: context.sourceId,
+    sourcePath: context.sourcePath,
+    bundleRoot: context.bundleRoot,
+    sourceOrder: context.sourceOrder,
+    ...(context.modifiedAtMs === undefined ? {} : { modifiedAtMs: context.modifiedAtMs }),
   };
+}
 
-  for (const rawLine of content.replace(/\r\n/g, '\n').split('\n')) {
-    const line = stripComment(rawLine);
-    if (!line.trim()) {
-      if (blockKey) blockValue.push('');
-      continue;
-    }
-    if (blockKey && /^\s+/.test(rawLine)) {
-      blockValue.push(rawLine.replace(/^\s{2}/, ''));
-      continue;
-    }
-    flushBlock();
-
-    const keyValue = line.match(/^([A-Za-z0-9_]+):(?:\s*(.*))?$/);
-    if (keyValue?.[1]) {
-      currentKey = keyValue[1];
-      const value = keyValue[2] ?? '';
-      if (value === '|') {
-        blockKey = currentKey;
-      } else if (value === '') {
-        root[currentKey] = [];
-      } else {
-        root[currentKey] = parseScalarOrInlineArray(value);
-      }
-      continue;
-    }
-
-    const item = line.match(/^\s*-\s*(.*)$/);
-    if (item && currentKey) {
-      const list = Array.isArray(root[currentKey]) ? (root[currentKey] as unknown[]) : [];
-      list.push(parseScalarOrInlineArray(item[1] ?? ''));
-      root[currentKey] = list;
-      continue;
-    }
-    throw new Error(`Unsupported skill YAML line: ${rawLine}`);
+function validateName(name: string): void {
+  if (name.length > MAX_NAME_LENGTH) {
+    throw new Error(`Skill "name" must not exceed ${MAX_NAME_LENGTH} characters.`);
   }
-  flushBlock();
-  return root;
-}
-
-function parseScalarOrInlineArray(value: string): unknown {
-  const trimmed = unquote(value.trim());
-  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-    const inner = trimmed.slice(1, -1).trim();
-    return inner ? inner.split(',').map((item) => unquote(item.trim())) : [];
+  if (!NAME_PATTERN.test(name)) {
+    throw new Error(
+      'Skill "name" must use lowercase letters, numbers, and single hyphens; it cannot start or end with a hyphen.',
+    );
   }
-  if (trimmed === 'true') return true;
-  if (trimmed === 'false') return false;
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-  return trimmed;
 }
 
-function stripComment(line: string): string {
-  let quote: string | undefined;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    if ((character === '"' || character === "'") && line[index - 1] !== '\\') {
-      quote = quote === character ? undefined : quote ?? character;
-    }
-    if (character === '#' && !quote) return line.slice(0, index).trimEnd();
+function parseMetadata(value: unknown): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  if (!isRecord(value)) {
+    throw new Error('Skill "metadata" must be a mapping of string keys to string values.');
   }
-  return line;
-}
-
-function requiredName(value: unknown): string {
-  const name = requiredString(value, 'name');
-  if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(name)) {
-    throw new Error('Skill name must start with a letter or underscore and contain only letters, numbers, underscores, or hyphens.');
-  }
-  return name;
-}
-
-function requiredString(value: unknown, key: string): string {
-  const normalized = optionalString(value);
-  if (!normalized) throw new Error(`Skill "${key}" is required.`);
-  return normalized;
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function stringArray(value: unknown, key: string): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error(`Skill "${key}" must be a list.`);
-  return value.map((item) => requiredString(item, key));
-}
-
-function normalizeDefaults(value: unknown): Record<string, string | number | boolean> {
-  if (value === undefined || (Array.isArray(value) && value.length === 0)) return {};
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Skill "defaults" must be an object.');
-  }
-  const output: Record<string, string | number | boolean> = {};
+  const output: Record<string, string> = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry === 'string' || typeof entry === 'number' || typeof entry === 'boolean') {
-      output[key] = entry;
+    if (typeof entry !== 'string') {
+      throw new Error(`Skill "metadata.${key}" must be a string.`);
     }
+    output[key] = entry;
   }
   return output;
 }
 
-function normalizeExecutionLimits(
-  value: unknown,
-): SkillDefinition['executionLimits'] {
-  if (value === undefined || (Array.isArray(value) && value.length === 0)) return undefined;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Skill "execution_limits" must be an object.');
+function parsePreapprovedTools(value: unknown): string[] {
+  if (value === undefined || value === null || value === '') return [];
+  if (typeof value !== 'string') {
+    throw new Error(
+      'Skill "allowed-tools" must be a space-separated string as defined by Agent Skills.',
+    );
   }
-  const source = value as Record<string, unknown>;
-  const output: NonNullable<SkillDefinition['executionLimits']> = {};
-  copyPositiveInteger(source, output, 'max_iterations', 'maxIterations');
-  copyPositiveInteger(source, output, 'maxIterations', 'maxIterations');
-  copyPositiveInteger(source, output, 'max_sql_attempts', 'maxSqlAttempts');
-  copyPositiveInteger(source, output, 'maxSqlAttempts', 'maxSqlAttempts');
-  return output;
-}
 
-function copyPositiveInteger(
-  source: Record<string, unknown>,
-  output: NonNullable<SkillDefinition['executionLimits']>,
-  sourceKey: string,
-  targetKey: keyof NonNullable<SkillDefinition['executionLimits']>,
-): void {
-  const value = source[sourceKey];
-  if (value === undefined) return;
-  if (!Number.isSafeInteger(value) || (value as number) < 1) {
-    throw new Error(`Skill "execution_limits.${sourceKey}" must be a positive integer.`);
+  const output: string[] = [];
+  let token = '';
+  let parenthesisDepth = 0;
+  for (const character of value.trim()) {
+    if (/\s/.test(character) && parenthesisDepth === 0) {
+      if (token) output.push(token);
+      token = '';
+      continue;
+    }
+    if (character === '(') parenthesisDepth += 1;
+    if (character === ')') {
+      parenthesisDepth -= 1;
+      if (parenthesisDepth < 0) {
+        throw new Error('Skill "allowed-tools" contains unbalanced parentheses.');
+      }
+    }
+    token += character;
   }
-  output[targetKey] = value as number;
-}
-
-function normalizeOutputFormat(value: unknown): SkillDefinition['outputFormat'] {
-  if (value === undefined) return 'markdown';
-  if (value === 'markdown' || value === 'json' || value === 'text') return value;
-  throw new Error('Skill output_format must be markdown, json, or text.');
-}
-
-function unquote(value: string): string {
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1);
+  if (parenthesisDepth !== 0) {
+    throw new Error('Skill "allowed-tools" contains unbalanced parentheses.');
   }
-  return value;
+  if (token) output.push(token);
+  return [...new Set(output)];
 }
 
-function unique(values: string[]): string[] {
-  return [...new Set(values)];
+function requiredString(value: unknown, field: string): string {
+  const result = optionalString(value, field);
+  if (!result) throw new Error(`Skill "${field}" is required.`);
+  return result;
+}
+
+function optionalString(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw new Error(`Skill "${field}" must be a string.`);
+  const result = value.trim();
+  return result || undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

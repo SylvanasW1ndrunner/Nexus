@@ -6,9 +6,12 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "schemanaut-server": "dist/cli.js"
+    "schemanaut": "dist/cli.js"
   },
-  "files": ["dist", "package.json"],
+  "files": [
+    "dist",
+    "package.json"
+  ],
   "scripts": {
     "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

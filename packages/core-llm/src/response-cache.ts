@@ -1,37 +1,60 @@
 import { createHash } from 'node:crypto';
+import { estimateRetainedValueBytes } from './retained-size.js';
 import type { LlmChatRequest, LlmChatResponse } from './types.js';
 
 type CacheEntry = {
   value: LlmChatResponse;
   expiresAt: number;
   accessedAt: number;
+  byteSize: number;
 };
 
 export type LlmResponseCacheOptions = {
   maxEntries?: number;
+  maxEntryBytes?: number;
+  maxTotalBytes?: number;
   defaultTtlMs?: number;
   now?: () => number;
 };
 
+const DEFAULT_MAX_ENTRY_BYTES = 8 * 1_024 * 1_024;
+const DEFAULT_MAX_TOTAL_BYTES = 64 * 1_024 * 1_024;
+
 export class LlmResponseCache {
   private readonly entries = new Map<string, CacheEntry>();
   private readonly maxEntries: number;
+  private readonly maxEntryBytes: number;
+  private readonly maxTotalBytes: number;
   private readonly defaultTtlMs: number;
   private readonly now: () => number;
+  private totalBytes = 0;
 
   constructor(options: LlmResponseCacheOptions = {}) {
     this.maxEntries = positiveInteger(options.maxEntries ?? 500, 'maxEntries');
+    this.maxEntryBytes = positiveInteger(
+      options.maxEntryBytes ?? DEFAULT_MAX_ENTRY_BYTES,
+      'maxEntryBytes',
+    );
+    this.maxTotalBytes = positiveInteger(
+      options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES,
+      'maxTotalBytes',
+    );
     this.defaultTtlMs = positiveInteger(options.defaultTtlMs ?? 300_000, 'defaultTtlMs');
     this.now = options.now ?? Date.now;
   }
 
-  get(tenantId: string, request: LlmChatRequest, namespace = 'chat'): LlmChatResponse | undefined {
-    const key = this.key(tenantId, request, namespace);
+  get(
+    tenantId: string,
+    providerId: string,
+    request: LlmChatRequest,
+    namespace = 'chat',
+  ): LlmChatResponse | undefined {
+    const key = this.key(tenantId, providerId, request, namespace);
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     const now = this.now();
     if (entry.expiresAt <= now) {
-      this.entries.delete(key);
+      this.remove(key);
       return undefined;
     }
     entry.accessedAt = now;
@@ -40,16 +63,31 @@ export class LlmResponseCache {
 
   set(
     tenantId: string,
+    providerId: string,
     request: LlmChatRequest,
     response: LlmChatResponse,
     options: { namespace?: string; ttlMs?: number } = {},
   ): void {
     const now = this.now();
     const ttlMs = positiveInteger(options.ttlMs ?? this.defaultTtlMs, 'ttlMs');
-    const key = this.key(tenantId, request, options.namespace ?? 'chat');
-    this.entries.set(key, { value: cloneResponse(response), expiresAt: now + ttlMs, accessedAt: now });
+    const key = this.key(tenantId, providerId, request, options.namespace ?? 'chat');
+    const byteSize = estimateRetainedValueBytes(response, this.maxEntryBytes);
+    if (byteSize > this.maxEntryBytes) {
+      this.remove(key);
+      return;
+    }
+    this.remove(key);
+    this.entries.set(key, {
+      value: cloneResponse(response),
+      expiresAt: now + ttlMs,
+      accessedAt: now,
+      byteSize,
+    });
+    this.totalBytes += byteSize;
     this.evictExpired(now);
-    while (this.entries.size > this.maxEntries) this.evictLeastRecentlyUsed();
+    while (this.entries.size > this.maxEntries || this.totalBytes > this.maxTotalBytes) {
+      this.evictLeastRecentlyUsed();
+    }
   }
 
   deleteTenant(tenantId: string): number {
@@ -57,7 +95,7 @@ export class LlmResponseCache {
     let removed = 0;
     for (const key of this.entries.keys()) {
       if (key.startsWith(prefix)) {
-        this.entries.delete(key);
+        this.remove(key);
         removed += 1;
       }
     }
@@ -66,6 +104,7 @@ export class LlmResponseCache {
 
   clear(): void {
     this.entries.clear();
+    this.totalBytes = 0;
   }
 
   size(): number {
@@ -73,8 +112,14 @@ export class LlmResponseCache {
     return this.entries.size;
   }
 
-  private key(tenantId: string, request: LlmChatRequest, namespace: string): string {
+  private key(
+    tenantId: string,
+    providerId: string,
+    request: LlmChatRequest,
+    namespace: string,
+  ): string {
     if (!tenantId.trim()) throw new Error('tenantId is required for cache isolation.');
+    if (!providerId.trim()) throw new Error('providerId is required for cache isolation.');
     const cacheable = {
       namespace,
       model: request.model,
@@ -87,12 +132,12 @@ export class LlmResponseCache {
       stop: request.stop,
       seed: request.seed,
     };
-    return `${hash(tenantId)}:${hash(stableStringify(cacheable))}`;
+    return `${hash(tenantId)}:${hash(providerId)}:${hash(stableStringify(cacheable))}`;
   }
 
   private evictExpired(now: number): void {
     for (const [key, entry] of this.entries) {
-      if (entry.expiresAt <= now) this.entries.delete(key);
+      if (entry.expiresAt <= now) this.remove(key);
     }
   }
 
@@ -105,16 +150,20 @@ export class LlmResponseCache {
         oldestKey = key;
       }
     }
-    if (oldestKey) this.entries.delete(oldestKey);
+    if (oldestKey) this.remove(oldestKey);
+  }
+
+  private remove(key: string): boolean {
+    const entry = this.entries.get(key);
+    if (!entry) return false;
+    this.entries.delete(key);
+    this.totalBytes -= entry.byteSize;
+    return true;
   }
 }
 
 function cloneResponse(response: LlmChatResponse): LlmChatResponse {
-  return {
-    ...response,
-    toolCalls: response.toolCalls.map((call) => ({ ...call, arguments: { ...call.arguments } })),
-    ...(response.usage === undefined ? {} : { usage: { ...response.usage } }),
-  };
+  return structuredClone(response);
 }
 
 function stableStringify(value: unknown): string {
@@ -135,6 +184,7 @@ function hash(value: string): string {
 }
 
 function positiveInteger(value: number, name: string): number {
-  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer.`);
+  if (!Number.isInteger(value) || value <= 0)
+    throw new Error(`${name} must be a positive integer.`);
   return value;
 }

@@ -7,6 +7,10 @@ export function createAgentSession(input: {
   mode: AgentSession['mode'];
   userId?: string;
   knowledgeSnapshot?: AgentSession['knowledgeSnapshot'];
+  project?: AgentSession['project'];
+  activeSkills?: AgentSession['activeSkills'];
+  sessionSkills?: AgentSession['sessionSkills'];
+  subagentDepth?: number;
   now: () => string;
 }): AgentSession {
   return {
@@ -14,12 +18,19 @@ export function createAgentSession(input: {
     title: input.title,
     ...(input.userId === undefined ? {} : { userId: input.userId }),
     mode: input.mode,
-    strategy: 'react',
     messages: [],
     tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    ...(input.project === undefined ? {} : { project: structuredClone(input.project) }),
+    ...(input.activeSkills === undefined
+      ? {}
+      : { activeSkills: structuredClone(input.activeSkills) }),
+    ...(input.sessionSkills === undefined
+      ? {}
+      : { sessionSkills: structuredClone(input.sessionSkills) }),
     ...(input.knowledgeSnapshot === undefined
       ? {}
       : { knowledgeSnapshot: structuredClone(input.knowledgeSnapshot) }),
+    ...(input.subagentDepth === undefined ? {} : { subagentDepth: input.subagentDepth }),
     aborted: false,
   };
 }

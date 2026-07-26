@@ -54,15 +54,15 @@
 
 每个资源至少包含：
 
-| 字段组 | 内容 |
-|---|---|
-| 身份 | 稳定内部 ID、资源类型、来源原生 ID |
-| 名称 | 规范名称、展示名称、别名 |
-| 范围 | 租户、组织、项目、环境、区域 |
-| 技术 | 引擎或技术标识、版本 |
-| 描述 | 标签、可传输扩展属性 |
-| 版本 | 版本号、首次发现、最近更新、删除时间 |
-| 来源 | 来源类型、来源 ID、连接引用、观测时间和有效期 |
+| 字段组 | 内容                                          |
+| ------ | --------------------------------------------- |
+| 身份   | 稳定内部 ID、资源类型、来源原生 ID            |
+| 名称   | 规范名称、展示名称、别名                      |
+| 范围   | 租户、组织、项目、环境、区域                  |
+| 技术   | 引擎或技术标识、版本                          |
+| 描述   | 标签、可传输扩展属性                          |
+| 版本   | 版本号、首次发现、最近更新、删除时间          |
+| 来源   | 来源类型、来源 ID、连接引用、观测时间和有效期 |
 
 身份规则：
 
@@ -106,15 +106,15 @@ flowchart TD
 
 当前关系：
 
-| 关系 | 含义 |
-|---|---|
-| `contains` | 层级包含 |
-| `depends_on` | 数据或执行依赖 |
-| `runs_on` | 任务运行位置 |
-| `replicates_to` | 复制方向 |
-| `accessed_via` | 访问入口 |
-| `owned_by` | 资源所有者 |
-| `member_of` | 集合或角色成员关系 |
+| 关系            | 含义               |
+| --------------- | ------------------ |
+| `contains`      | 层级包含           |
+| `depends_on`    | 数据或执行依赖     |
+| `runs_on`       | 任务运行位置       |
+| `replicates_to` | 复制方向           |
+| `accessed_via`  | 访问入口           |
+| `owned_by`      | 资源所有者         |
+| `member_of`     | 集合或角色成员关系 |
 
 关系规则：
 
@@ -260,19 +260,19 @@ flowchart LR
 
 当前工程归属：
 
-| 组件 | 路径 |
-|---|---|
-| 资源公共合同 | [`resource.ts`](../../packages/shared/src/contracts/resource.ts) |
-| 资源合同校验 | [`validation.ts`](../../packages/shared/src/contracts/validation.ts) |
-| 资源注册、图查询与状态 | [`resource-registry.ts`](../../packages/core-resource/src/resource-registry.ts) |
-| Snapshot Store | [`resource-snapshot-store.ts`](../../packages/core-resource/src/resource-snapshot-store.ts) |
-| 包公共出口 | [`index.ts`](../../packages/core-resource/src/index.ts) |
-| 数据库发现适配 | [`database-access-runtime.ts`](../../packages/core-db/src/database-access-runtime.ts) |
-| SDK 入口 | [`runtime.ts`](../../packages/sdk/src/runtime.ts) |
-| REST API | [`server.ts`](../../apps/server/src/server.ts) |
-| 资源功能与恢复测试 | [`packages/core-resource/test`](../../packages/core-resource/test/) |
-| SDK/API 集成测试 | [`runtime.test.ts`](../../packages/sdk/test/runtime.test.ts)、[`server.test.ts`](../../apps/server/test/server.test.ts) |
-| 性能基准 | [`run-resource-state-benchmark.mjs`](../../scripts/run-resource-state-benchmark.mjs) |
+| 组件                   | 路径                                                                                                                    |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 资源公共合同           | [`resource.ts`](../../packages/shared/src/contracts/resource.ts)                                                        |
+| 资源合同校验           | [`validation.ts`](../../packages/shared/src/contracts/validation.ts)                                                    |
+| 资源注册、图查询与状态 | [`resource-registry.ts`](../../packages/core-resource/src/resource-registry.ts)                                         |
+| Snapshot Store         | [`resource-snapshot-store.ts`](../../packages/core-resource/src/resource-snapshot-store.ts)                             |
+| 包公共出口             | [`index.ts`](../../packages/core-resource/src/index.ts)                                                                 |
+| 数据库发现适配         | [`database-access-runtime.ts`](../../packages/core-db/src/database-access-runtime.ts)                                   |
+| SDK 入口               | [`runtime.ts`](../../packages/sdk/src/runtime.ts)                                                                       |
+| REST API               | [`server.ts`](../../apps/server/src/server.ts)                                                                          |
+| 资源功能与恢复测试     | [`packages/core-resource/test`](../../packages/core-resource/test/)                                                     |
+| SDK/API 集成测试       | [`runtime.test.ts`](../../packages/sdk/test/runtime.test.ts)、[`server.test.ts`](../../apps/server/test/server.test.ts) |
+| 性能基准               | [`run-resource-state-benchmark.mjs`](../../scripts/run-resource-state-benchmark.mjs)                                    |
 
 `core-resource` 不依赖 `core-db`、`core-llm`、Agent、MCP 或 WebUI。数据库接入只向资源运行时提交标准资源、关系和观测。
 
@@ -300,15 +300,15 @@ const state = runtime.resources.state(page.items[0]!.id);
 
 ### 10.2 REST API
 
-| 方法与路径 | 用途 |
-|---|---|
-| `GET /v1/resources` | 范围过滤和分页查询 |
-| `GET /v1/resources/:id` | 查询单个资源 |
-| `GET /v1/resources/:id/relations` | 查询直接关系 |
-| `POST /v1/resources/traverse` | 受限图遍历 |
-| `GET /v1/resources/:id/state` | 查询派生当前状态 |
-| `GET /v1/resources/:id/observations` | 查询观测历史 |
-| `GET /v1/resource-events` | 查询变化事件 |
+| 方法与路径                           | 用途               |
+| ------------------------------------ | ------------------ |
+| `GET /v1/resources`                  | 范围过滤和分页查询 |
+| `GET /v1/resources/:id`              | 查询单个资源       |
+| `GET /v1/resources/:id/relations`    | 查询直接关系       |
+| `POST /v1/resources/traverse`        | 受限图遍历         |
+| `GET /v1/resources/:id/state`        | 查询派生当前状态   |
+| `GET /v1/resources/:id/observations` | 查询观测历史       |
+| `GET /v1/resource-events`            | 查询变化事件       |
 
 数据库专用发现入口继续由数据库接入模块提供；资源读取使用上述通用入口。
 
@@ -338,19 +338,19 @@ const state = runtime.resources.state(page.items[0]!.id);
 
 基准使用确定性内存数据，不包含外部数据库、磁盘或网络延迟。
 
-| 指标 | 数据规模 | 目标 | 本地实测 |
-|---|---:|---:|---:|
-| 资源 ID 查询 P95 | 100,000 资源，2,000 次查询 | ≤ 10 ms | 0.0108 ms |
-| 单跳关系查询 P95 | 100,000 关系，2,000 次查询 | ≤ 50 ms | 0.0227 ms |
-| 两跳受限遍历 P95 | 100,000 关系，1,000 次查询 | ≤ 100 ms | 0.0553 ms |
-| 范围与类型组合查询 P95 | 100,000 资源，1,000 次查询 | ≤ 50 ms | 0.8660 ms |
-| 单资源增量更新 P95 | 10,000 次更新 | ≤ 5 ms | 0.0721 ms |
-| 状态派生 P95 | 100,000 条有效观测 | ≤ 10 ms | 0.0085 ms |
-| 重复观测有界保留 | 1,000,000 次同资源观测 | 不超过配置上限 | 保留 32/32 |
-| 100,000 资源 Snapshot 恢复 | 完整资源与关系 | ≤ 5 s | 3.368 s |
-| 事件保留 | 超过配置上限 | 内存数量不增长 | 保留 64/64 |
+| 指标                       |                   数据规模 |       验收阈值 |
+| -------------------------- | -------------------------: | -------------: |
+| 资源 ID 查询 P95           | 100,000 资源，2,000 次查询 |        ≤ 10 ms |
+| 单跳关系查询 P95           | 100,000 关系，2,000 次查询 |        ≤ 50 ms |
+| 两跳受限遍历 P95           | 100,000 关系，1,000 次查询 |       ≤ 100 ms |
+| 范围与类型组合查询 P95     | 100,000 资源，1,000 次查询 |        ≤ 50 ms |
+| 单资源增量更新 P95         |              10,000 次更新 |         ≤ 5 ms |
+| 状态派生 P95               |         100,000 条有效观测 |        ≤ 10 ms |
+| 重复观测有界保留           |     1,000,000 次同资源观测 | 不超过配置上限 |
+| 100,000 资源 Snapshot 恢复 |             完整资源与关系 |          ≤ 5 s |
+| 事件保留                   |               超过配置上限 | 内存数量不增长 |
 
-本地实测环境为 Node.js 24.14.0、Windows 10、Intel i9-13900HX；结果见 [`performance.json`](../../reports/resource-state/performance.json)。报告包含数据规模、环境、阈值、实际值和逐项结论。
+[`performance.json`](../../reports/resource-state/performance.json) 是 `generatedAt`、运行环境、数据规模、实测值、阈值和逐项结论的唯一事实来源；文档不复制会随机器与候选源码变化的历史数值。
 
 ## 13. 实际场景
 

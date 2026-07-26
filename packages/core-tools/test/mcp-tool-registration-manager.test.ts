@@ -89,4 +89,35 @@ describe('McpToolRegistrationManager', () => {
     expect(registry.llmTools().map((tool) => tool.name)).toEqual(['query_database']);
     expect(manager.listServerTools('broken')).toEqual([]);
   });
+
+  it('rolls back only tools from the failed MCP registration when ToolRegistry reports a collision', () => {
+    const registry = new ToolRegistry();
+    const manager = new McpToolRegistrationManager(registry);
+    registry.register(
+      {
+        name: 'broken__second',
+        description: 'Existing unrelated tool',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => ({ source: 'existing' }),
+    );
+
+    expect(() =>
+      manager.registerServerTools({
+        serverId: 'broken',
+        source: 'user-mcp',
+        tools: [
+          { name: 'first', inputSchema: { type: 'object' } },
+          { name: 'second', inputSchema: { type: 'object' } },
+        ],
+        callTool: () => ({ ok: true }),
+      }),
+    ).toThrow('Tool already registered: broken__second');
+
+    expect(registry.has('broken__first')).toBe(false);
+    expect(registry.has('broken__second')).toBe(true);
+    expect(manager.listServerTools('broken')).toEqual([]);
+  });
 });

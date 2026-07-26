@@ -40,4 +40,5 @@ describe('ToolRegistry', () => {
     expect(registry.unregister('missing')).toBe(false);
     expect(registry.llmTools().map((tool) => tool.name)).toEqual(['query_database']);
   });
+
 });

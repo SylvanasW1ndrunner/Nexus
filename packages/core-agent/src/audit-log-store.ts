@@ -85,9 +85,6 @@ export type AgentAuditEvent =
       resultPreview: string;
       failureKind?: AgentToolExecutionRecord['failureKind'];
       retryable?: boolean;
-      redacted?: boolean;
-      blocked?: boolean;
-      redactionReasons?: AgentToolExecutionRecord['redactionReasons'];
       approval?: AgentToolExecutionRecord['approval'];
     }
   | {

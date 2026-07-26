@@ -19,11 +19,13 @@ import type {
   QueryJob,
   QuerySubmission,
   ResourceDiscoveryPage,
+  ResourceDescriptor,
   ResourceObservation,
   ResourceQuery,
   ResourceQueryPage,
   ResourceRegistrySnapshot,
   ResourceRelation,
+  ResourceScope,
   ResultBatch,
 } from '@dbagent/shared';
 import {
@@ -31,10 +33,7 @@ import {
   assertConnectionProfile,
   assertQuerySubmission,
 } from '@dbagent/shared';
-import {
-  ResourceConflictError,
-  ResourceRegistry,
-} from '@dbagent/core-resource';
+import { ResourceConflictError, ResourceRegistry } from '@dbagent/core-resource';
 import {
   CapabilityResolver,
   CapabilityUnavailableError,
@@ -42,6 +41,7 @@ import {
 } from './capability-resolver.js';
 import type { ConnectorContext, TransactionOptions } from './connector.js';
 import { ConnectorNotFoundError, ConnectorRegistry } from './connector-registry.js';
+import { parseSql, permissionAllows } from './sql-parser.js';
 
 export interface CredentialResolver {
   resolve(reference: CredentialReference): Promise<DatabaseCredential>;
@@ -78,6 +78,12 @@ type JobBinding = {
   sessionId?: ConnectionSessionId;
 };
 
+type QueryJobBinding = JobBinding & {
+  resourceId?: string;
+  authorization?: DatabaseAuditEvent['authorization'];
+  started: Date;
+};
+
 export class DatabaseAccessRuntime {
   readonly connectors: ConnectorRegistry;
   readonly resources: ResourceRegistry;
@@ -85,8 +91,9 @@ export class DatabaseAccessRuntime {
   readonly #profiles = new Map<ConnectionProfileId, ConnectionProfile>();
   readonly #sessions = new Map<ConnectionSessionId, ConnectionSession>();
   readonly #profileSessions = new Map<ConnectionProfileId, ConnectionSessionId>();
-  readonly #jobs = new Map<string, JobBinding>();
-  readonly #results = new Map<string, JobBinding>();
+  readonly #jobs = new Map<string, QueryJobBinding>();
+  readonly #terminalAuditedJobs = new Set<string>();
+  readonly #results = new Map<string, QueryJobBinding>();
   readonly #transactions = new Map<string, JobBinding>();
   readonly #audit: DatabaseAuditEvent[] = [];
   readonly #credentialResolver: CredentialResolver | undefined;
@@ -113,10 +120,15 @@ export class DatabaseAccessRuntime {
 
   createProfile(profile: ConnectionProfile): ConnectionProfile {
     if (this.#profiles.has(profile.id)) {
-      throw runtimeError('PROFILE_EXISTS', 'conflict', `Connection profile already exists: ${profile.id}`, {
-        stage: 'profile',
-        profileId: profile.id,
-      });
+      throw runtimeError(
+        'PROFILE_EXISTS',
+        'conflict',
+        `Connection profile already exists: ${profile.id}`,
+        {
+          stage: 'profile',
+          profileId: profile.id,
+        },
+      );
     }
     this.#validateProfile(profile);
     const stored = cloneProfile(profile);
@@ -153,10 +165,15 @@ export class DatabaseAccessRuntime {
   deleteProfile(profileId: ConnectionProfileId): boolean {
     const session = this.getSessionForProfile(profileId);
     if (session?.status === 'connected' || session?.status === 'connecting') {
-      throw runtimeError('PROFILE_IN_USE', 'conflict', 'Disconnect the profile before deleting it', {
-        stage: 'profile',
-        profileId,
-      });
+      throw runtimeError(
+        'PROFILE_IN_USE',
+        'conflict',
+        'Disconnect the profile before deleting it',
+        {
+          stage: 'profile',
+          profileId,
+        },
+      );
     }
     if (session) this.#sessions.delete(session.id);
     this.#profileSessions.delete(profileId);
@@ -346,7 +363,11 @@ export class DatabaseAccessRuntime {
   ): Promise<ResourceDiscoveryPage> {
     const context = await this.#context(profileId, undefined, true, false);
     try {
-      const page = await this.connectors.get(context.profile.connectorId).discover(context, input);
+      const page = applyProfileScope(
+        await this.connectors.get(context.profile.connectorId).discover(context, input),
+        context.profile.scope,
+        profileId,
+      );
       this.resources.applyDiscoveryPage(page);
       this.#metric.discoveryPages += 1;
       return structuredClone(page);
@@ -357,7 +378,12 @@ export class DatabaseAccessRuntime {
 
   async discoverAll(
     profileId: ConnectionProfileId,
-    input: { pageSize?: number; kinds?: string[]; incrementalSince?: string; maxPages?: number } = {},
+    input: {
+      pageSize?: number;
+      kinds?: string[];
+      incrementalSince?: string;
+      maxPages?: number;
+    } = {},
   ): Promise<{ pages: number; resources: number; relations: number; observations: number }> {
     const maxPages = input.maxPages ?? 10_000;
     let cursor: string | undefined;
@@ -378,16 +404,26 @@ export class DatabaseAccessRuntime {
       relationCount += page.relations.length;
       observationCount += page.observations?.length ?? 0;
       if (pages > maxPages) {
-        throw runtimeError('DISCOVERY_PAGE_LIMIT', 'provider', 'Discovery exceeded its page limit', {
-          stage: 'discover',
-          profileId,
-        });
+        throw runtimeError(
+          'DISCOVERY_PAGE_LIMIT',
+          'provider',
+          'Discovery exceeded its page limit',
+          {
+            stage: 'discover',
+            profileId,
+          },
+        );
       }
       if (page.nextCursor && seenCursors.has(page.nextCursor)) {
-        throw runtimeError('DISCOVERY_CURSOR_LOOP', 'provider', 'Connector repeated a discovery cursor', {
-          stage: 'discover',
-          profileId,
-        });
+        throw runtimeError(
+          'DISCOVERY_CURSOR_LOOP',
+          'provider',
+          'Connector repeated a discovery cursor',
+          {
+            stage: 'discover',
+            profileId,
+          },
+        );
       }
       if (page.nextCursor) seenCursors.add(page.nextCursor);
       cursor = page.complete ? undefined : page.nextCursor;
@@ -422,6 +458,27 @@ export class DatabaseAccessRuntime {
     this.#validateSubmission(submission);
     const context = await this.#context(submission.profileId, undefined, true, false);
     try {
+      const permissionMode = submission.authorization?.permissionMode ?? 'read';
+      const requiredPermission = parseSql(submission.sql).requiredPermission;
+      if (!permissionAllows(permissionMode, requiredPermission)) {
+        throw runtimeError(
+          'QUERY_PERMISSION_DENIED',
+          'authorization',
+          `SQL requires ${requiredPermission} permission, but the effective mode is ${permissionMode}.`,
+          {
+            stage: 'submit',
+            profileId: submission.profileId,
+          },
+        );
+      }
+      const effectiveAuthorization: NonNullable<QuerySubmission['authorization']> = {
+        ...(submission.authorization ?? {}),
+        permissionMode,
+      };
+      const effectiveSubmission: QuerySubmission = {
+        ...submission,
+        authorization: effectiveAuthorization,
+      };
       const capabilities = await this.capabilities(submission.profileId);
       this.#capabilityResolver.require(capabilities, { key: DATABASE_CAPABILITIES.SQL_QUERY });
       if (submission.executionMode === 'async') {
@@ -429,27 +486,32 @@ export class DatabaseAccessRuntime {
       }
       const job = await this.connectors
         .get(context.profile.connectorId)
-        .submit(context, cloneQuerySubmission(submission));
+        .submit(context, cloneQuerySubmission(effectiveSubmission));
       this.#validateJob(job, submission.profileId, context.profile.connectorId);
-      const binding: JobBinding = {
+      const binding: QueryJobBinding = {
         profileId: submission.profileId,
         ...(context.session ? { sessionId: context.session.id } : {}),
+        ...(submission.resourceId ? { resourceId: submission.resourceId } : {}),
+        authorization: effectiveAuthorization,
+        started,
       };
       this.#jobs.set(job.id, binding);
       if (job.result) this.#results.set(job.result.id, binding);
       this.#metric.submittedQueries += 1;
       this.#metric.platformSubmitTotalMs += performance.now() - platformStarted;
-      await this.#recordAudit({
-        action: 'database.query.submit',
-        profileId: submission.profileId,
-        ...(submission.resourceId ? { resourceId: submission.resourceId } : {}),
-        jobId: job.id,
-        authorization: submission.authorization,
-        started,
-        status: terminalAuditStatus(job),
-        ...(job.completedAt ? { completedAt: new Date(job.completedAt) } : {}),
-        ...(job.error ? { errorCode: job.error.code } : {}),
-      });
+      if (isTerminalJob(job)) {
+        await this.#recordTerminalJobAudit(job, binding, 'database.query.submit', started);
+      } else {
+        await this.#recordAudit({
+          action: 'database.query.submit',
+          profileId: submission.profileId,
+          ...(submission.resourceId ? { resourceId: submission.resourceId } : {}),
+          jobId: job.id,
+          authorization: effectiveAuthorization,
+          started,
+          status: 'unknown',
+        });
+      }
       return structuredClone(job);
     } catch (error) {
       this.#metric.platformSubmitTotalMs += performance.now() - platformStarted;
@@ -463,6 +525,7 @@ export class DatabaseAccessRuntime {
     try {
       const job = await this.connectors.get(context.profile.connectorId).getJob(context, jobId);
       if (job.result) this.#results.set(job.result.id, binding);
+      await this.#recordTerminalJobAudit(job, binding);
       return structuredClone(job);
     } catch (error) {
       throw this.#normalizeError(error, 'execute', binding.profileId, undefined, jobId);
@@ -477,13 +540,18 @@ export class DatabaseAccessRuntime {
       const job = await this.connectors.get(context.profile.connectorId).cancel(context, jobId);
       this.#metric.cancelledQueries += 1;
       this.#metric.platformCancelTotalMs += performance.now() - platformStarted;
-      await this.#recordAudit({
-        action: 'database.query.cancel',
-        profileId: binding.profileId,
-        jobId,
-        started,
-        status: terminalAuditStatus(job),
-      });
+      if (isTerminalJob(job)) {
+        await this.#recordTerminalJobAudit(job, binding, 'database.query.cancel', started);
+      } else {
+        await this.#recordAudit({
+          action: 'database.query.cancel',
+          profileId: binding.profileId,
+          jobId,
+          authorization: binding.authorization,
+          started,
+          status: 'unknown',
+        });
+      }
       return structuredClone(job);
     } catch (error) {
       this.#metric.platformCancelTotalMs += performance.now() - platformStarted;
@@ -540,10 +608,15 @@ export class DatabaseAccessRuntime {
       yield cloneResultBatch(batch);
       if (batch.complete) return;
       if (!batch.nextCursor || seen.has(batch.nextCursor)) {
-        throw runtimeError('RESULT_CURSOR_INVALID', 'provider', 'Connector returned an invalid result cursor', {
-          stage: 'result',
-          profileId: binding.profileId,
-        });
+        throw runtimeError(
+          'RESULT_CURSOR_INVALID',
+          'provider',
+          'Connector returned an invalid result cursor',
+          {
+            stage: 'result',
+            profileId: binding.profileId,
+          },
+        );
       }
       seen.add(batch.nextCursor);
       cursor = batch.nextCursor;
@@ -557,10 +630,15 @@ export class DatabaseAccessRuntime {
     const context = await this.#context(profileId, undefined, true, false);
     const connector = this.connectors.get(context.profile.connectorId);
     if (!connector.beginTransaction) {
-      throw runtimeError('TRANSACTION_UNSUPPORTED', 'unsupported', 'Connector does not support transactions', {
-        stage: 'execute',
-        profileId,
-      });
+      throw runtimeError(
+        'TRANSACTION_UNSUPPORTED',
+        'unsupported',
+        'Connector does not support transactions',
+        {
+          stage: 'execute',
+          profileId,
+        },
+      );
     }
     const capabilities = await this.capabilities(profileId);
     this.#capabilityResolver.require(capabilities, { key: DATABASE_CAPABILITIES.TRANSACTION });
@@ -594,10 +672,15 @@ export class DatabaseAccessRuntime {
     const context = await this.#context(request.profileId, undefined, true, false);
     const connector = this.connectors.get(context.profile.connectorId);
     if (!connector.observe) {
-      throw runtimeError('OBSERVATION_UNSUPPORTED', 'unsupported', 'Connector does not expose observations', {
-        stage: 'observe',
-        profileId: request.profileId,
-      });
+      throw runtimeError(
+        'OBSERVATION_UNSUPPORTED',
+        'unsupported',
+        'Connector does not expose observations',
+        {
+          stage: 'observe',
+          profileId: request.profileId,
+        },
+      );
     }
     try {
       const observations = await connector.observe(context, request);
@@ -617,17 +700,27 @@ export class DatabaseAccessRuntime {
     const context = await this.#context(request.profileId, undefined, true, false);
     const connector = this.connectors.get(context.profile.connectorId);
     if (!connector.operate) {
-      throw runtimeError('OPERATION_UNSUPPORTED', 'unsupported', 'Connector does not expose operations', {
-        stage: 'operate',
-        profileId: request.profileId,
-      });
+      throw runtimeError(
+        'OPERATION_UNSUPPORTED',
+        'unsupported',
+        'Connector does not expose operations',
+        {
+          stage: 'operate',
+          profileId: request.profileId,
+        },
+      );
     }
     const descriptor = connector.manifest.operations.find((item) => item.key === request.operation);
     if (!descriptor) {
-      throw runtimeError('OPERATION_UNKNOWN', 'unsupported', `Unknown operation: ${request.operation}`, {
-        stage: 'operate',
-        profileId: request.profileId,
-      });
+      throw runtimeError(
+        'OPERATION_UNKNOWN',
+        'unsupported',
+        `Unknown operation: ${request.operation}`,
+        {
+          stage: 'operate',
+          profileId: request.profileId,
+        },
+      );
     }
     if (descriptor.risk !== 'read' && !hasOperationAuthorization(request)) {
       throw runtimeError(
@@ -741,20 +834,30 @@ export class DatabaseAccessRuntime {
   #requireProfile(profileId: ConnectionProfileId): ConnectionProfile {
     const profile = this.#profiles.get(profileId);
     if (!profile) {
-      throw runtimeError('PROFILE_NOT_FOUND', 'not-found', `Unknown connection profile: ${profileId}`, {
-        stage: 'profile',
-        profileId,
-      });
+      throw runtimeError(
+        'PROFILE_NOT_FOUND',
+        'not-found',
+        `Unknown connection profile: ${profileId}`,
+        {
+          stage: 'profile',
+          profileId,
+        },
+      );
     }
     return cloneProfile(profile);
   }
 
   #validateProfile(profile: ConnectionProfile): void {
     if (!profile.id || !profile.name || !profile.connectorId || !profile.engine) {
-      throw runtimeError('PROFILE_INVALID', 'validation', 'Profile identity fields cannot be empty', {
-        stage: 'profile',
-        profileId: profile.id,
-      });
+      throw runtimeError(
+        'PROFILE_INVALID',
+        'validation',
+        'Profile identity fields cannot be empty',
+        {
+          stage: 'profile',
+          profileId: profile.id,
+        },
+      );
     }
     if (profile.endpoints.length === 0) {
       throw runtimeError('ENDPOINT_REQUIRED', 'validation', 'At least one endpoint is required', {
@@ -822,30 +925,37 @@ export class DatabaseAccessRuntime {
       session.endpointIndex < 0 ||
       session.endpointIndex >= profile.endpoints.length
     ) {
-      throw runtimeError('CONNECTOR_SESSION_INVALID', 'provider', 'Connector returned an invalid session', {
-        stage: 'connect',
-        profileId: profile.id,
-      });
+      throw runtimeError(
+        'CONNECTOR_SESSION_INVALID',
+        'provider',
+        'Connector returned an invalid session',
+        {
+          stage: 'connect',
+          profileId: profile.id,
+        },
+      );
     }
   }
 
   #validateJob(job: QueryJob, profileId: string, connectorId: string): void {
     if (!job.id || job.profileId !== profileId || job.connectorId !== connectorId) {
-      throw runtimeError('CONNECTOR_JOB_INVALID', 'provider', 'Connector returned an invalid query job', {
-        stage: 'submit',
-        profileId,
-      });
+      throw runtimeError(
+        'CONNECTOR_JOB_INVALID',
+        'provider',
+        'Connector returned an invalid query job',
+        {
+          stage: 'submit',
+          profileId,
+        },
+      );
     }
   }
 
   #validateSubmission(submission: QuerySubmission): void {
     if (!submission.profileId || typeof submission.profileId !== 'string') {
-      throw runtimeError(
-        'QUERY_PROFILE_REQUIRED',
-        'validation',
-        'Query profileId is required.',
-        { stage: 'submit' },
-      );
+      throw runtimeError('QUERY_PROFILE_REQUIRED', 'validation', 'Query profileId is required.', {
+        stage: 'submit',
+      });
     }
     if (typeof submission.sql !== 'string' || !submission.sql.trim()) {
       throw runtimeError(
@@ -909,10 +1019,15 @@ export class DatabaseAccessRuntime {
   async #disconnectThenConnect(context: ConnectorContext): Promise<ConnectionSession> {
     const connector = this.connectors.get(context.profile.connectorId);
     if (context.session) await connector.disconnect(context);
-    return connector.connect({ profile: context.profile, ...(context.credential ? { credential: context.credential } : {}) });
+    return connector.connect({
+      profile: context.profile,
+      ...(context.credential ? { credential: context.credential } : {}),
+    });
   }
 
-  async #jobContext(jobId: string): Promise<{ context: ConnectorContext; binding: JobBinding }> {
+  async #jobContext(
+    jobId: string,
+  ): Promise<{ context: ConnectorContext; binding: QueryJobBinding }> {
     const binding = this.#jobs.get(jobId);
     if (!binding) {
       throw runtimeError('QUERY_JOB_NOT_FOUND', 'not-found', `Unknown query job: ${jobId}`, {
@@ -926,18 +1041,19 @@ export class DatabaseAccessRuntime {
 
   async #transactionAction(
     transactionId: string,
-    action:
-      | 'createSavepoint'
-      | 'rollbackToSavepoint'
-      | 'commitTransaction'
-      | 'rollbackTransaction',
+    action: 'createSavepoint' | 'rollbackToSavepoint' | 'commitTransaction' | 'rollbackTransaction',
     name?: string,
   ): Promise<DatabaseTransaction> {
     const binding = this.#transactions.get(transactionId);
     if (!binding) {
-      throw runtimeError('TRANSACTION_NOT_FOUND', 'not-found', `Unknown transaction: ${transactionId}`, {
-        stage: 'execute',
-      });
+      throw runtimeError(
+        'TRANSACTION_NOT_FOUND',
+        'not-found',
+        `Unknown transaction: ${transactionId}`,
+        {
+          stage: 'execute',
+        },
+      );
     }
     const context = await this.#context(binding.profileId, undefined, true, false);
     const connector = this.connectors.get(context.profile.connectorId);
@@ -986,6 +1102,28 @@ export class DatabaseAccessRuntime {
       status: normalized.outcome === 'unknown' ? 'unknown' : 'failed',
       errorCode: normalized.code,
     });
+  }
+
+  async #recordTerminalJobAudit(
+    job: QueryJob,
+    binding: QueryJobBinding,
+    action = 'database.query.complete',
+    started = binding.started,
+  ): Promise<boolean> {
+    if (!isTerminalJob(job) || this.#terminalAuditedJobs.has(job.id)) return false;
+    this.#terminalAuditedJobs.add(job.id);
+    await this.#recordAudit({
+      action,
+      profileId: binding.profileId,
+      ...(binding.resourceId ? { resourceId: binding.resourceId } : {}),
+      jobId: job.id,
+      authorization: binding.authorization,
+      started,
+      status: terminalAuditStatus(job),
+      ...(job.completedAt ? { completedAt: new Date(job.completedAt) } : {}),
+      ...(job.error ? { errorCode: job.error.code } : {}),
+    });
+    return true;
   }
 
   async #recordAudit(input: {
@@ -1066,6 +1204,54 @@ function runtimeError(
   });
 }
 
+const RESOURCE_SCOPE_KEYS = [
+  'tenantId',
+  'organizationId',
+  'projectId',
+  'environment',
+  'region',
+] as const satisfies readonly (keyof ResourceScope)[];
+
+function applyProfileScope(
+  page: ResourceDiscoveryPage,
+  profileScope: ResourceScope | undefined,
+  profileId: ConnectionProfileId,
+): ResourceDiscoveryPage {
+  if (!profileScope) return page;
+  return {
+    ...page,
+    resources: page.resources.map((resource) =>
+      applyResourceScope(resource, profileScope, profileId),
+    ),
+  };
+}
+
+function applyResourceScope(
+  resource: ResourceDescriptor,
+  profileScope: ResourceScope,
+  profileId: ConnectionProfileId,
+): ResourceDescriptor {
+  for (const key of RESOURCE_SCOPE_KEYS) {
+    const expected = profileScope[key];
+    const actual = resource.scope?.[key];
+    if (expected !== undefined && actual !== undefined && expected !== actual) {
+      throw runtimeError(
+        'DISCOVERY_SCOPE_MISMATCH',
+        'authorization',
+        `Connector returned resource ${resource.id} outside the connection profile scope`,
+        { stage: 'discover', profileId },
+      );
+    }
+  }
+  return {
+    ...resource,
+    scope: {
+      ...resource.scope,
+      ...profileScope,
+    },
+  };
+}
+
 function normalizeUnknownError(
   error: unknown,
   stage: NonNullable<DatabaseAccessError['stage']> | 'internal',
@@ -1098,10 +1284,7 @@ function normalizeUnknownError(
   }
   const message = error instanceof Error ? error.message : String(error);
   const code =
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    typeof error.code === 'string'
+    typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
       ? error.code
       : 'CONNECTOR_ERROR';
   return {
@@ -1109,14 +1292,19 @@ function normalizeUnknownError(
     category: stage === 'connect' ? 'network' : 'provider',
     message,
     ...(stage === 'internal' ? {} : { stage }),
-    retryable: stage === 'connect' || stage === 'discover' || stage === 'result' || stage === 'observe',
-    outcome: stage === 'submit' || stage === 'execute' || stage === 'operate' ? 'unknown' : 'unchanged',
+    retryable:
+      stage === 'connect' || stage === 'discover' || stage === 'result' || stage === 'observe',
+    outcome:
+      stage === 'submit' || stage === 'execute' || stage === 'operate' ? 'unknown' : 'unchanged',
     ...(profileId ? { profileId } : {}),
     ...(jobId ? { jobId } : {}),
   };
 }
 
-function unsupportedTransactionAction(action: string, profileId: string): DatabaseAccessRuntimeError {
+function unsupportedTransactionAction(
+  action: string,
+  profileId: string,
+): DatabaseAccessRuntimeError {
   return runtimeError(
     'TRANSACTION_ACTION_UNSUPPORTED',
     'unsupported',
@@ -1125,9 +1313,17 @@ function unsupportedTransactionAction(action: string, profileId: string): Databa
   );
 }
 
-function validateEndpoint(endpoint: ConnectionProfile['endpoints'][number], profileId: string): void {
+function validateEndpoint(
+  endpoint: ConnectionProfile['endpoints'][number],
+  profileId: string,
+): void {
   if (endpoint.transport === 'tcp') {
-    if (!endpoint.host || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65_535) {
+    if (
+      !endpoint.host ||
+      !Number.isInteger(endpoint.port) ||
+      endpoint.port < 1 ||
+      endpoint.port > 65_535
+    ) {
       throw runtimeError('TCP_ENDPOINT_INVALID', 'validation', 'TCP host and port are invalid', {
         stage: 'profile',
         profileId,
@@ -1149,10 +1345,15 @@ function validateEndpoint(endpoint: ConnectionProfile['endpoints'][number], prof
     try {
       url = new URL(endpoint.baseUrl);
     } catch {
-      throw runtimeError('HTTP_ENDPOINT_INVALID', 'validation', 'HTTP endpoint is not a valid URL', {
-        stage: 'profile',
-        profileId,
-      });
+      throw runtimeError(
+        'HTTP_ENDPOINT_INVALID',
+        'validation',
+        'HTTP endpoint is not a valid URL',
+        {
+          stage: 'profile',
+          profileId,
+        },
+      );
     }
     if (url.username || url.password) {
       throw runtimeError(
@@ -1185,9 +1386,7 @@ function validateSavepointName(name: string): void {
   }
 }
 
-function stripCapabilityRuntimeFields(
-  capabilities: CapabilityProfile['capabilities'],
-): Record<
+function stripCapabilityRuntimeFields(capabilities: CapabilityProfile['capabilities']): Record<
   string,
   Omit<CapabilityProfile['capabilities'][string], 'source' | 'observedAt'> & {
     observedAt?: string;
@@ -1203,16 +1402,21 @@ function stripCapabilityRuntimeFields(
 }
 
 function terminalAuditStatus(job: QueryJob): DatabaseAuditEvent['status'] {
+  if (job.state === 'succeeded') return 'succeeded';
   if (job.state === 'failed') return 'failed';
   if (job.state === 'cancelled') return 'cancelled';
-  return 'succeeded';
+  return 'unknown';
+}
+
+function isTerminalJob(job: QueryJob): boolean {
+  return ['succeeded', 'failed', 'cancelled', 'expired'].includes(job.state);
 }
 
 function hasOperationAuthorization(request: DatabaseOperationRequest): boolean {
   return Boolean(
     request.authorization?.approvalId ||
-      request.authorization?.policyId ||
-      request.authorization?.permissionMode === 'fully-approved',
+    request.authorization?.policyId ||
+    request.authorization?.permissionMode === 'full',
   );
 }
 

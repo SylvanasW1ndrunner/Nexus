@@ -1,0 +1,4 @@
+interface:
+  display_name: "SchemaNaut MCP and Skills"
+  short_description: "Build MCP and importable Skills"
+  default_prompt: "Use $schemanaut-mcp-skills-development to implement SchemaNaut MCP or Skill support."

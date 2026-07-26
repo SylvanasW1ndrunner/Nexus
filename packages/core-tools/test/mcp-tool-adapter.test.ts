@@ -13,6 +13,7 @@ import {
   adaptMcpToolDefinition,
   inferMcpToolRisk,
   namespacedToolName,
+  normalizeMcpToolSpec,
   registerMcpTools,
 } from '../src/index.js';
 
@@ -23,7 +24,7 @@ afterEach(async () => {
 });
 
 describe('MCP tool adapter', () => {
-  it('normalizes MCP tool names, schemas, source metadata and readonly risk', () => {
+  it('normalizes MCP tool names and schemas without trusting remote readonly metadata', () => {
     const definition = adaptMcpToolDefinition({
       serverId: 'customer db',
       source: 'user-mcp',
@@ -43,8 +44,9 @@ describe('MCP tool adapter', () => {
       originalName: 'list_tables',
       source: 'user-mcp',
       sourceId: 'customer db',
-      dangerLevel: 'safe',
-      readonly: true,
+      dangerLevel: 'medium',
+      readonly: false,
+      requiredPermission: 'edit',
       inputSchema: {
         type: 'object',
         properties: { schema: { type: 'string' } },
@@ -53,18 +55,97 @@ describe('MCP tool adapter', () => {
     });
   });
 
-  it('uses conservative defaults for unknown imported tools and dangerous names', () => {
-    expect(inferMcpToolRisk({ name: 'summarize', description: 'custom action' }, 'user-mcp')).toEqual({
+  it('preserves official MCP title, output schema, annotations and metadata before ToolRegistry adaptation', () => {
+    const spec = normalizeMcpToolSpec({
+      name: 'rich_result',
+      title: 'Rich result',
+      description: 'Returns structured content and resource links.',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: {
+        type: 'object',
+        properties: { count: { type: 'integer' } },
+        required: ['count'],
+      },
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+        customHint: 'preserved',
+      },
+      _meta: {
+        publisher: 'fixture',
+        nested: { version: 2 },
+      },
+    });
+
+    expect(spec).toEqual({
+      name: 'rich_result',
+      title: 'Rich result',
+      description: 'Returns structured content and resource links.',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: {
+        type: 'object',
+        properties: { count: { type: 'integer' } },
+        required: ['count'],
+      },
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+        customHint: 'preserved',
+      },
+      _meta: {
+        publisher: 'fixture',
+        nested: { version: 2 },
+      },
+    });
+  });
+
+  it('uses a local edit floor and lets remote metadata only raise risk', () => {
+    expect(
+      inferMcpToolRisk({ name: 'summarize', description: 'custom action' }, 'user-mcp'),
+    ).toEqual({
       dangerLevel: 'medium',
       readonly: false,
     });
-    expect(inferMcpToolRisk({ name: 'delete_records', description: 'Delete rows' }, 'user-mcp')).toEqual({
+    expect(
+      inferMcpToolRisk({ name: 'delete_records', description: 'Delete rows' }, 'user-mcp'),
+    ).toEqual({
       dangerLevel: 'high',
       readonly: false,
     });
-    expect(inferMcpToolRisk({ name: 'decrypt_phone', annotations: { readOnlyHint: true } }, 'user-mcp')).toEqual({
-      dangerLevel: 'safe',
-      readonly: true,
+    expect(
+      inferMcpToolRisk({ name: 'decrypt_phone', annotations: { readOnlyHint: true } }, 'user-mcp'),
+    ).toEqual({
+      dangerLevel: 'medium',
+      readonly: false,
+    });
+    expect(
+      inferMcpToolRisk(
+        {
+          name: 'delete_records',
+          description: 'Delete rows',
+          annotations: { readOnlyHint: true },
+        },
+        'user-mcp',
+      ),
+    ).toEqual({
+      dangerLevel: 'high',
+      readonly: false,
+    });
+    expect(
+      adaptMcpToolDefinition({
+        serverId: 'hostile',
+        source: 'user-mcp',
+        tool: {
+          name: 'delete_records',
+          annotations: { readOnlyHint: true, destructiveHint: true },
+        },
+      }),
+    ).toMatchObject({
+      dangerLevel: 'high',
+      readonly: false,
+      requiredPermission: 'full',
     });
   });
 
@@ -111,7 +192,11 @@ describe('MCP tool adapter', () => {
           name: 'decrypt_phone',
           description: 'Decrypt a phone field for analysis',
           annotations: { readOnlyHint: true },
-          inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] },
+          inputSchema: {
+            type: 'object',
+            properties: { value: { type: 'string' } },
+            required: ['value'],
+          },
         },
       ],
       callTool: ({ toolName, args, signal }) => {
@@ -121,14 +206,21 @@ describe('MCP tool adapter', () => {
     });
 
     expect(registered).toEqual([
-      { name: 'decryptor__decrypt_phone', originalName: 'decrypt_phone', source: 'user-mcp', sourceId: 'decryptor' },
+      {
+        name: 'decryptor__decrypt_phone',
+        originalName: 'decrypt_phone',
+        source: 'user-mcp',
+        sourceId: 'decryptor',
+      },
     ]);
     await expect(
       registry.get('decryptor__decrypt_phone')?.handler({ value: 'enc:phone' }, toolContext()),
     ).resolves.toEqual({
       city: 'Shanghai',
     });
-    expect(calls).toEqual([{ toolName: 'decrypt_phone', args: { value: 'enc:phone' }, aborted: false }]);
+    expect(calls).toEqual([
+      { toolName: 'decrypt_phone', args: { value: 'enc:phone' }, aborted: false },
+    ]);
   });
 
   it('blocks unavailable MCP servers before invoking third-party code', async () => {
@@ -149,9 +241,9 @@ describe('MCP tool adapter', () => {
       },
     });
 
-    await expect(registry.get('broken__read_status')?.handler({}, toolContext())).rejects.toBeInstanceOf(
-      McpUnavailableError,
-    );
+    await expect(
+      registry.get('broken__read_status')?.handler({}, toolContext()),
+    ).rejects.toBeInstanceOf(McpUnavailableError);
     expect(called).toBe(false);
   });
 
@@ -173,12 +265,12 @@ describe('MCP tool adapter', () => {
         }),
     });
 
-    await expect(registry.get('slow__read_slow')?.handler({}, toolContext())).rejects.toBeInstanceOf(
-      McpToolTimeoutError,
-    );
+    await expect(
+      registry.get('slow__read_slow')?.handler({}, toolContext()),
+    ).rejects.toBeInstanceOf(McpToolTimeoutError);
   });
 
-  it('lets readonly Agent use readonly MCP tools but denies dangerous write-capable tools before side effects', async () => {
+  it('denies every untrusted MCP tool in read mode and requires full mode for destructive tools', async () => {
     const registry = new ToolRegistry();
     const health = new McpHealthManager();
     health.markHealthy('warehouse');
@@ -191,7 +283,11 @@ describe('MCP tool adapter', () => {
       health,
       tools: [
         { name: 'list_tables', description: 'List tables', annotations: { readOnlyHint: true } },
-        { name: 'delete_records', description: 'Delete rows', annotations: { destructiveHint: true } },
+        {
+          name: 'delete_records',
+          description: 'Delete rows',
+          annotations: { destructiveHint: true },
+        },
       ],
       callTool: ({ toolName }) => {
         calledTools.push(toolName);
@@ -217,14 +313,22 @@ describe('MCP tool adapter', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: 'List tables through MCP.',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 2,
     });
     expect(readResult.status).toBe('done');
-    expect(calledTools).toEqual(['list_tables']);
+    expect(readResult.toolExecutions).toMatchObject([
+      {
+        toolName: 'warehouse__list_tables',
+        status: 'denied',
+      },
+    ]);
+    expect(calledTools).toEqual([]);
 
     const blockedAgent = new ReactAgent(
-      new LlmRouter(usage, [scriptedProvider([responseWithTool('call_delete', 'warehouse__delete_records', {})])]),
+      new LlmRouter(usage, [
+        scriptedProvider([responseWithTool('call_delete', 'warehouse__delete_records', {})]),
+      ]),
       registry,
       usage,
       undefined,
@@ -234,12 +338,18 @@ describe('MCP tool adapter', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: 'Delete records through MCP.',
-      mode: 'readonly',
+      mode: 'edit',
       maxIterations: 1,
     });
 
-    expect(blockedResult.status).toBe('permission_denied');
-    expect(calledTools).toEqual(['list_tables']);
+    expect(blockedResult.status).toBe('max_iterations_reached');
+    expect(blockedResult.toolExecutions).toMatchObject([
+      {
+        toolName: 'warehouse__delete_records',
+        status: 'denied',
+      },
+    ]);
+    expect(calledTools).toEqual([]);
   });
 });
 
@@ -248,8 +358,7 @@ function toolContext() {
     session: {
       id: 'session_mcp_tools',
       title: 'mcp tools',
-      mode: 'readonly' as const,
-      strategy: 'react' as const,
+      mode: 'read' as const,
       messages: [],
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       aborted: false,
@@ -273,7 +382,11 @@ function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
   };
 }
 
-function responseWithTool(id: string, name: string, args: Record<string, unknown>): LlmChatResponse {
+function responseWithTool(
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+): LlmChatResponse {
   return {
     text: '',
     toolCalls: [{ id, name, arguments: args }],

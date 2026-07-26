@@ -1,5 +1,5 @@
 {
-  "contract": "dbagent.database.connection-profile",
+  "contract": "schemanaut.database.connection-profile",
   "version": "1.0",
   "payload": {
     "id": "profile-1",

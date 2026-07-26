@@ -57,7 +57,7 @@ const query = {
   batchSize: 250,
   authorization: {
     actorId: 'benchmark-user',
-    permissionMode: 'all-writes-approved',
+    permissionMode: 'read',
   },
   labels: { workload: 'contract-benchmark' },
 };
@@ -131,9 +131,7 @@ const checks = Object.fromEntries(
 );
 const report = {
   kind: 'public-contracts-performance',
-  status: Object.values(checks).every((check) => check.passed)
-    ? 'passed'
-    : 'failed',
+  status: Object.values(checks).every((check) => check.passed) ? 'passed' : 'failed',
   generatedAt: new Date().toISOString(),
   environment: environment(),
   dataset: {
@@ -170,38 +168,32 @@ function measure(samples, operation) {
 
 function percentile(values, quantile) {
   const sorted = [...values].sort((left, right) => left - right);
-  return sorted[
-    Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1)
-  ];
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1)];
 }
 
 async function validateFixtures() {
   const fixtureContracts = {
     'resource-snapshot.json': {
-      contract: 'dbagent.resource-registry.snapshot',
+      contract: 'schemanaut.resource-registry.snapshot',
       validate: assertResourceRegistrySnapshot,
     },
     'connection-profile.json': {
-      contract: 'dbagent.database.connection-profile',
+      contract: 'schemanaut.database.connection-profile',
       validate: assertConnectionProfile,
     },
     'query-submission.json': {
-      contract: 'dbagent.database.query-submission',
+      contract: 'schemanaut.database.query-submission',
       validate: assertQuerySubmission,
     },
     'database-error.json': {
-      contract: 'dbagent.database.error',
+      contract: 'schemanaut.database.error',
       validate: assertDatabaseAccessError,
     },
   };
-  const names = (await readdir(fixtureDirectory))
-    .filter((name) => name.endsWith('.json'))
-    .sort();
+  const names = (await readdir(fixtureDirectory)).filter((name) => name.endsWith('.json')).sort();
   const checks = [];
   for (const name of names) {
-    const envelope = JSON.parse(
-      await readFile(join(fixtureDirectory, name), 'utf8'),
-    );
+    const envelope = JSON.parse(await readFile(join(fixtureDirectory, name), 'utf8'));
     try {
       const fixture = fixtureContracts[name];
       if (!fixture) {

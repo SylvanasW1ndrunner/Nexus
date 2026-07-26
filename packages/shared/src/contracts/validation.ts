@@ -113,18 +113,18 @@ export function fromPortableValue(value: PortableValue): unknown {
   if (Array.isArray(value)) {
     return value.map((item) => fromPortableValue(item));
   }
-  if (isExactTag(value, 'bigint', ['$dbagentType', 'value'])) {
+  if (isExactTag(value, 'bigint', ['$schemanautType', 'value'])) {
     if (!/^-?\d+$/u.test(value.value)) {
       fail('INVALID_VALUE', '$.value', 'Invalid bigint transport value');
     }
     return BigInt(value.value);
   }
-  if (isExactTag(value, 'datetime', ['$dbagentType', 'value'])) {
+  if (isExactTag(value, 'datetime', ['$schemanautType', 'value'])) {
     requireIsoTime(value.value, '$.value');
     return new Date(value.value);
   }
   if (
-    isExactTag(value, 'binary', ['$dbagentType', 'encoding', 'value']) &&
+    isExactTag(value, 'binary', ['$schemanautType', 'encoding', 'value']) &&
     value.encoding === 'base64'
   ) {
     if (!isCanonicalBase64(value.value)) {
@@ -193,13 +193,7 @@ export function assertResourceDescriptor(
     }
   }
   if (resource.scope !== undefined) {
-    const scope = requireRecord(resource.scope, '$.scope');
-    for (const [key, item] of Object.entries(scope)) {
-      if (!['tenantId', 'organizationId', 'projectId', 'environment', 'region'].includes(key)) {
-        fail('INVALID_VALUE', `$.scope.${key}`, 'Unknown resource scope field');
-      }
-      requireNonEmptyString(item, `$.scope.${key}`);
-    }
+    assertResourceScope(resource.scope, '$.scope');
   }
   if (resource.facts !== undefined) {
     const facts = requireRecord(resource.facts, '$.facts');
@@ -336,6 +330,9 @@ export function assertConnectionProfile(
   if (typeof profile.readOnly !== 'boolean') {
     fail('INVALID_TYPE', '$.readOnly', 'readOnly must be a boolean');
   }
+  if (profile.scope !== undefined) {
+    assertResourceScope(profile.scope, '$.scope');
+  }
   requireIsoTime(profile.createdAt, '$.createdAt');
   requireIsoTime(profile.updatedAt, '$.updatedAt');
   if (Object.hasOwn(profile, 'password') || Object.hasOwn(profile, 'token')) {
@@ -355,6 +352,16 @@ export function assertConnectionProfile(
   const profileWithoutCredentialReference = { ...profile };
   delete profileWithoutCredentialReference.credentialRef;
   assertNoSecretMaterial(profileWithoutCredentialReference);
+}
+
+function assertResourceScope(value: unknown, path: string): void {
+  const scope = requireRecord(value, path);
+  for (const [key, item] of Object.entries(scope)) {
+    if (!['tenantId', 'organizationId', 'projectId', 'environment', 'region'].includes(key)) {
+      fail('INVALID_VALUE', `${path}.${key}`, 'Unknown resource scope field');
+    }
+    requireNonEmptyString(item, `${path}.${key}`);
+  }
 }
 
 export function assertQuerySubmission(
@@ -570,17 +577,17 @@ function encodePortable(
     return value;
   }
   if (typeof value === 'bigint') {
-    return { $dbagentType: 'bigint', value: value.toString(10) };
+    return { $schemanautType: 'bigint', value: value.toString(10) };
   }
   if (value instanceof Date) {
     if (!Number.isFinite(value.getTime())) {
       fail('NON_PORTABLE_VALUE', path, 'Date must be valid');
     }
-    return { $dbagentType: 'datetime', value: value.toISOString() };
+    return { $schemanautType: 'datetime', value: value.toISOString() };
   }
   if (value instanceof Uint8Array) {
     return {
-      $dbagentType: 'binary',
+      $schemanautType: 'binary',
       encoding: 'base64',
       value: Buffer.from(value).toString('base64'),
     };
@@ -762,12 +769,12 @@ function isExactTag(
   type: string,
   keys: string[],
 ): value is Record<string, PortableValue> & {
-  $dbagentType: string;
+  $schemanautType: string;
   value: string;
   encoding?: string;
 } {
   return (
-    value.$dbagentType === type &&
+    value.$schemanautType === type &&
     typeof value.value === 'string' &&
     Object.keys(value).sort().join('\0') === [...keys].sort().join('\0')
   );

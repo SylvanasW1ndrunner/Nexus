@@ -19,6 +19,8 @@ const STRING_REDACTIONS: Array<[RegExp, StringReplacement]> = [
 
 export function redactPersistedAgentValue(value: unknown): unknown {
   if (typeof value === 'string') return redactPersistedAgentString(value);
+  if (value instanceof Date) return new Date(value.getTime());
+  if (value instanceof Uint8Array) return new Uint8Array(value);
   if (Array.isArray(value)) return value.map((item) => redactPersistedAgentValue(item));
   if (!value || typeof value !== 'object') return value;
 

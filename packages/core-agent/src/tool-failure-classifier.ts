@@ -8,7 +8,14 @@ export type AgentToolFailureClassification = {
 export function classifyAgentToolFailure(message: string): AgentToolFailureClassification {
   const text = message.toLocaleLowerCase();
 
-  if (includesAny(text, ['permission denied', 'not allowed', 'requires explicit confirmation', 'blocked by connection policy'])) {
+  if (
+    includesAny(text, [
+      'permission denied',
+      'not allowed',
+      'requires explicit confirmation',
+      'blocked by connection policy',
+    ])
+  ) {
     return { failureKind: 'permission', retryable: false };
   }
 
@@ -16,7 +23,9 @@ export function classifyAgentToolFailure(message: string): AgentToolFailureClass
     return { failureKind: 'timeout', retryable: true };
   }
 
-  if (includesAny(text, ['tool is not registered', 'not registered', 'unavailable', 'not active'])) {
+  if (
+    includesAny(text, ['tool is not registered', 'not registered', 'unavailable', 'not active'])
+  ) {
     return { failureKind: 'tool_unavailable', retryable: false };
   }
 
@@ -30,6 +39,12 @@ export function classifyAgentToolFailure(message: string): AgentToolFailureClass
       'undefined table',
       'sql is empty',
       'single-statement',
+      '不存在',
+      '未定义的列',
+      '未定义的表',
+      '关系不存在',
+      '语法错误',
+      '字段不存在',
     ])
   ) {
     return { failureKind: 'sql_repairable', retryable: true };
@@ -55,6 +70,28 @@ export function classifyAgentToolFailure(message: string): AgentToolFailureClass
   }
 
   return { failureKind: 'unknown', retryable: false };
+}
+
+/**
+ * Classifies a failure with the tool contract as an additional signal.
+ *
+ * Database error text is not stable across drivers, server locales, or hosted
+ * gateways. A failed SQL execution/explain call is therefore repairable even
+ * when its localized message does not match one of the text patterns above.
+ */
+export function classifyAgentToolExecutionFailure(
+  toolName: string,
+  message: string,
+): AgentToolFailureClassification {
+  const classification = classifyAgentToolFailure(message);
+  if (
+    classification.failureKind === 'unknown' &&
+    (toolName === 'sql_execute' || toolName === 'sql_explain')
+  ) {
+    return { failureKind: 'sql_repairable', retryable: true };
+  }
+
+  return classification;
 }
 
 function includesAny(text: string, needles: string[]): boolean {

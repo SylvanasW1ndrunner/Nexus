@@ -1,11 +1,16 @@
 /* eslint-disable @typescript-eslint/require-await -- Provider test doubles implement async contracts. */
 import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
 import type { Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DatabaseAgentRuntime } from '../../../sdk/src/index.js';
 import { startDatabaseAgentServer } from '../../../../apps/server/src/server.js';
 import type { LlmChatStreamEvent, LlmProvider } from '../../src/index.js';
 
 const servers: Server[] = [];
+const runtimes: DatabaseAgentRuntime[] = [];
+const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
@@ -16,16 +21,28 @@ afterEach(async () => {
         }),
     ),
   );
+  await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, {
+        recursive: true,
+        force: true,
+      }),
+    ),
+  );
 });
 
 describe('LLM product entrypoints', () => {
   it('provides the same chat, stream and async behavior through the TypeScript SDK', async () => {
-    const runtime = new DatabaseAgentRuntime({ provider: provider(), model: 'test-model', tenantId: 'sdk-tenant' });
+    const runtime = await createRuntime('sdk-tenant');
     const chat = await runtime.llmChat({ messages: [{ role: 'user', content: 'hello' }] });
     expect(chat).toMatchObject({ text: 'echo:hello', usage: { totalTokens: 3 } });
 
     const events = [];
-    for await (const event of runtime.llmStream({ messages: [{ role: 'user', content: 'stream' }] })) events.push(event);
+    for await (const event of runtime.llmStream({
+      messages: [{ role: 'user', content: 'stream' }],
+    }))
+      events.push(event);
     expect(events.at(-1)).toMatchObject({ type: 'finish', response: { text: 'streamed' } });
 
     const submitted = runtime.submitLlmBatch([
@@ -39,12 +56,14 @@ describe('LLM product entrypoints', () => {
   });
 
   it('exposes model catalog, metrics, chat, SSE stream and jobs through REST', async () => {
-    const runtime = new DatabaseAgentRuntime({ provider: provider(), model: 'test-model', tenantId: 'rest-tenant' });
+    const runtime = await createRuntime('rest-tenant');
     const started = await startDatabaseAgentServer({ runtime, port: 0 });
     servers.push(started.server);
 
     const models = await getJson(`${started.url}/v1/llm/models`);
-    expect(models).toEqual([expect.objectContaining({ providerId: 'entrypoint', model: 'test-model' })]);
+    expect(models).toEqual([
+      expect.objectContaining({ providerId: 'entrypoint', model: 'test-model' }),
+    ]);
 
     const chat = await postJson(`${started.url}/v1/llm/chat`, {
       messages: [{ role: 'user', content: 'rest' }],
@@ -74,11 +93,25 @@ describe('LLM product entrypoints', () => {
     expect(job).toMatchObject({ status: 'completed', completed: 2 });
 
     const metrics = await getJson(`${started.url}/v1/llm/metrics`);
-    if (!metrics || typeof metrics !== 'object') throw new Error('Metrics response must be an object.');
+    if (!metrics || typeof metrics !== 'object')
+      throw new Error('Metrics response must be an object.');
     expect(typeof (metrics as Record<string, unknown>).requests).toBe('number');
     expect(typeof (metrics as Record<string, unknown>).completed).toBe('number');
   });
 });
+
+async function createRuntime(tenantId: string): Promise<DatabaseAgentRuntime> {
+  const directory = await mkdtemp(join(tmpdir(), 'schemanaut-llm-entrypoints-'));
+  temporaryDirectories.push(directory);
+  const runtime = new DatabaseAgentRuntime({
+    provider: provider(),
+    model: 'test-model',
+    tenantId,
+    sessionDatabasePath: join(directory, 'sessions.db'),
+  });
+  runtimes.push(runtime);
+  return runtime;
+}
 
 function provider(): LlmProvider {
   return {

@@ -6,13 +6,8 @@ import type {
   QueryResultRow,
 } from './database-sdk.js';
 import type { QuerySafetyReport, QueryTransactionMode } from './database-runtime.js';
-import type {
-  OperationOutcome,
-  PortableScalar,
-  PortableValue,
-  PublicErrorBase,
-} from './common.js';
-import type { ResourceId } from './resource.js';
+import type { OperationOutcome, PortableScalar, PortableValue, PublicErrorBase } from './common.js';
+import type { ResourceId, ResourceScope } from './resource.js';
 
 export type ConnectionProfileId = string;
 export type ConnectionSessionId = string;
@@ -24,7 +19,7 @@ export type TcpEndpoint = {
   host: string;
   port: number;
   database?: string;
-  ssl?: boolean | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
+  ssl?: boolean | 'require' | 'verify-ca' | 'verify-full';
 };
 
 export type JdbcEndpoint = {
@@ -104,6 +99,8 @@ export type ConnectionProfile = {
   principal?: string;
   purpose: ConnectionPurpose;
   readOnly: boolean;
+  /** Trusted host scope applied to every resource discovered through this profile. */
+  scope?: ResourceScope;
   defaultResourceId?: ResourceId;
   defaultNamespace?: string;
   network?: ConnectionNetwork;
@@ -214,7 +211,7 @@ export type QueryAuthorization = {
   actorId?: string;
   policyId?: string;
   approvalId?: string;
-  permissionMode?: 'all-writes-approved' | 'non-high-risk' | 'fully-approved';
+  permissionMode?: 'read' | 'edit' | 'full';
 };
 
 export type QuerySubmission = {
@@ -374,12 +371,18 @@ export type DatabaseAccessErrorCategory =
   | 'provider'
   | 'internal';
 
-export type DatabaseAccessError = Omit<
-  PublicErrorBase,
-  'retryable' | 'outcome'
-> & {
+export type DatabaseAccessError = Omit<PublicErrorBase, 'retryable' | 'outcome'> & {
   category: DatabaseAccessErrorCategory;
-  stage?: 'profile' | 'connect' | 'discover' | 'submit' | 'execute' | 'cancel' | 'result' | 'observe' | 'operate';
+  stage?:
+    | 'profile'
+    | 'connect'
+    | 'discover'
+    | 'submit'
+    | 'execute'
+    | 'cancel'
+    | 'result'
+    | 'observe'
+    | 'operate';
   resourceId?: ResourceId;
   profileId?: ConnectionProfileId;
   jobId?: QueryJobId;

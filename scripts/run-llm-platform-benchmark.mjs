@@ -12,7 +12,10 @@ import {
 } from '../packages/core-llm/dist/index.js';
 
 const SAMPLES = positiveInteger(process.env.DBAGENT_LLM_BENCHMARK_SAMPLES ?? '1000', 'samples');
-const CONCURRENCY = positiveInteger(process.env.DBAGENT_LLM_BENCHMARK_CONCURRENCY ?? '50', 'concurrency');
+const CONCURRENCY = positiveInteger(
+  process.env.DBAGENT_LLM_BENCHMARK_CONCURRENCY ?? '50',
+  'concurrency',
+);
 const reportPath = resolve('reports/llm-platform/performance.json');
 
 const provider = benchmarkProvider();
@@ -20,7 +23,11 @@ const gateway = new LlmGateway();
 gateway.registerProvider(provider, [
   {
     model: 'benchmark-model',
-    capabilities: { streaming: 'supported', toolCalling: 'supported', structuredOutput: 'supported' },
+    capabilities: {
+      streaming: 'supported',
+      toolCalling: 'supported',
+      structuredOutput: 'supported',
+    },
     limits: { maxConcurrency: CONCURRENCY * 2 },
     pricing: { currency: 'CNY', inputPerMillionTokens: 1, outputPerMillionTokens: 2 },
   },
@@ -64,7 +71,8 @@ for await (const event of gateway.stream({
   maxRetries: 0,
   maxFallbacks: 0,
 })) {
-  if (event.type === 'text-delta') streamForwardLatencies.push(performance.now() - provider.lastYieldAt());
+  if (event.type === 'text-delta')
+    streamForwardLatencies.push(performance.now() - provider.lastYieldAt());
 }
 
 const submissionLatencies = [];
@@ -74,7 +82,11 @@ for (let index = 0; index < SAMPLES; index += 1) {
   const job = gateway.submitBatch([
     {
       providerId: provider.id,
-      request: { model: 'benchmark-model', messages: [{ role: 'user', content: `job-${index}` }], maxTokens: 8 },
+      request: {
+        model: 'benchmark-model',
+        messages: [{ role: 'user', content: `job-${index}` }],
+        maxTokens: 8,
+      },
       context: { tenantId: 'benchmark', taskType: 'performance-job' },
       maxRetries: 0,
       maxFallbacks: 0,
@@ -106,15 +118,24 @@ const thresholds = {
   cancellationPropagationP95Ms: 100,
 };
 const checks = {
-  routeDecision: metrics.routeDecisionMs.samples === SAMPLES && metrics.routeDecisionMs.p95 <= thresholds.routeDecisionP95Ms,
+  routeDecision:
+    metrics.routeDecisionMs.samples === SAMPLES &&
+    metrics.routeDecisionMs.p95 <= thresholds.routeDecisionP95Ms,
   tokenEstimation:
-    metrics.tokenEstimationMs.samples === SAMPLES && metrics.tokenEstimationMs.p95 <= thresholds.tokenEstimationP95Ms,
+    metrics.tokenEstimationMs.samples === SAMPLES &&
+    metrics.tokenEstimationMs.p95 <= thresholds.tokenEstimationP95Ms,
   structuredValidation:
     metrics.structuredValidationMs.samples === SAMPLES &&
     metrics.structuredValidationMs.p95 <= thresholds.structuredValidationP95Ms,
-  gateway: metrics.gatewayTotalMs.samples === SAMPLES && metrics.gatewayTotalMs.p95 <= thresholds.gatewayP95Ms,
-  streamForward: metrics.streamForwardMs.samples === SAMPLES && metrics.streamForwardMs.p95 <= thresholds.streamForwardP95Ms,
-  asyncSubmission: metrics.asyncSubmissionMs.samples === SAMPLES && metrics.asyncSubmissionMs.p95 <= thresholds.asyncSubmissionP95Ms,
+  gateway:
+    metrics.gatewayTotalMs.samples === SAMPLES &&
+    metrics.gatewayTotalMs.p95 <= thresholds.gatewayP95Ms,
+  streamForward:
+    metrics.streamForwardMs.samples === SAMPLES &&
+    metrics.streamForwardMs.p95 <= thresholds.streamForwardP95Ms,
+  asyncSubmission:
+    metrics.asyncSubmissionMs.samples === SAMPLES &&
+    metrics.asyncSubmissionMs.p95 <= thresholds.asyncSubmissionP95Ms,
   cancellationPropagation:
     metrics.cancellationPropagationMs.samples === Math.min(SAMPLES, 1_000) &&
     metrics.cancellationPropagationMs.p95 <= thresholds.cancellationPropagationP95Ms,
@@ -136,7 +157,8 @@ const report = {
       heapUsedMiB: bytesToMiB(process.memoryUsage().heapUsed),
     },
   },
-  measurement: 'Platform path with an in-process deterministic provider; external model and network latency excluded.',
+  measurement:
+    'Platform path with an in-process deterministic provider; external model and network latency excluded.',
   thresholds,
   checks,
   metrics,
@@ -157,7 +179,11 @@ function benchmarkProvider() {
     capabilities: { chat: 'supported', streaming: 'supported' },
     async chat(request) {
       const text = request.messages.at(-1)?.content ?? 'ok';
-      return { text, toolCalls: [], usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 } };
+      return {
+        text,
+        toolCalls: [],
+        usage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 },
+      };
     },
     async *stream(request) {
       const count = request.maxTokens ?? SAMPLES;
@@ -197,7 +223,11 @@ function benchmarkRoute(samples) {
       model: `route-${index}`,
       quality: index % 3 === 0 ? 'advanced' : 'balanced',
       capabilities: { toolCalling: 'supported', structuredOutput: 'supported' },
-      pricing: { currency: 'CNY', inputPerMillionTokens: 1 + index / 10, outputPerMillionTokens: 2 + index / 10 },
+      pricing: {
+        currency: 'CNY',
+        inputPerMillionTokens: 1 + index / 10,
+        outputPerMillionTokens: 2 + index / 10,
+      },
     });
   }
   const router = new LlmTaskRouter(registry);
@@ -219,7 +249,8 @@ function benchmarkRoute(samples) {
 }
 
 function benchmarkTokenEstimation(samples) {
-  const text = '数据库治理 database observability SELECT * FROM orders WHERE status = paid; '.repeat(128);
+  const text =
+    '数据库治理 database observability SELECT * FROM orders WHERE status = paid; '.repeat(128);
   return benchmarkSynchronous(samples, () => {
     const result = estimateTokens(text);
     if (result <= 0) throw new Error('Token estimator returned an invalid result.');
@@ -339,7 +370,12 @@ async function runConcurrent(count, concurrency, operation) {
 
 async function waitForJobs(gateway, ids) {
   for (let attempt = 0; attempt < 10_000; attempt += 1) {
-    if (ids.every((id) => ['completed', 'failed', 'cancelled'].includes(gateway.getJob(id)?.status))) return;
+    if (
+      ids.every((id) =>
+        ['completed', 'failed', 'cancelled'].includes(gateway.getJob(id, 'benchmark')?.status),
+      )
+    )
+      return;
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
   throw new Error('Benchmark async jobs did not finish.');
@@ -359,12 +395,15 @@ function summarize(values) {
 }
 
 function percentile(sorted, quantile) {
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * quantile) - 1))] ?? 0;
+  return (
+    sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * quantile) - 1))] ?? 0
+  );
 }
 
 function positiveInteger(value, name) {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer.`);
+  if (!Number.isInteger(parsed) || parsed <= 0)
+    throw new Error(`${name} must be a positive integer.`);
   return parsed;
 }
 

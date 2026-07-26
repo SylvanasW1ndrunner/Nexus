@@ -1,6 +1,8 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
+import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   LlmRouter,
@@ -9,7 +11,14 @@ import {
   type LlmProvider,
 } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
-import { AgentSessionStore, ReactAgent, ToolRegistry, type AgentSession } from '../src/index.js';
+import {
+  AgentSessionStore,
+  ReactAgent,
+  ToolRegistry,
+  agentProjectReference,
+  createAgentProjectContext,
+  type AgentSession,
+} from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -18,6 +27,74 @@ afterEach(async () => {
 });
 
 describe('AgentSessionStore', () => {
+  it('isolates every Session operation by the bound Project in one SQLite database', async () => {
+    const filePath = await sessionPath();
+    const projectA = agentProjectReference(createAgentProjectContext(join(dirname(filePath), 'A')));
+    const projectB = agentProjectReference(createAgentProjectContext(join(dirname(filePath), 'B')));
+    const storeA = new AgentSessionStore(filePath).forProject(projectA);
+    const storeB = new AgentSessionStore(filePath).forProject(projectB);
+    const session = {
+      ...testSession('session_project_a', 'Project A only'),
+      project: projectA,
+      contextCheckpoint: {
+        version: 1 as const,
+        sequence: 1,
+        trigger: 'manual' as const,
+        method: 'model' as const,
+        summary: 'Project A checkpoint',
+        coveredConversationMessageCount: 1,
+        sourceTokenEstimate: 100,
+        summaryTokenEstimate: 10,
+        modelContextTokens: 32_768,
+        createdAt: '2026-07-26T00:00:00.000Z',
+      },
+    };
+
+    await storeA.save({ session });
+
+    await expect(storeA.list()).resolves.toMatchObject([{ id: session.id }]);
+    await expect(storeA.load(session.id)).resolves.toMatchObject({ id: session.id });
+    await expect(storeA.listContextCheckpoints(session.id)).resolves.toMatchObject([
+      { sequence: 1 },
+    ]);
+
+    await expect(storeB.list()).resolves.toEqual([]);
+    await expect(storeB.load(session.id)).resolves.toBeUndefined();
+    await expect(storeB.delete(session.id)).resolves.toBe(false);
+    await expect(storeB.listContextCheckpoints(session.id)).resolves.toEqual([]);
+    await expect(storeB.archive(session.id)).rejects.toThrow('Agent session not found');
+    await expect(storeB.update(session.id, { title: 'foreign edit' })).rejects.toThrow(
+      'Agent session not found',
+    );
+    await expect(
+      storeB.fork({ id: session.id, fromMessageIndex: 0 }),
+    ).rejects.toThrow('Agent session not found');
+    await expect(storeB.export(session.id, 'json')).rejects.toThrow('Agent session not found');
+    await expect(
+      storeB.save({
+        session: {
+          ...session,
+          project: projectB,
+          messages: [
+            ...session.messages,
+            {
+              role: 'user' as const,
+              content: 'foreign overwrite',
+              createdAt: '2026-07-26T00:01:00.000Z',
+            },
+          ],
+        },
+      }),
+    ).rejects.toThrow('already owned by another Project');
+
+    await expect(storeA.archive(session.id)).resolves.toMatchObject({ archived: true });
+    await expect(storeA.archive(session.id, false)).resolves.toMatchObject({ archived: false });
+    await expect(storeA.load(session.id)).resolves.toMatchObject({
+      title: 'Project A only',
+      messages: session.messages,
+    });
+  });
+
   it('persists, lists, loads, updates, archives, restores, and deletes sessions', async () => {
     const store = new AgentSessionStore(await sessionPath());
     const session = testSession('session_1', '订单分析');
@@ -32,20 +109,31 @@ describe('AgentSessionStore', () => {
       updatedAt: '2026-06-23T01:00:00.000Z',
       lastMessageAt: '2026-06-23T00:00:01.000Z',
     });
-    await expect(store.load('session_1')).resolves.toMatchObject({ id: 'session_1', title: '订单分析' });
+    await expect(store.load('session_1')).resolves.toMatchObject({
+      id: 'session_1',
+      title: '订单分析',
+    });
     await expect(store.list()).resolves.toMatchObject([{ id: 'session_1' }]);
 
-    await expect(store.update('session_1', { title: 'GMV 分析' }, '2026-06-23T02:00:00.000Z')).resolves.toMatchObject({
+    await expect(
+      store.update('session_1', { title: 'GMV 分析' }, '2026-06-23T02:00:00.000Z'),
+    ).resolves.toMatchObject({
       title: 'GMV 分析',
       updatedAt: '2026-06-23T02:00:00.000Z',
     });
-    await expect(store.archive('session_1', true, '2026-06-23T03:00:00.000Z')).resolves.toMatchObject({
+    await expect(
+      store.archive('session_1', true, '2026-06-23T03:00:00.000Z'),
+    ).resolves.toMatchObject({
       archived: true,
     });
     await expect(store.list()).resolves.toEqual([]);
-    await expect(store.list({ archived: true })).resolves.toMatchObject([{ id: 'session_1', archived: true }]);
+    await expect(store.list({ archived: true })).resolves.toMatchObject([
+      { id: 'session_1', archived: true },
+    ]);
 
-    await expect(store.archive('session_1', false, '2026-06-23T04:00:00.000Z')).resolves.toMatchObject({
+    await expect(
+      store.archive('session_1', false, '2026-06-23T04:00:00.000Z'),
+    ).resolves.toMatchObject({
       archived: false,
     });
     await expect(store.delete('session_1')).resolves.toBe(true);
@@ -54,11 +142,21 @@ describe('AgentSessionStore', () => {
 
   it('searches summaries by title and message text with pagination', async () => {
     const store = new AgentSessionStore(await sessionPath());
-    await store.save({ session: testSession('session_orders', '订单分析'), now: '2026-06-23T01:00:00.000Z' });
-    await store.save({ session: testSession('session_users', '用户留存'), now: '2026-06-23T02:00:00.000Z' });
+    await store.save({
+      session: testSession('session_orders', '订单分析'),
+      now: '2026-06-23T01:00:00.000Z',
+    });
+    await store.save({
+      session: testSession('session_users', '用户留存'),
+      now: '2026-06-23T02:00:00.000Z',
+    });
 
-    await expect(store.list({ query: '订单分析' })).resolves.toMatchObject([{ id: 'session_orders' }]);
-    await expect(store.list({ limit: 1, offset: 1 })).resolves.toMatchObject([{ id: 'session_orders' }]);
+    await expect(store.list({ query: '订单分析' })).resolves.toMatchObject([
+      { id: 'session_orders' },
+    ]);
+    await expect(store.list({ limit: 1, offset: 1 })).resolves.toMatchObject([
+      { id: 'session_orders' },
+    ]);
   });
 
   it('appends new messages without rewriting or mutating prior history', async () => {
@@ -91,9 +189,7 @@ describe('AgentSessionStore', () => {
       content: '试图改写历史。',
       createdAt: '2026-07-24T00:00:01.000Z',
     };
-    await expect(store.save({ session })).rejects.toThrow(
-      'append-only',
-    );
+    await expect(store.save({ session })).rejects.toThrow('append-only');
   });
 
   it('persists every context checkpoint while keeping only the active one on the session', async () => {
@@ -129,9 +225,7 @@ describe('AgentSessionStore', () => {
       },
       messages: session.messages,
     });
-    await expect(
-      store.listContextCheckpoints(session.id),
-    ).resolves.toMatchObject([
+    await expect(store.listContextCheckpoints(session.id)).resolves.toMatchObject([
       { sequence: 1, trigger: 'auto' },
       { sequence: 2, trigger: 'manual', focus: '保留地区金额。' },
     ]);
@@ -139,7 +233,10 @@ describe('AgentSessionStore', () => {
 
   it('forks a session from a selected message and exports json or markdown', async () => {
     const store = new AgentSessionStore(await sessionPath());
-    await store.save({ session: testSession('session_1', '订单分析'), now: '2026-06-23T01:00:00.000Z' });
+    await store.save({
+      session: testSession('session_1', '订单分析'),
+      now: '2026-06-23T01:00:00.000Z',
+    });
 
     await expect(
       store.fork({
@@ -162,11 +259,19 @@ describe('AgentSessionStore', () => {
     const store = new AgentSessionStore(await sessionPath());
     await store.save({ session: testSession('session_1', '订单分析') });
 
-    await expect(store.update('missing', { title: 'x' })).rejects.toThrow('Agent session not found: missing');
-    await expect(store.fork({ id: 'session_1', fromMessageIndex: 99 })).rejects.toThrow('Invalid fork message index: 99');
-    await expect(store.export('missing', 'json')).rejects.toThrow('Agent session not found: missing');
+    await expect(store.update('missing', { title: 'x' })).rejects.toThrow(
+      'Agent session not found: missing',
+    );
+    await expect(store.fork({ id: 'session_1', fromMessageIndex: 99 })).rejects.toThrow(
+      'Invalid fork message index: 99',
+    );
+    await expect(store.export('missing', 'json')).rejects.toThrow(
+      'Agent session not found: missing',
+    );
     await expect(store.list({ limit: 0 })).rejects.toThrow('limit must be a positive integer.');
-    await expect(store.list({ offset: -1 })).rejects.toThrow('offset must be a non-negative integer.');
+    await expect(store.list({ offset: -1 })).rejects.toThrow(
+      'offset must be a non-negative integer.',
+    );
   });
 
   it('quarantines a corrupt SQLite database so startup can continue', async () => {
@@ -182,6 +287,138 @@ describe('AgentSessionStore', () => {
     await expect(readdir(directory)).resolves.toEqual(
       expect.arrayContaining([expect.stringMatching(/agent-sessions\.db\.corrupt-/)]),
     );
+  });
+
+  it('removes the obsolete strategy column from an existing session database', async () => {
+    const filePath = await sessionPath();
+    await mkdir(dirname(filePath), { recursive: true });
+    const sqliteModuleId = ['node', 'sqlite'].join(':');
+    const { DatabaseSync } = createRequire(import.meta.url)(sqliteModuleId) as {
+      DatabaseSync: new (path: string) => NodeDatabaseSync;
+    };
+    const legacy = new DatabaseSync(filePath);
+    legacy.exec(`
+      CREATE TABLE agent_sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        user_id TEXT,
+        mode TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        archived INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL,
+        tool_message_count INTEGER NOT NULL,
+        prompt_tokens INTEGER NOT NULL,
+        completion_tokens INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_message_at TEXT,
+        payload_json TEXT NOT NULL
+      )
+    `);
+    legacy.close();
+
+    const store = new AgentSessionStore(filePath);
+    await store.save({ session: testSession('session_migrated', '迁移测试') });
+
+    const migrated = new DatabaseSync(filePath);
+    const columns = migrated
+      .prepare('PRAGMA table_info(agent_sessions)')
+      .all() as unknown as Array<{ name: string }>;
+    migrated.close();
+    expect(columns.map((column) => column.name)).not.toContain('strategy');
+  });
+
+  it('migrates Project ownership from payloads while keeping unowned legacy rows isolated', async () => {
+    const filePath = await sessionPath();
+    await mkdir(dirname(filePath), { recursive: true });
+    const sqliteModuleId = ['node', 'sqlite'].join(':');
+    const { DatabaseSync } = createRequire(import.meta.url)(sqliteModuleId) as {
+      DatabaseSync: new (path: string) => NodeDatabaseSync;
+    };
+    const legacy = new DatabaseSync(filePath);
+    legacy.exec(`
+      CREATE TABLE agent_sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        user_id TEXT,
+        mode TEXT NOT NULL,
+        archived INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL,
+        tool_message_count INTEGER NOT NULL,
+        prompt_tokens INTEGER NOT NULL,
+        completion_tokens INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_message_at TEXT,
+        payload_json TEXT NOT NULL
+      )
+    `);
+    const projectA = agentProjectReference(createAgentProjectContext(join(dirname(filePath), 'A')));
+    const projectSession = { ...testSession('project_payload', 'owned'), project: projectA };
+    const unownedSession = testSession('legacy_payload', 'legacy');
+    const insert = legacy.prepare(`
+      INSERT INTO agent_sessions (
+        id, title, user_id, mode, archived, message_count, tool_message_count,
+        prompt_tokens, completion_tokens, total_tokens, created_at, updated_at,
+        last_message_at, payload_json
+      ) VALUES (?, ?, NULL, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const session of [projectSession, unownedSession]) {
+      insert.run(
+        session.id,
+        session.title,
+        session.mode,
+        session.messages.length,
+        session.tokenUsage.promptTokens,
+        session.tokenUsage.completionTokens,
+        session.tokenUsage.totalTokens,
+        session.messages[0]?.createdAt ?? '2026-07-26T00:00:00.000Z',
+        session.messages.at(-1)?.createdAt ?? '2026-07-26T00:00:00.000Z',
+        session.messages.at(-1)?.createdAt ?? null,
+        JSON.stringify(session),
+      );
+    }
+    legacy.close();
+
+    const storeA = new AgentSessionStore(filePath).forProject(projectA);
+    const storeB = new AgentSessionStore(filePath).forProject(
+      agentProjectReference(createAgentProjectContext(join(dirname(filePath), 'B'))),
+    );
+    const legacyStore = new AgentSessionStore(filePath);
+
+    await expect(storeA.load(projectSession.id)).resolves.toMatchObject({
+      id: projectSession.id,
+      messages: projectSession.messages,
+    });
+    await expect(storeB.load(projectSession.id)).resolves.toBeUndefined();
+    await expect(storeA.load(unownedSession.id)).resolves.toBeUndefined();
+    await expect(storeB.load(unownedSession.id)).resolves.toBeUndefined();
+    await expect(legacyStore.load(unownedSession.id)).resolves.toMatchObject({
+      id: unownedSession.id,
+      messages: unownedSession.messages,
+    });
+    await expect(legacyStore.load(projectSession.id)).resolves.toBeUndefined();
+
+    const migrated = new DatabaseSync(filePath);
+    const rows = migrated
+      .prepare(
+        'SELECT id, project_key, project_root FROM agent_sessions ORDER BY id ASC',
+      )
+      .all() as unknown as Array<{
+      id: string;
+      project_key: string;
+      project_root: string | null;
+    }>;
+    migrated.close();
+    const migratedProjectRow = rows.find(({ id }) => id === projectSession.id);
+    expect(migratedProjectRow?.project_key).toMatch(/^project:/);
+    expect(typeof migratedProjectRow?.project_root).toBe('string');
+    expect(rows.find(({ id }) => id === unownedSession.id)).toMatchObject({
+      project_key: 'legacy:unscoped',
+      project_root: null,
+    });
   });
 
   it('persists the knowledge snapshot and automatically distills stable user preferences', async () => {
@@ -200,6 +437,11 @@ describe('AgentSessionStore', () => {
       content: '我希望默认使用只读模式。以后请先展示 SQL，再解释结果。',
       createdAt: '2026-06-23T00:00:02.000Z',
     });
+    session.messages.push({
+      role: 'user',
+      content: '我希望查询上个月的销售额。',
+      createdAt: '2026-06-23T00:00:03.000Z',
+    });
 
     await store.save({
       session,
@@ -215,14 +457,14 @@ describe('AgentSessionStore', () => {
     });
     const preferences = await store.listPreferences('user-alice');
     expect(preferences.map((preference) => preference.value)).toEqual(
-      expect.arrayContaining([
-        '我希望默认使用只读模式',
-        '以后请先展示 SQL，再解释结果',
-      ]),
+      expect.arrayContaining(['我希望默认使用只读模式', '以后请先展示 SQL，再解释结果']),
     );
-    expect(preferences.every((preference) => preference.sourceSessionId === 'session_preferences')).toBe(
-      true,
+    expect(preferences.map((preference) => preference.value)).not.toContain(
+      '我希望查询上个月的销售额',
     );
+    expect(
+      preferences.every((preference) => preference.sourceSessionId === 'session_preferences'),
+    ).toBe(true);
   });
 
   it('injects cross-session preferences into a later Agent run without an extra model call', async () => {
@@ -273,12 +515,12 @@ describe('AgentSessionStore', () => {
     });
 
     expect(result.status).toBe('done');
-    expect(result.session.messages.map((message) => message.role)).toEqual([
-      'user',
-      'assistant',
-    ]);
-    expect(calls[0]?.messages[0]?.role).toBe('system');
-    expect(calls[0]?.messages[0]?.content).toContain('默认先展示 SQL');
+    expect(result.session.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(
+      calls[0]?.messages.some(
+        (message) => message.role === 'system' && message.content.includes('默认先展示 SQL'),
+      ),
+    ).toBe(true);
     expect(result.iterations).toBe(1);
   });
 
@@ -374,7 +616,7 @@ describe('AgentSessionStore', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '查询订单总数',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 2,
     });
 
@@ -404,11 +646,14 @@ function testSession(id: string, title: string): AgentSession {
   return {
     id,
     title,
-    mode: 'readonly',
-    strategy: 'react',
+    mode: 'read',
     messages: [
       { role: 'user', content: '分析 GMV', createdAt: '2026-06-23T00:00:00.000Z' },
-      { role: 'assistant', content: '请先查看 orders.total_amount。', createdAt: '2026-06-23T00:00:01.000Z' },
+      {
+        role: 'assistant',
+        content: '请先查看 orders.total_amount。',
+        createdAt: '2026-06-23T00:00:01.000Z',
+      },
     ],
     tokenUsage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
     aborted: false,

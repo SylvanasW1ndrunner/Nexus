@@ -4,8 +4,11 @@ import type {
   CapabilityDescriptor,
   CapabilityProfile,
   ConnectionProfile,
+  DatabaseAccessError,
   DatabaseTransaction,
+  QueryAuthorization,
   QueryJob,
+  QuerySubmission,
   ResourceDescriptor,
   ResourceRelation,
   ResultBatch,
@@ -47,9 +50,12 @@ function createMockConnector(options: {
   repeatDiscoveryCursor?: boolean;
   nativeStream?: boolean;
   disconnectFails?: boolean;
+  asyncTerminalState?: 'succeeded' | 'failed';
 } = {}) {
   const calls: string[] = [];
   const jobs = new Map<string, QueryJob>();
+  const jobPolls = new Map<string, number>();
+  const submissions: QuerySubmission[] = [];
   const rows = Array.from({ length: 7 }, (_, index) => ({ value: index + 1 }));
   const databaseId = createStableResourceId({
     sourceNamespace: 'mock',
@@ -217,13 +223,15 @@ function createMockConnector(options: {
     },
     submit(context, submission) {
       calls.push('submit');
+      submissions.push(structuredClone(submission));
+      const asynchronous = submission.executionMode === 'async';
       const job: QueryJob = {
         id: randomUUID(),
         profileId: context.profile.id,
         connectorId: 'mock-connector',
-        state: submission.sql === 'queued' ? 'queued' : 'succeeded',
+        state: asynchronous ? 'queued' : 'succeeded',
         submittedAt: now,
-        ...(submission.sql === 'queued'
+        ...(asynchronous
           ? {}
           : {
               completedAt: now,
@@ -243,7 +251,49 @@ function createMockConnector(options: {
     getJob(_context, jobId) {
       calls.push('getJob');
       const job = jobs.get(jobId);
-      return job ? Promise.resolve(job) : Promise.reject(new Error('job missing'));
+      if (!job) return Promise.reject(new Error('job missing'));
+      const polls = (jobPolls.get(jobId) ?? 0) + 1;
+      jobPolls.set(jobId, polls);
+      if (job.state === 'queued') {
+        const running = { ...job, state: 'running' as const, startedAt: now };
+        jobs.set(jobId, running);
+        return Promise.resolve(running);
+      }
+      if (job.state === 'running') {
+        const terminalState = options.asyncTerminalState ?? 'succeeded';
+        const terminal: QueryJob =
+          terminalState === 'failed'
+            ? {
+                ...job,
+                state: 'failed',
+                completedAt: now,
+                error: {
+                  code: 'QUERY_FAILED',
+                  category: 'provider',
+                  message: 'The asynchronous query failed.',
+                  stage: 'execute',
+                  profileId: job.profileId,
+                  jobId,
+                  retryable: false,
+                  outcome: 'unchanged',
+                } satisfies DatabaseAccessError,
+              }
+            : {
+                ...job,
+                state: 'succeeded',
+                completedAt: now,
+                result: {
+                  id: `result-${jobId}`,
+                  jobId,
+                  format: 'rows',
+                  columns: [{ name: 'value', dataType: 'integer' }],
+                  rowCount: rows.length,
+                },
+              };
+        jobs.set(jobId, terminal);
+        return Promise.resolve(terminal);
+      }
+      return Promise.resolve(job);
     },
     cancel(_context, jobId) {
       calls.push('cancel');
@@ -338,7 +388,7 @@ function createMockConnector(options: {
       });
     },
   };
-  return { connector, calls, databaseId, tableId };
+  return { connector, calls, databaseId, tableId, submissions };
 }
 
 function transaction(profileId: string, id: string, savepoints: string[] = []): DatabaseTransaction {
@@ -468,7 +518,7 @@ describe('DatabaseAccessRuntime', () => {
 
     const queued = await runtime.submit({
       profileId: 'profile-1',
-      sql: 'queued',
+      sql: 'select queued',
       executionMode: 'async',
     });
     expect((await runtime.cancel(queued.id)).state).toBe('cancelled');
@@ -494,6 +544,180 @@ describe('DatabaseAccessRuntime', () => {
     );
     await expect(runtime.getJob('missing')).rejects.toBeInstanceOf(DatabaseAccessRuntimeError);
     await expect(runtime.readResult('missing')).rejects.toBeInstanceOf(DatabaseAccessRuntimeError);
+  });
+
+  it.each([
+    {
+      name: 'missing authorization',
+      authorization: undefined,
+    },
+    {
+      name: 'approval metadata and confirmation without a permission mode',
+      authorization: {
+        approvalId: 'approval-1',
+        policyId: 'policy-1',
+      } satisfies QueryAuthorization,
+    },
+  ])('does not let $name elevate a write above the default read boundary', async ({ authorization }) => {
+    const mock = createMockConnector();
+    const runtime = runtimeWith(mock.connector);
+    runtime.createProfile(profile());
+    await runtime.connect('profile-1');
+
+    await expect(
+      runtime.submit({
+        profileId: 'profile-1',
+        sql: 'insert into orders (id) values (1)',
+        confirmed: true,
+        ...(authorization ? { authorization } : {}),
+      }),
+    ).rejects.toMatchObject({
+      error: {
+        code: 'QUERY_PERMISSION_DENIED',
+        category: 'authorization',
+        outcome: 'unchanged',
+      },
+    });
+    expect(mock.submissions).toHaveLength(0);
+  });
+
+  it('passes an explicit effective read mode to the connector when authorization is omitted', async () => {
+    const mock = createMockConnector();
+    const runtime = runtimeWith(mock.connector);
+    runtime.createProfile(profile());
+    await runtime.connect('profile-1');
+
+    const job = await runtime.submit({
+      profileId: 'profile-1',
+      sql: 'select value from orders',
+    });
+
+    expect(job.state).toBe('succeeded');
+    expect(mock.submissions).toHaveLength(1);
+    expect(mock.submissions[0]?.authorization).toEqual({ permissionMode: 'read' });
+  });
+
+  it('allows edit SQL only in edit/full mode and reserves DDL for full mode', async () => {
+    const mock = createMockConnector();
+    const runtime = runtimeWith(mock.connector);
+    runtime.createProfile(profile());
+    await runtime.connect('profile-1');
+
+    await expect(
+      runtime.submit({
+        profileId: 'profile-1',
+        sql: 'update orders set status = 1 where id = 1',
+        authorization: { permissionMode: 'edit' },
+      }),
+    ).resolves.toMatchObject({ state: 'succeeded' });
+    await expect(
+      runtime.submit({
+        profileId: 'profile-1',
+        sql: 'alter table orders add column status integer',
+        authorization: { permissionMode: 'edit' },
+      }),
+    ).rejects.toMatchObject({
+      error: {
+        code: 'QUERY_PERMISSION_DENIED',
+        category: 'authorization',
+      },
+    });
+    await expect(
+      runtime.submit({
+        profileId: 'profile-1',
+        sql: 'alter table orders add column status integer',
+        authorization: { permissionMode: 'full' },
+      }),
+    ).resolves.toMatchObject({ state: 'succeeded' });
+    expect(mock.submissions.map((submission) => submission.authorization?.permissionMode)).toEqual([
+      'edit',
+      'full',
+    ]);
+  });
+
+  it.each([
+    { terminalState: 'succeeded' as const, expectedStatus: 'succeeded' as const },
+    { terminalState: 'failed' as const, expectedStatus: 'failed' as const },
+  ])(
+    'records an asynchronous $terminalState terminal audit exactly once',
+    async ({ terminalState, expectedStatus }) => {
+      const mock = createMockConnector({ asyncTerminalState: terminalState });
+      const runtime = runtimeWith(mock.connector);
+      runtime.createProfile(profile());
+      await runtime.connect('profile-1');
+      const queued = await runtime.submit({
+        profileId: 'profile-1',
+        sql: 'select async_value',
+        executionMode: 'async',
+        authorization: { actorId: 'audit-user', permissionMode: 'read' },
+      });
+
+      expect(
+        runtime
+          .listAuditEvents({ profileId: 'profile-1' })
+          .find((event) => event.jobId === queued.id),
+      ).toMatchObject({
+        action: 'database.query.submit',
+        status: 'unknown',
+      });
+      expect((await runtime.getJob(queued.id)).state).toBe('running');
+      expect(
+        runtime
+          .listAuditEvents({ profileId: 'profile-1' })
+          .filter(
+            (event) =>
+              event.jobId === queued.id &&
+              ['succeeded', 'failed', 'cancelled'].includes(event.status),
+          ),
+      ).toHaveLength(0);
+
+      expect((await runtime.getJob(queued.id)).state).toBe(terminalState);
+      await runtime.getJob(queued.id);
+      expect(
+        runtime
+          .listAuditEvents({ profileId: 'profile-1' })
+          .filter(
+            (event) =>
+              event.jobId === queued.id &&
+              ['succeeded', 'failed', 'cancelled'].includes(event.status),
+          ),
+      ).toEqual([
+        expect.objectContaining({
+          action: 'database.query.complete',
+          status: expectedStatus,
+          authorization: { actorId: 'audit-user', permissionMode: 'read' },
+        }),
+      ]);
+    },
+  );
+
+  it('records cancellation as the only terminal audit for a queued job', async () => {
+    const mock = createMockConnector();
+    const runtime = runtimeWith(mock.connector);
+    runtime.createProfile(profile());
+    await runtime.connect('profile-1');
+    const queued = await runtime.submit({
+      profileId: 'profile-1',
+      sql: 'select cancellable_value',
+      executionMode: 'async',
+    });
+
+    expect((await runtime.cancel(queued.id)).state).toBe('cancelled');
+    await runtime.getJob(queued.id);
+    expect(
+      runtime
+        .listAuditEvents({ profileId: 'profile-1' })
+        .filter(
+          (event) =>
+            event.jobId === queued.id &&
+            ['succeeded', 'failed', 'cancelled'].includes(event.status),
+        ),
+    ).toEqual([
+      expect.objectContaining({
+        action: 'database.query.cancel',
+        status: 'cancelled',
+      }),
+    ]);
   });
 
   it('uses a connector-native result stream when available', async () => {

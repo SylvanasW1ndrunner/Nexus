@@ -1,4 +1,10 @@
-export type McpServerStatus = 'stopped' | 'starting' | 'healthy' | 'unhealthy' | 'restarting' | 'disabled';
+export type McpServerStatus =
+  | 'stopped'
+  | 'starting'
+  | 'healthy'
+  | 'unhealthy'
+  | 'restarting'
+  | 'disabled';
 
 export type McpResourceSample = {
   rssBytes?: number;
@@ -79,10 +85,22 @@ export class McpHealthManager {
 
   constructor(options: McpHealthManagerOptions = {}) {
     this.maxRestarts = normalizePositiveInteger(options.maxRestarts, DEFAULT_MAX_RESTARTS);
-    this.baseRestartDelayMs = normalizePositiveInteger(options.baseRestartDelayMs, DEFAULT_BASE_RESTART_DELAY_MS);
-    this.maxRestartDelayMs = normalizePositiveInteger(options.maxRestartDelayMs, DEFAULT_MAX_RESTART_DELAY_MS);
-    this.memoryLimitBytes = normalizePositiveInteger(options.memoryLimitBytes, DEFAULT_MEMORY_LIMIT_BYTES);
-    this.cpuLimitPercent = normalizePositiveInteger(options.cpuLimitPercent, DEFAULT_CPU_LIMIT_PERCENT);
+    this.baseRestartDelayMs = normalizePositiveInteger(
+      options.baseRestartDelayMs,
+      DEFAULT_BASE_RESTART_DELAY_MS,
+    );
+    this.maxRestartDelayMs = normalizePositiveInteger(
+      options.maxRestartDelayMs,
+      DEFAULT_MAX_RESTART_DELAY_MS,
+    );
+    this.memoryLimitBytes = normalizePositiveInteger(
+      options.memoryLimitBytes,
+      DEFAULT_MEMORY_LIMIT_BYTES,
+    );
+    this.cpuLimitPercent = normalizePositiveInteger(
+      options.cpuLimitPercent,
+      DEFAULT_CPU_LIMIT_PERCENT,
+    );
     this.cpuSustainMs = normalizePositiveInteger(options.cpuSustainMs, DEFAULT_CPU_SUSTAIN_MS);
     this.now = options.now ?? (() => new Date().toISOString());
   }
@@ -139,7 +157,10 @@ export class McpHealthManager {
     }));
   }
 
-  recordExit(serverId: string, input: { code?: number; signal?: string; at?: string } = {}): McpServerHealthState {
+  recordExit(
+    serverId: string,
+    input: { code?: number; signal?: string; errorMessage?: string; at?: string } = {},
+  ): McpServerHealthState {
     const at = input.at ?? this.now();
     return this.update(serverId, (state) => {
       if (state.status === 'disabled') {
@@ -164,7 +185,11 @@ export class McpHealthManager {
         lastExitAt: at,
         ...(input.code === undefined ? {} : { lastExitCode: input.code }),
         ...(input.signal === undefined ? {} : { lastExitSignal: input.signal }),
-        lastError: canRestart ? `Process exited; restart scheduled in ${delayMs}ms.` : 'Process exited; restart limit reached.',
+        lastError:
+          input.errorMessage ??
+          (canRestart
+            ? `Process exited; restart scheduled in ${delayMs}ms.`
+            : 'Process exited; restart limit reached.'),
         nextRestartAt: canRestart ? addMilliseconds(at, delayMs) : undefined,
       };
     });
@@ -190,10 +215,16 @@ export class McpHealthManager {
         pushWarning(warnings, `Memory limit exceeded: ${sample.rssBytes} bytes.`);
         const restartCount = state.restartCount + 1;
         const canRestart = restartCount <= this.maxRestarts;
-        const delayMs = restartDelayMs(restartCount, this.baseRestartDelayMs, this.maxRestartDelayMs);
+        const delayMs = restartDelayMs(
+          restartCount,
+          this.baseRestartDelayMs,
+          this.maxRestartDelayMs,
+        );
         status = canRestart ? 'restarting' : 'unhealthy';
         healthy = false;
-        lastError = canRestart ? `Memory limit exceeded; restart scheduled in ${delayMs}ms.` : 'Memory limit exceeded; restart limit reached.';
+        lastError = canRestart
+          ? `Memory limit exceeded; restart scheduled in ${delayMs}ms.`
+          : 'Memory limit exceeded; restart limit reached.';
         nextRestartAt = canRestart ? addMilliseconds(sampledAt, delayMs) : undefined;
         return {
           ...state,
@@ -212,7 +243,10 @@ export class McpHealthManager {
         const overSince = this.cpuOverLimitSince.get(serverId) ?? sampledAt;
         this.cpuOverLimitSince.set(serverId, overSince);
         if (Date.parse(sampledAt) - Date.parse(overSince) >= this.cpuSustainMs) {
-          pushWarning(warnings, `CPU stayed above ${this.cpuLimitPercent}% for at least ${this.cpuSustainMs}ms.`);
+          pushWarning(
+            warnings,
+            `CPU stayed above ${this.cpuLimitPercent}% for at least ${this.cpuSustainMs}ms.`,
+          );
         }
       } else {
         this.cpuOverLimitSince.delete(serverId);
@@ -238,7 +272,10 @@ export class McpHealthManager {
     if (!this.ensure(serverId).healthy) throw new McpUnavailableError(serverId);
   }
 
-  private update(serverId: string, updater: (state: McpServerHealthState) => McpServerHealthState): McpServerHealthState {
+  private update(
+    serverId: string,
+    updater: (state: McpServerHealthState) => McpServerHealthState,
+  ): McpServerHealthState {
     const next = pruneUndefined(updater(this.ensure(serverId)));
     this.states.set(serverId, next);
     return cloneState(next);

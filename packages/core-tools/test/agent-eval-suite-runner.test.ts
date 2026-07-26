@@ -47,7 +47,7 @@ describe('runAgentBehaviorEvaluationSuite', () => {
       baseRun: {
         providerId: 'fake',
         model: 'fake-model',
-        mode: 'readonly',
+        mode: 'read',
         maxIterations: 5,
       },
       suite: {
@@ -93,7 +93,7 @@ describe('runAgentBehaviorEvaluationSuite', () => {
       {
         providerId: 'fake',
         model: 'fake-model',
-        mode: 'readonly',
+        mode: 'read',
         maxIterations: 5,
         maxToolExecutionMs: 10_000,
         userMessage: '按渠道统计 GMV 和 ROI',
@@ -132,7 +132,7 @@ describe('runAgentBehaviorEvaluationSuite', () => {
       baseRun: {
         providerId: 'fake',
         model: 'fake-model',
-        mode: 'readonly',
+        mode: 'read',
       },
       suite: {
         suiteId: 'agent-rag-stop',
@@ -183,7 +183,9 @@ describe('runAgentBehaviorEvaluationSuite', () => {
   });
 });
 
-function recordingAgent(script: AgentRunResult[]): AgentEvalSuiteAgent & { calls: AgentRunOptions[] } {
+function recordingAgent(
+  script: AgentRunResult[],
+): AgentEvalSuiteAgent & { calls: AgentRunOptions[] } {
   const calls: AgentRunOptions[] = [];
   return {
     calls,
@@ -202,8 +204,7 @@ function runResult(overrides: Partial<AgentRunResult>): AgentRunResult {
     session: {
       id: 'session_eval_suite',
       title: 'eval suite',
-      mode: 'readonly',
-      strategy: 'react',
+      mode: 'read',
       messages: [],
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       aborted: false,

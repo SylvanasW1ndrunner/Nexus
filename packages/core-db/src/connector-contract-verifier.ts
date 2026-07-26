@@ -36,7 +36,7 @@ export type ConnectorContractVerificationOptions = {
 
 /**
  * Reusable, read-only connector contract verification. A passing `contract`
- * report proves that the adapter obeys DBAgent contracts; only a run against
+ * report proves that the adapter obeys SchemaNaut contracts; only a run against
  * the actual vendor service may use `scope: "vendor"`.
  */
 export async function verifyConnectorContract(

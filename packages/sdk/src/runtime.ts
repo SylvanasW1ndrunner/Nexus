@@ -1,10 +1,21 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import {
+  AgentToolApprovalBroker,
+  AgentSubagentPool,
   AgentSessionStore,
   ReactAgent,
   ToolRegistry,
+  agentProjectReference,
+  agentProjectStorageIdentity,
+  assertSameAgentProject,
+  createAgentProjectContext,
+  defaultAgentStateDatabasePath,
+  defaultAgentUserSkillsDirectory,
   type AgentContextCheckpoint,
+  type AgentProjectContext,
+  type AgentSession,
 } from '@dbagent/core-agent';
 import {
   ConnectorRegistry,
@@ -29,25 +40,41 @@ import {
   type LlmProvider,
   type RegisteredLlmModel,
 } from '@dbagent/core-llm';
-import { SchemaRagEngine } from '@dbagent/core-rag';
 import {
-  createDefaultBuiltinSkills,
-  SkillRegistry,
-} from '@dbagent/core-skills';
+  ProgressiveSchemaRagIndexer,
+  SchemaRagEngine,
+  SchemaRagSnapshotStore,
+} from '@dbagent/core-rag';
+import { SkillRegistry, systemSkillSource, type SkillOverlay } from '@dbagent/core-skills';
 import {
+  registerAgentRuntimeTools,
   registerAiSqlTools,
-  runAutoSkillAgent,
+  registerSkillTools,
+  registerSubagentTools,
+  registerWebTools,
+  registerWorkspaceTools,
+  createMcpRuntimeLauncher,
+  McpConfigStore,
+  McpHealthManager,
+  McpRuntimeManager,
+  McpToolRegistrationManager,
   type AiSqlQueryExecutionInput,
   type AiSqlResultStore,
+  type McpServerConfig,
+  type McpServerHealthState,
+  type McpServerInput,
 } from '@dbagent/core-tools';
 import { UsageTracker } from '@dbagent/core-usage';
-import type {
-  ConnectionProfile,
-  QueryExecutionResult,
-  QuerySafetyReport,
-  ResourceDescriptor,
-  ResourceRelation,
-  SavedConnection,
+import {
+  stringifyPublicJson,
+  type ConnectionProfile,
+  type QueryJob,
+  type QueryExecutionResult,
+  type QuerySafetyReport,
+  type ResourceDescriptor,
+  type ResourceRelation,
+  type ResourceScope,
+  type SavedConnection,
 } from '@dbagent/shared';
 import { DatabaseAgentError, asDatabaseAgentError } from './errors.js';
 import { parseGeneratedSqlResponse } from './parse-generation.js';
@@ -67,6 +94,17 @@ import type {
   PostgresConnectionInput,
   RunAiSqlAgentInput,
   AiSqlAgentRun,
+  AiSqlAgentRunView,
+  AgentSessionListInput,
+  AgentSessionListItem,
+  AgentSessionView,
+  AgentSkillCatalogEntry,
+  AgentSkillListInput,
+  AgentSkillRefreshResult,
+  AgentApprovalRequest,
+  McpServerStartSummary,
+  McpServerStopSummary,
+  McpServerSummary,
   RuntimeStatus,
   SchemaIndexSnapshot,
   SqlRunSnapshot,
@@ -86,6 +124,7 @@ const EXECUTABLE_STATEMENT_KINDS = new Set(['SELECT', 'WITH', 'VALUES']);
 export class DatabaseAgentRuntime {
   private readonly driver: IDatabaseDriver;
   private readonly rag: SchemaRagEngine;
+  private readonly ragIndexer: ProgressiveSchemaRagIndexer;
   private readonly createRunId: () => string;
   private readonly createConnectionId: () => string;
   private readonly now: () => string;
@@ -94,10 +133,31 @@ export class DatabaseAgentRuntime {
   private readonly llmRouter: LlmRouter;
   private readonly usageTracker: UsageTracker;
   private readonly reactAgent: ReactAgent;
+  private readonly subagents: AgentSubagentPool;
+  private readonly approvalBroker: AgentToolApprovalBroker | undefined;
+  private readonly project: AgentProjectContext;
+  private readonly defaultSessionSkills: SkillOverlay[];
+  private readonly sessionSkillViews = new WeakMap<
+    AgentSession,
+    { baseRevision: number; registry: SkillRegistry }
+  >();
+  private readonly skillsReady: Promise<unknown>;
+  private readonly dynamicToolDiscovery: boolean;
+  private readonly autoStartMcp: boolean;
+  private mcpAutoStartPromise: Promise<unknown> | undefined;
+  private readonly activeAgentRuns = new Set<Promise<unknown>>();
+  private readonly activeAgentRunControllers = new Set<AbortController>();
+  private readonly activeLlmOperations = new Set<Promise<unknown>>();
+  private readonly activeLlmControllers = new Set<AbortController>();
+  private readonly activeLlmStreamClosers = new Set<() => Promise<void>>();
+  private readonly llmJobOwnerId = randomUUID();
+  private closing = false;
   readonly tools: ToolRegistry;
   readonly skills: SkillRegistry;
   readonly results: AiSqlResultStore;
   readonly sessions: AgentSessionStore;
+  readonly mcpConfig: McpConfigStore;
+  readonly mcp: McpRuntimeManager;
   /**
    * Unified database/warehouse/cluster access API. Connector registration,
    * resources, capabilities, query jobs, transactions and operations all live
@@ -107,22 +167,28 @@ export class DatabaseAgentRuntime {
   /** Product-wide resource, graph, observation and state runtime. */
   readonly resources: ResourceRegistry;
   private readonly tenantId: string;
+  private readonly resourceScope: ResourceScope;
   private readonly runs = new Map<string, SqlRunSnapshot>();
   private providerId?: string;
   private model?: string;
   private connection: SavedConnection | undefined;
   private readonly postgresConnector: PostgresConnector | undefined;
-  private readonly legacyUsesDatabaseAccess: boolean;
+  private readonly usesDatabaseAccess: boolean;
   private legacyProfileId: string | undefined;
   private indexTruncated = false;
+  private lastIndexMaxTables = DEFAULT_MAX_SCHEMA_TABLES;
+  private schemaFreshnessPromise: Promise<void> | undefined;
 
   constructor(options: DatabaseAgentRuntimeOptions = {}) {
+    if (options.schemaSnapshotDirectory !== undefined && !options.schemaSnapshotDirectory.trim()) {
+      throw new TypeError('schemaSnapshotDirectory must not be blank');
+    }
     const defaultDriver = options.driver ?? new PostgresDriver();
     this.driver = defaultDriver;
     if (options.databaseAccess) {
       this.database = options.databaseAccess;
       this.postgresConnector = undefined;
-      this.legacyUsesDatabaseAccess = false;
+      this.usesDatabaseAccess = true;
     } else {
       const connectors = options.connectorRegistry ?? new ConnectorRegistry();
       const resources = options.resourceRegistry ?? new ResourceRegistry();
@@ -142,7 +208,7 @@ export class DatabaseAgentRuntime {
         ...(options.databaseAuditSink ? { auditSink: options.databaseAuditSink } : {}),
       });
       this.postgresConnector = postgresConnector;
-      this.legacyUsesDatabaseAccess = options.driver === undefined;
+      this.usesDatabaseAccess = options.driver === undefined;
     }
     this.resources = this.database.resources;
     this.usageTracker = options.usageTracker ?? new UsageTracker();
@@ -199,9 +265,7 @@ export class DatabaseAgentRuntime {
                   return response.results
                     .map((item) => {
                       const document = documents[item.index];
-                      return document
-                        ? { id: document.id, score: item.score }
-                        : undefined;
+                      return document ? { id: document.id, score: item.score } : undefined;
                     })
                     .filter(
                       (
@@ -225,14 +289,67 @@ export class DatabaseAgentRuntime {
       MAX_ROW_LIMIT,
     );
     this.tools = new ToolRegistry();
-    this.skills = new SkillRegistry();
-    this.sessions =
+    this.project = createAgentProjectContext(resolve(options.projectDirectory ?? process.cwd()));
+    this.resourceScope = {
+      tenantId: this.tenantId,
+      projectId: agentProjectStorageIdentity(agentProjectReference(this.project)).projectKey,
+    };
+    this.ragIndexer = new ProgressiveSchemaRagIndexer({
+      engine: this.rag,
+      ...(options.schemaSnapshotDirectory === undefined
+        ? {}
+        : {
+            snapshotStore: new SchemaRagSnapshotStore({
+              rootDir: resolve(
+                this.project.rootPath,
+                options.schemaSnapshotDirectory,
+                schemaSnapshotScopeDirectory(this.resourceScope),
+              ),
+            }),
+          }),
+    });
+    this.defaultSessionSkills = structuredClone(options.sessionSkills ?? []);
+    this.skills = new SkillRegistry({
+      sources: [
+        systemSkillSource(),
+        {
+          scope: 'user',
+          path: options.userSkillsDirectory ?? defaultAgentUserSkillsDirectory(),
+          id: 'schemanaut-user',
+        },
+        {
+          scope: 'project',
+          path: this.project.skillsDirectory,
+          id: 'schemanaut-project',
+        },
+      ],
+    });
+    this.skillsReady = this.skills.refresh();
+    this.dynamicToolDiscovery = options.dynamicToolDiscovery ?? true;
+    this.sessions = (
       options.sessionStore ??
-      new AgentSessionStore(
-        options.sessionDatabasePath ??
-          resolve(process.cwd(), '.schemanaut', 'schemanaut.db'),
-      );
-    for (const skill of createDefaultBuiltinSkills()) this.skills.register(skill);
+      new AgentSessionStore(options.sessionDatabasePath ?? defaultAgentStateDatabasePath())
+    ).forProject(agentProjectReference(this.project));
+    registerAgentRuntimeTools(this.tools);
+    registerSkillTools(this.tools, (session) => this.skillRegistryForSession(session));
+    registerWorkspaceTools(this.tools, {
+      rootPath: this.project.rootPath,
+      ...(options.enableShellTool === undefined ? {} : { enableShell: options.enableShellTool }),
+    });
+    if (options.webAdapter) registerWebTools(this.tools, options.webAdapter);
+    this.mcpConfig = new McpConfigStore(this.project.mcpConfigPath);
+    this.mcp = new McpRuntimeManager({
+      configStore: this.mcpConfig,
+      health: new McpHealthManager(),
+      tools: new McpToolRegistrationManager(this.tools),
+      launcher: createMcpRuntimeLauncher({
+        cwd: this.project.rootPath,
+        ...(options.mcpSecretResolver === undefined
+          ? {}
+          : { resolveSecret: options.mcpSecretResolver }),
+      }),
+    });
+    this.autoStartMcp = options.autoStartMcp ?? false;
     this.results = registerAiSqlTools({
       registry: this.tools,
       driver: this.driver,
@@ -244,19 +361,54 @@ export class DatabaseAgentRuntime {
           : undefined,
       ...(options.resultStore === undefined ? {} : { resultStore: options.resultStore }),
       onSchemaChanged: async () => {
-        if (this.connection) await this.indexSchema();
+        if (this.connection) await this.indexSchema({ maxTables: this.lastIndexMaxTables });
       },
     });
+    this.approvalBroker =
+      options.approvalProvider === undefined ? new AgentToolApprovalBroker() : undefined;
     this.reactAgent = new ReactAgent(
       this.llmRouter,
       this.tools,
       this.usageTracker,
-      options.approvalProvider,
+      options.approvalProvider ?? this.approvalBroker?.createProvider(),
       {
         ...(options.agentDependencies ?? {}),
         sessionStore: this.sessions,
       },
     );
+    this.subagents = new AgentSubagentPool((runOptions) => this.reactAgent.run(runOptions), {
+      store: this.sessions,
+    });
+    registerSubagentTools(this.tools, {
+      pool: this.subagents,
+      buildRunOptions: async (task, context) => {
+        const { providerId, model } = this.requireModelConfiguration();
+        await this.skillsReady;
+        const effectiveSkills = this.skillRegistryForSession(context.session);
+        const projectInstructions = await readOptionalText(this.project.instructionsPath);
+        const runSignal = context.runSignal ?? context.signal;
+        return {
+          providerId,
+          model,
+          userMessage: task,
+          ...(context.session.userId === undefined ? {} : { userId: context.session.userId }),
+          mode: context.session.mode,
+          ...(context.session.knowledgeSnapshot === undefined
+            ? {}
+            : {
+                knowledgeSnapshot: structuredClone(context.session.knowledgeSnapshot),
+              }),
+          project: agentProjectReference(this.project),
+          ...(projectInstructions?.trim() ? { projectInstructions } : {}),
+          skillCatalog: effectiveSkills.catalogForModel(),
+          ...(context.session.sessionSkills === undefined
+            ? {}
+            : { sessionSkills: structuredClone(context.session.sessionSkills) }),
+          dynamicToolDiscovery: this.dynamicToolDiscovery,
+          ...(runSignal === undefined ? {} : { signal: runSignal }),
+        };
+      },
+    });
     if (options.provider || options.model) {
       if (!options.provider || !options.model?.trim()) {
         throw new DatabaseAgentError('INVALID_INPUT', 'provider 和 model 必须同时配置。', false);
@@ -278,8 +430,8 @@ export class DatabaseAgentRuntime {
 
   async testConnection(input: PostgresConnectionInput): Promise<ConnectionTestResult> {
     const config = normalizeConnection(input, input.id ?? 'connection-test');
-    if (this.legacyUsesDatabaseAccess) {
-      const profile = toPostgresProfile(config, this.now());
+    if (this.usesDatabaseAccess) {
+      const profile = toPostgresProfile(config, this.now(), this.resourceScope);
       this.database.createProfile(profile);
       try {
         const result = await this.database.testProfile(profile.id, {
@@ -308,25 +460,23 @@ export class DatabaseAgentRuntime {
   async connect(input: PostgresConnectionInput): Promise<SavedConnection> {
     if (this.connection) await this.disconnect();
     const config = normalizeConnection(input, input.id ?? this.createConnectionId());
-    if (this.legacyUsesDatabaseAccess) {
-      const profile = toPostgresProfile(config, this.now());
+    if (this.usesDatabaseAccess) {
+      const profile = toPostgresProfile(config, this.now(), this.resourceScope);
       this.database.createProfile(profile);
       try {
-        await this.database.connect(profile.id, {
+        const session = await this.database.connect(profile.id, {
           username: config.username,
           ...(config.password ? { password: config.password } : {}),
         });
-        const connection = this.postgresConnector?.getLegacyConnection(profile.id);
-        if (!connection) {
-          throw new DatabaseAgentError(
-            'CONNECTION_FAILED',
-            'PostgreSQL Connector did not expose the active driver connection.',
-            false,
-          );
-        }
+        const connection =
+          this.postgresConnector?.getLegacyConnection(profile.id) ??
+          savedConnectionFromDatabaseSession(config, session.connectionId, this.now());
         this.connection = connection;
         this.legacyProfileId = profile.id;
         this.indexTruncated = false;
+        this.lastIndexMaxTables = DEFAULT_MAX_SCHEMA_TABLES;
+        const restored = await this.ragIndexer.restore(connection.id);
+        if (restored?.ready) this.restoreSchemaIndexOptions(connection.id);
         return cloneConnection(connection);
       } catch (error) {
         this.database.deleteProfile(profile.id);
@@ -344,13 +494,16 @@ export class DatabaseAgentRuntime {
     }
     this.connection = result.data;
     this.indexTruncated = false;
+    this.lastIndexMaxTables = DEFAULT_MAX_SCHEMA_TABLES;
+    const restored = await this.ragIndexer.restore(result.data.id);
+    if (restored?.ready) this.restoreSchemaIndexOptions(result.data.id);
     return cloneConnection(result.data);
   }
 
   async disconnect(): Promise<void> {
     const current = this.connection;
     if (!current) return;
-    if (this.legacyUsesDatabaseAccess && this.legacyProfileId) {
+    if (this.usesDatabaseAccess && this.legacyProfileId) {
       const profileId = this.legacyProfileId;
       try {
         await this.database.disconnect(profileId);
@@ -373,11 +526,43 @@ export class DatabaseAgentRuntime {
     this.rag.clear(current.id);
     this.connection = undefined;
     this.indexTruncated = false;
+    this.lastIndexMaxTables = DEFAULT_MAX_SCHEMA_TABLES;
+    this.schemaFreshnessPromise = undefined;
     this.runs.clear();
   }
 
   async close(): Promise<void> {
+    this.closing = true;
     const failures: unknown[] = [];
+    for (const controller of this.activeAgentRunControllers) {
+      controller.abort();
+    }
+    for (const controller of this.activeLlmControllers) {
+      controller.abort();
+    }
+    for (const job of this.llmGateway.listJobs(this.tenantId, this.llmJobOwnerId)) {
+      if (job?.status === 'queued' || job?.status === 'running') {
+        this.llmGateway.cancelJob(job.id, this.tenantId, this.llmJobOwnerId);
+      }
+    }
+    await Promise.allSettled(
+      [...this.activeLlmStreamClosers].map(async (closeStream) => closeStream()),
+    );
+    const subagents = this.subagents.list();
+    for (const subagent of subagents) {
+      if (subagent.status === 'running') this.subagents.stop(subagent.id);
+    }
+    for (const request of this.approvalBroker?.listPending() ?? []) {
+      this.approvalBroker?.cancel(request.id, 'runtime closed');
+    }
+    await Promise.allSettled(subagents.map((subagent) => this.subagents.wait(subagent.id, 30_000)));
+    await Promise.allSettled([...this.activeAgentRuns]);
+    await Promise.allSettled([...this.activeLlmOperations]);
+    try {
+      await this.mcp.stopAll();
+    } catch (error) {
+      failures.push(error);
+    }
     if (this.connection) {
       try {
         await this.disconnect();
@@ -390,6 +575,7 @@ export class DatabaseAgentRuntime {
     } catch (error) {
       failures.push(error);
     }
+    this.results.clear();
     this.runs.clear();
     if (failures.length > 0) {
       throw new AggregateError(failures, 'SchemaNaut runtime did not close cleanly.');
@@ -404,45 +590,9 @@ export class DatabaseAgentRuntime {
       1,
       MAX_SCHEMA_TABLES,
     );
-    if (this.legacyUsesDatabaseAccess && this.legacyProfileId) {
-      const discovery = await discoverCurrentResources(
-        this.database,
-        this.legacyProfileId,
-      );
-      const scopedResources = discovery.resources;
-      const scopedResourceIds = new Set(scopedResources.map((resource) => resource.id));
-      const scopedRelations = discovery.relations.filter(
-        (relation) =>
-          scopedResourceIds.has(relation.fromResourceId) &&
-          scopedResourceIds.has(relation.toResourceId),
-      );
-      const tableRoots = scopedResources
-        .filter((resource) =>
-          ['table', 'view', 'materialized-view', 'external-table'].includes(
-            resource.kind,
-          ),
-        )
-        .sort((left, right) => left.id.localeCompare(right.id));
-      const excluded = collectContainedResources(
-        new Set(tableRoots.slice(maxTables).map((resource) => resource.id)),
-        scopedRelations,
-      );
-      const resources = scopedResources.filter((resource) => !excluded.has(resource.id));
-      const resourceIds = new Set(resources.map((resource) => resource.id));
-      const relations = scopedRelations.filter(
-        (relation) =>
-          resourceIds.has(relation.fromResourceId) &&
-          resourceIds.has(relation.toResourceId),
-      );
-      await this.rag.indexAsync({
-        connectionId: connection.id,
-        resources,
-        relations,
-        sourceRevision: discovery.sourceRevision,
-        indexedAt: this.now(),
-      });
-      this.indexTruncated = tableRoots.length > maxTables;
-      return this.schemaStatus();
+    if (this.usesDatabaseAccess && this.legacyProfileId) {
+      const discovery = await discoverCurrentResources(this.database, this.legacyProfileId);
+      return await this.indexDiscoveredSchema(connection, discovery, maxTables);
     }
     const listed = await this.driver.listTables(connection.id);
     if (!listed.ok) {
@@ -466,12 +616,15 @@ export class DatabaseAgentRuntime {
       }
       return described.data;
     });
-    await this.rag.indexAsync({
+    await this.ragIndexer.indexAsync({
       connectionId: connection.id,
       tables,
+      sourceTableCount: listed.data.length,
+      maxTables,
       indexedAt: this.now(),
     });
     this.indexTruncated = listed.data.length > selected.length;
+    this.lastIndexMaxTables = maxTables;
     return this.schemaStatus();
   }
 
@@ -516,29 +669,53 @@ export class DatabaseAgentRuntime {
     };
   }
 
-  async runAgent(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun> {
-    const { providerId, model } = this.requireModelConfiguration();
-    const connection = this.requireConnection();
-    if (!this.rag.hasIndex(connection.id)) {
-      throw new DatabaseAgentError(
-        'SCHEMA_NOT_INDEXED',
-        '请先索引当前数据库的知识目录。',
-        true,
+  runAgent(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun> {
+    if (this.closing) {
+      return Promise.reject(
+        new DatabaseAgentError('ABORTED', 'SchemaNaut runtime is closing.', false),
       );
     }
-    const message = requireText(input.message, 'message', MAX_QUESTION_CHARS);
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(input.signal?.reason);
+    if (input.signal?.aborted) forwardAbort();
+    else input.signal?.addEventListener('abort', forwardAbort, { once: true });
+    this.activeAgentRunControllers.add(controller);
+    const runPromise = this.runAgentInternal({
+      ...input,
+      signal: controller.signal,
+    });
+    this.activeAgentRuns.add(runPromise);
+    return runPromise.finally(() => {
+      input.signal?.removeEventListener('abort', forwardAbort);
+      this.activeAgentRunControllers.delete(controller);
+      this.activeAgentRuns.delete(runPromise);
+    });
+  }
+
+  private async runAgentInternal(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun> {
+    const { providerId, model } = this.requireModelConfiguration();
+    await this.skillsReady;
+    await this.skills.refresh();
+    await this.ensureMcpAutoStarted();
+    const connection = this.requireConnection();
+    await this.ensureSchemaFresh(connection, input.signal);
+    if (!this.rag.hasIndex(connection.id)) {
+      throw new DatabaseAgentError('SCHEMA_NOT_INDEXED', '请先索引当前数据库的知识目录。', true);
+    }
+    const rawMessage = requireText(input.message, 'message', MAX_QUESTION_CHARS);
     if (input.session && input.sessionId?.trim()) {
+      throw new DatabaseAgentError('INVALID_INPUT', 'session 与 sessionId 只能提供一个。', false);
+    }
+    if (input.sessionSkills !== undefined && (input.session || input.sessionId?.trim())) {
       throw new DatabaseAgentError(
         'INVALID_INPUT',
-        'session 与 sessionId 只能提供一个。',
+        'sessionSkills 只能在创建新 Session 时提供，不能替换已存在 Session 的私有 Skills。',
         false,
       );
     }
     const initialSession =
       input.session ??
-      (input.sessionId?.trim()
-        ? await this.sessions.load(input.sessionId.trim())
-        : undefined);
+      (input.sessionId?.trim() ? await this.sessions.load(input.sessionId.trim()) : undefined);
     if (input.sessionId?.trim() && !initialSession) {
       throw new DatabaseAgentError(
         'INVALID_INPUT',
@@ -546,14 +723,23 @@ export class DatabaseAgentRuntime {
         false,
       );
     }
+    if (initialSession) this.assertSessionProject(initialSession);
+    const sessionSkills =
+      initialSession?.sessionSkills ?? input.sessionSkills ?? this.defaultSessionSkills;
+    const effectiveSkills = this.skills.createSessionView(sessionSkills);
     const catalog = this.rag.getCatalog(connection.id);
     const manifest = this.rag.getIndexManifest(connection.id);
-    const output = await runAutoSkillAgent(this.reactAgent, {
-      skills: this.skills.list(),
-      userInput: message,
-      toolPolicy: { toolRegistry: this.tools },
+    const invokedSkill = await effectiveSkills.invoke(rawMessage);
+    const message =
+      invokedSkill === undefined
+        ? rawMessage
+        : invokedSkill.arguments ||
+          `Follow the activated Skill "${invokedSkill.skill.name}" and complete its workflow for the current database.`;
+    const projectInstructions = await readOptionalText(this.project.instructionsPath);
+    const runPromise = this.reactAgent.run({
       providerId,
       model,
+      userMessage: message,
       ...(input.userId === undefined ? {} : { userId: input.userId }),
       mode: input.mode ?? 'read',
       knowledgeSnapshot: {
@@ -564,18 +750,167 @@ export class DatabaseAgentRuntime {
         indexVersion: manifest.indexVersion,
       },
       ...(initialSession === undefined ? {} : { initialSession }),
-      ...(input.maxIterations === undefined
+      project: agentProjectReference(this.project),
+      ...(projectInstructions?.trim() ? { projectInstructions } : {}),
+      skillCatalog: effectiveSkills.catalogForModel(),
+      ...(invokedSkill === undefined
         ? {}
-        : { maxIterations: input.maxIterations }),
+        : {
+            activatedSkills: [
+              {
+                name: invokedSkill.skill.name,
+                description: invokedSkill.skill.description,
+                scope: invokedSkill.skill.scope,
+                instructions: invokedSkill.skill.instructions,
+              },
+            ],
+          }),
+      ...(initialSession !== undefined || sessionSkills.length === 0
+        ? {}
+        : { sessionSkills: structuredClone(sessionSkills) }),
+      dynamicToolDiscovery: this.dynamicToolDiscovery,
+      ...(input.onEvent === undefined ? {} : { eventSink: input.onEvent }),
+      ...(input.maxIterations === undefined ? {} : { maxIterations: input.maxIterations }),
       ...(input.maxToolExecutionMs === undefined
         ? {}
         : { maxToolExecutionMs: input.maxToolExecutionMs }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
+    const result = await runPromise;
     return {
-      selectedSkill: output.autoPlan.candidate.skill.name,
-      result: output.result,
+      activatedSkills: (result.session.activeSkills ?? []).map((skill) => skill.name),
+      result,
     };
+  }
+
+  steerAgentSession(sessionId: string, message: string): boolean {
+    const id = requireText(sessionId, 'sessionId', 300);
+    const content = requireText(message, 'message', MAX_QUESTION_CHARS);
+    this.approvalBroker?.cancelSession(id);
+    return this.reactAgent.steer(id, content);
+  }
+
+  async listAgentSessions(input: AgentSessionListInput = {}): Promise<AgentSessionListItem[]> {
+    return (await this.sessions.list(input)).map((session) => ({
+      id: session.id,
+      title: session.title,
+      ...(session.userId === undefined ? {} : { userId: session.userId }),
+      mode: session.mode,
+      archived: session.archived,
+      conversationMessageCount: Math.max(0, session.messageCount - session.toolMessageCount),
+      tokenUsage: { ...session.tokenUsage },
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      ...(session.lastMessageAt === undefined ? {} : { lastMessageAt: session.lastMessageAt }),
+    }));
+  }
+
+  async getAgentSession(sessionId: string): Promise<AgentSessionView | undefined> {
+    const session = await this.sessions.load(requireText(sessionId, 'sessionId', 300));
+    return session === undefined ? undefined : toAgentSessionView(session);
+  }
+
+  async deleteAgentSession(sessionId: string): Promise<boolean> {
+    const id = requireText(sessionId, 'sessionId', 300);
+    return await this.reactAgent.runSessionOperation(id, async () => {
+      const deleted = await this.sessions.delete(id);
+      if (deleted) this.results.clearSession(id);
+      return deleted;
+    });
+  }
+
+  async listAgentSkills(input: AgentSkillListInput = {}): Promise<AgentSkillCatalogEntry[]> {
+    await this.skillsReady;
+    if (!input.sessionId?.trim()) return this.skills.catalogForModel();
+    const session = await this.sessions.load(requireText(input.sessionId, 'sessionId', 300));
+    if (!session) {
+      throw new DatabaseAgentError(
+        'INVALID_INPUT',
+        `未找到 Session：${input.sessionId.trim()}`,
+        false,
+      );
+    }
+    this.assertSessionProject(session);
+    return this.skillRegistryForSession(session).catalogForModel();
+  }
+
+  async refreshSkills(): Promise<AgentSkillRefreshResult> {
+    return await this.skills.refresh();
+  }
+
+  listAgentApprovals(): AgentApprovalRequest[] {
+    return this.approvalBroker?.listPending() ?? [];
+  }
+
+  resolveAgentApproval(
+    requestId: string,
+    approved: boolean,
+    options: { resolvedBy?: string; reason?: string } = {},
+  ): boolean {
+    const broker = this.approvalBroker;
+    if (!broker) return false;
+    const id = requireText(requestId, 'requestId', 300);
+    return approved ? broker.approve(id, options) : broker.deny(id, options);
+  }
+
+  async listMcpServers(): Promise<McpServerSummary[]> {
+    const servers = await this.mcpConfig.list();
+    return servers.map((server) =>
+      toMcpServerSummary(server, this.mcp.health(server.id), this.mcp.isRunning(server.id)),
+    );
+  }
+
+  async upsertMcpServer(input: McpServerInput): Promise<McpServerSummary> {
+    let server: McpServerConfig;
+    try {
+      server = await this.mcpConfig.upsert(input);
+    } catch (error) {
+      throw new DatabaseAgentError(
+        'INVALID_INPUT',
+        error instanceof Error ? error.message : 'MCP Server 配置无效。',
+        false,
+      );
+    }
+    if (this.mcp.isRunning(server.id)) await this.mcp.stop(server.id);
+    this.mcpAutoStartPromise = undefined;
+    return toMcpServerSummary(server, this.mcp.health(server.id), this.mcp.isRunning(server.id));
+  }
+
+  async removeMcpServer(serverId: string): Promise<boolean> {
+    const id = requireText(serverId, 'serverId', 300);
+    if (this.mcp.isRunning(id)) await this.mcp.stop(id);
+    const removed = (await this.mcpConfig.remove(id)).removed;
+    if (removed) this.mcpAutoStartPromise = undefined;
+    return removed;
+  }
+
+  async startMcpServer(serverId: string): Promise<McpServerStartSummary> {
+    const id = requireText(serverId, 'serverId', 300);
+    if (!(await this.mcpConfig.list()).some((server) => server.id === id)) {
+      throw new DatabaseAgentError('INVALID_INPUT', `未找到 MCP Server：${id}`, false);
+    }
+    const started = await this.mcp.start(id);
+    return {
+      server: toMcpServerSummary(
+        started.server,
+        started.health,
+        this.mcp.isRunning(started.server.id),
+      ),
+      tools: [...started.tools],
+    };
+  }
+
+  async stopMcpServer(serverId: string): Promise<McpServerStopSummary> {
+    const stopped = await this.mcp.stop(requireText(serverId, 'serverId', 300));
+    return {
+      serverId: stopped.serverId,
+      removedTools: [...stopped.removedTools],
+      status: stopped.health.status,
+    };
+  }
+
+  async startConfiguredMcpServers() {
+    return await this.mcp.startAutoStart();
   }
 
   async compactAgentSession(
@@ -584,16 +919,11 @@ export class DatabaseAgentRuntime {
     const { providerId, model } = this.requireModelConfiguration();
     const session =
       input.session ??
-      (input.sessionId?.trim()
-        ? await this.sessions.load(input.sessionId.trim())
-        : undefined);
+      (input.sessionId?.trim() ? await this.sessions.load(input.sessionId.trim()) : undefined);
     if (!session) {
-      throw new DatabaseAgentError(
-        'INVALID_INPUT',
-        '请提供有效的 session 或 sessionId。',
-        false,
-      );
+      throw new DatabaseAgentError('INVALID_INPUT', '请提供有效的 session 或 sessionId。', false);
     }
+    this.assertSessionProject(session);
     return await this.reactAgent.compact({
       providerId,
       model,
@@ -616,6 +946,7 @@ export class DatabaseAgentRuntime {
   async generate(input: GenerateSqlInput): Promise<GeneratedSqlRun> {
     const { providerId, model } = this.requireModelConfiguration();
     const connection = this.requireConnection();
+    await this.ensureSchemaFresh(connection, input.signal);
     if (!this.rag.hasIndex(connection.id)) {
       throw new DatabaseAgentError('SCHEMA_NOT_INDEXED', '请先索引数据库 Schema。', true);
     }
@@ -648,11 +979,11 @@ export class DatabaseAgentRuntime {
           maxTokens: 1_200,
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           messages: [
-          { role: 'system', content: buildSystemPrompt() },
-          {
-            role: 'user',
-            content: `用户问题：\n${question}\n\n可用 PostgreSQL Schema：\n${contextText}`,
-          },
+            { role: 'system', content: buildSystemPrompt() },
+            {
+              role: 'user',
+              content: `用户问题：\n${question}\n\n可用 PostgreSQL Schema：\n${contextText}`,
+            },
           ],
         },
         context: { tenantId: this.tenantId, taskType: 'nl2sql-generation' },
@@ -770,11 +1101,19 @@ export class DatabaseAgentRuntime {
     return run ? cloneRun(run) : undefined;
   }
 
-  async llmChat(request: LlmRuntimeChatRequest, options: LlmRuntimeCallOptions = {}): Promise<LlmChatResponse> {
+  async llmChat(
+    request: LlmRuntimeChatRequest,
+    options: LlmRuntimeCallOptions = {},
+  ): Promise<LlmChatResponse> {
+    if (this.closing) {
+      throw new DatabaseAgentError('ABORTED', 'SchemaNaut runtime is closing.', false);
+    }
     const { providerId, model } = this.requireModelConfiguration();
-    return await this.llmGateway.chat({
+    const linked = createLinkedAbortController(request.signal);
+    this.activeLlmControllers.add(linked.controller);
+    const operation = this.llmGateway.chat({
       providerId,
-      request: { ...request, model },
+      request: { ...request, model, signal: linked.controller.signal },
       context: {
         tenantId: this.tenantId,
         taskType: options.taskType?.trim() || 'sdk-chat',
@@ -787,16 +1126,28 @@ export class DatabaseAgentRuntime {
       ...(options.maxFallbacks === undefined ? {} : { maxFallbacks: options.maxFallbacks }),
       ...(options.cache === undefined ? {} : { cache: options.cache }),
     });
+    this.activeLlmOperations.add(operation);
+    try {
+      return await operation;
+    } finally {
+      linked.dispose();
+      this.activeLlmControllers.delete(linked.controller);
+      this.activeLlmOperations.delete(operation);
+    }
   }
 
-  async *llmStream(
+  llmStream(
     request: LlmRuntimeChatRequest,
     options: LlmRuntimeCallOptions = {},
   ): AsyncIterable<LlmChatStreamEvent> {
+    if (this.closing) {
+      throw new DatabaseAgentError('ABORTED', 'SchemaNaut runtime is closing.', false);
+    }
     const { providerId, model } = this.requireModelConfiguration();
-    yield* this.llmGateway.stream({
+    const linked = createLinkedAbortController(request.signal);
+    const source = this.llmGateway.stream({
       providerId,
-      request: { ...request, model },
+      request: { ...request, model, signal: linked.controller.signal },
       context: {
         tenantId: this.tenantId,
         taskType: options.taskType?.trim() || 'sdk-stream',
@@ -808,12 +1159,48 @@ export class DatabaseAgentRuntime {
       ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
       ...(options.maxFallbacks === undefined ? {} : { maxFallbacks: options.maxFallbacks }),
     });
+    let resolveOperation: (() => void) | undefined;
+    const operation = new Promise<void>((resolve) => {
+      resolveOperation = resolve;
+    });
+    let settled = false;
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      linked.dispose();
+      this.activeLlmControllers.delete(linked.controller);
+      this.activeLlmOperations.delete(operation);
+      this.activeLlmStreamClosers.delete(closeStream);
+      resolveOperation?.();
+    };
+    const iterator = (async function* () {
+      try {
+        yield* source;
+      } finally {
+        cleanup();
+      }
+    })();
+    const closeStream = async () => {
+      linked.controller.abort();
+      try {
+        await iterator.return(undefined);
+      } finally {
+        cleanup();
+      }
+    };
+    this.activeLlmControllers.add(linked.controller);
+    this.activeLlmOperations.add(operation);
+    this.activeLlmStreamClosers.add(closeStream);
+    return iterator;
   }
 
   submitLlmBatch(
     requests: LlmRuntimeChatRequest[],
     options: LlmRuntimeCallOptions & { concurrency?: number } = {},
   ): LlmAsyncJob<LlmGatewayResult> {
+    if (this.closing) {
+      throw new DatabaseAgentError('ABORTED', 'SchemaNaut runtime is closing.', false);
+    }
     const { providerId, model } = this.requireModelConfiguration();
     const inputs = requests.map((request) => ({
       providerId,
@@ -829,18 +1216,27 @@ export class DatabaseAgentRuntime {
       ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
       ...(options.maxFallbacks === undefined ? {} : { maxFallbacks: options.maxFallbacks }),
     }));
-    return this.llmGateway.submitBatch(
-      inputs,
-      options.concurrency === undefined ? {} : { concurrency: options.concurrency },
+    const job = this.llmGateway.submitBatch(inputs, {
+      ownerId: this.llmJobOwnerId,
+      ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
+    });
+    const operation = waitForLlmJobCompletion(
+      this.llmGateway,
+      job.id,
+      this.tenantId,
+      this.llmJobOwnerId,
     );
+    this.activeLlmOperations.add(operation);
+    void operation.finally(() => this.activeLlmOperations.delete(operation));
+    return job;
   }
 
   getLlmJob(id: string): LlmAsyncJob<LlmGatewayResult> | undefined {
-    return this.llmGateway.getJob(id);
+    return this.llmGateway.getJob(id, this.tenantId, this.llmJobOwnerId);
   }
 
   cancelLlmJob(id: string): LlmAsyncJob<LlmGatewayResult> | undefined {
-    return this.llmGateway.cancelJob(id);
+    return this.llmGateway.cancelJob(id, this.tenantId, this.llmJobOwnerId);
   }
 
   llmModels(): RegisteredLlmModel[] {
@@ -850,9 +1246,11 @@ export class DatabaseAgentRuntime {
   async discoverLlmModels(): Promise<RegisteredLlmModel[]> {
     const { providerId, model } = this.requireModelConfiguration();
     const provider = this.llmGateway.registry.provider(providerId);
-    if (!provider) throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM Provider is not registered.', true);
+    if (!provider)
+      throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM Provider is not registered.', true);
     const selected = this.llmGateway.registry.find(providerId, model);
-    if (!selected) throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM model is not registered.', true);
+    if (!selected)
+      throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM model is not registered.', true);
     this.llmGateway.registry.applyModelMetadata(selected.id, {
       model,
       source: 'provider-declaration',
@@ -891,11 +1289,13 @@ export class DatabaseAgentRuntime {
     return this.llmGateway.metricsSnapshot();
   }
 
-  private async executeAiSqlQuery(
-    input: AiSqlQueryExecutionInput,
-  ): Promise<QueryExecutionResult> {
-    if (!this.legacyUsesDatabaseAccess || !this.legacyProfileId) {
-      const result = await this.driver.execute(input.request, input.connection);
+  private async executeAiSqlQuery(input: AiSqlQueryExecutionInput): Promise<QueryExecutionResult> {
+    if (!this.usesDatabaseAccess || !this.legacyProfileId) {
+      const result = await this.driver.execute(
+        input.request,
+        input.connection,
+        input.signal === undefined ? undefined : { signal: input.signal },
+      );
       if (!result.ok) {
         throw new DatabaseAgentError(
           'QUERY_FAILED',
@@ -909,28 +1309,26 @@ export class DatabaseAgentRuntime {
 
     const started = performance.now();
     let job;
+    if (input.signal?.aborted) {
+      throw new DatabaseAgentError('ABORTED', '数据库查询已取消。', false);
+    }
     try {
       job = await this.database.submit({
         profileId: this.legacyProfileId,
         sql: input.request.sql,
-        executionMode: 'sync',
-        ...(input.request.timeoutMs === undefined
-          ? {}
-          : { timeoutMs: input.request.timeoutMs }),
-        ...(input.request.limit === undefined
-          ? {}
-          : { rowLimit: input.request.limit }),
-        ...(input.request.dryRun === undefined
-          ? {}
-          : { dryRun: input.request.dryRun }),
-        ...(input.request.confirmed === undefined
-          ? {}
-          : { confirmed: input.request.confirmed }),
+        executionMode: input.signal === undefined ? 'sync' : 'async',
+        ...(input.request.timeoutMs === undefined ? {} : { timeoutMs: input.request.timeoutMs }),
+        ...(input.request.limit === undefined ? {} : { rowLimit: input.request.limit }),
+        ...(input.request.dryRun === undefined ? {} : { dryRun: input.request.dryRun }),
+        ...(input.request.confirmed === undefined ? {} : { confirmed: input.request.confirmed }),
         ...(input.request.transactionMode === undefined
           ? {}
           : { transactionMode: input.request.transactionMode }),
         authorization: input.authorization,
       });
+      if (input.signal !== undefined) {
+        job = await waitForDatabaseJob(this.database, job, input.signal);
+      }
     } catch (error) {
       throw mapDatabaseAccessError(error);
     }
@@ -976,18 +1374,122 @@ export class DatabaseAgentRuntime {
       rows,
       rowCount: job.result?.rowCount ?? rows.length,
       returnedRowCount: rows.length,
-      ...(input.request.limit === undefined
-        ? {}
-        : { rowLimit: input.request.limit }),
-      ...(job.result?.hasMore === undefined
-        ? {}
-        : { hasMore: job.result.hasMore }),
-      ...(job.result?.truncated === undefined
-        ? {}
-        : { truncated: job.result.truncated }),
+      ...(input.request.limit === undefined ? {} : { rowLimit: input.request.limit }),
+      ...(job.result?.hasMore === undefined ? {} : { hasMore: job.result.hasMore }),
+      ...(job.result?.truncated === undefined ? {} : { truncated: job.result.truncated }),
       elapsedMs: Math.round(performance.now() - started),
       safety,
     };
+  }
+
+  private async ensureSchemaFresh(
+    connection: SavedConnection,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.usesDatabaseAccess || !this.legacyProfileId || !this.rag.hasIndex(connection.id)) {
+      return;
+    }
+    if (signal?.aborted) {
+      throw new DatabaseAgentError('ABORTED', 'Schema freshness check was cancelled.', false);
+    }
+    let current = this.schemaFreshnessPromise;
+    if (!current) {
+      current = (async () => {
+        const discovery = await discoverCurrentResources(this.database, this.legacyProfileId!);
+        const indexedRevision = this.rag.getCatalog(connection.id).sourceRevision;
+        if (indexedRevision === discovery.sourceRevision) return;
+        await this.indexDiscoveredSchema(connection, discovery, this.lastIndexMaxTables);
+      })();
+      this.schemaFreshnessPromise = current;
+      const clear = () => {
+        if (this.schemaFreshnessPromise === current) this.schemaFreshnessPromise = undefined;
+      };
+      void current.then(clear, clear);
+    }
+    await waitForSharedOperation(
+      current,
+      signal,
+      () => new DatabaseAgentError('ABORTED', 'Schema freshness check was cancelled.', false),
+    );
+  }
+
+  private async indexDiscoveredSchema(
+    connection: SavedConnection,
+    discovery: {
+      resources: ResourceDescriptor[];
+      relations: ResourceRelation[];
+      sourceRevision: string;
+    },
+    maxTables: number,
+  ): Promise<SchemaIndexSnapshot> {
+    const scopedResources = discovery.resources;
+    const scopedResourceIds = new Set(scopedResources.map((resource) => resource.id));
+    const scopedRelations = discovery.relations.filter(
+      (relation) =>
+        scopedResourceIds.has(relation.fromResourceId) &&
+        scopedResourceIds.has(relation.toResourceId),
+    );
+    const tableRoots = scopedResources
+      .filter((resource) =>
+        ['table', 'view', 'materialized-view', 'external-table'].includes(resource.kind),
+      )
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const excluded = collectContainedResources(
+      new Set(tableRoots.slice(maxTables).map((resource) => resource.id)),
+      scopedRelations,
+    );
+    const resources = scopedResources.filter((resource) => !excluded.has(resource.id));
+    const resourceIds = new Set(resources.map((resource) => resource.id));
+    const relations = scopedRelations.filter(
+      (relation) =>
+        resourceIds.has(relation.fromResourceId) && resourceIds.has(relation.toResourceId),
+    );
+    await this.ragIndexer.indexAsync({
+      connectionId: connection.id,
+      resources,
+      relations,
+      sourceRevision: discovery.sourceRevision,
+      sourceTableCount: tableRoots.length,
+      maxTables,
+      indexedAt: this.now(),
+    });
+    this.indexTruncated = tableRoots.length > maxTables;
+    this.lastIndexMaxTables = maxTables;
+    return this.schemaStatus();
+  }
+
+  private restoreSchemaIndexOptions(connectionId: string): void {
+    const manifest = this.rag.getIndexManifest(connectionId);
+    if (manifest.maxTables === undefined || manifest.sourceTableCount === undefined) return;
+    this.lastIndexMaxTables = manifest.maxTables;
+    this.indexTruncated = manifest.sourceTableCount > manifest.maxTables;
+  }
+
+  private async ensureMcpAutoStarted(): Promise<void> {
+    if (!this.autoStartMcp) return;
+    this.mcpAutoStartPromise ??= this.mcp.startAutoStart();
+    await this.mcpAutoStartPromise;
+  }
+
+  private skillRegistryForSession(session: AgentSession): SkillRegistry {
+    const baseRevision = this.skills.currentRevision();
+    const cached = this.sessionSkillViews.get(session);
+    if (cached?.baseRevision === baseRevision) return cached.registry;
+    const registry = this.skills.createSessionView(session.sessionSkills ?? []);
+    this.sessionSkillViews.set(session, { baseRevision, registry });
+    return registry;
+  }
+
+  private assertSessionProject(session: AgentSession): void {
+    try {
+      assertSameAgentProject(session.project, agentProjectReference(this.project));
+    } catch (error) {
+      throw new DatabaseAgentError(
+        'INVALID_INPUT',
+        error instanceof Error ? error.message : String(error),
+        false,
+      );
+    }
   }
 
   private requireModelConfiguration(): { providerId: string; model: string } {
@@ -1030,12 +1532,122 @@ export class DatabaseAgentRuntime {
   }
 }
 
+export function toAgentSessionView(session: AgentSession): AgentSessionView {
+  const messages: AgentSessionView['messages'] = [];
+  for (const message of session.messages) {
+    if (message.role === 'user') {
+      messages.push({
+        role: 'user',
+        content: message.content,
+        createdAt: message.createdAt,
+      });
+      continue;
+    }
+    if (message.role === 'assistant' && message.content.trim()) {
+      messages.push({
+        role: 'assistant',
+        content: message.content,
+        createdAt: message.createdAt,
+      });
+    }
+  }
+  return {
+    id: session.id,
+    title: session.title,
+    ...(session.userId === undefined ? {} : { userId: session.userId }),
+    mode: session.mode,
+    messages,
+    tokenUsage: { ...session.tokenUsage },
+    ...(session.project === undefined ? {} : { project: { rootPath: session.project.rootPath } }),
+    ...(session.taskPlan === undefined
+      ? {}
+      : {
+          taskPlan: {
+            ...session.taskPlan,
+            tasks: session.taskPlan.tasks.map((task) => ({
+              ...task,
+              acceptanceCriteria: [...task.acceptanceCriteria],
+              dependsOn: [...task.dependsOn],
+              evidence: task.evidence.map((evidence) => ({
+                kind: evidence.kind,
+                summary: evidence.summary,
+                createdAt: evidence.createdAt,
+              })),
+            })),
+          },
+        }),
+    ...(session.artifacts === undefined
+      ? {}
+      : { artifacts: session.artifacts.map((artifact) => ({ ...artifact })) }),
+    ...(session.activeSkills === undefined
+      ? {}
+      : {
+          activeSkills: session.activeSkills.map((skill) => ({
+            name: skill.name,
+            description: skill.description,
+            scope: skill.scope,
+          })),
+        }),
+    aborted: session.aborted,
+  };
+}
+
+export function toAiSqlAgentRunView(run: AiSqlAgentRun): AiSqlAgentRunView {
+  return {
+    activatedSkills: [...run.activatedSkills],
+    result: {
+      status: run.result.status,
+      session: toAgentSessionView(run.result.session),
+      finalText: run.result.finalText,
+      iterations: run.result.iterations,
+      ...(run.result.events === undefined
+        ? {}
+        : { events: run.result.events.map((event) => structuredClone(event)) }),
+      ...(run.result.artifacts === undefined
+        ? {}
+        : {
+            artifacts: run.result.artifacts.map((artifact) => ({
+              ...artifact,
+            })),
+          }),
+      ...(run.result.completion === undefined
+        ? {}
+        : {
+            completion: {
+              verified: run.result.completion.verified,
+              unresolvedTaskIds: [...run.result.completion.unresolvedTaskIds],
+            },
+          }),
+    },
+  };
+}
+
+function toMcpServerSummary(
+  server: McpServerConfig,
+  health: McpServerHealthState,
+  running: boolean,
+): McpServerSummary {
+  return {
+    id: server.id,
+    name: server.name,
+    source: server.source,
+    transport: server.transport,
+    enabled: server.enabled,
+    autoStart: server.autoStart,
+    running,
+    status: health.status,
+    healthy: health.healthy,
+    warnings: [...health.warnings],
+  };
+}
+
 function normalizeConnection(input: PostgresConnectionInput, id: string): DatabaseConnectionConfig {
   const host = requireText(input.host, 'host', 500);
   const database = requireText(input.database, 'database', 300);
   const username = requireText(input.username, 'username', 300);
   const port = normalizeInteger(input.port ?? 5432, 'port', 1, 65_535);
   const name = input.name?.trim() || `${database}@${host}`;
+  const ssl = normalizePostgresSsl(input.ssl);
   return {
     id: requireText(id, 'id', 300),
     name,
@@ -1045,7 +1657,7 @@ function normalizeConnection(input: PostgresConnectionInput, id: string): Databa
     database,
     username,
     ...(input.password === undefined ? {} : { password: input.password }),
-    ...(input.ssl === undefined ? {} : { ssl: input.ssl }),
+    ...(ssl === undefined ? {} : { ssl }),
     readOnly: input.readOnly ?? false,
     connectionTimeoutMs: normalizeInteger(
       input.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS,
@@ -1062,9 +1674,28 @@ function normalizeConnection(input: PostgresConnectionInput, id: string): Databa
   };
 }
 
+function normalizePostgresSsl(value: unknown): DatabaseConnectionConfig['ssl'] {
+  if (
+    value === undefined ||
+    value === true ||
+    value === false ||
+    value === 'require' ||
+    value === 'verify-ca' ||
+    value === 'verify-full'
+  ) {
+    return value;
+  }
+  throw new DatabaseAgentError(
+    'INVALID_INPUT',
+    'ssl must be a boolean, require, verify-ca, or verify-full.',
+    false,
+  );
+}
+
 function toPostgresProfile(
   config: DatabaseConnectionConfig,
   now: string,
+  scope: ResourceScope,
 ): ConnectionProfile {
   return {
     id: config.id!,
@@ -1083,15 +1714,39 @@ function toPostgresProfile(
     principal: config.username,
     purpose: config.readOnly ? 'read-only' : 'read-write',
     readOnly: config.readOnly,
+    scope: structuredClone(scope),
     network: {
-      ...(config.connectionTimeoutMs
-        ? { connectTimeoutMs: config.connectionTimeoutMs }
-        : {}),
-      ...(config.statementTimeoutMs
-        ? { statementTimeoutMs: config.statementTimeoutMs }
-        : {}),
+      ...(config.connectionTimeoutMs ? { connectTimeoutMs: config.connectionTimeoutMs } : {}),
+      ...(config.statementTimeoutMs ? { statementTimeoutMs: config.statementTimeoutMs } : {}),
     },
     pool: { max: config.maxClients ?? 5 },
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function savedConnectionFromDatabaseSession(
+  config: DatabaseConnectionConfig,
+  connectionId: string,
+  now: string,
+): SavedConnection {
+  return {
+    id: connectionId,
+    name: config.name,
+    engine: 'postgres',
+    host: config.host,
+    port: config.port,
+    database: config.database,
+    username: config.username,
+    ...(typeof config.ssl === 'boolean' ? { ssl: config.ssl } : {}),
+    readOnly: config.readOnly,
+    ...(config.connectionTimeoutMs === undefined
+      ? {}
+      : { connectionTimeoutMs: config.connectionTimeoutMs }),
+    ...(config.statementTimeoutMs === undefined
+      ? {}
+      : { statementTimeoutMs: config.statementTimeoutMs }),
+    status: 'connected',
     createdAt: now,
     updatedAt: now,
   };
@@ -1107,7 +1762,6 @@ async function discoverCurrentResources(
 }> {
   const resources = new Map<string, ResourceDescriptor>();
   const relations = new Map<string, ResourceRelation>();
-  const snapshots: string[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
   let pages = 0;
@@ -1131,7 +1785,6 @@ async function discoverCurrentResources(
     for (const relation of page.relations) {
       relations.set(relation.id, relation);
     }
-    if (page.snapshotId) snapshots.push(page.snapshotId);
     if (page.complete) {
       cursor = undefined;
       break;
@@ -1154,31 +1807,104 @@ async function discoverCurrentResources(
     cursor = page.nextCursor;
   } while (cursor);
 
+  const sortedResources = [...resources.values()].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
+  const sortedRelations = [...relations.values()].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
   return {
-    resources: [...resources.values()].sort((left, right) =>
-      left.id.localeCompare(right.id),
-    ),
-    relations: [...relations.values()].sort((left, right) =>
-      left.id.localeCompare(right.id),
-    ),
-    sourceRevision: JSON.stringify({
-      profileId,
-      pages,
-      snapshots,
-      resourceVersions: [...resources.values()]
-        .map((resource) => [resource.id, resource.version] as const)
-        .sort(([left], [right]) => left.localeCompare(right)),
-      relationVersions: [...relations.values()]
-        .map((relation) => [relation.id, relation.version] as const)
-        .sort(([left], [right]) => left.localeCompare(right)),
-    }),
+    resources: sortedResources,
+    relations: sortedRelations,
+    sourceRevision: schemaSourceRevision(profileId, sortedResources, sortedRelations),
   };
 }
 
-function collectContainedResources(
-  roots: Set<string>,
+function schemaSourceRevision(
+  profileId: string,
+  resources: ResourceDescriptor[],
   relations: ResourceRelation[],
-): Set<string> {
+): string {
+  const revisionInput = {
+    profileId,
+    resources: resources.map((resource) => ({
+      id: resource.id,
+      kind: resource.kind,
+      nativeId: resource.nativeId,
+      canonicalName: resource.canonicalName,
+      displayName: resource.displayName ?? null,
+      aliases: [...(resource.aliases ?? [])].sort(),
+      engine: resource.engine ?? null,
+      engineVersion: resource.engineVersion ?? null,
+      scope: resource.scope ?? {},
+      tags: resource.tags ?? {},
+      attributes: resource.attributes ?? {},
+      facts: Object.fromEntries(
+        Object.entries(resource.facts ?? {})
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, candidates]) => [
+            key,
+            candidates
+              .map((candidate) => ({
+                value: candidate.value,
+                confidence: candidate.confidence ?? null,
+                source: {
+                  sourceId: candidate.source.sourceId,
+                  sourceType: candidate.source.sourceType,
+                  connectorId: candidate.source.connectorId ?? null,
+                  connectionProfileId: candidate.source.connectionProfileId ?? null,
+                  priority: candidate.source.priority ?? null,
+                },
+              }))
+              .sort((left, right) =>
+                stringifyPublicJson(canonicalizeRevisionValue(left)).localeCompare(
+                  stringifyPublicJson(canonicalizeRevisionValue(right)),
+                ),
+              ),
+          ]),
+      ),
+      version: resource.version,
+      deleted: resource.deletedAt !== undefined,
+    })),
+    relations: relations.map((relation) => ({
+      id: relation.id,
+      kind: relation.kind,
+      fromResourceId: relation.fromResourceId,
+      toResourceId: relation.toResourceId,
+      attributes: relation.attributes ?? {},
+      version: relation.version,
+      deleted: relation.deletedAt !== undefined,
+    })),
+  };
+  const encoded = stringifyPublicJson(canonicalizeRevisionValue(revisionInput));
+  return `sha256:${createHash('sha256').update(encoded).digest('hex')}`;
+}
+
+function schemaSnapshotScopeDirectory(scope: ResourceScope): string {
+  const encoded = stringifyPublicJson({
+    tenantId: scope.tenantId ?? null,
+    organizationId: scope.organizationId ?? null,
+    projectId: scope.projectId ?? null,
+    environment: scope.environment ?? null,
+    region: scope.region ?? null,
+  });
+  return `scope-${createHash('sha256').update(encoded).digest('hex')}`;
+}
+
+function canonicalizeRevisionValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalizeRevisionValue(item));
+  if (value instanceof Date || value instanceof Uint8Array) return value;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalizeRevisionValue(item)]),
+    );
+  }
+  return value;
+}
+
+function collectContainedResources(roots: Set<string>, relations: ResourceRelation[]): Set<string> {
   const children = new Map<string, string[]>();
   for (const relation of relations) {
     if (relation.kind !== 'contains' || relation.deletedAt) continue;
@@ -1209,6 +1935,40 @@ function mapDatabaseAccessError(error: unknown): DatabaseAgentError {
     );
   }
   return asDatabaseAgentError(error);
+}
+
+async function waitForDatabaseJob(
+  database: DatabaseAccessRuntime,
+  initialJob: QueryJob,
+  signal: AbortSignal,
+): Promise<QueryJob> {
+  let job = initialJob;
+  let cancellation: Promise<unknown> | undefined;
+  const requestCancellation = () => {
+    cancellation ??= database.cancel(job.id).catch(() => undefined);
+  };
+  signal.addEventListener('abort', requestCancellation, { once: true });
+  try {
+    if (signal.aborted) requestCancellation();
+    while (!['succeeded', 'failed', 'cancelled', 'expired'].includes(job.state)) {
+      if (signal.aborted) {
+        requestCancellation();
+        await cancellation;
+      }
+      await pollingDelay(10);
+      job = await database.getJob(job.id);
+    }
+    await cancellation;
+    return job;
+  } finally {
+    signal.removeEventListener('abort', requestCancellation);
+  }
+}
+
+async function pollingDelay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolvePromise) => {
+    setTimeout(resolvePromise, milliseconds);
+  });
 }
 
 function buildSystemPrompt(): string {
@@ -1322,6 +2082,85 @@ function toRunError(error: DatabaseAgentError): {
   retryable: boolean;
 } {
   return { code: error.code, message: error.message, retryable: error.retryable };
+}
+
+async function readOptionalText(path: string): Promise<string | undefined> {
+  try {
+    const value = (await readFile(path, 'utf8')).trim();
+    return value || undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+function createLinkedAbortController(signal?: AbortSignal): {
+  controller: AbortController;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) {
+    forwardAbort();
+  } else {
+    signal?.addEventListener('abort', forwardAbort, { once: true });
+  }
+  return {
+    controller,
+    dispose: () => signal?.removeEventListener('abort', forwardAbort),
+  };
+}
+
+async function waitForLlmJobCompletion(
+  gateway: LlmGateway,
+  id: string,
+  tenantId: string,
+  ownerId: string,
+): Promise<void> {
+  while (true) {
+    const job = gateway.getJob(id, tenantId, ownerId);
+    if (
+      job === undefined ||
+      job.status === 'completed' ||
+      job.status === 'failed' ||
+      job.status === 'cancelled'
+    ) {
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function waitForSharedOperation<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+  abortedError: () => Error,
+): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) return Promise.reject(abortedError());
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', abort);
+    const abort = () => {
+      cleanup();
+      reject(abortedError());
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    void operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        const reason: unknown = error;
+        reject(
+          reason instanceof Error
+            ? reason
+            : new Error('Shared operation rejected with a non-Error reason.', { cause: reason }),
+        );
+      },
+    );
+  });
 }
 
 async function mapInBatches<T, R>(

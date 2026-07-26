@@ -15,6 +15,17 @@ import {
   type LlmToolCall,
   type LlmUsage,
 } from './types.js';
+import { redactKnownSecrets, sanitizeKnownSecretError } from './known-secret-sanitizer.js';
+import {
+  addStreamBytes,
+  assertToolCallCapacity,
+  readLimitedResponseText,
+  readLimitedSseData,
+  resolveLlmMaxResponseBytes,
+  resolveLlmStreamLimits,
+  type LlmStreamLimitOptions,
+  type LlmStreamLimits,
+} from './stream-safety.js';
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -39,6 +50,8 @@ export type OpenAICompatibleProviderConfig = {
   metadataSource?: 'openai-compatible' | 'ollama';
   capabilities?: Partial<LlmProviderCapabilities>;
   defaultHeaders?: Record<string, string>;
+  maxResponseBytes?: number;
+  streamLimits?: LlmStreamLimitOptions;
   fetch?: FetchLike;
 };
 
@@ -150,6 +163,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private readonly modelsPath: string;
   private readonly metadataSource: 'openai-compatible' | 'ollama';
   private readonly defaultHeaders: Record<string, string>;
+  private readonly knownSecrets: readonly string[];
+  private readonly maxResponseBytes: number;
+  private readonly streamLimits: LlmStreamLimits;
   private readonly fetchImpl: FetchLike;
 
   constructor(config: OpenAICompatibleProviderConfig) {
@@ -178,7 +194,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
       rerank: 'unknown',
       ...config.capabilities,
     };
-    this.defaultHeaders = config.defaultHeaders ?? {};
+    this.defaultHeaders = { ...(config.defaultHeaders ?? {}) };
+    this.knownSecrets = collectKnownHeaderSecrets(this.apiKey, this.defaultHeaders);
+    this.maxResponseBytes = resolveLlmMaxResponseBytes(config.maxResponseBytes);
+    this.streamLimits = resolveLlmStreamLimits(config.streamLimits);
     this.fetchImpl = config.fetch ?? fetch;
   }
 
@@ -200,14 +219,27 @@ export class OpenAICompatibleProvider implements LlmProvider {
       },
       request.signal,
     );
-    const sorted = [...(response.data ?? [])].sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+    const sorted = [...(response.data ?? [])].sort(
+      (left, right) => (left.index ?? 0) - (right.index ?? 0),
+    );
     const embeddings = sorted.map((item) => item.embedding ?? []);
-    if (embeddings.length !== request.input.length || embeddings.some((embedding) => embedding.length === 0)) {
-      throw new LlmProviderError('LLM_BAD_RESPONSE', 'Embedding provider returned an invalid vector batch.', false);
+    if (
+      embeddings.length !== request.input.length ||
+      embeddings.some((embedding) => embedding.length === 0)
+    ) {
+      throw new LlmProviderError(
+        'LLM_BAD_RESPONSE',
+        'Embedding provider returned an invalid vector batch.',
+        false,
+      );
     }
     const dimensions = embeddings[0]?.length ?? 0;
     if (embeddings.some((embedding) => embedding.length !== dimensions)) {
-      throw new LlmProviderError('LLM_BAD_RESPONSE', 'Embedding vectors have inconsistent dimensions.', false);
+      throw new LlmProviderError(
+        'LLM_BAD_RESPONSE',
+        'Embedding vectors have inconsistent dimensions.',
+        false,
+      );
     }
     const usage = parseEmbeddingUsage(response.usage);
     return {
@@ -234,8 +266,19 @@ export class OpenAICompatibleProvider implements LlmProvider {
       score: result.relevance_score ?? result.score ?? 0,
       ...(typeof result.document === 'string' ? { document: result.document } : {}),
     }));
-    if (results.some((result) => result.index < 0 || result.index >= request.documents.length || !Number.isFinite(result.score))) {
-      throw new LlmProviderError('LLM_BAD_RESPONSE', 'Rerank provider returned invalid result indexes or scores.', false);
+    if (
+      results.some(
+        (result) =>
+          result.index < 0 ||
+          result.index >= request.documents.length ||
+          !Number.isFinite(result.score),
+      )
+    ) {
+      throw new LlmProviderError(
+        'LLM_BAD_RESPONSE',
+        'Rerank provider returned invalid result indexes or scores.',
+        false,
+      );
     }
     const usage = parseEmbeddingUsage(response.usage);
     return {
@@ -270,12 +313,21 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 
   async *stream(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent> {
-    const payload = { ...buildChatPayload(request), stream: true, stream_options: { include_usage: true } };
+    const payload = {
+      ...buildChatPayload(request),
+      stream: true,
+      stream_options: { include_usage: true },
+    };
     const stream = await this.requestStream('/chat/completions', payload, request.signal);
     const state = createStreamState();
+    let textBytes = 0;
+    let toolArgumentsBytes = 0;
 
     try {
-      for await (const event of readSseEvents(stream.body)) {
+      for await (const event of readLimitedSseData(
+        stream.body,
+        this.streamLimits.maxSseFrameBytes,
+      )) {
         if (event === '[DONE]') {
           const response = streamStateToResponse(state);
           yield finishEvent(response, state.finishReason);
@@ -284,7 +336,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
         const chunk = parseJson(event) as OpenAIChatResponse;
         if (!chunk || typeof chunk !== 'object') {
-          throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM stream returned an invalid event.', true);
+          throw new LlmProviderError(
+            'LLM_BAD_RESPONSE',
+            'LLM stream returned an invalid event.',
+            true,
+          );
         }
 
         if (chunk.id) state.providerResponseId = chunk.id;
@@ -299,27 +355,52 @@ export class OpenAICompatibleProvider implements LlmProvider {
           if (choice.finish_reason) state.finishReason = choice.finish_reason;
           const text = choice.delta?.content ?? '';
           if (text) {
+            textBytes = addStreamBytes(textBytes, text, this.streamLimits.maxTextBytes, 'text');
             state.text += text;
             yield { type: 'text-delta', text };
           }
 
           for (const delta of choice.delta?.tool_calls ?? []) {
             const index = delta.index ?? 0;
+            if (!state.toolCalls.has(index)) {
+              assertToolCallCapacity(state.toolCalls.size, this.streamLimits.maxToolCalls);
+            }
             const current = state.toolCalls.get(index) ?? { arguments: '' };
             if (delta.id) current.id = delta.id;
             if (delta.function?.name) current.name = delta.function.name;
-            if (delta.function?.arguments) current.arguments += delta.function.arguments;
+            if (delta.function?.arguments) {
+              toolArgumentsBytes = addStreamBytes(
+                toolArgumentsBytes,
+                delta.function.arguments,
+                this.streamLimits.maxToolArgumentsBytes,
+                'tool arguments',
+              );
+              current.arguments += delta.function.arguments;
+            }
             state.toolCalls.set(index, current);
             yield {
               type: 'tool-call-delta',
               index,
               ...(delta.id === undefined ? {} : { id: delta.id }),
               ...(delta.function?.name === undefined ? {} : { name: delta.function.name }),
-              ...(delta.function?.arguments === undefined ? {} : { argumentsDelta: delta.function.arguments }),
+              ...(delta.function?.arguments === undefined
+                ? {}
+                : { argumentsDelta: delta.function.arguments }),
             };
           }
         }
       }
+    } catch (error) {
+      if (error instanceof LlmProviderError)
+        throw sanitizeKnownSecretError(error, this.knownSecrets);
+      throw new LlmProviderError(
+        'LLM_NETWORK_ERROR',
+        redactKnownSecrets(
+          error instanceof Error ? error.message : 'LLM stream failed.',
+          this.knownSecrets,
+        ),
+        true,
+      );
     } finally {
       stream.cleanup();
     }
@@ -336,10 +417,15 @@ export class OpenAICompatibleProvider implements LlmProvider {
       return {
         available,
         latencyMs: performance.now() - startedAt,
-        ...(available || model === undefined ? {} : { detail: `Model is not advertised by the Provider: ${model}` }),
+        ...(available || model === undefined
+          ? {}
+          : { detail: `Model is not advertised by the Provider: ${model}` }),
       };
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = redactKnownSecrets(
+        error instanceof Error ? error.message : String(error),
+        this.knownSecrets,
+      );
       return { available: false, latencyMs: performance.now() - startedAt, detail };
     }
   }
@@ -389,14 +475,18 @@ export class OpenAICompatibleProvider implements LlmProvider {
         signal: controller.signal,
       });
 
-      const text = await response.text();
+      const text = await readLimitedResponseText(response, this.maxResponseBytes);
       const json = parseJson(text);
 
       if (!response.ok) {
         throw httpError(response.status, json);
       }
       if (!json || typeof json !== 'object') {
-        throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM provider returned an empty response.', false);
+        throw new LlmProviderError(
+          'LLM_BAD_RESPONSE',
+          'LLM provider returned an empty response.',
+          false,
+        );
       }
       return json as T;
     } catch (error) {
@@ -404,12 +494,20 @@ export class OpenAICompatibleProvider implements LlmProvider {
         if (!timedOut && signal?.aborted) {
           throw new LlmProviderError('LLM_ABORTED', 'LLM request was aborted by the user.', false);
         }
-        throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
+        throw new LlmProviderError(
+          'LLM_TIMEOUT',
+          `LLM request timed out after ${this.timeoutMs}ms.`,
+          true,
+        );
       }
-      if (error instanceof LlmProviderError) throw redactProviderError(error, this.apiKey);
+      if (error instanceof LlmProviderError)
+        throw sanitizeKnownSecretError(error, this.knownSecrets);
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        error instanceof Error ? error.message : 'LLM network request failed.',
+        redactKnownSecrets(
+          error instanceof Error ? error.message : 'LLM network request failed.',
+          this.knownSecrets,
+        ),
         true,
       );
     } finally {
@@ -453,17 +551,35 @@ export class OpenAICompatibleProvider implements LlmProvider {
         headers: this.headers(),
         signal: controller.signal,
       });
-      const body = parseJson(await response.text());
+      const body = parseJson(await readLimitedResponseText(response, this.maxResponseBytes));
       if (!response.ok) throw httpError(response.status, body);
-      if (!body || typeof body !== 'object') throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM provider returned an empty response.', false);
+      if (!body || typeof body !== 'object')
+        throw new LlmProviderError(
+          'LLM_BAD_RESPONSE',
+          'LLM provider returned an empty response.',
+          false,
+        );
       return body as T;
     } catch (error) {
       if (isAbortError(error)) {
-        if (!timedOut && signal?.aborted) throw new LlmProviderError('LLM_ABORTED', 'LLM request was aborted by the user.', false);
-        throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
+        if (!timedOut && signal?.aborted)
+          throw new LlmProviderError('LLM_ABORTED', 'LLM request was aborted by the user.', false);
+        throw new LlmProviderError(
+          'LLM_TIMEOUT',
+          `LLM request timed out after ${this.timeoutMs}ms.`,
+          true,
+        );
       }
-      if (error instanceof LlmProviderError) throw redactProviderError(error, this.apiKey);
-      throw new LlmProviderError('LLM_NETWORK_ERROR', error instanceof Error ? error.message : 'LLM network request failed.', true);
+      if (error instanceof LlmProviderError)
+        throw sanitizeKnownSecretError(error, this.knownSecrets);
+      throw new LlmProviderError(
+        'LLM_NETWORK_ERROR',
+        redactKnownSecrets(
+          error instanceof Error ? error.message : 'LLM network request failed.',
+          this.knownSecrets,
+        ),
+        true,
+      );
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
@@ -524,25 +640,41 @@ export class OpenAICompatibleProvider implements LlmProvider {
       });
 
       if (!response.ok) {
-        const text = await response.text();
+        const text = await readLimitedResponseText(response, this.maxResponseBytes);
         throw httpError(response.status, parseJson(text));
       }
       if (!response.body) {
-        throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM provider returned an empty stream.', true);
+        throw new LlmProviderError(
+          'LLM_BAD_RESPONSE',
+          'LLM provider returned an empty stream.',
+          true,
+        );
       }
       return { body: response.body, cleanup };
     } catch (error) {
       cleanup();
       if (isAbortError(error)) {
         if (!timedOut && signal?.aborted) {
-          throw new LlmProviderError('LLM_ABORTED', 'LLM stream request was aborted by the user.', false);
+          throw new LlmProviderError(
+            'LLM_ABORTED',
+            'LLM stream request was aborted by the user.',
+            false,
+          );
         }
-        throw new LlmProviderError('LLM_TIMEOUT', `LLM request timed out after ${this.timeoutMs}ms.`, true);
+        throw new LlmProviderError(
+          'LLM_TIMEOUT',
+          `LLM request timed out after ${this.timeoutMs}ms.`,
+          true,
+        );
       }
-      if (error instanceof LlmProviderError) throw redactProviderError(error, this.apiKey);
+      if (error instanceof LlmProviderError)
+        throw sanitizeKnownSecretError(error, this.knownSecrets);
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        error instanceof Error ? error.message : 'LLM stream request failed.',
+        redactKnownSecrets(
+          error instanceof Error ? error.message : 'LLM stream request failed.',
+          this.knownSecrets,
+        ),
         true,
       );
     }
@@ -572,7 +704,11 @@ function parseChatResponse(response: OpenAIChatResponse): LlmChatResponse {
   const choice = response.choices?.[0];
   const message = choice?.message;
   if (!message) {
-    throw new LlmProviderError('LLM_BAD_RESPONSE', 'LLM provider response did not include a message.', false);
+    throw new LlmProviderError(
+      'LLM_BAD_RESPONSE',
+      'LLM provider response did not include a message.',
+      false,
+    );
   }
 
   const parsed: LlmChatResponse = {
@@ -614,7 +750,9 @@ function buildChatPayload(request: LlmChatRequest): Record<string, unknown> {
     ...(request.maxTokens === undefined ? {} : { max_tokens: request.maxTokens }),
     ...(request.stop === undefined ? {} : { stop: request.stop }),
     ...(request.seed === undefined ? {} : { seed: request.seed }),
-    ...(request.reasoning?.effort === undefined ? {} : { reasoning_effort: request.reasoning.effort }),
+    ...(request.reasoning?.effort === undefined
+      ? {}
+      : { reasoning_effort: request.reasoning.effort }),
     ...(request.responseFormat === undefined || request.responseFormat.type === 'text'
       ? {}
       : request.responseFormat.type === 'json_object'
@@ -678,48 +816,6 @@ function finishEvent(response: LlmChatResponse, reason?: string): LlmChatStreamE
     response,
     ...(reason === undefined ? {} : { reason }),
   };
-}
-
-async function* readSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterable<string> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      yield* drainSseBuffer(buffer, (next) => {
-        buffer = next;
-      });
-    }
-    buffer += decoder.decode();
-    yield* drainSseBuffer(`${buffer}\n\n`, (next) => {
-      buffer = next;
-    });
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-function* drainSseBuffer(buffer: string, setBuffer: (next: string) => void): Iterable<string> {
-  let rest = buffer;
-  while (true) {
-    const normalized = rest.replace(/\r\n/g, '\n');
-    const boundary = normalized.indexOf('\n\n');
-    if (boundary < 0) {
-      setBuffer(rest);
-      return;
-    }
-    const rawEvent = normalized.slice(0, boundary);
-    rest = normalized.slice(boundary + 2);
-    const dataLines = rawEvent
-      .split('\n')
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).trimStart());
-    if (dataLines.length > 0) yield dataLines.join('\n');
-  }
 }
 
 function parseToolCall(call: OpenAIToolCall): LlmToolCall {
@@ -791,7 +887,8 @@ function parseOllamaModelMetadata(
   const advertised = Array.isArray(response.capabilities);
   const capabilities = new Set(response.capabilities ?? []);
   const contextTokens = Object.entries(response.model_info ?? {}).find(
-    ([key, value]) => key.endsWith('.context_length') && Number.isInteger(value) && Number(value) > 0,
+    ([key, value]) =>
+      key.endsWith('.context_length') && Number.isInteger(value) && Number(value) > 0,
   )?.[1];
   return {
     model,
@@ -810,7 +907,9 @@ function parseOllamaModelMetadata(
     ...(typeof contextTokens === 'number' ? { contextTokens } : {}),
     ...(response.details?.family ? { family: response.details.family } : {}),
     ...(response.details?.parameter_size ? { parameterSize: response.details.parameter_size } : {}),
-    ...(response.details?.quantization_level ? { quantization: response.details.quantization_level } : {}),
+    ...(response.details?.quantization_level
+      ? { quantization: response.details.quantization_level }
+      : {}),
   };
 }
 
@@ -825,8 +924,10 @@ function parseJson(text: string): unknown {
 
 function httpError(status: number, body: unknown): LlmProviderError {
   const message = extractErrorMessage(body) ?? `LLM provider returned HTTP ${status}.`;
-  if (status === 401 || status === 403) return new LlmProviderError('LLM_AUTH_FAILED', message, false, status);
-  if (status === 408 || status === 429) return new LlmProviderError('LLM_RATE_LIMITED', message, true, status);
+  if (status === 401 || status === 403)
+    return new LlmProviderError('LLM_AUTH_FAILED', message, false, status);
+  if (status === 408 || status === 429)
+    return new LlmProviderError('LLM_RATE_LIMITED', message, true, status);
   if (status >= 500) return new LlmProviderError('LLM_PROVIDER_ERROR', message, true, status);
   return new LlmProviderError('LLM_PROVIDER_ERROR', message, false, status);
 }
@@ -837,6 +938,31 @@ function extractErrorMessage(body: unknown): string | undefined {
   return typeof error?.message === 'string' ? error.message : undefined;
 }
 
+function collectKnownHeaderSecrets(
+  apiKey: string,
+  headers: Readonly<Record<string, string>>,
+): readonly string[] {
+  const secrets = new Set<string>();
+  if (apiKey) secrets.add(apiKey);
+  for (const [name, rawValue] of Object.entries(headers)) {
+    if (!/(?:authorization|api[-_]?key|token|secret|credential|cookie)/i.test(name)) continue;
+    const value = rawValue.trim();
+    if (!value) continue;
+    secrets.add(value);
+    if (/authorization/i.test(name)) {
+      const credential = /^\S+\s+(.+)$/.exec(value)?.[1]?.trim();
+      if (credential) secrets.add(credential);
+    }
+    if (/cookie/i.test(name)) {
+      for (const part of value.split(';')) {
+        const cookieValue = /^[^=]+=(.*)$/.exec(part.trim())?.[1]?.trim();
+        if (cookieValue) secrets.add(cookieValue);
+      }
+    }
+  }
+  return [...secrets].sort((left, right) => right.length - left.length);
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
@@ -845,19 +971,9 @@ function isRetryable(error: unknown): boolean {
   return error instanceof LlmProviderError && error.retryable;
 }
 
-function redactProviderError(error: LlmProviderError, secret: string): LlmProviderError {
-  if (!secret || !error.message.includes(secret)) return error;
-  return new LlmProviderError(
-    error.code,
-    error.message.split(secret).join('[REDACTED]'),
-    error.retryable,
-    error.statusCode,
-    error.detail,
-  );
-}
-
 async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) throw new LlmProviderError('LLM_ABORTED', 'LLM retry wait was aborted by the user.', false);
+  if (signal?.aborted)
+    throw new LlmProviderError('LLM_ABORTED', 'LLM retry wait was aborted by the user.', false);
   await new Promise<void>((resolve, reject) => {
     const cleanup = () => signal?.removeEventListener('abort', abort);
     const timeout = setTimeout(() => {

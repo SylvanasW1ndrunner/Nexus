@@ -49,6 +49,22 @@ export class ProgressiveSchemaRagIndexer {
     input: SchemaRagIndexInput,
     options: SchemaRagProgressiveIndexOptions = {},
   ): Promise<ProgressiveSchemaRagIndexResult> {
+    return await this.runIndex(input, options, () => Promise.resolve(this.engine.index(input)));
+  }
+
+  async indexAsync(
+    input: SchemaRagIndexInput,
+    options: SchemaRagProgressiveIndexOptions = {},
+  ): Promise<ProgressiveSchemaRagIndexResult> {
+    return await this.runIndex(input, options, () => this.engine.indexAsync(input));
+  }
+
+  private async runIndex(
+    input: SchemaRagIndexInput,
+    options: SchemaRagProgressiveIndexOptions,
+    buildIndex: () => Promise<SchemaRagIndex>,
+  ): Promise<ProgressiveSchemaRagIndexResult> {
+    const checkpoint = this.engine.createCheckpoint(input.connectionId);
     const startedAt = new Date().toISOString();
     const tableCount = input.tables?.length ?? 0;
     const stages = buildInitialStages(tableCount, options.hotTableLimit, startedAt);
@@ -69,7 +85,7 @@ export class ProgressiveSchemaRagIndexer {
         startedAt,
       );
 
-      const index = this.engine.index(input);
+      const index = await buildIndex();
       if (this.snapshotStore) {
         await this.snapshotStore.save(index);
       }
@@ -78,6 +94,7 @@ export class ProgressiveSchemaRagIndexer {
       this.statuses.set(input.connectionId, status);
       return { index, status };
     } catch (error) {
+      this.engine.restoreCheckpoint(checkpoint);
       const failedAt = new Date().toISOString();
       const message = error instanceof Error ? error.message : String(error);
       const failedStages = stages.map((stage) =>
@@ -91,19 +108,43 @@ export class ProgressiveSchemaRagIndexer {
   }
 
   async upsertTables(input: SchemaRagIndexInput): Promise<ProgressiveSchemaRagIndexResult> {
-    const index = this.engine.upsertTables(input);
-    if (this.snapshotStore) {
-      await this.snapshotStore.save(index);
+    const checkpoint = this.engine.createCheckpoint(input.connectionId);
+    try {
+      const index = await this.engine.upsertTablesAsync(input);
+      if (this.snapshotStore) {
+        await this.snapshotStore.save(index);
+      }
+      const status = buildStatus(
+        index,
+        'ready',
+        true,
+        buildUpsertStages(input.tables?.length ?? 0),
+        new Date().toISOString(),
+      );
+      this.statuses.set(input.connectionId, status);
+      return { index, status };
+    } catch (error) {
+      this.engine.restoreCheckpoint(checkpoint);
+      const failedAt = new Date().toISOString();
+      const message = error instanceof Error ? error.message : String(error);
+      this.setStatus(
+        input.connectionId,
+        'failed',
+        false,
+        [
+          {
+            stage: 'failed',
+            state: 'failed',
+            done: 0,
+            total: 1,
+            completedAt: failedAt,
+            error: message,
+          },
+        ],
+        failedAt,
+      );
+      throw error;
     }
-    const status = buildStatus(
-      index,
-      'ready',
-      true,
-      buildUpsertStages(input.tables?.length ?? 0),
-      new Date().toISOString(),
-    );
-    this.statuses.set(input.connectionId, status);
-    return { index, status };
   }
 
   async restore(connectionId: string): Promise<SchemaRagIndexStatus | undefined> {

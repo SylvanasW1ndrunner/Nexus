@@ -10,13 +10,15 @@ describe('AgentToolApprovalBroker', () => {
       approvalTimeoutMs: 1_000,
     });
 
-    const resultPromise = broker.requestApproval(request({ password: 'secret-pass', sql: 'delete from orders' }));
+    const resultPromise = broker.requestApproval(
+      request({ password: 'secret-pass', sql: 'delete from orders' }),
+    );
 
     expect(broker.listPending()).toEqual([
       expect.objectContaining({
         id: 'approval_1',
         status: 'pending',
-        mode: 'ask',
+        mode: 'read',
         sessionId: 'session_1',
         toolCallId: 'call_write',
         toolName: 'execute_sql',
@@ -69,7 +71,9 @@ describe('AgentToolApprovalBroker', () => {
       approvalTimeoutMs: 1,
     });
 
-    const result = await broker.requestApproval(request({ sql: 'alter table orders add column note text' }));
+    const result = await broker.requestApproval(
+      request({ sql: 'alter table orders add column note text' }),
+    );
 
     expect(result).toEqual({
       approved: false,
@@ -99,6 +103,27 @@ describe('AgentToolApprovalBroker', () => {
     });
     expect(broker.getRequest('approval_abort')).toMatchObject({ status: 'cancelled' });
   });
+
+  it('cancels only pending approvals owned by a steered Session', async () => {
+    let id = 0;
+    const broker = new AgentToolApprovalBroker({
+      createRequestId: () => `approval_${++id}`,
+      approvalTimeoutMs: 1_000,
+    });
+    const first = broker.requestApproval(request({ sql: 'delete from orders' }));
+    const second = broker.requestApproval(
+      request({ sql: 'delete from other_orders' }, { sessionId: 'session_2' }),
+    );
+
+    expect(broker.cancelSession('session_1')).toBe(1);
+    await expect(first).resolves.toMatchObject({
+      approved: false,
+      reason: 'approval request was superseded by new user input',
+    });
+    expect(broker.listPending()).toHaveLength(1);
+    expect(broker.deny('approval_2')).toBe(true);
+    await second;
+  });
 });
 
 function request(
@@ -106,7 +131,7 @@ function request(
   overrides: Partial<PermissionRequest> = {},
 ): PermissionRequest {
   return {
-    mode: 'ask',
+    mode: 'read',
     sessionId: 'session_1',
     sessionTitle: '订单清理',
     tool: {

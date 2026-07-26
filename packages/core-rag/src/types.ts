@@ -181,6 +181,10 @@ export type SchemaRagIndexManifest = {
   documentCount: number;
   indexVersion: string;
   createdAt: string;
+  /** Total table-like resources observed before an SDK-level indexing limit. */
+  sourceTableCount?: number;
+  /** Table limit used to build this index. */
+  maxTables?: number;
 };
 
 export type SchemaRagEmbeddingAdapter = {
@@ -327,6 +331,8 @@ export type SchemaRagIndexInput = {
   knowledge?: BusinessKnowledgeInput[];
   bindings?: KnowledgeBindingInput[];
   sourceRevision?: string;
+  sourceTableCount?: number;
+  maxTables?: number;
   retrievalProfile?: SchemaRagRetrievalProfile;
   glossary?: SchemaRagGlossaryEntry[];
   indexedAt?: string;

@@ -23,6 +23,8 @@ import {
   DatabaseAccessRuntimeError,
   ResourceConflictError,
   asDatabaseAgentError,
+  toAgentSessionView,
+  toAiSqlAgentRunView,
   type ExecuteGeneratedOptions,
   type GenerateSqlInput,
   type GeneratedSqlRun,
@@ -36,6 +38,12 @@ import {
   type ExecutedSqlRun,
   type ConnectionProfile,
   type AgentContextCheckpoint,
+  type AgentApprovalRequest,
+  type AgentSessionListInput,
+  type AgentSessionListItem,
+  type AgentSessionView,
+  type AgentSkillCatalogEntry,
+  type AgentSkillRefreshResult,
   type AiSqlAgentRun,
   type CompactAiSqlAgentSessionInput,
   type CompactAiSqlAgentSessionResult,
@@ -44,6 +52,10 @@ import {
   type DatabaseOperationRequest,
   type QuerySubmission,
   type RunAiSqlAgentInput,
+  type McpServerRegistrationInput,
+  type McpServerStartSummary,
+  type McpServerStopSummary,
+  type McpServerSummary,
   type ResourceEventType,
   type ResourceKind,
   type ResourceQuery,
@@ -52,12 +64,15 @@ import {
 } from '@dbagent/sdk';
 import {
   ContractValidationError,
+  parsePublicJson,
   stringifyPublicJson,
   type SavedConnection,
 } from '@dbagent/shared';
 import { WEB_UI_HTML } from './web-ui.js';
 
 const MAX_BODY_BYTES = 1_048_576;
+const MAX_AGENT_ITERATIONS = 64;
+const MAX_TOOL_EXECUTION_MS = 300_000;
 const RESOURCE_EVENT_TYPES = new Set<ResourceEventType>([
   'resource-created',
   'resource-updated',
@@ -86,6 +101,7 @@ export type LlmSetupInput = {
 
 export type DatabaseAgentRuntimePort = {
   readonly database?: DatabaseAccessRuntime;
+  close?(): Promise<void>;
   configureProvider(provider: LlmProvider, model: string): void;
   connect(input: PostgresConnectionInput): Promise<SavedConnection>;
   disconnect(): Promise<void>;
@@ -96,18 +112,38 @@ export type DatabaseAgentRuntimePort = {
   executeGenerated(runId: string, options?: ExecuteGeneratedOptions): Promise<ExecutedSqlRun>;
   getRun(runId: string): SqlRunSnapshot | undefined;
   runAgent?(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun>;
+  steerAgentSession?(sessionId: string, message: string): boolean;
+  listAgentSessions?(input?: AgentSessionListInput): Promise<AgentSessionListItem[]>;
+  getAgentSession?(sessionId: string): Promise<AgentSessionView | undefined>;
+  deleteAgentSession?(sessionId: string): Promise<boolean>;
+  listAgentSkills?(): Promise<AgentSkillCatalogEntry[]>;
+  refreshSkills?(): Promise<AgentSkillRefreshResult>;
+  listAgentApprovals?(): AgentApprovalRequest[];
+  resolveAgentApproval?(
+    requestId: string,
+    approved: boolean,
+    options?: { resolvedBy?: string; reason?: string },
+  ): boolean;
+  listMcpServers?(): Promise<McpServerSummary[]>;
+  upsertMcpServer?(input: McpServerRegistrationInput): Promise<McpServerSummary>;
+  removeMcpServer?(serverId: string): Promise<boolean>;
+  startMcpServer?(serverId: string): Promise<McpServerStartSummary>;
+  stopMcpServer?(serverId: string): Promise<McpServerStopSummary>;
   compactAgentSession?(
     input: CompactAiSqlAgentSessionInput,
   ): Promise<CompactAiSqlAgentSessionResult>;
-  agentContextCheckpoints?(
-    sessionId: string,
-    limit?: number,
-  ): Promise<AgentContextCheckpoint[]>;
+  agentContextCheckpoints?(sessionId: string, limit?: number): Promise<AgentContextCheckpoint[]>;
   llmModels?(): RegisteredLlmModel[];
   discoverLlmModels?(): Promise<RegisteredLlmModel[]>;
   llmMetrics?(): LlmMetricsSnapshot;
-  llmChat?(request: LlmRuntimeChatRequest, options?: LlmRuntimeCallOptions): Promise<LlmChatResponse>;
-  llmStream?(request: LlmRuntimeChatRequest, options?: LlmRuntimeCallOptions): AsyncIterable<LlmChatStreamEvent>;
+  llmChat?(
+    request: LlmRuntimeChatRequest,
+    options?: LlmRuntimeCallOptions,
+  ): Promise<LlmChatResponse>;
+  llmStream?(
+    request: LlmRuntimeChatRequest,
+    options?: LlmRuntimeCallOptions,
+  ): AsyncIterable<LlmChatStreamEvent>;
   submitLlmBatch?(
     requests: LlmRuntimeChatRequest[],
     options?: LlmRuntimeCallOptions & { concurrency?: number },
@@ -119,6 +155,13 @@ export type DatabaseAgentRuntimePort = {
 export type DatabaseAgentServerOptions = {
   runtime?: DatabaseAgentRuntimePort;
   createProvider?: (input: LlmSetupInput) => LlmProvider;
+  /**
+   * Allows REST clients to register and start process-backed stdio MCP servers.
+   *
+   * Disabled by default because a stdio MCP command executes with the server
+   * process privileges. SDK and interactive CLI MCP usage are not affected.
+   */
+  allowProcessMcpManagement?: boolean;
 };
 
 export type StartDatabaseAgentServerOptions = DatabaseAgentServerOptions & {
@@ -132,22 +175,89 @@ export type StartedDatabaseAgentServer = {
   host: string;
   port: number;
   url: string;
+  /** Stops accepting requests and waits for the runtime to release all resources. */
+  close: () => Promise<void>;
 };
+
+type ServerRequestPolicy = {
+  allowProcessMcpManagement: boolean;
+  shutdownSignal: AbortSignal;
+};
+
+class ServerRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ServerRequestError';
+  }
+}
 
 export function createDatabaseAgentServer(options: DatabaseAgentServerOptions = {}): {
   server: Server;
   runtime: DatabaseAgentRuntimePort;
+  close: () => Promise<void>;
 } {
   const runtime = options.runtime ?? new DatabaseAgentRuntime();
   const createProvider = options.createProvider ?? defaultProviderFactory;
+  const shutdownController = new AbortController();
+  const requestPolicy: ServerRequestPolicy = {
+    allowProcessMcpManagement: options.allowProcessMcpManagement === true,
+    shutdownSignal: shutdownController.signal,
+  };
   const server = createServer((request, response) => {
-    void handleRequest(request, response, runtime, createProvider);
+    void handleRequest(request, response, runtime, createProvider, requestPolicy);
   });
+  let runtimeClosePromise: Promise<void> | undefined;
+  let closePromise: Promise<void> | undefined;
+  const closeRuntime = (): Promise<void> => {
+    runtimeClosePromise ??= closeDatabaseAgentRuntime(runtime);
+    return runtimeClosePromise;
+  };
+  const closeHttpServer = server.close.bind(server);
+  server.close = (callback?: (error?: Error) => void) => {
+    shutdownController.abort();
+    void closeRuntime().catch(() => undefined);
+    server.closeAllConnections();
+    return closeHttpServer(callback);
+  };
   server.on('close', () => {
-    void runtime.disconnect().catch(() => undefined);
-    void runtime.database?.close().catch(() => undefined);
+    shutdownController.abort();
+    // Low-level callers may still close the Node server directly. Start the
+    // same idempotent cleanup path; the public close() method below awaits it
+    // and reports failures to its caller.
+    void closeRuntime().catch(() => undefined);
   });
-  return { server, runtime };
+  const close = (): Promise<void> => {
+    closePromise ??= (async () => {
+      let closeServer = Promise.resolve();
+      if (server.listening) {
+        closeServer = new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+      }
+      shutdownController.abort();
+      server.closeAllConnections();
+      const results = await Promise.allSettled([closeRuntime(), closeServer]);
+      const failures: unknown[] = [];
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          const reason: unknown = result.reason;
+          failures.push(reason);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'SchemaNaut server did not close cleanly.');
+      }
+    })();
+    return closePromise;
+  };
+  return { server, runtime, close };
 }
 
 export async function startDatabaseAgentServer(
@@ -159,7 +269,7 @@ export async function startDatabaseAgentServer(
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
     throw new DatabaseAgentError('INVALID_INPUT', 'port 必须是 0 到 65535 之间的整数。');
   }
-  const { server, runtime } = createDatabaseAgentServer(options);
+  const { server, runtime, close } = createDatabaseAgentServer(options);
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error) => {
       server.off('listening', onListening);
@@ -181,6 +291,55 @@ export async function startDatabaseAgentServer(
     host,
     port: boundPort,
     url: `http://${host}:${boundPort}`,
+    close,
+  };
+}
+
+async function closeDatabaseAgentRuntime(runtime: DatabaseAgentRuntimePort): Promise<void> {
+  if (runtime.close) {
+    await runtime.close();
+    return;
+  }
+
+  const failures: unknown[] = [];
+  try {
+    await runtime.disconnect();
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await runtime.database?.close();
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'SchemaNaut server runtime did not close cleanly.');
+  }
+}
+
+function bindRequestLifetime(
+  request: IncomingMessage,
+  response: ServerResponse,
+  shutdownSignal: AbortSignal,
+): {
+  signal: AbortSignal;
+  dispose(): void;
+} {
+  const controller = new AbortController();
+  const abort = () => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+  request.once('aborted', abort);
+  response.once('close', abort);
+  shutdownSignal.addEventListener('abort', abort, { once: true });
+  if (request.aborted || response.destroyed || shutdownSignal.aborted) abort();
+  return {
+    signal: controller.signal,
+    dispose() {
+      request.off('aborted', abort);
+      response.off('close', abort);
+      shutdownSignal.removeEventListener('abort', abort);
+    },
   };
 }
 
@@ -189,10 +348,13 @@ async function handleRequest(
   response: ServerResponse,
   runtime: DatabaseAgentRuntimePort,
   createProvider: (input: LlmSetupInput) => LlmProvider,
+  policy: ServerRequestPolicy,
 ): Promise<void> {
   setSecurityHeaders(response);
   try {
+    validateLocalRequest(request);
     const method = request.method ?? 'GET';
+    validateJsonContentType(request, method);
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
 
     if (method === 'GET' && url.pathname === '/') {
@@ -212,16 +374,41 @@ async function handleRequest(
       sendJson(response, 200, {
         databases: ['postgres'],
         llmProtocols: ['openai-compatible', 'anthropic-messages'],
-        llmOperations: ['chat', 'stream', 'async-batch', 'tool-calling', 'structured-output', 'embeddings', 'rerank'],
+        llmOperations: [
+          'chat',
+          'stream',
+          'async-batch',
+          'tool-calling',
+          'structured-output',
+          'embeddings',
+          'rerank',
+        ],
         agentOperations: [
           'run',
+          'semantic-event-stream',
+          'session-list-load-delete',
+          'active-run-steering',
+          'approval-resolution',
+          'skills-discovery',
+          'mcp-lifecycle',
           'automatic-context-compaction',
           'manual-context-compaction',
           'context-checkpoint-history',
         ],
         surfaces: ['typescript-sdk', 'rest', 'cli', 'webui'],
-        safety: { readOnly: true, generatedSqlOnly: true, explicitExecution: true },
-        limits: { defaultRows: 200, maxRows: 1000, maxRequestBytes: MAX_BODY_BYTES },
+        safety: {
+          permissionModes: ['read', 'edit', 'full'],
+          oneTimeApproval: true,
+          sqlClassifiedByAst: true,
+          restProcessMcpManagement: policy.allowProcessMcpManagement,
+        },
+        limits: {
+          defaultRows: 200,
+          maxRows: 1000,
+          maxRequestBytes: MAX_BODY_BYTES,
+          maxAgentIterations: MAX_AGENT_ITERATIONS,
+          maxToolExecutionMs: MAX_TOOL_EXECUTION_MS,
+        },
       });
       return;
     }
@@ -244,7 +431,7 @@ async function handleRequest(
       runtime.configureProvider(provider, llm.model);
       const models = runtime.discoverLlmModels
         ? await runtime.discoverLlmModels()
-        : runtime.llmModels?.() ?? [];
+        : (runtime.llmModels?.() ?? []);
       sendJson(response, 200, {
         providerId: provider.id,
         protocol: provider.protocol ?? llm.protocol,
@@ -254,30 +441,48 @@ async function handleRequest(
       return;
     }
     if (method === 'POST' && url.pathname === '/v1/llm/chat') {
-      if (!runtime.llmChat) throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM chat is unavailable.');
+      if (!runtime.llmChat)
+        throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM chat is unavailable.');
       const body = requireRecord(await readJson(request), 'request');
       const parsed = parseLlmChatBody(body);
-      sendJson(response, 200, await runtime.llmChat(parsed.request, parsed.options));
+      const lifetime = bindRequestLifetime(request, response, policy.shutdownSignal);
+      try {
+        const result = await runtime.llmChat(
+          { ...parsed.request, signal: lifetime.signal },
+          parsed.options,
+        );
+        if (!lifetime.signal.aborted) sendJson(response, 200, result);
+      } finally {
+        lifetime.dispose();
+      }
       return;
     }
     if (method === 'POST' && url.pathname === '/v1/llm/chat/stream') {
-      if (!runtime.llmStream) throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM streaming is unavailable.');
+      if (!runtime.llmStream)
+        throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM streaming is unavailable.');
       const body = requireRecord(await readJson(request), 'request');
       const parsed = parseLlmChatBody(body);
-      const controller = new AbortController();
-      response.once('close', () => controller.abort());
-      await sendLlmStream(
-        response,
-        runtime.llmStream({ ...parsed.request, signal: controller.signal }, parsed.options),
-      );
+      const lifetime = bindRequestLifetime(request, response, policy.shutdownSignal);
+      try {
+        await sendLlmStream(
+          response,
+          runtime.llmStream({ ...parsed.request, signal: lifetime.signal }, parsed.options),
+        );
+      } finally {
+        lifetime.dispose();
+      }
       return;
     }
     if (method === 'POST' && url.pathname === '/v1/llm/jobs') {
-      if (!runtime.submitLlmBatch) throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM batch jobs are unavailable.');
+      if (!runtime.submitLlmBatch)
+        throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM batch jobs are unavailable.');
       const body = requireRecord(await readJson(request), 'request');
       const values = body.requests;
       if (!Array.isArray(values) || values.length === 0 || values.length > 1_000) {
-        throw new DatabaseAgentError('INVALID_INPUT', 'requests must contain between 1 and 1000 items.');
+        throw new DatabaseAgentError(
+          'INVALID_INPUT',
+          'requests must contain between 1 and 1000 items.',
+        );
       }
       const parsed = values.map((value) => parseLlmChatBody(requireRecord(value, 'request item')));
       const concurrency = optionalInteger(body, 'concurrency');
@@ -431,33 +636,31 @@ async function handleRequest(
     }
     if (
       method === 'GET' &&
-      (url.pathname === '/v1/resources' ||
-        url.pathname === '/v1/database/resources')
+      (url.pathname === '/v1/resources' || url.pathname === '/v1/database/resources')
     ) {
-      sendJson(
-        response,
-        200,
-        requireDatabaseRuntime(runtime).resources.query(parseResourceQuery(url)),
-      );
+      const resources = requireDatabaseRuntime(runtime).resources;
+      const { scope, ...query } = parseResourceQuery(url);
+      const resourceView = scope === undefined ? resources : resources.scoped(scope);
+      sendJson(response, 200, resourceView.query(query));
       return;
     }
     if (method === 'POST' && url.pathname === '/v1/resources/traverse') {
       const requestBody = requireRecord(await readJson(request), 'request');
-      sendJson(
-        response,
-        200,
-        requireDatabaseRuntime(runtime).resources.traverse(
-          parseResourceTraversal(requestBody),
-        ),
-      );
+      const resources = requireDatabaseRuntime(runtime).resources;
+      const { scope, ...traversal } = parseResourceTraversal(requestBody);
+      const resourceView = scope === undefined ? resources : resources.scoped(scope);
+      sendJson(response, 200, resourceView.traverse(traversal));
       return;
     }
     if (method === 'GET' && url.pathname === '/v1/resource-events') {
       const eventTypes = parseResourceEventTypes(url);
+      const resources = requireDatabaseRuntime(runtime).resources;
+      const scope = parseResourceScopeFromUrl(url);
+      const resourceView = scope === undefined ? resources : resources.scoped(scope);
       sendJson(
         response,
         200,
-        requireDatabaseRuntime(runtime).resources.events({
+        resourceView.events({
           ...(url.searchParams.get('resourceId')
             ? { resourceId: url.searchParams.get('resourceId') as string }
             : {}),
@@ -473,10 +676,7 @@ async function handleRequest(
           ...(url.searchParams.get('limit') === null
             ? {}
             : {
-                limit: parsePositiveUrlInteger(
-                  url.searchParams.get('limit') as string,
-                  'limit',
-                ),
+                limit: parsePositiveUrlInteger(url.searchParams.get('limit') as string, 'limit'),
               }),
         }),
       );
@@ -486,50 +686,40 @@ async function handleRequest(
       /^\/v1\/(?:database\/)?resources\/([^/]+)\/relations$/,
     );
     if (resourceRelationsMatch?.[1] && method === 'GET') {
+      const resourceId = decodeURIComponent(resourceRelationsMatch[1]);
       const direction = url.searchParams.get('direction') ?? undefined;
       const relationKinds = parseCommaSeparatedQuery(url, 'kinds');
       const includeDeleted = parseOptionalUrlBoolean(url, 'includeDeleted');
       const scope = parseResourceScopeFromUrl(url);
-      if (
-        direction !== undefined &&
-        !['outgoing', 'incoming', 'both'].includes(direction)
-      ) {
+      const resources = requireDatabaseRuntime(runtime).resources;
+      const resourceView = scope === undefined ? resources : resources.scoped(scope);
+      if (direction !== undefined && !['outgoing', 'incoming', 'both'].includes(direction)) {
         throw new DatabaseAgentError('INVALID_INPUT', 'direction is invalid.');
       }
+      if (!resourceView.getResource(resourceId, includeDeleted ?? false)) throwResourceNotFound();
       sendJson(
         response,
         200,
-        requireDatabaseRuntime(runtime).resources.relationsFor(
-          decodeURIComponent(resourceRelationsMatch[1]),
-          {
-            ...(direction === undefined
-              ? {}
-              : {
-                  direction: direction as
-                    | 'outgoing'
-                    | 'incoming'
-                    | 'both',
-                }),
-            ...(relationKinds === undefined ? {} : { kinds: relationKinds }),
-            ...(includeDeleted === undefined ? {} : { includeDeleted }),
-            ...(scope === undefined ? {} : { scope }),
-          },
-        ),
+        resourceView.relationsFor(resourceId, {
+          ...(direction === undefined
+            ? {}
+            : {
+                direction: direction as 'outgoing' | 'incoming' | 'both',
+              }),
+          ...(relationKinds === undefined ? {} : { kinds: relationKinds }),
+          ...(includeDeleted === undefined ? {} : { includeDeleted }),
+        }),
       );
       return;
     }
-    const resourceStateMatch = url.pathname.match(
-      /^\/v1\/resources\/([^/]+)\/state$/,
-    );
+    const resourceStateMatch = url.pathname.match(/^\/v1\/resources\/([^/]+)\/state$/);
     if (resourceStateMatch?.[1] && method === 'GET') {
-      const state = requireDatabaseRuntime(runtime).resources.state(
-        decodeURIComponent(resourceStateMatch[1]),
-        {
-          ...(url.searchParams.get('asOf')
-            ? { asOf: url.searchParams.get('asOf') as string }
-            : {}),
-        },
-      );
+      const resources = requireDatabaseRuntime(runtime).resources;
+      const scope = parseResourceScopeFromUrl(url);
+      const resourceView = scope === undefined ? resources : resources.scoped(scope);
+      const state = resourceView.state(decodeURIComponent(resourceStateMatch[1]), {
+        ...(url.searchParams.get('asOf') ? { asOf: url.searchParams.get('asOf') as string } : {}),
+      });
       if (!state) throwResourceNotFound();
       sendJson(response, 200, state);
       return;
@@ -540,36 +730,34 @@ async function handleRequest(
     if (resourceObservationsMatch?.[1] && method === 'GET') {
       const resourceId = decodeURIComponent(resourceObservationsMatch[1]);
       const resources = requireDatabaseRuntime(runtime).resources;
+      const scope = parseResourceScopeFromUrl(url);
+      const resourceView = scope === undefined ? resources : resources.scoped(scope);
       const includeExpired = parseOptionalUrlBoolean(url, 'includeExpired');
-      if (!resources.getResource(resourceId, true)) throwResourceNotFound();
+      if (!resourceView.getResource(resourceId, true)) throwResourceNotFound();
       sendJson(
         response,
         200,
-        resources.observationsFor(resourceId, {
+        resourceView.observationsFor(resourceId, {
           ...(includeExpired === undefined ? {} : { includeExpired }),
           ...(url.searchParams.get('category')
             ? { category: url.searchParams.get('category') as string }
             : {}),
-          ...(url.searchParams.get('at')
-            ? { at: url.searchParams.get('at') as string }
-            : {}),
+          ...(url.searchParams.get('at') ? { at: url.searchParams.get('at') as string } : {}),
           ...(url.searchParams.get('limit') === null
             ? {}
             : {
-                limit: parsePositiveUrlInteger(
-                  url.searchParams.get('limit') as string,
-                  'limit',
-                ),
+                limit: parsePositiveUrlInteger(url.searchParams.get('limit') as string, 'limit'),
               }),
         }),
       );
       return;
     }
-    const resourceMatch = url.pathname.match(
-      /^\/v1\/(?:database\/)?resources\/([^/]+)$/,
-    );
+    const resourceMatch = url.pathname.match(/^\/v1\/(?:database\/)?resources\/([^/]+)$/);
     if (resourceMatch?.[1] && method === 'GET') {
-      const resource = requireDatabaseRuntime(runtime).resources.getResource(
+      const resources = requireDatabaseRuntime(runtime).resources;
+      const scope = parseResourceScopeFromUrl(url);
+      const resourceView = scope === undefined ? resources : resources.scoped(scope);
+      const resource = resourceView.getResource(
         decodeURIComponent(resourceMatch[1]),
         parseOptionalUrlBoolean(url, 'includeDeleted') ?? false,
       );
@@ -578,9 +766,7 @@ async function handleRequest(
       return;
     }
     if (method === 'POST' && url.pathname === '/v1/database/queries') {
-      const submission = parseQuerySubmission(
-        requireRecord(await readJson(request), 'request'),
-      );
+      const submission = parseQuerySubmission(requireRecord(await readJson(request), 'request'));
       const job = await requireDatabaseRuntime(runtime).submit(submission);
       sendJson(response, job.state === 'queued' || job.state === 'submitted' ? 202 : 200, job);
       return;
@@ -694,9 +880,7 @@ async function handleRequest(
       return;
     }
     if (method === 'POST' && url.pathname === '/v1/database/operations') {
-      const operation = parseDatabaseOperation(
-        requireRecord(await readJson(request), 'request'),
-      );
+      const operation = parseDatabaseOperation(requireRecord(await readJson(request), 'request'));
       sendJson(response, 200, await requireDatabaseRuntime(runtime).operate(operation));
       return;
     }
@@ -727,7 +911,11 @@ async function handleRequest(
       await runtime.discoverLlmModels?.();
       const connection = await runtime.connect(database);
       sendJson(response, 200, {
-        provider: { id: provider.id, protocol: provider.protocol ?? llm.protocol, model: llm.model },
+        provider: {
+          id: provider.id,
+          protocol: provider.protocol ?? llm.protocol,
+          model: llm.model,
+        },
         connection,
         schema: runtime.schemaStatus(),
       });
@@ -735,7 +923,9 @@ async function handleRequest(
     }
     if (method === 'POST' && url.pathname === '/v1/database/connect') {
       const body = requireRecord(await readJson(request), 'request');
-      const database = parseDatabaseSetup(body.database === undefined ? body : requireRecord(body.database, 'database'));
+      const database = parseDatabaseSetup(
+        body.database === undefined ? body : requireRecord(body.database, 'database'),
+      );
       const connection = await runtime.connect(database);
       sendJson(response, 200, { connection, schema: runtime.schemaStatus() });
       return;
@@ -751,50 +941,190 @@ async function handleRequest(
       sendJson(response, 200, runtime.schemaStatus());
       return;
     }
-    if (method === 'POST' && url.pathname === '/v1/agent/run') {
+    if (method === 'POST' && url.pathname === '/v1/agent/run/stream') {
       if (!runtime.runAgent) {
-        throw new DatabaseAgentError(
-          'NOT_CONFIGURED',
-          '当前 Runtime 未启用 AI SQL Agent。',
-          true,
-        );
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 AI SQL Agent。', true);
       }
       const body = requireRecord(await readJson(request), 'request');
-      const mode = optionalString(body, 'mode');
-      if (mode && mode !== 'read' && mode !== 'edit' && mode !== 'full') {
-        throw new DatabaseAgentError(
-          'INVALID_INPUT',
-          'mode 必须是 read、edit 或 full。',
-          false,
-        );
+      const lifetime = bindRequestLifetime(request, response, policy.shutdownSignal);
+      try {
+        await sendAgentRunStream(response, runtime.runAgent.bind(runtime), {
+          ...parseAgentRunBody(body),
+          signal: lifetime.signal,
+        });
+      } finally {
+        lifetime.dispose();
       }
-      const agentMode =
-        mode === undefined
-          ? undefined
-          : (mode as 'read' | 'edit' | 'full');
-      const sessionId = optionalString(body, 'sessionId');
-      const userId = optionalString(body, 'userId');
-      const maxIterations = optionalInteger(body, 'maxIterations');
-      const result = await runtime.runAgent({
-        message: requireString(body, 'message'),
-        ...(agentMode === undefined ? {} : { mode: agentMode }),
-        ...(sessionId === undefined ? {} : { sessionId }),
-        ...(userId === undefined ? {} : { userId }),
-        ...(maxIterations === undefined ? {} : { maxIterations }),
-      });
-      sendJson(response, 200, result);
       return;
     }
-    const compactSessionMatch = url.pathname.match(
-      /^\/v1\/agent\/sessions\/([^/]+)\/compact$/,
-    );
+    if (method === 'POST' && url.pathname === '/v1/agent/run') {
+      if (!runtime.runAgent) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 AI SQL Agent。', true);
+      }
+      const body = requireRecord(await readJson(request), 'request');
+      const lifetime = bindRequestLifetime(request, response, policy.shutdownSignal);
+      try {
+        const result = await runtime.runAgent({
+          ...parseAgentRunBody(body),
+          signal: lifetime.signal,
+        });
+        if (!lifetime.signal.aborted) sendJson(response, 200, toAiSqlAgentRunView(result));
+      } finally {
+        lifetime.dispose();
+      }
+      return;
+    }
+    if (method === 'GET' && url.pathname === '/v1/agent/sessions') {
+      if (!runtime.listAgentSessions) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 Session 管理。', true);
+      }
+      const limitText = url.searchParams.get('limit');
+      const offsetText = url.searchParams.get('offset');
+      const archived = parseOptionalUrlBoolean(url, 'archived');
+      const input: AgentSessionListInput = {
+        ...(url.searchParams.get('userId')
+          ? { userId: url.searchParams.get('userId') as string }
+          : {}),
+        ...(url.searchParams.get('query')
+          ? { query: url.searchParams.get('query') as string }
+          : {}),
+        ...(archived === undefined ? {} : { archived }),
+        ...(limitText === null ? {} : { limit: parsePositiveUrlInteger(limitText, 'limit') }),
+        ...(offsetText === null
+          ? {}
+          : { offset: parseNonNegativeUrlInteger(offsetText, 'offset') }),
+      };
+      sendJson(response, 200, await runtime.listAgentSessions(input));
+      return;
+    }
+    if (method === 'GET' && url.pathname === '/v1/agent/skills') {
+      if (!runtime.listAgentSkills) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 Skills。', true);
+      }
+      sendJson(response, 200, await runtime.listAgentSkills());
+      return;
+    }
+    if (method === 'POST' && url.pathname === '/v1/agent/skills/refresh') {
+      if (!runtime.refreshSkills) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 Skills。', true);
+      }
+      const refreshed = await runtime.refreshSkills();
+      sendJson(response, 200, {
+        changed: refreshed.changed,
+        revision: refreshed.revision,
+        skills: refreshed.skills,
+        issueCount: refreshed.issues.length,
+        conflictCount: refreshed.conflicts.length,
+      });
+      return;
+    }
+    if (method === 'GET' && url.pathname === '/v1/agent/approvals') {
+      if (!runtime.listAgentApprovals) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用许可请求。', true);
+      }
+      sendJson(response, 200, runtime.listAgentApprovals());
+      return;
+    }
+    const approvalMatch = url.pathname.match(/^\/v1\/agent\/approvals\/([^/]+)\/resolve$/);
+    if (method === 'POST' && approvalMatch?.[1]) {
+      if (!runtime.resolveAgentApproval) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用许可请求。', true);
+      }
+      const body = requireRecord(await readJson(request), 'request');
+      const approved = requireBoolean(body, 'approved');
+      const resolvedBy = optionalString(body, 'resolvedBy');
+      const reason = optionalString(body, 'reason');
+      const resolved = runtime.resolveAgentApproval(
+        decodeURIComponent(approvalMatch[1]),
+        approved,
+        {
+          ...(resolvedBy === undefined ? {} : { resolvedBy }),
+          ...(reason === undefined ? {} : { reason }),
+        },
+      );
+      if (!resolved) {
+        throw new DatabaseAgentError('INVALID_INPUT', '许可请求不存在或已经处理。', false);
+      }
+      sendJson(response, 200, { resolved: true, approved });
+      return;
+    }
+    if (method === 'GET' && url.pathname === '/v1/agent/mcp') {
+      if (!runtime.listMcpServers) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 MCP。', true);
+      }
+      sendJson(response, 200, await runtime.listMcpServers());
+      return;
+    }
+    if (method === 'POST' && url.pathname === '/v1/agent/mcp') {
+      if (!runtime.upsertMcpServer) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 MCP。', true);
+      }
+      const body = requireRecord(await readJson(request), 'request');
+      const input = parseMcpServerInput(body);
+      assertProcessMcpManagementAllowed(
+        input.transport ?? 'stdio',
+        policy.allowProcessMcpManagement,
+      );
+      sendJson(response, 201, await runtime.upsertMcpServer(input));
+      return;
+    }
+    const mcpActionMatch = url.pathname.match(/^\/v1\/agent\/mcp\/([^/]+)\/(start|stop)$/);
+    if (method === 'POST' && mcpActionMatch?.[1] && mcpActionMatch[2]) {
+      const serverId = decodeURIComponent(mcpActionMatch[1]);
+      if (mcpActionMatch[2] === 'start') {
+        if (!runtime.startMcpServer) {
+          throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 MCP。', true);
+        }
+        if (!policy.allowProcessMcpManagement) {
+          if (!runtime.listMcpServers) {
+            throw processMcpForbidden();
+          }
+          const registered = (await runtime.listMcpServers()).find(
+            (server) => server.id === serverId,
+          );
+          if (!registered) {
+            throw new DatabaseAgentError('RUN_NOT_FOUND', 'MCP server was not found.', false);
+          }
+          assertProcessMcpManagementAllowed(registered.transport, policy.allowProcessMcpManagement);
+        }
+        sendJson(response, 200, await runtime.startMcpServer(serverId));
+        return;
+      }
+      if (!runtime.stopMcpServer) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 MCP。', true);
+      }
+      sendJson(response, 200, await runtime.stopMcpServer(serverId));
+      return;
+    }
+    const mcpServerMatch = url.pathname.match(/^\/v1\/agent\/mcp\/([^/]+)$/);
+    if (method === 'DELETE' && mcpServerMatch?.[1]) {
+      if (!runtime.removeMcpServer) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 MCP。', true);
+      }
+      const removed = await runtime.removeMcpServer(decodeURIComponent(mcpServerMatch[1]));
+      sendJson(response, removed ? 200 : 404, { removed });
+      return;
+    }
+    const steerSessionMatch = url.pathname.match(/^\/v1\/agent\/sessions\/([^/]+)\/steer$/);
+    if (method === 'POST' && steerSessionMatch?.[1]) {
+      if (!runtime.steerAgentSession) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用任务追加输入。', true);
+      }
+      const body = requireRecord(await readJson(request), 'request');
+      const accepted = runtime.steerAgentSession(
+        decodeURIComponent(steerSessionMatch[1]),
+        requireString(body, 'message'),
+      );
+      sendJson(response, accepted ? 202 : 409, {
+        accepted,
+        ...(accepted ? {} : { reason: 'no-active-run' }),
+      });
+      return;
+    }
+    const compactSessionMatch = url.pathname.match(/^\/v1\/agent\/sessions\/([^/]+)\/compact$/);
     if (method === 'POST' && compactSessionMatch?.[1]) {
       if (!runtime.compactAgentSession) {
-        throw new DatabaseAgentError(
-          'NOT_CONFIGURED',
-          '当前 Runtime 未启用上下文压缩。',
-          true,
-        );
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用上下文压缩。', true);
       }
       const body = await readOptionalJson(request);
       const focus = optionalString(body, 'focus');
@@ -802,7 +1132,7 @@ async function handleRequest(
         sessionId: decodeURIComponent(compactSessionMatch[1]),
         ...(focus === undefined ? {} : { focus }),
       });
-      sendJson(response, 200, result);
+      sendJson(response, 200, toPublicCompactionResult(result));
       return;
     }
     const checkpointMatch = url.pathname.match(
@@ -810,33 +1140,45 @@ async function handleRequest(
     );
     if (method === 'GET' && checkpointMatch?.[1]) {
       if (!runtime.agentContextCheckpoints) {
-        throw new DatabaseAgentError(
-          'NOT_CONFIGURED',
-          '当前 Runtime 未启用上下文检查点。',
-          true,
-        );
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用上下文检查点。', true);
       }
       const limitText = url.searchParams.get('limit');
-      const limit =
-        limitText === null ? undefined : Number.parseInt(limitText, 10);
-      if (
-        limit !== undefined &&
-        (!Number.isSafeInteger(limit) || limit <= 0)
-      ) {
-        throw new DatabaseAgentError(
-          'INVALID_INPUT',
-          'limit 必须是正整数。',
-          false,
-        );
+      const limit = limitText === null ? undefined : Number.parseInt(limitText, 10);
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0)) {
+        throw new DatabaseAgentError('INVALID_INPUT', 'limit 必须是正整数。', false);
       }
       sendJson(
         response,
         200,
-        await runtime.agentContextCheckpoints(
-          decodeURIComponent(checkpointMatch[1]),
-          limit,
+        (await runtime.agentContextCheckpoints(decodeURIComponent(checkpointMatch[1]), limit)).map(
+          toPublicContextCheckpoint,
         ),
       );
+      return;
+    }
+    const agentSessionMatch = url.pathname.match(/^\/v1\/agent\/sessions\/([^/]+)$/);
+    if (agentSessionMatch?.[1] && (method === 'GET' || method === 'DELETE')) {
+      const sessionId = decodeURIComponent(agentSessionMatch[1]);
+      if (method === 'GET') {
+        if (!runtime.getAgentSession) {
+          throw new DatabaseAgentError(
+            'NOT_CONFIGURED',
+            '当前 Runtime 未启用 Session 管理。',
+            true,
+          );
+        }
+        const session = await runtime.getAgentSession(sessionId);
+        if (!session) {
+          throw new DatabaseAgentError('RUN_NOT_FOUND', '未找到指定 Session。', false);
+        }
+        sendJson(response, 200, toPublicAgentSessionView(session));
+        return;
+      }
+      if (!runtime.deleteAgentSession) {
+        throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 Session 管理。', true);
+      }
+      const deleted = await runtime.deleteAgentSession(sessionId);
+      sendJson(response, deleted ? 200 : 404, { deleted });
       return;
     }
     if (method === 'POST' && url.pathname === '/v1/query/generate') {
@@ -870,13 +1212,23 @@ async function handleRequest(
       error: { code: 'NOT_FOUND', message: '接口不存在。', retryable: false },
     });
   } catch (error) {
+    if (error instanceof ServerRequestError) {
+      sendJson(response, error.status, {
+        error: {
+          code: error.code,
+          message: error.message,
+          retryable: false,
+        },
+      });
+      return;
+    }
     if (error instanceof ContractValidationError) {
       sendJson(response, 400, {
         error: {
           code: 'CONTRACT_VALIDATION_FAILED',
           message: 'The public request contract is invalid.',
           retryable: false,
-          issues: error.issues,
+          issues: redactPublicErrorValue(error.issues),
         },
       });
       return;
@@ -884,17 +1236,13 @@ async function handleRequest(
     if (error instanceof ResourceConflictError) {
       sendJson(
         response,
-        [
-          'RESOURCE_CONFLICT',
-          'RELATION_CYCLE',
-          'STALE_CHANGE_SET',
-        ].includes(error.code)
+        ['RESOURCE_CONFLICT', 'RELATION_CYCLE', 'STALE_CHANGE_SET'].includes(error.code)
           ? 409
           : 400,
         {
           error: {
             code: error.code,
-            message: error.message,
+            message: sanitizePublicErrorMessage(error.message),
             retryable: false,
           },
         },
@@ -902,18 +1250,130 @@ async function handleRequest(
       return;
     }
     if (error instanceof DatabaseAccessRuntimeError) {
-      sendJson(response, statusForDatabaseError(error), { error: error.error });
+      sendJson(response, statusForDatabaseError(error), { error: toPublicDatabaseError(error) });
       return;
     }
     const normalized = asDatabaseAgentError(error);
     sendJson(response, statusForError(normalized), {
       error: {
         code: normalized.code,
-        message: normalized.message,
+        message:
+          normalized.code === 'INTERNAL_ERROR'
+            ? 'Internal server error.'
+            : sanitizePublicErrorMessage(normalized.message),
         retryable: normalized.retryable,
       },
     });
   }
+}
+
+function parseAgentRunBody(body: Record<string, unknown>): RunAiSqlAgentInput {
+  const mode = optionalString(body, 'mode');
+  if (mode && mode !== 'read' && mode !== 'edit' && mode !== 'full') {
+    throw new DatabaseAgentError('INVALID_INPUT', 'mode 必须是 read、edit 或 full。', false);
+  }
+  const sessionId = optionalString(body, 'sessionId');
+  const userId = optionalString(body, 'userId');
+  const maxIterations = optionalInteger(body, 'maxIterations');
+  const maxToolExecutionMs = optionalInteger(body, 'maxToolExecutionMs');
+  assertIntegerRange(maxIterations, 'maxIterations', 1, MAX_AGENT_ITERATIONS);
+  assertIntegerRange(maxToolExecutionMs, 'maxToolExecutionMs', 1, MAX_TOOL_EXECUTION_MS);
+  return {
+    message: requireString(body, 'message'),
+    ...(mode === undefined ? {} : { mode: mode as 'read' | 'edit' | 'full' }),
+    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(userId === undefined ? {} : { userId }),
+    ...(maxIterations === undefined ? {} : { maxIterations }),
+    ...(maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs }),
+  };
+}
+
+function parseMcpServerInput(body: Record<string, unknown>): McpServerRegistrationInput {
+  const source = optionalString(body, 'source');
+  if (source !== undefined && source !== 'user' && source !== 'imported') {
+    throw new DatabaseAgentError('INVALID_INPUT', 'source 必须是 user 或 imported。', false);
+  }
+  const transport = optionalString(body, 'transport');
+  if (
+    transport !== undefined &&
+    transport !== 'stdio' &&
+    transport !== 'sse' &&
+    transport !== 'streamable-http'
+  ) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      'transport 必须是 stdio、sse 或 streamable-http。',
+      false,
+    );
+  }
+  const args = parseOptionalStringArray(body.args, 'args', 256);
+  const env = parseMcpValueMap(body.env, 'env');
+  const headers = parseMcpValueMap(body.headers, 'headers');
+  const id = optionalString(body, 'id');
+  const command = optionalString(body, 'command');
+  const cwd = optionalString(body, 'cwd');
+  const serverUrl = optionalString(body, 'url');
+  const description = optionalString(body, 'description');
+  const packageName = optionalString(body, 'packageName');
+  const autoStart = optionalBoolean(body, 'autoStart');
+  const enabled = optionalBoolean(body, 'enabled');
+  return {
+    ...(id === undefined ? {} : { id }),
+    name: requireString(body, 'name'),
+    ...(source === undefined ? {} : { source }),
+    ...(transport === undefined
+      ? {}
+      : {
+          transport,
+        }),
+    ...(autoStart === undefined ? {} : { autoStart }),
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(command === undefined ? {} : { command }),
+    ...(args === undefined ? {} : { args }),
+    ...(cwd === undefined ? {} : { cwd }),
+    ...(serverUrl === undefined ? {} : { url: serverUrl }),
+    ...(env === undefined ? {} : { env }),
+    ...(headers === undefined ? {} : { headers }),
+    ...(description === undefined ? {} : { description }),
+    ...(packageName === undefined ? {} : { packageName }),
+  };
+}
+
+function parseMcpValueMap(
+  value: unknown,
+  name: string,
+): Record<string, string | { ref: string }> | undefined {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value, name);
+  const entries = Object.entries(record);
+  if (entries.length > 256) {
+    throw new DatabaseAgentError('INVALID_INPUT', `${name} 最多允许 256 项。`, false);
+  }
+  const parsed: Record<string, string | { ref: string }> = {};
+  for (const [key, item] of entries) {
+    if (typeof item === 'string') {
+      parsed[key] = item;
+      continue;
+    }
+    if (
+      typeof item === 'object' &&
+      item !== null &&
+      !Array.isArray(item) &&
+      typeof (item as Record<string, unknown>).ref === 'string' &&
+      ((item as Record<string, unknown>).ref as string).trim()
+    ) {
+      parsed[key] = {
+        ref: ((item as Record<string, unknown>).ref as string).trim(),
+      };
+      continue;
+    }
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      `${name}.${key} 必须是普通字符串或 {"ref":"secret-ref"}。`,
+      false,
+    );
+  }
+  return parsed;
 }
 
 function defaultProviderFactory(input: LlmSetupInput): LlmProvider {
@@ -925,7 +1385,8 @@ function defaultProviderFactory(input: LlmSetupInput): LlmProvider {
     });
   }
   if (input.protocol === 'anthropic-messages') {
-    if (!input.apiKey) throw new DatabaseAgentError('INVALID_INPUT', 'Anthropic 原生协议必须配置 apiKey。');
+    if (!input.apiKey)
+      throw new DatabaseAgentError('INVALID_INPUT', 'Anthropic 原生协议必须配置 apiKey。');
     return new AnthropicProvider({
       id: input.providerId ?? 'default-anthropic',
       name: 'Anthropic',
@@ -941,7 +1402,9 @@ function defaultProviderFactory(input: LlmSetupInput): LlmProvider {
     baseUrl: input.baseUrl,
     metadataSource: isOllamaBaseUrl(input.baseUrl) ? 'ollama' : 'openai-compatible',
     ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
-    ...(input.allowUnauthenticated === undefined ? {} : { allowUnauthenticated: input.allowUnauthenticated }),
+    ...(input.allowUnauthenticated === undefined
+      ? {}
+      : { allowUnauthenticated: input.allowUnauthenticated }),
   });
 }
 
@@ -960,7 +1423,10 @@ function parseLlmSetup(input: Record<string, unknown>): LlmSetupInput {
   const presetId = optionalString(input, 'presetId');
   const protocolValue = optionalString(input, 'protocol') ?? 'openai-compatible';
   if (protocolValue !== 'openai-compatible' && protocolValue !== 'anthropic-messages') {
-    throw new DatabaseAgentError('INVALID_INPUT', 'protocol 必须是 openai-compatible 或 anthropic-messages。');
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      'protocol 必须是 openai-compatible 或 anthropic-messages。',
+    );
   }
   const preset = presetId ? getLlmProviderPreset(presetId) : undefined;
   if (presetId && !preset) {
@@ -1030,13 +1496,8 @@ function parseConnectionProfile(input: Record<string, unknown>): ConnectionProfi
     if (transport === 'tcp') {
       const sslValue = endpoint.ssl;
       const validSslMode =
-        typeof sslValue === 'string' &&
-        ['prefer', 'require', 'verify-ca', 'verify-full'].includes(sslValue);
-      if (
-        sslValue !== undefined &&
-        typeof sslValue !== 'boolean' &&
-        !validSslMode
-      ) {
+        typeof sslValue === 'string' && ['require', 'verify-ca', 'verify-full'].includes(sslValue);
+      if (sslValue !== undefined && typeof sslValue !== 'boolean' && !validSslMode) {
         throw new DatabaseAgentError('INVALID_INPUT', `endpoints[${index}].ssl is invalid.`);
       }
       return {
@@ -1049,12 +1510,7 @@ function parseConnectionProfile(input: Record<string, unknown>): ConnectionProfi
         ...(sslValue === undefined
           ? {}
           : {
-              ssl: sslValue as
-                | boolean
-                | 'prefer'
-                | 'require'
-                | 'verify-ca'
-                | 'verify-full',
+              ssl: sslValue as boolean | 'require' | 'verify-ca' | 'verify-full',
             }),
       };
     }
@@ -1112,10 +1568,13 @@ function parseConnectionProfile(input: Record<string, unknown>): ConnectionProfi
   }
   const timestamp = new Date().toISOString();
   const credentialRefValue =
-    input.credentialRef === undefined ? undefined : requireRecord(input.credentialRef, 'credentialRef');
+    input.credentialRef === undefined
+      ? undefined
+      : requireRecord(input.credentialRef, 'credentialRef');
   const networkValue =
     input.network === undefined ? undefined : requireRecord(input.network, 'network');
   const poolValue = input.pool === undefined ? undefined : requireRecord(input.pool, 'pool');
+  const scope = parseResourceScopeRecord(input.scope);
   const profile: ConnectionProfile = {
     id: optionalString(input, 'id') ?? randomUUID(),
     name: requireString(input, 'name'),
@@ -1141,6 +1600,7 @@ function parseConnectionProfile(input: Record<string, unknown>): ConnectionProfi
       : { principal: optionalString(input, 'principal') as string }),
     purpose: purpose as ConnectionProfile['purpose'],
     readOnly: optionalBoolean(input, 'readOnly') ?? purpose === 'read-only',
+    ...(scope === undefined ? {} : { scope }),
     ...(optionalString(input, 'defaultResourceId') === undefined
       ? {}
       : { defaultResourceId: optionalString(input, 'defaultResourceId') as string }),
@@ -1164,7 +1624,9 @@ function parseConnectionProfile(input: Record<string, unknown>): ConnectionProfi
               : { connectTimeoutMs: optionalInteger(networkValue, 'connectTimeoutMs') as number }),
             ...(optionalInteger(networkValue, 'statementTimeoutMs') === undefined
               ? {}
-              : { statementTimeoutMs: optionalInteger(networkValue, 'statementTimeoutMs') as number }),
+              : {
+                  statementTimeoutMs: optionalInteger(networkValue, 'statementTimeoutMs') as number,
+                }),
             ...(optionalBoolean(networkValue, 'keepAlive') === undefined
               ? {}
               : { keepAlive: optionalBoolean(networkValue, 'keepAlive') as boolean }),
@@ -1188,10 +1650,10 @@ function parseConnectionProfile(input: Record<string, unknown>): ConnectionProfi
       : {}),
     ...(input.sessionParameters === undefined
       ? {}
-      : { sessionParameters: requireRecord(input.sessionParameters, 'sessionParameters') as never }),
-    ...(input.labels === undefined
-      ? {}
-      : { labels: parseStringRecord(input.labels, 'labels') }),
+      : {
+          sessionParameters: requireRecord(input.sessionParameters, 'sessionParameters') as never,
+        }),
+    ...(input.labels === undefined ? {} : { labels: parseStringRecord(input.labels, 'labels') }),
     createdAt: optionalString(input, 'createdAt') ?? timestamp,
     updatedAt: timestamp,
   };
@@ -1252,9 +1714,7 @@ function parseQuerySubmission(input: Record<string, unknown>): QuerySubmission {
     ...(optionalString(input, 'resourceId') === undefined
       ? {}
       : { resourceId: optionalString(input, 'resourceId') as string }),
-    ...(params === undefined
-      ? {}
-      : { params: params as NonNullable<QuerySubmission['params']> }),
+    ...(params === undefined ? {} : { params: params as NonNullable<QuerySubmission['params']> }),
     ...(executionMode
       ? { executionMode: executionMode as NonNullable<QuerySubmission['executionMode']> }
       : {}),
@@ -1292,19 +1752,16 @@ function parseDatabaseOperation(input: Record<string, unknown>): DatabaseOperati
     ...(input.authorization === undefined
       ? {}
       : {
-          authorization: parseAuthorization(
-            requireRecord(input.authorization, 'authorization'),
-          ),
+          authorization: parseAuthorization(requireRecord(input.authorization, 'authorization')),
         }),
   };
 }
 
-function parseAuthorization(input: Record<string, unknown>): NonNullable<QuerySubmission['authorization']> {
+function parseAuthorization(
+  input: Record<string, unknown>,
+): NonNullable<QuerySubmission['authorization']> {
   const permissionMode = optionalString(input, 'permissionMode');
-  if (
-    permissionMode &&
-    !['all-writes-approved', 'non-high-risk', 'fully-approved'].includes(permissionMode)
-  ) {
+  if (permissionMode && !['read', 'edit', 'full'].includes(permissionMode)) {
     throw new DatabaseAgentError('INVALID_INPUT', 'permissionMode is invalid.');
   }
   return {
@@ -1369,33 +1826,28 @@ function parseUrlInteger(value: string, name: string): number {
 function parsePositiveUrlInteger(value: string, name: string): number {
   const parsed = parseUrlInteger(value, name);
   if (parsed < 1) {
-    throw new DatabaseAgentError(
-      'INVALID_INPUT',
-      `${name} must be greater than zero.`,
-    );
+    throw new DatabaseAgentError('INVALID_INPUT', `${name} must be greater than zero.`);
   }
   return parsed;
 }
 
-function parseOptionalUrlBoolean(
-  url: URL,
-  name: string,
-): boolean | undefined {
+function parseNonNegativeUrlInteger(value: string, name: string): number {
+  const parsed = parseUrlInteger(value, name);
+  if (parsed < 0) {
+    throw new DatabaseAgentError('INVALID_INPUT', `${name} must be zero or greater.`);
+  }
+  return parsed;
+}
+
+function parseOptionalUrlBoolean(url: URL, name: string): boolean | undefined {
   const value = url.searchParams.get(name);
   if (value === null) return undefined;
   if (value === 'true') return true;
   if (value === 'false') return false;
-  throw new DatabaseAgentError(
-    'INVALID_INPUT',
-    `${name} must be true or false.`,
-  );
+  throw new DatabaseAgentError('INVALID_INPUT', `${name} must be true or false.`);
 }
 
-function parseCommaSeparatedQuery(
-  url: URL,
-  name: string,
-  maxItems = 100,
-): string[] | undefined {
+function parseCommaSeparatedQuery(url: URL, name: string, maxItems = 100): string[] | undefined {
   const raw = url.searchParams.get(name);
   if (raw === null) return undefined;
   const values = raw
@@ -1415,24 +1867,13 @@ function parseResourceScopeFromUrl(url: URL): ResourceScope | undefined {
   return createResourceScope((key) => url.searchParams.get(key) ?? undefined);
 }
 
-function parseResourceScopeRecord(
-  value: unknown,
-): ResourceScope | undefined {
+function parseResourceScopeRecord(value: unknown): ResourceScope | undefined {
   if (value === undefined) return undefined;
   const record = requireRecord(value, 'scope');
-  const allowed = new Set([
-    'tenantId',
-    'organizationId',
-    'projectId',
-    'environment',
-    'region',
-  ]);
+  const allowed = new Set(['tenantId', 'organizationId', 'projectId', 'environment', 'region']);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) {
-      throw new DatabaseAgentError(
-        'INVALID_INPUT',
-        `scope.${key} is not supported.`,
-      );
+      throw new DatabaseAgentError('INVALID_INPUT', `scope.${key} is not supported.`);
     }
   }
   return createResourceScope((key) => optionalString(record, key));
@@ -1442,13 +1883,7 @@ function createResourceScope(
   read: (key: keyof ResourceScope) => string | undefined,
 ): ResourceScope | undefined {
   const scope: ResourceScope = {};
-  for (const key of [
-    'tenantId',
-    'organizationId',
-    'projectId',
-    'environment',
-    'region',
-  ] as const) {
+  for (const key of ['tenantId', 'organizationId', 'projectId', 'environment', 'region'] as const) {
     const value = read(key)?.trim();
     if (value) scope[key] = value;
   }
@@ -1456,41 +1891,28 @@ function createResourceScope(
 }
 
 function parseResourceQuery(url: URL): ResourceQuery {
-  const kinds = parseCommaSeparatedQuery(url, 'kinds') as
-    | ResourceKind[]
-    | undefined;
+  const kinds = parseCommaSeparatedQuery(url, 'kinds') as ResourceKind[] | undefined;
   const scope = parseResourceScopeFromUrl(url);
   const includeDeleted = parseOptionalUrlBoolean(url, 'includeDeleted');
   return {
     ...(kinds === undefined ? {} : { kinds }),
-    ...(url.searchParams.get('engine')
-      ? { engine: url.searchParams.get('engine') as string }
-      : {}),
-    ...(url.searchParams.get('text')
-      ? { text: url.searchParams.get('text') as string }
-      : {}),
+    ...(url.searchParams.get('engine') ? { engine: url.searchParams.get('engine') as string } : {}),
+    ...(url.searchParams.get('text') ? { text: url.searchParams.get('text') as string } : {}),
     ...(url.searchParams.get('parentResourceId')
       ? { parentResourceId: url.searchParams.get('parentResourceId') as string }
       : {}),
-    ...(url.searchParams.get('cursor')
-      ? { cursor: url.searchParams.get('cursor') as string }
-      : {}),
+    ...(url.searchParams.get('cursor') ? { cursor: url.searchParams.get('cursor') as string } : {}),
     ...(url.searchParams.get('limit') === null
       ? {}
       : {
-          limit: parsePositiveUrlInteger(
-            url.searchParams.get('limit') as string,
-            'limit',
-          ),
+          limit: parsePositiveUrlInteger(url.searchParams.get('limit') as string, 'limit'),
         }),
     ...(includeDeleted === undefined ? {} : { includeDeleted }),
     ...(scope === undefined ? {} : { scope }),
   };
 }
 
-function parseResourceTraversal(
-  input: Record<string, unknown>,
-): ResourceTraversalRequest {
+function parseResourceTraversal(input: Record<string, unknown>): ResourceTraversalRequest {
   const startResourceIds = parseOptionalStringArray(
     input.startResourceIds,
     'startResourceIds',
@@ -1503,17 +1925,10 @@ function parseResourceTraversal(
     );
   }
   const direction = optionalString(input, 'direction');
-  if (
-    direction !== undefined &&
-    !['outgoing', 'incoming', 'both'].includes(direction)
-  ) {
+  if (direction !== undefined && !['outgoing', 'incoming', 'both'].includes(direction)) {
     throw new DatabaseAgentError('INVALID_INPUT', 'direction is invalid.');
   }
-  const relationKinds = parseOptionalStringArray(
-    input.relationKinds,
-    'relationKinds',
-    100,
-  );
+  const relationKinds = parseOptionalStringArray(input.relationKinds, 'relationKinds', 100);
   const scope = parseResourceScopeRecord(input.scope);
   return {
     startResourceIds,
@@ -1535,14 +1950,9 @@ function parseResourceTraversal(
 }
 
 function parseResourceEventTypes(url: URL): ResourceEventType[] | undefined {
-  const types = parseCommaSeparatedQuery(url, 'types') as
-    | ResourceEventType[]
-    | undefined;
+  const types = parseCommaSeparatedQuery(url, 'types') as ResourceEventType[] | undefined;
   if (types?.some((type) => !RESOURCE_EVENT_TYPES.has(type))) {
-    throw new DatabaseAgentError(
-      'INVALID_INPUT',
-      'types contains an unknown resource event type.',
-    );
+    throw new DatabaseAgentError('INVALID_INPUT', 'types contains an unknown resource event type.');
   }
   return types;
 }
@@ -1596,15 +2006,18 @@ function parseLlmChatBody(input: Record<string, unknown>): {
   const maxRetries = optionalInteger(input, 'maxRetries');
   const maxFallbacks = optionalInteger(input, 'maxFallbacks');
   const cacheRecord = input.cache === undefined ? undefined : requireRecord(input.cache, 'cache');
-  const cache = cacheRecord === undefined
-    ? undefined
-    : {
-        enabled: optionalBoolean(cacheRecord, 'enabled') ?? false,
-        ...(optionalInteger(cacheRecord, 'ttlMs') === undefined ? {} : { ttlMs: optionalInteger(cacheRecord, 'ttlMs') as number }),
-        ...(optionalString(cacheRecord, 'namespace') === undefined
-          ? {}
-          : { namespace: optionalString(cacheRecord, 'namespace') as string }),
-      };
+  const cache =
+    cacheRecord === undefined
+      ? undefined
+      : {
+          enabled: optionalBoolean(cacheRecord, 'enabled') ?? false,
+          ...(optionalInteger(cacheRecord, 'ttlMs') === undefined
+            ? {}
+            : { ttlMs: optionalInteger(cacheRecord, 'ttlMs') as number }),
+          ...(optionalString(cacheRecord, 'namespace') === undefined
+            ? {}
+            : { namespace: optionalString(cacheRecord, 'namespace') as string }),
+        };
   return {
     request: {
       messages,
@@ -1628,7 +2041,8 @@ function parseLlmChatBody(input: Record<string, unknown>): {
 
 function parseLlmTools(value: unknown): LlmTool[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 128) throw new DatabaseAgentError('INVALID_INPUT', 'tools must be an array of at most 128 items.');
+  if (!Array.isArray(value) || value.length > 128)
+    throw new DatabaseAgentError('INVALID_INPUT', 'tools must be an array of at most 128 items.');
   return value.map((item, index) => {
     const tool = requireRecord(item, `tools[${index}]`);
     return {
@@ -1657,10 +2071,21 @@ function parseResponseFormat(value: unknown): LlmResponseFormat | undefined {
   throw new DatabaseAgentError('INVALID_INPUT', 'responseFormat.type is invalid.');
 }
 
-function parseOptionalStringArray(value: unknown, name: string, maxItems: number): string[] | undefined {
+function parseOptionalStringArray(
+  value: unknown,
+  name: string,
+  maxItems: number,
+): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > maxItems || value.some((item) => typeof item !== 'string')) {
-    throw new DatabaseAgentError('INVALID_INPUT', `${name} must be a string array with at most ${maxItems} items.`);
+  if (
+    !Array.isArray(value) ||
+    value.length > maxItems ||
+    value.some((item) => typeof item !== 'string')
+  ) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      `${name} must be a string array with at most ${maxItems} items.`,
+    );
   }
   return value.map((item) => (item as string).slice(0, 500));
 }
@@ -1699,10 +2124,11 @@ async function readBody(request: IncomingMessage): Promise<string> {
 
 function parseJson(text: string): unknown {
   try {
-    return JSON.parse(text);
+    JSON.parse(text);
   } catch {
     throw new DatabaseAgentError('INVALID_INPUT', '请求体不是有效 JSON。');
   }
+  return parsePublicJson(text);
 }
 
 function requireRecord(value: unknown, name: string): Record<string, unknown> {
@@ -1751,6 +2177,14 @@ function optionalBoolean(record: Record<string, unknown>, key: string): boolean 
   const value = record[key];
   if (value === undefined) return undefined;
   if (typeof value !== 'boolean') {
+    throw new DatabaseAgentError('INVALID_INPUT', `${key} 必须是布尔值。`);
+  }
+  return value;
+}
+
+function requireBoolean(record: Record<string, unknown>, key: string): boolean {
+  const value = optionalBoolean(record, key);
+  if (value === undefined) {
     throw new DatabaseAgentError('INVALID_INPUT', `${key} 必须是布尔值。`);
   }
   return value;
@@ -1814,11 +2248,319 @@ function statusForDatabaseError(error: DatabaseAccessRuntimeError): number {
   }
 }
 
+function validateLocalRequest(request: IncomingMessage): void {
+  const hostHeader = request.headers.host;
+  if (!hostHeader) {
+    throw new ServerRequestError(400, 'INVALID_HOST', 'A loopback Host header is required.');
+  }
+  let requestOrigin: URL;
+  try {
+    requestOrigin = new URL(`http://${hostHeader}`);
+  } catch {
+    throw new ServerRequestError(400, 'INVALID_HOST', 'The Host header is invalid.');
+  }
+  if (
+    requestOrigin.username ||
+    requestOrigin.password ||
+    requestOrigin.pathname !== '/' ||
+    requestOrigin.search ||
+    requestOrigin.hash ||
+    !isLoopbackHostname(requestOrigin.hostname)
+  ) {
+    throw new ServerRequestError(
+      403,
+      'LOCAL_ACCESS_ONLY',
+      'SchemaNaut Server accepts loopback requests only.',
+    );
+  }
+
+  const originHeader = request.headers.origin;
+  if (originHeader === undefined) return;
+  let browserOrigin: URL;
+  try {
+    browserOrigin = new URL(originHeader);
+  } catch {
+    throw new ServerRequestError(403, 'ORIGIN_FORBIDDEN', 'The browser Origin is not allowed.');
+  }
+  if (
+    browserOrigin.username ||
+    browserOrigin.password ||
+    browserOrigin.pathname !== '/' ||
+    browserOrigin.search ||
+    browserOrigin.hash ||
+    browserOrigin.origin !== requestOrigin.origin
+  ) {
+    throw new ServerRequestError(403, 'ORIGIN_FORBIDDEN', 'The browser Origin is not allowed.');
+  }
+}
+
+function validateJsonContentType(request: IncomingMessage, method: string): void {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) || !requestHasBody(request)) {
+    return;
+  }
+  const mediaType = request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mediaType !== 'application/json') {
+    throw new ServerRequestError(
+      415,
+      'UNSUPPORTED_MEDIA_TYPE',
+      'Requests with a body must use application/json.',
+    );
+  }
+}
+
+function requestHasBody(request: IncomingMessage): boolean {
+  const contentLength = request.headers['content-length'];
+  if (contentLength !== undefined) {
+    const parsed = Number.parseInt(contentLength, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return true;
+  }
+  return request.headers['transfer-encoding'] !== undefined;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
+  return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
+}
+
+function assertProcessMcpManagementAllowed(
+  transport: McpServerRegistrationInput['transport'] | McpServerSummary['transport'],
+  allowed: boolean,
+): void {
+  if (transport === 'stdio' && !allowed) {
+    throw processMcpForbidden();
+  }
+}
+
+function processMcpForbidden(): ServerRequestError {
+  return new ServerRequestError(
+    403,
+    'PROCESS_MCP_DISABLED',
+    'Process-backed stdio MCP management is disabled for this REST server.',
+  );
+}
+
+function assertIntegerRange(
+  value: number | undefined,
+  name: string,
+  minimum: number,
+  maximum: number,
+): void {
+  if (value === undefined) return;
+  if (value < minimum || value > maximum) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      `${name} must be between ${minimum} and ${maximum}.`,
+      false,
+    );
+  }
+}
+
+function toPublicCompactionResult(result: CompactAiSqlAgentSessionResult): Record<string, unknown> {
+  return {
+    status: result.status,
+    session: toPublicAgentSessionView(toAgentSessionView(result.session)),
+    report: {
+      phase: result.report.phase,
+      trigger: result.report.trigger,
+      originalTokenEstimate: result.report.originalTokenEstimate,
+      finalTokenEstimate: result.report.finalTokenEstimate,
+      retainedMessageCount: result.report.retainedMessageCount,
+      coveredConversationMessageCount: result.report.coveredConversationMessageCount,
+      warnings: result.report.warnings.map(sanitizePublicErrorMessage),
+    },
+    ...(result.checkpoint === undefined
+      ? {}
+      : { checkpoint: toPublicContextCheckpoint(result.checkpoint) }),
+  };
+}
+
+function toPublicContextCheckpoint(checkpoint: AgentContextCheckpoint): Record<string, unknown> {
+  return {
+    sequence: checkpoint.sequence,
+    trigger: checkpoint.trigger,
+    summary: checkpoint.summary,
+    coveredConversationMessageCount: checkpoint.coveredConversationMessageCount,
+    sourceTokenEstimate: checkpoint.sourceTokenEstimate,
+    summaryTokenEstimate: checkpoint.summaryTokenEstimate,
+    createdAt: checkpoint.createdAt,
+    ...(checkpoint.focus === undefined ? {} : { focus: checkpoint.focus }),
+  };
+}
+
+function toPublicAgentSessionView(session: AgentSessionView): AgentSessionView {
+  return {
+    id: session.id,
+    title: session.title,
+    ...(session.userId === undefined ? {} : { userId: session.userId }),
+    mode: session.mode,
+    messages: session.messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    })),
+    tokenUsage: {
+      promptTokens: session.tokenUsage.promptTokens,
+      completionTokens: session.tokenUsage.completionTokens,
+      totalTokens: session.tokenUsage.totalTokens,
+      ...(session.tokenUsage.cachedPromptTokens === undefined
+        ? {}
+        : { cachedPromptTokens: session.tokenUsage.cachedPromptTokens }),
+      ...(session.tokenUsage.estimated === undefined
+        ? {}
+        : { estimated: session.tokenUsage.estimated }),
+    },
+    ...(session.project === undefined ? {} : { project: { rootPath: session.project.rootPath } }),
+    ...(session.taskPlan === undefined
+      ? {}
+      : {
+          taskPlan: {
+            version: session.taskPlan.version,
+            goal: session.taskPlan.goal,
+            tasks: session.taskPlan.tasks.map((task) => ({
+              id: task.id,
+              title: task.title,
+              ...(task.description === undefined ? {} : { description: task.description }),
+              status: task.status,
+              acceptanceCriteria: [...task.acceptanceCriteria],
+              dependsOn: [...task.dependsOn],
+              evidence: task.evidence.map((evidence) => ({
+                kind: evidence.kind,
+                summary: evidence.summary,
+                createdAt: evidence.createdAt,
+              })),
+              createdAt: task.createdAt,
+              updatedAt: task.updatedAt,
+            })),
+            createdAt: session.taskPlan.createdAt,
+            updatedAt: session.taskPlan.updatedAt,
+          },
+        }),
+    ...(session.artifacts === undefined
+      ? {}
+      : {
+          artifacts: session.artifacts.map((artifact) => ({
+            id: artifact.id,
+            path: artifact.path,
+            ...(artifact.mediaType === undefined ? {} : { mediaType: artifact.mediaType }),
+            ...(artifact.sizeBytes === undefined ? {} : { sizeBytes: artifact.sizeBytes }),
+            createdAt: artifact.createdAt,
+            source: artifact.source,
+          })),
+        }),
+    ...(session.activeSkills === undefined
+      ? {}
+      : {
+          activeSkills: session.activeSkills.map((skill) => ({
+            name: skill.name,
+            description: skill.description,
+            scope: skill.scope,
+          })),
+        }),
+    aborted: session.aborted,
+  };
+}
+
+function toPublicDatabaseError(error: DatabaseAccessRuntimeError): Record<string, unknown> {
+  const value = error.error;
+  return {
+    code: sanitizePublicErrorMessage(value.code),
+    category: value.category,
+    message:
+      value.category === 'internal'
+        ? 'Internal database service error.'
+        : sanitizePublicErrorMessage(value.message),
+    retryable: value.retryable,
+    outcome: value.outcome,
+    ...(value.stage === undefined ? {} : { stage: value.stage }),
+    ...(value.category === 'internal' || value.detail === undefined
+      ? {}
+      : { detail: sanitizePublicErrorMessage(value.detail) }),
+  };
+}
+
+function redactPublicErrorValue(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') return sanitizePublicErrorMessage(value);
+  if (Array.isArray(value)) return value.map((item) => redactPublicErrorValue(item, seen));
+  if (!value || typeof value !== 'object') return value;
+  if (seen.has(value)) return '[CIRCULAR]';
+  seen.add(value);
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    output[key] = isSensitiveErrorKey(key) ? '[REDACTED]' : redactPublicErrorValue(child, seen);
+  }
+  return output;
+}
+
+function isSensitiveErrorKey(key: string): boolean {
+  return /^(?:access[_-]?token|api[_-]?key|authorization|bearer|connection[_-]?string|credential|credentials|database[_-]?url|db[_-]?url|dsn|password|passwd|pwd|refresh[_-]?token|secret|session[_-]?token|token)$/i.test(
+    key,
+  );
+}
+
+function sanitizePublicErrorMessage(message: string): string {
+  const sanitized = message
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/gi, 'sk-[REDACTED]')
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^:/@\s]+):([^@\s]+)@/gi, '$1[REDACTED]@')
+    .replace(
+      /(["']?(?:api[_-]?key|authorization|connection[_-]?string|credential|database[_-]?url|db[_-]?url|dsn|password|passwd|pwd|secret|session[_-]?token|token)["']?\s*[:=]\s*["']?)([^"',}\s&]+)/gi,
+      '$1[REDACTED]',
+    )
+    .replace(/\bfile:\/\/\/?[^\s"'<>]+/gi, '[LOCAL_PATH]')
+    .replace(/(["'])\b[A-Za-z]:\\.*?\1/g, '[LOCAL_PATH]')
+    .replace(/\b[A-Za-z]:\\[^\s"'<>|]+/g, '[LOCAL_PATH]')
+    .replace(
+      /(^|[\s("'=])\/(?:home|Users|var|tmp|private|opt|srv|workspace)\/[^\s"'<>]*/g,
+      '$1[LOCAL_PATH]',
+    );
+  return sanitized.length <= 1_000 ? sanitized : `${sanitized.slice(0, 997)}...`;
+}
+
 function sendHtml(response: ServerResponse, html: string): void {
   response.statusCode = 200;
   response.setHeader('content-type', 'text/html; charset=utf-8');
   response.setHeader('cache-control', 'no-store');
   response.end(html);
+}
+
+async function sendAgentRunStream(
+  response: ServerResponse,
+  runAgent: (input: RunAiSqlAgentInput) => Promise<AiSqlAgentRun>,
+  input: RunAiSqlAgentInput,
+): Promise<void> {
+  response.statusCode = 200;
+  response.setHeader('content-type', 'text/event-stream; charset=utf-8');
+  response.setHeader('cache-control', 'no-store');
+  response.setHeader('connection', 'keep-alive');
+  response.flushHeaders();
+  try {
+    const result = await runAgent({
+      ...input,
+      onEvent: async (event) => {
+        await writeSseEvent(response, event.type, event);
+      },
+    });
+    await writeSseEvent(response, 'result', toAiSqlAgentRunView(result));
+  } catch (error) {
+    if (!response.writableEnded && !response.destroyed) {
+      const normalized = asDatabaseAgentError(error);
+      await writeSseEvent(response, 'error', {
+        error: {
+          code: normalized.code,
+          message:
+            normalized.code === 'INTERNAL_ERROR'
+              ? 'Internal server error.'
+              : sanitizePublicErrorMessage(normalized.message),
+          retryable: normalized.retryable,
+        },
+      });
+    }
+  } finally {
+    if (!response.writableEnded && !response.destroyed) response.end();
+  }
 }
 
 async function sendLlmStream(
@@ -1832,22 +2574,56 @@ async function sendLlmStream(
   try {
     for await (const event of stream) {
       if (response.writableEnded || response.destroyed) return;
-      response.write(
-        `event: ${event.type}\ndata: ${stringifyPublicJson(event)}\n\n`,
-      );
+      if (!(await writeSseEvent(response, event.type, event))) return;
     }
   } catch (error) {
     if (!response.writableEnded && !response.destroyed) {
       const normalized = asDatabaseAgentError(error);
-      response.write(
-        `event: error\ndata: ${stringifyPublicJson({
-          error: { code: normalized.code, message: normalized.message, retryable: normalized.retryable },
-        })}\n\n`,
-      );
+      await writeSseEvent(response, 'error', {
+        error: {
+          code: normalized.code,
+          message:
+            normalized.code === 'INTERNAL_ERROR'
+              ? 'Internal server error.'
+              : sanitizePublicErrorMessage(normalized.message),
+          retryable: normalized.retryable,
+        },
+      });
     }
   } finally {
     if (!response.writableEnded && !response.destroyed) response.end();
   }
+}
+
+async function writeSseEvent(
+  response: ServerResponse,
+  event: string,
+  value: unknown,
+): Promise<boolean> {
+  if (response.writableEnded || response.destroyed) return false;
+  if (response.write(`event: ${event}\ndata: ${stringifyPublicJson(value)}\n\n`)) return true;
+  return new Promise<boolean>((resolve, reject) => {
+    const cleanup = () => {
+      response.off('drain', onDrain);
+      response.off('close', onClose);
+      response.off('error', onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve(true);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve(false);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    response.once('drain', onDrain);
+    response.once('close', onClose);
+    response.once('error', onError);
+  });
 }
 
 function emptyLlmMetrics(): LlmMetricsSnapshot {
@@ -1868,7 +2644,7 @@ function emptyLlmMetrics(): LlmMetricsSnapshot {
 }
 
 function sendJson(response: ServerResponse, status: number, value: unknown): void {
-  if (response.writableEnded) return;
+  if (response.writableEnded || response.destroyed) return;
   response.statusCode = status;
   response.setHeader('content-type', 'application/json; charset=utf-8');
   response.setHeader('cache-control', 'no-store');
@@ -1886,8 +2662,7 @@ function setSecurityHeaders(response: ServerResponse): void {
 }
 
 function assertLoopbackHost(host: string): void {
-  const normalized = host.trim().toLowerCase();
-  if (normalized !== '127.0.0.1' && normalized !== '::1' && normalized !== 'localhost') {
+  if (!isLoopbackHostname(host)) {
     throw new DatabaseAgentError(
       'INVALID_INPUT',
       'SchemaNaut Server 只允许监听 127.0.0.1、::1 或 localhost。',

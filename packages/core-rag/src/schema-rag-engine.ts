@@ -40,6 +40,12 @@ export type SchemaRagEngineOptions = {
   rerankAdapter?: SchemaRagRerankAdapter;
 };
 
+export type SchemaRagEngineCheckpoint = {
+  connectionId: string;
+  index?: SchemaRagIndex;
+  legacyTables?: NonNullable<SchemaRagIndexInput['tables']>;
+};
+
 export class SchemaRagEngine {
   private readonly indexes = new Map<string, SchemaRagIndex>();
   private readonly legacyTables = new Map<string, Map<string, NonNullable<SchemaRagIndexInput['tables']>[number]>>();
@@ -90,6 +96,10 @@ export class SchemaRagEngine {
         profile: retrievalProfile,
         documentCount: documents.length,
         createdAt: indexedAt,
+        ...(input.sourceTableCount === undefined
+          ? {}
+          : { sourceTableCount: input.sourceTableCount }),
+        ...(input.maxTables === undefined ? {} : { maxTables: input.maxTables }),
       }),
       retrievalProfile,
       indexedAt,
@@ -113,21 +123,14 @@ export class SchemaRagEngine {
   }
 
   async indexAsync(input: SchemaRagIndexInput): Promise<SchemaRagIndex> {
-    const index = this.index(input);
-    const profile = this.profiles.get(input.connectionId)!;
-    if (profile.embedding) {
-      if (!this.embeddingAdapter) {
-        throw new Error(
-          `Retrieval profile ${profile.id} configures embeddings but no embedding adapter is available.`,
-        );
-      }
-      index.vectors = await buildDocumentVectors({
-        documents: index.documents,
-        profile: profile.embedding,
-        adapter: this.embeddingAdapter,
-      });
+    const checkpoint = this.createCheckpoint(input.connectionId);
+    try {
+      const index = this.index(input);
+      return await this.buildVectors(index);
+    } catch (error) {
+      this.restoreCheckpoint(checkpoint);
+      throw error;
     }
-    return index;
   }
 
   upsertTables(input: SchemaRagIndexInput): SchemaRagIndex {
@@ -148,10 +151,20 @@ export class SchemaRagEngine {
       tables: [...tables.values()],
       glossary: input.glossary ?? existing.glossary,
       indexedAt: input.indexedAt ?? existing.indexedAt,
-      ...(input.retrievalProfile === undefined
-        ? {}
-        : { retrievalProfile: input.retrievalProfile }),
+      retrievalProfile: input.retrievalProfile ?? existing.retrievalProfile ?? this.defaultProfile,
     });
+  }
+
+  async upsertTablesAsync(input: SchemaRagIndexInput): Promise<SchemaRagIndex> {
+    const checkpoint = this.createCheckpoint(input.connectionId);
+    try {
+      const index = this.upsertTables(input);
+      if ((input.tables?.length ?? 0) === 0) return index;
+      return await this.buildVectors(index);
+    } catch (error) {
+      this.restoreCheckpoint(checkpoint);
+      throw error;
+    }
   }
 
   loadIndex(index: SchemaRagIndex): SchemaRagIndex {
@@ -162,6 +175,34 @@ export class SchemaRagEngine {
       normalizeRetrievalProfile(index.retrievalProfile ?? this.defaultProfile),
     );
     return index;
+  }
+
+  createCheckpoint(connectionId: string): SchemaRagEngineCheckpoint {
+    const index = this.indexes.get(connectionId);
+    const legacyTables = this.legacyTables.get(connectionId);
+    return {
+      connectionId,
+      ...(index === undefined ? {} : { index: structuredClone(index) }),
+      ...(legacyTables === undefined
+        ? {}
+        : { legacyTables: structuredClone([...legacyTables.values()]) }),
+    };
+  }
+
+  restoreCheckpoint(checkpoint: SchemaRagEngineCheckpoint): void {
+    this.clear(checkpoint.connectionId);
+    if (checkpoint.index) this.loadIndex(structuredClone(checkpoint.index));
+    if (checkpoint.legacyTables) {
+      this.legacyTables.set(
+        checkpoint.connectionId,
+        new Map(
+          checkpoint.legacyTables.map((table) => [
+            tableDocumentId(table.schema, table.name),
+            structuredClone(table),
+          ]),
+        ),
+      );
+    }
   }
 
   clear(connectionId: string): void {
@@ -409,6 +450,22 @@ export class SchemaRagEngine {
       throw new Error(`Knowledge catalog is not available for connection: ${connectionId}`);
     }
     return catalog;
+  }
+
+  private async buildVectors(index: SchemaRagIndex): Promise<SchemaRagIndex> {
+    const profile = this.profiles.get(index.connectionId)!;
+    if (!profile.embedding) return index;
+    if (!this.embeddingAdapter) {
+      throw new Error(
+        `Retrieval profile ${profile.id} configures embeddings but no embedding adapter is available.`,
+      );
+    }
+    index.vectors = await buildDocumentVectors({
+      documents: index.documents,
+      profile: profile.embedding,
+      adapter: this.embeddingAdapter,
+    });
+    return index;
   }
 }
 

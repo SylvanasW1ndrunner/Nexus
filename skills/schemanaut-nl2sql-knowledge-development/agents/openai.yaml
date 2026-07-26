@@ -1,0 +1,4 @@
+interface:
+  display_name: "SchemaNaut NL2SQL and Knowledge"
+  short_description: "Build Schema knowledge and NL2SQL"
+  default_prompt: "Use $schemanaut-nl2sql-knowledge-development to improve SchemaNaut Schema context or NL2SQL."

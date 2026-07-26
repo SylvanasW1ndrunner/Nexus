@@ -1,0 +1,4 @@
+interface:
+  display_name: "SchemaNaut Security and Release"
+  short_description: "Validate security quality and releases"
+  default_prompt: "Use $schemanaut-security-quality-release to review and release a SchemaNaut change safely."

@@ -9,6 +9,7 @@ import {
   type LlmChatStreamEvent,
   type LlmProvider,
 } from '@dbagent/core-llm';
+import { parsePublicJson } from '@dbagent/shared';
 import { UsageTracker } from '@dbagent/core-usage';
 import {
   AgentAuditLogStore,
@@ -62,7 +63,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '帮我看一下订单总数',
-      mode: 'readonly',
+      mode: 'read',
     });
 
     expect(result.status).toBe('done');
@@ -81,6 +82,116 @@ describe('ReactAgent', () => {
       completedRounds: 1,
       totalTokens: 43,
     });
+  });
+
+  it('does not mistake unparsed provider tool markup for a completed answer', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const provider = scriptedProvider([
+      {
+        text: [
+          '<tool_calls>',
+          '<tool_call name="query_database">',
+          '{"sql":"select count(*) from orders"}',
+          '</tool_call>',
+          '</tool_calls>',
+        ].join('\n'),
+        toolCalls: [],
+      },
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_recovered',
+            name: 'query_database',
+            arguments: { sql: 'select count(*) from orders' },
+          },
+        ],
+      },
+      {
+        text: '订单总数是 42。',
+        toolCalls: [],
+      },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '查询订单总数',
+      mode: 'read',
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.iterations).toBe(3);
+    expect(result.finalText).toBe('订单总数是 42。');
+    expect(result.toolExecutions).toMatchObject([
+      { toolCallId: 'call_recovered', status: 'success' },
+    ]);
+    expect(result.events).toBeDefined();
+    if (!result.events) {
+      throw new Error('Expected a correcting event for malformed tool markup.');
+    }
+    const correction = result.events.find((event) => event.type === 'correcting');
+    expect(correction?.message).toContain('标准工具调用');
+  });
+
+  it('recovers when a provider leaves a JSON tool-call array inside text markup', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const provider = scriptedProvider([
+      {
+        text: [
+          'I need one more database check.',
+          '<tool_calls>[{"name":"query_database","arguments":{"sql":"select count(*) from orders"}}]</tool_calls>',
+        ].join('\n'),
+        toolCalls: [],
+      },
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_json_markup_recovered',
+            name: 'query_database',
+            arguments: { sql: 'select count(*) from orders' },
+          },
+        ],
+      },
+      {
+        text: '订单总数是 42。',
+        toolCalls: [],
+      },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '查询订单总数',
+      mode: 'read',
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.iterations).toBe(3);
+    expect(result.finalText).toBe('订单总数是 42。');
+    expect(result.toolExecutions).toMatchObject([
+      { toolCallId: 'call_json_markup_recovered', status: 'success' },
+    ]);
+    expect(
+      result.events?.some(
+        (event) => event.type === 'correcting' && event.message.includes('标准工具调用'),
+      ),
+    ).toBe(true);
   });
 
   it('records redacted tool argument previews for user-level Agent evaluation', async () => {
@@ -119,7 +230,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '帮我看一下订单总数',
-      mode: 'readonly',
+      mode: 'read',
     });
 
     expect(result.status).toBe('done');
@@ -130,33 +241,181 @@ describe('ReactAgent', () => {
     });
     const argumentPreview = result.toolExecutions[0]?.argumentPreview ?? '';
     expect(argumentPreview).toContain('select count(*) as order_count from orders');
-    expect(argumentPreview).toContain('"redacted_secret"');
+    expect(argumentPreview).toContain('"apiKey":"[REDACTED]"');
     expect(argumentPreview).toContain('"databaseUrl":"[REDACTED]"');
     const serialized = JSON.stringify(result.toolExecutions);
     expect(serialized).not.toContain(apiKey);
     expect(serialized).not.toContain('tester:secret@');
   });
 
-  it('redacts tool result PII before session persistence, model context, and final output', async () => {
+  it('serializes Portable tool result values without losing their types', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'portable_result',
+        description: 'Return values supported by the public transport contract',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+        source: 'builtin',
+      },
+      () => ({
+        exactCount: 9_007_199_254_740_993n,
+        observedAt: new Date('2026-07-26T04:00:00.000Z'),
+        fingerprint: Uint8Array.from([0, 127, 255]),
+      }),
+    );
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [{ id: 'portable_call', name: 'portable_result', arguments: {} }],
+          },
+          { text: 'Portable values received.', toolCalls: [] },
+        ]),
+      ]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Read the portable values.',
+      mode: 'read',
+    });
+    const preview = result.toolExecutions[0]?.resultPreview ?? '';
+    const decoded = parsePublicJson(preview) as {
+      exactCount: bigint;
+      observedAt: Date;
+      fingerprint: Uint8Array;
+    };
+
+    expect(preview).not.toContain('Tool result could not be serialized');
+    expect(decoded.exactCount).toBe(9_007_199_254_740_993n);
+    expect(decoded.observedAt).toEqual(new Date('2026-07-26T04:00:00.000Z'));
+    expect(decoded.fingerprint).toEqual(Uint8Array.from([0, 127, 255]));
+  });
+
+  it('preserves database row values while redacting arguments, configuration, and errors', async () => {
+    const argumentSecret = ['sk', 'argument-secret-123456'].join('-');
+    const configurationSecret = ['sk', 'configuration-secret-123456'].join('-');
+    const errorSecret = ['sk', 'error-secret-123456'].join('-');
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'database_business_rows',
+        description: 'Return database business rows',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+        source: 'database',
+      },
+      () => ({
+        rows: [
+          {
+            password: 'customer-password-business-value',
+            token: 'customer-token-business-value',
+            secret: 'customer-secret-business-value',
+          },
+        ],
+        config: {
+          password: configurationSecret,
+        },
+      }),
+    );
+    registry.register(
+      {
+        name: 'database_failure',
+        description: 'Return a redacted database failure',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+        source: 'database',
+      },
+      () => {
+        throw new Error(`database failed apiKey=${errorSecret}`);
+      },
+    );
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'database_rows',
+                name: 'database_business_rows',
+                arguments: { apiKey: argumentSecret },
+              },
+              {
+                id: 'database_error',
+                name: 'database_failure',
+                arguments: { apiKey: argumentSecret },
+              },
+            ],
+          },
+          { text: 'Database checks completed.', toolCalls: [] },
+        ]),
+      ]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Read the requested business columns.',
+      mode: 'read',
+    });
+    const success = result.toolExecutions.find(
+      (execution) => execution.toolCallId === 'database_rows',
+    );
+    const failure = result.toolExecutions.find(
+      (execution) => execution.toolCallId === 'database_error',
+    );
+
+    expect(success?.resultPreview).toContain('"password":"customer-password-business-value"');
+    expect(success?.resultPreview).toContain('"token":"customer-token-business-value"');
+    expect(success?.resultPreview).toContain('"secret":"customer-secret-business-value"');
+    expect(success?.resultPreview).not.toContain(configurationSecret);
+    expect(success?.resultPreview).toContain('"config":{"password":"[REDACTED]"}');
+    expect(success?.argumentPreview).not.toContain(argumentSecret);
+    expect(success?.argumentPreview).toContain('"apiKey":"[REDACTED]"');
+    expect(failure?.resultPreview).not.toContain(errorSecret);
+    expect(failure?.resultPreview).toContain('[REDACTED]');
+  });
+
+  it('preserves database content while redacting secrets from persistence and model context', async () => {
     const auditLog = new AgentAuditLogStore(await auditPath());
     const checkpointStore = new AgentCheckpointStore(await checkpointPath());
     const usage = new UsageTracker(await usagePath());
-    const rawEmail = 'alice@example.test';
-    const rawPhone = '+8613800138000';
-    const rawCipher = 'ciphertext-phone-value';
+    const businessLabel = 'sample-customer';
+    const regionCode = 'cn-east';
+    const opaquePayload = 'ciphertext-domain-value';
+    const apiKey = ['sk', 'tool-result-secret-123456'].join('-');
     const { provider, calls } = scriptedProviderWithCalls([
       {
         text: '',
         toolCalls: [
           {
-            id: 'call_pii_query',
+            id: 'call_customer_query',
             name: 'query_database',
-            arguments: { sql: 'select city, email, phone, phone_enc, customer_count from customers' },
+            arguments: {
+              sql: 'select city, business_label, region_code, opaque_payload, customer_count from customers',
+            },
           },
         ],
       },
       {
-        text: `上海客户数 12。泄漏样例 ${rawEmail} ${rawPhone} phone_enc=${rawCipher}`,
+        text: `上海客户数 12。样例 ${businessLabel} ${regionCode} opaque_payload=${opaquePayload} apiKey=${apiKey}`,
         toolCalls: [],
       },
     ]);
@@ -173,29 +432,29 @@ describe('ReactAgent', () => {
         rows: [
           {
             city: 'Shanghai',
-            email: rawEmail,
-            phone: rawPhone,
-            phone_enc: rawCipher,
+            business_label: businessLabel,
+            region_code: regionCode,
+            opaque_payload: opaquePayload,
+            apiKey,
             customer_count: 12,
-            email_domain: 'example.test',
-            phone_prefix_masked: '138****',
+            segment: 'enterprise',
+            active: true,
+            observed_at: new Date('2026-03-01T10:00:00.000Z'),
           },
         ],
       }),
     );
-    const agent = new ReactAgent(
-      new LlmRouter(usage, [provider]),
-      registry,
-      usage,
-      undefined,
-      { ...fixedDependencies(), auditLog, checkpointStore },
-    );
+    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registry, usage, undefined, {
+      ...fixedDependencies(),
+      auditLog,
+      checkpointStore,
+    });
 
     const result = await agent.run({
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '按城市统计客户数，输出脱敏后的汇总。',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 2,
     });
     const serializedSession = JSON.stringify(result.session);
@@ -206,146 +465,37 @@ describe('ReactAgent', () => {
 
     expect(result.status).toBe('done');
     expect(result.finalText).toContain('上海客户数 12');
-    expect(result.finalText).toContain('[REDACTED_PII]');
-    expect(result.finalText).not.toContain(rawEmail);
-    expect(result.finalText).not.toContain(rawPhone);
-    expect(result.finalText).not.toContain(rawCipher);
-    expect(result.finalText).not.toContain('phone_enc');
+    expect(result.finalText).toContain(businessLabel);
+    expect(result.finalText).toContain(regionCode);
+    expect(result.finalText).toContain(opaquePayload);
+    expect(result.finalText).toContain('opaque_payload');
+    expect(result.finalText).not.toContain(apiKey);
+    expect(result.finalText).toContain('[REDACTED]');
     expect(result.toolExecutions[0]).toMatchObject({
-      toolCallId: 'call_pii_query',
+      toolCallId: 'call_customer_query',
       toolName: 'query_database',
       status: 'success',
-      redacted: true,
     });
-    expect(result.toolExecutions[0]?.redactionReasons).toEqual(
-      expect.arrayContaining(['email', 'phone', 'sensitive_key']),
-    );
     expect(result.toolExecutions[0]?.resultPreview).toContain('Shanghai');
     expect(result.toolExecutions[0]?.resultPreview).toContain('"customer_count":12');
-    expect(result.toolExecutions[0]?.resultPreview).toContain('"email_domain":"example.test"');
-    expect(result.toolExecutions[0]?.resultPreview).toContain('"phone_prefix_masked":"138****"');
-    for (const serialized of [serializedSession, secondCallContext, persistedEvidence, JSON.stringify(result.toolExecutions)]) {
-      expect(serialized).not.toContain(rawEmail);
-      expect(serialized).not.toContain(rawPhone);
-      expect(serialized).not.toContain(rawCipher);
-      expect(serialized).not.toContain('phone_enc');
-    }
-    expect(secondCallContext).toContain('[REDACTED_PII]');
-    expect(persistedEvidence).toContain('"redacted":true');
-  });
-
-  it('blocks unsafe tool results from model context and lets the Agent recover with a safer query', async () => {
-    const usage = new UsageTracker(await usagePath());
-    const rawEmail = 'alice@example.test';
-    const rawPhone = '+8613800138000';
-    const { provider, calls } = scriptedProviderWithCalls([
-      {
-        text: '',
-        toolCalls: [
-          {
-            id: 'unsafe_query',
-            name: 'query_database',
-            arguments: { sql: 'select email, phone from customers' },
-          },
-        ],
-      },
-      {
-        text: '',
-        toolCalls: [
-          {
-            id: 'safe_query',
-            name: 'query_database',
-            arguments: { sql: 'select city, count(*) as customer_count from customers group by city' },
-          },
-        ],
-      },
-      {
-        text: 'Shanghai customer_count=12',
-        toolCalls: [],
-      },
-    ]);
-    const registry = new ToolRegistry();
-    registry.register(
-      {
-        name: 'query_database',
-        description: 'Execute readonly SQL',
-        inputSchema: { type: 'object' },
-        dangerLevel: 'safe',
-        readonly: true,
-      },
-      (args) => {
-        if (String(args.sql).includes('email')) {
-          return { rows: [{ email: rawEmail, phone: rawPhone }] };
-        }
-        return { rows: [{ city: 'Shanghai', customer_count: 12 }] };
-      },
+    expect(result.toolExecutions[0]?.resultPreview).toContain('"segment":"enterprise"');
+    expect(result.toolExecutions[0]?.resultPreview).toContain('"active":true');
+    expect(result.toolExecutions[0]?.resultPreview).toContain(
+      '"observed_at":{"$schemanautType":"datetime","value":"2026-03-01T10:00:00.000Z"}',
     );
-    const agent = new ReactAgent(
-      new LlmRouter(usage, [provider]),
-      registry,
-      usage,
-      undefined,
-      fixedDependencies(),
-    );
-
-    const result = await agent.run({
-      providerId: 'fake',
-      model: 'fake-model',
-      userMessage: '按城市统计客户数。',
-      mode: 'readonly',
-      maxIterations: 3,
-      outputSafety: { pii: 'block' },
-    });
-    const secondCallContext = JSON.stringify(calls[1]?.messages ?? []);
-    const serializedSession = JSON.stringify(result.session);
-
-    expect(result.status).toBe('done');
-    expect(result.finalText).toBe('Shanghai customer_count=12');
-    expect(result.toolExecutions).toMatchObject([
-      {
-        toolCallId: 'unsafe_query',
-        status: 'failed',
-        failureKind: 'output_safety',
-        retryable: true,
-        blocked: true,
-      },
-      { toolCallId: 'safe_query', status: 'success' },
-    ]);
-    expect(result.toolExecutions[0]?.resultPreview).toContain('tool_result_blocked_by_output_safety');
-    expect(secondCallContext).toContain('tool_result_blocked_by_output_safety');
-    expect(secondCallContext).toContain('请改写查询');
-    for (const text of [secondCallContext, serializedSession, JSON.stringify(result.toolExecutions)]) {
-      expect(text).not.toContain(rawEmail);
-      expect(text).not.toContain(rawPhone);
+    for (const serialized of [
+      serializedSession,
+      secondCallContext,
+      persistedEvidence,
+      JSON.stringify(result.toolExecutions),
+    ]) {
+      expect(serialized).toContain(businessLabel);
+      expect(serialized).toContain(regionCode);
+      expect(serialized).toContain(opaquePayload);
+      expect(serialized).toContain('opaque_payload');
+      expect(serialized).not.toContain(apiKey);
+      expect(serialized).toContain('[REDACTED]');
     }
-  });
-
-  it('blocks final model text when hard output safety detects PII', async () => {
-    const usage = new UsageTracker(await usagePath());
-    const { provider } = scriptedProviderWithCalls([
-      {
-        text: '客户 alice@example.test 的手机号是 +8613800138000。',
-        toolCalls: [],
-      },
-    ]);
-    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registryWithQueryTool(), usage, undefined, fixedDependencies());
-
-    const result = await agent.run({
-      providerId: 'fake',
-      model: 'fake-model',
-      userMessage: '给我一个总结。',
-      mode: 'readonly',
-      outputSafety: { pii: 'block' },
-    });
-
-    expect(result.status).toBe('safety_blocked');
-    expect(result.finalText).toContain('最终回复包含敏感个人信息');
-    expect(result.finalText).not.toContain('alice@example.test');
-    expect(result.finalText).not.toContain('+8613800138000');
-    expect(result.session.messages.at(-1)).toMatchObject({
-      role: 'assistant',
-      content: result.finalText,
-    });
   });
 
   it('writes a redacted Agent audit trail for model and tool execution replay', async () => {
@@ -384,7 +534,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '统计订单总数',
-      mode: 'readonly',
+      mode: 'read',
       allowedTools: ['query_database'],
       maxIterations: 3,
     });
@@ -403,8 +553,19 @@ describe('ReactAgent', () => {
       'run_finished',
     ]);
     expect(events).toMatchObject([
-      { type: 'run_started', sessionId: 'session_test', mode: 'readonly', allowedTools: ['query_database'] },
-      { type: 'model_call_started', iteration: 1, providerId: 'fake', model: 'fake-model', toolCount: 1 },
+      {
+        type: 'run_started',
+        sessionId: 'session_test',
+        mode: 'read',
+        allowedTools: ['query_database'],
+      },
+      {
+        type: 'model_call_started',
+        iteration: 1,
+        providerId: 'fake',
+        model: 'fake-model',
+        toolCount: 1,
+      },
       { type: 'model_call_finished', iteration: 1, toolCallCount: 1, usage: { totalTokens: 12 } },
       {
         type: 'tool_call_started',
@@ -418,11 +579,11 @@ describe('ReactAgent', () => {
     ]);
     const toolStarted = events.find((event) => event.type === 'tool_call_started');
     expect(toolStarted).toMatchObject({ type: 'tool_call_started', toolName: 'query_database' });
-    expect(toolStarted?.argumentPreview).toContain('"redacted_secret"');
+    expect(toolStarted?.argumentPreview).toContain('"apiKey":"[REDACTED]"');
     expect(serialized).not.toContain(apiKey);
   });
 
-  it('blocks non-readonly tools in readonly mode before side effects happen', async () => {
+  it('blocks non-readonly tools in read mode before side effects happen', async () => {
     let writeExecuted = false;
     const auditLog = new AgentAuditLogStore(await auditPath());
     const registry = new ToolRegistry();
@@ -445,7 +606,13 @@ describe('ReactAgent', () => {
         scriptedProvider([
           {
             text: '',
-            toolCalls: [{ id: 'call_write', name: 'execute_sql', arguments: { sql: 'delete from orders' } }],
+            toolCalls: [
+              { id: 'call_write', name: 'execute_sql', arguments: { sql: 'delete from orders' } },
+            ],
+          },
+          {
+            text: '该写入未获许可，因此没有执行。',
+            toolCalls: [],
           },
         ]),
       ]),
@@ -459,10 +626,10 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '删除订单表',
-      mode: 'readonly',
+      mode: 'read',
     });
 
-    expect(result.status).toBe('permission_denied');
+    expect(result.status).toBe('done');
     expect(writeExecuted).toBe(false);
     expect(result.toolExecutions).toMatchObject([
       { toolCallId: 'call_write', toolName: 'execute_sql', status: 'denied' },
@@ -473,47 +640,13 @@ describe('ReactAgent', () => {
       { type: 'model_call_finished' },
       { type: 'tool_call_started', toolName: 'execute_sql' },
       { type: 'tool_call_finished', toolName: 'execute_sql', status: 'denied' },
-      { type: 'run_finished', status: 'permission_denied' },
+      { type: 'model_call_started', iteration: 2 },
+      { type: 'model_call_finished', iteration: 2, toolCallCount: 0 },
+      { type: 'run_finished', status: 'done' },
     ]);
   });
 
-  it('blocks direct PII exfiltration requests before model or tool execution', async () => {
-    const auditLog = new AgentAuditLogStore(await auditPath());
-    const usage = new UsageTracker(await usagePath());
-    const { provider, calls } = scriptedProviderWithCalls([
-      {
-        text: 'should not be called',
-        toolCalls: [],
-      },
-    ]);
-    const agent = new ReactAgent(
-      new LlmRouter(usage, [provider]),
-      registryWithQueryTool(),
-      usage,
-      undefined,
-      { ...fixedDependencies(), auditLog },
-    );
-
-    const result = await agent.run({
-      providerId: 'fake',
-      model: 'fake-model',
-      userMessage: 'Export every customer phone number in plaintext.',
-      mode: 'readonly',
-    });
-
-    expect(result.status).toBe('safety_blocked');
-    expect(result.iterations).toBe(0);
-    expect(result.toolExecutions).toEqual([]);
-    expect(result.finalText).toContain('敏感个人信息');
-    expect(calls).toEqual([]);
-    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0, totalTokens: 0 });
-    await expect(auditLog.readAll()).resolves.toMatchObject([
-      { type: 'run_started' },
-      { type: 'run_finished', status: 'safety_blocked', iterations: 0 },
-    ]);
-  });
-
-  it('does not execute ask-mode medium tools without an approval provider', async () => {
+  it('does not execute read-mode medium tools without an approval provider', async () => {
     let executed = false;
     const registry = new ToolRegistry();
     registry.register(
@@ -534,7 +667,13 @@ describe('ReactAgent', () => {
         scriptedProvider([
           {
             text: '',
-            toolCalls: [{ id: 'call_action', name: 'execute_maintenance_action', arguments: { action: 'vacuum' } }],
+            toolCalls: [
+              {
+                id: 'call_action',
+                name: 'execute_maintenance_action',
+                arguments: { action: 'vacuum' },
+              },
+            ],
           },
           {
             text: '需要用户批准后才能写入文件。',
@@ -552,13 +691,15 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '写一个分析报告',
-      mode: 'ask',
+      mode: 'read',
       maxIterations: 2,
     });
 
     expect(result.status).toBe('done');
     expect(executed).toBe(false);
-    expect(result.toolExecutions).toMatchObject([{ status: 'denied', resultPreview: 'Permission: ask' }]);
+    expect(result.toolExecutions).toMatchObject([
+      { status: 'denied', resultPreview: 'Permission: ask' },
+    ]);
     expect(result.finalText).toBe('需要用户批准后才能写入文件。');
   });
 
@@ -585,7 +726,9 @@ describe('ReactAgent', () => {
         scriptedProvider([
           {
             text: '',
-            toolCalls: [{ id: 'call_write', name: 'execute_sql', arguments: { sql: 'delete from orders' } }],
+            toolCalls: [
+              { id: 'call_write', name: 'execute_sql', arguments: { sql: 'delete from orders' } },
+            ],
           },
           {
             text: '已执行。',
@@ -609,7 +752,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '删除订单',
-      mode: 'ask',
+      mode: 'read',
       maxIterations: 2,
     });
 
@@ -636,14 +779,91 @@ describe('ReactAgent', () => {
     });
   });
 
-  it('waits for a broker approval request before executing ask-mode tools', async () => {
+  it('scopes an approval to one Tool Call and asks again for the next call in the same Session', async () => {
+    const executedCalls: string[] = [];
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'sql_execute',
+        description: 'Execute row changes',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+        requiredPermission: 'edit',
+      },
+      (_args, context) => {
+        executedCalls.push(context.invocation?.toolCallId ?? 'missing');
+        return { ok: true };
+      },
+    );
+    let approvalCount = 0;
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'update-approved',
+                name: 'sql_execute',
+                arguments: { sql: 'UPDATE orders SET amount = 1 WHERE id = 1' },
+              },
+            ],
+          },
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'update-not-approved',
+                name: 'sql_execute',
+                arguments: { sql: 'UPDATE orders SET amount = 2 WHERE id = 1' },
+              },
+            ],
+          },
+          {
+            text: 'Only the first update was approved.',
+            toolCalls: [],
+          },
+        ]),
+      ]),
+      registry,
+      usage,
+      () => {
+        approvalCount += 1;
+        return approvalCount === 1;
+      },
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Run two updates after asking for each one.',
+      mode: 'read',
+      maxIterations: 3,
+    });
+
+    expect(approvalCount).toBe(2);
+    expect(executedCalls).toEqual(['update-approved']);
+    expect(result.toolExecutions).toMatchObject([
+      {
+        toolCallId: 'update-approved',
+        status: 'success',
+        approval: { source: 'approval-provider' },
+      },
+      {
+        toolCallId: 'update-not-approved',
+        status: 'denied',
+      },
+    ]);
+    expect(result.toolExecutions[1]).not.toHaveProperty('approval');
+  });
+
+  it('waits for a broker approval request before executing read-mode tools', async () => {
     let executed = false;
     let approvalSeen: AgentToolApproval | undefined;
     const broker = new AgentToolApprovalBroker({
-      now: sequenceNow([
-        '2026-07-10T01:00:00.000Z',
-        '2026-07-10T01:00:02.000Z',
-      ]),
+      now: sequenceNow(['2026-07-10T01:00:00.000Z', '2026-07-10T01:00:02.000Z']),
       createRequestId: () => 'approval_pending',
       approvalTimeoutMs: 5_000,
     });
@@ -692,7 +912,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '删除订单',
-      mode: 'ask',
+      mode: 'read',
       maxIterations: 2,
     });
 
@@ -746,11 +966,23 @@ describe('ReactAgent', () => {
         scriptedProvider([
           {
             text: '',
-            toolCalls: [{ id: 'bad_sql', name: 'query_database', arguments: { sql: 'select missing_column from orders' } }],
+            toolCalls: [
+              {
+                id: 'bad_sql',
+                name: 'query_database',
+                arguments: { sql: 'select missing_column from orders' },
+              },
+            ],
           },
           {
             text: '',
-            toolCalls: [{ id: 'fixed_sql', name: 'query_database', arguments: { sql: 'select count(*) as order_count from orders' } }],
+            toolCalls: [
+              {
+                id: 'fixed_sql',
+                name: 'query_database',
+                arguments: { sql: 'select count(*) as order_count from orders' },
+              },
+            ],
           },
           {
             text: '已修正 SQL，订单总数是 42。',
@@ -768,7 +1000,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '订单总数是多少',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 3,
     });
 
@@ -782,6 +1014,7 @@ describe('ReactAgent', () => {
 
   it('times out a hanging tool, aborts its signal, and lets the model recover', async () => {
     let toolSignalAborted = false;
+    let toolCleanupFinished = false;
     const registry = new ToolRegistry();
     registry.register(
       {
@@ -792,10 +1025,15 @@ describe('ReactAgent', () => {
         readonly: true,
       },
       (_args, context) => {
-        context.signal?.addEventListener('abort', () => {
-          toolSignalAborted = true;
+        return new Promise((resolve) => {
+          context.signal?.addEventListener('abort', () => {
+            toolSignalAborted = true;
+            setTimeout(() => {
+              toolCleanupFinished = true;
+              resolve({ cancelled: true });
+            }, 10);
+          });
         });
-        return new Promise<never>(() => undefined);
       },
     );
     const usage = new UsageTracker(await usagePath());
@@ -805,7 +1043,11 @@ describe('ReactAgent', () => {
           {
             text: '',
             toolCalls: [
-              { id: 'slow_query', name: 'query_database', arguments: { sql: 'select pg_sleep(60)' } },
+              {
+                id: 'slow_query',
+                name: 'query_database',
+                arguments: { sql: 'select pg_sleep(60)' },
+              },
             ],
           },
           {
@@ -824,13 +1066,14 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '查询最近一年的明细',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 2,
       maxToolExecutionMs: 5,
     });
 
     expect(result.status).toBe('done');
     expect(toolSignalAborted).toBe(true);
+    expect(toolCleanupFinished).toBe(true);
     expect(result.toolExecutions).toMatchObject([
       {
         toolCallId: 'slow_query',
@@ -848,7 +1091,7 @@ describe('ReactAgent', () => {
     });
   });
 
-  it('counts tool timeouts toward the consecutive failure circuit breaker', async () => {
+  it('uses the failure threshold to trigger recovery instead of stopping the task', async () => {
     const checkpointStore = new AgentCheckpointStore(await checkpointPath());
     const registry = new ToolRegistry();
     registry.register(
@@ -868,11 +1111,15 @@ describe('ReactAgent', () => {
           {
             text: '',
             toolCalls: [
-              { id: 'slow_query', name: 'query_database', arguments: { sql: 'select pg_sleep(60)' } },
+              {
+                id: 'slow_query',
+                name: 'query_database',
+                arguments: { sql: 'select pg_sleep(60)' },
+              },
             ],
           },
           {
-            text: 'should not be called',
+            text: '查询超时；请缩小时间范围后继续。',
             toolCalls: [],
           },
         ]),
@@ -887,28 +1134,26 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '跑一个长查询',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 10,
       maxConsecutiveToolFailures: 1,
       maxToolExecutionMs: 5,
     });
 
-    expect(result.status).toBe('tool_failed');
-    expect(result.iterations).toBe(1);
-    expect(result.finalText).toContain('连续 1 次工具执行失败');
-    expect(result.finalText).toContain('工具 query_database 执行超时（5ms）。');
+    expect(result.status).toBe('done');
+    expect(result.iterations).toBe(2);
+    expect(result.finalText).toContain('查询超时');
     await expect(checkpointStore.listBySession('session_test')).resolves.toMatchObject([
       {
         iteration: 1,
-        status: 'failed',
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        errorMessage: expect.stringContaining('工具 query_database 执行超时'),
+        status: 'running',
       },
+      { iteration: 2, status: 'done' },
     ]);
-    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 1 });
   });
 
-  it('stops after repeated tool failures instead of wasting the full iteration budget', async () => {
+  it('changes approach after repeated tool failures and can still finish honestly', async () => {
     const checkpointStore = new AgentCheckpointStore(await checkpointPath());
     const registry = new ToolRegistry();
     registry.register(
@@ -929,18 +1174,36 @@ describe('ReactAgent', () => {
         scriptedProvider([
           {
             text: '',
-            toolCalls: [{ id: 'fail_1', name: 'query_database', arguments: { sql: 'select count(*) from orders' } }],
+            toolCalls: [
+              {
+                id: 'fail_1',
+                name: 'query_database',
+                arguments: { sql: 'select count(*) from orders' },
+              },
+            ],
           },
           {
             text: '',
-            toolCalls: [{ id: 'fail_2', name: 'query_database', arguments: { sql: 'select count(*) from orders' } }],
+            toolCalls: [
+              {
+                id: 'fail_2',
+                name: 'query_database',
+                arguments: { sql: 'select count(*) from orders' },
+              },
+            ],
           },
           {
             text: '',
-            toolCalls: [{ id: 'fail_3', name: 'query_database', arguments: { sql: 'select count(*) from orders' } }],
+            toolCalls: [
+              {
+                id: 'fail_3',
+                name: 'query_database',
+                arguments: { sql: 'select count(*) from orders' },
+              },
+            ],
           },
           {
-            text: 'should not be called',
+            text: '数据库连接持续重置，请恢复连接后在当前会话继续。',
             toolCalls: [],
           },
         ]),
@@ -955,13 +1218,13 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '连续查询直到成功',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 10,
     });
 
-    expect(result.status).toBe('tool_failed');
-    expect(result.iterations).toBe(3);
-    expect(result.finalText).toContain('连续 3 次工具执行失败');
+    expect(result.status).toBe('done');
+    expect(result.iterations).toBe(4);
+    expect(result.finalText).toContain('恢复连接');
     expect(result.toolExecutions).toMatchObject([
       { toolCallId: 'fail_1', status: 'failed' },
       { toolCallId: 'fail_2', status: 'failed' },
@@ -970,14 +1233,13 @@ describe('ReactAgent', () => {
     await expect(checkpointStore.listBySession('session_test')).resolves.toMatchObject([
       { iteration: 1, status: 'running' },
       { iteration: 2, status: 'running' },
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      { iteration: 3, status: 'failed', errorMessage: expect.stringContaining('连续 3 次工具执行失败') },
+      { iteration: 3, status: 'running' },
+      { iteration: 4, status: 'done' },
     ]);
     await expect(checkpointStore.listRecoverable()).resolves.toEqual([]);
-    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0 });
+    await expect(usage.current()).resolves.toMatchObject({ completedRounds: 1 });
     await expect(usage.roundHistory()).resolves.toMatchObject([
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      { sessionId: 'session_test', status: 'failed', errorMessage: expect.stringContaining('连续 3 次工具执行失败') },
+      { sessionId: 'session_test', status: 'success' },
     ]);
   });
 
@@ -993,7 +1255,8 @@ describe('ReactAgent', () => {
         readonly: true,
       },
       (args) => {
-        if (String(args.sql).includes('bad_column')) throw new Error('column bad_column does not exist');
+        if (String(args.sql).includes('bad_column'))
+          throw new Error('column bad_column does not exist');
         return { rows: [{ order_count: 42 }] };
       },
     );
@@ -1003,11 +1266,23 @@ describe('ReactAgent', () => {
         scriptedProvider([
           {
             text: '',
-            toolCalls: [{ id: 'bad_sql', name: 'query_database', arguments: { sql: 'select bad_column from orders' } }],
+            toolCalls: [
+              {
+                id: 'bad_sql',
+                name: 'query_database',
+                arguments: { sql: 'select bad_column from orders' },
+              },
+            ],
           },
           {
             text: '',
-            toolCalls: [{ id: 'fixed_sql', name: 'query_database', arguments: { sql: 'select count(*) from orders' } }],
+            toolCalls: [
+              {
+                id: 'fixed_sql',
+                name: 'query_database',
+                arguments: { sql: 'select count(*) from orders' },
+              },
+            ],
           },
           {
             text: 'order count is 42',
@@ -1025,7 +1300,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: 'Analyze order count',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 3,
     });
 
@@ -1083,21 +1358,23 @@ describe('ReactAgent', () => {
       providerId: 'streaming',
       model: 'fake-stream-model',
       userMessage: '帮我看一下订单总数',
-      mode: 'readonly',
+      mode: 'read',
     });
 
     expect(result.status).toBe('done');
     expect(result.finalText).toBe('订单总数是 42。');
     await expect(streamStore.listRecoverable()).resolves.toEqual([]);
-    await expect(streamStore.listBySession('session_test')).resolves.toMatchObject([{
-      status: 'complete',
-      sessionId: 'session_test',
-      roundId: 'round_test',
-      providerId: 'streaming',
-      model: 'fake-stream-model',
-      text: '订单总数是 42。',
-      chunks: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }],
-    }]);
+    await expect(streamStore.listBySession('session_test')).resolves.toMatchObject([
+      {
+        status: 'complete',
+        sessionId: 'session_test',
+        roundId: 'round_test',
+        providerId: 'streaming',
+        model: 'fake-stream-model',
+        text: '订单总数是 42。',
+        chunks: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }],
+      },
+    ]);
     await expect(usage.current()).resolves.toMatchObject({ completedRounds: 1, totalTokens: 16 });
   });
 
@@ -1117,7 +1394,7 @@ describe('ReactAgent', () => {
         providerId: 'streaming',
         model: 'fake-stream-model',
         userMessage: '分析订单后继续分析退款',
-        mode: 'readonly',
+        mode: 'read',
       }),
     ).rejects.toThrow('stream network reset');
 
@@ -1154,7 +1431,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: 'Run a readonly skill query.',
-      mode: 'readonly',
+      mode: 'read',
       allowedTools: ['query_database'],
     });
 
@@ -1229,21 +1506,20 @@ describe('ReactAgent', () => {
         dangerLevel: 'safe',
         readonly: true,
       },
-      () => ({ rows: Array.from({ length: 200 }, (_, index) => ({ id: index, amount: index * 10 })) }),
+      () => ({
+        rows: Array.from({ length: 200 }, (_, index) => ({ id: index, amount: index * 10 })),
+      }),
     );
-    const agent = new ReactAgent(
-      router,
-      registry,
-      usage,
-      undefined,
-      { ...fixedDependencies(), auditLog },
-    );
+    const agent = new ReactAgent(router, registry, usage, undefined, {
+      ...fixedDependencies(),
+      auditLog,
+    });
 
     const result = await agent.run({
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '分析所有订单明细',
-      mode: 'readonly',
+      mode: 'read',
       initialSession: longRestoredSession(),
       maxIterations: 2,
       keepRecentMessages: 4,
@@ -1251,12 +1527,8 @@ describe('ReactAgent', () => {
     });
 
     expect(result.status).toBe('done');
-    const compactionCalls = calls.filter(
-      (call) => call.metadata?.purpose === 'context-compaction',
-    );
-    const agentCalls = calls.filter(
-      (call) => call.metadata?.purpose !== 'context-compaction',
-    );
+    const compactionCalls = calls.filter((call) => call.metadata?.purpose === 'context-compaction');
+    const agentCalls = calls.filter((call) => call.metadata?.purpose !== 'context-compaction');
     expect(compactionCalls.length).toBeGreaterThan(0);
     expect(agentCalls).toHaveLength(2);
     expect(result.contextCompression).toHaveLength(2);
@@ -1265,9 +1537,7 @@ describe('ReactAgent', () => {
       level: 'conversation-checkpoint',
       activeCheckpointSequence: 1,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      steps: expect.arrayContaining([
-        expect.objectContaining({ type: 'conversation-checkpoint' }),
-      ]),
+      steps: expect.arrayContaining([expect.objectContaining({ type: 'conversation-checkpoint' })]),
     });
     expect(result.contextCompression?.[0]?.phase).toBe('compacted');
     expect(result.session.contextCheckpoint).toMatchObject({
@@ -1294,9 +1564,7 @@ describe('ReactAgent', () => {
       ),
     ).toBe(true);
     expect(
-      agentCalls[0]?.messages.some((message) =>
-        message.content.includes('orders.amount 是金额列'),
-      ),
+      agentCalls[0]?.messages.some((message) => message.content.includes('orders.amount 是金额列')),
     ).toBe(true);
     expect(JSON.stringify(agentCalls[0]?.messages)).not.toContain(
       'coveredConversationMessageCount',
@@ -1314,10 +1582,10 @@ describe('ReactAgent', () => {
         calls.push(request);
         return Promise.resolve({
           text: [
-          '## Goal',
-          '保留已执行 SQL 与精确金额。',
-          '## Actions and results',
-          'select sum(amount) from orders 已执行。',
+            '## Goal',
+            '保留已执行 SQL 与精确金额。',
+            '## Actions and results',
+            'select sum(amount) from orders 已执行。',
           ].join('\n'),
           toolCalls: [],
           usage: {
@@ -1365,11 +1633,9 @@ describe('ReactAgent', () => {
     expect(result.session.messages).toEqual(originalMessages);
     expect(calls.length).toBeGreaterThan(0);
     expect(calls[0]?.messages[1]?.content).toContain('<manual_focus>');
-    expect(
-      calls.every(
-        (call) => !JSON.stringify(call.messages).includes('call_internal_'),
-      ),
-    ).toBe(true);
+    expect(calls.every((call) => !JSON.stringify(call.messages).includes('call_internal_'))).toBe(
+      true,
+    );
   });
 
   it('continues with a deterministic checkpoint when the compaction model returns no summary', async () => {
@@ -1411,7 +1677,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '继续分析订单。',
-      mode: 'readonly',
+      mode: 'read',
       initialSession: longRestoredSession(),
       maxIterations: 1,
       keepRecentMessages: 4,
@@ -1423,20 +1689,20 @@ describe('ReactAgent', () => {
       trigger: 'auto',
       method: 'deterministic-fallback',
     });
+    expect(result.contextCompression).toBeDefined();
+    if (!result.contextCompression) {
+      throw new Error('Expected an automatic context compression report.');
+    }
     expect(result.contextCompression[0]?.warnings).toContain(
       'The model summary failed, so a deterministic recovery checkpoint was used.',
     );
-    const normalCall = calls.find(
-      (call) => call.metadata?.purpose !== 'context-compaction',
-    );
+    const normalCall = calls.find((call) => call.metadata?.purpose !== 'context-compaction');
     expect(
       normalCall?.messages.some((message) =>
         message.content.includes('Goal and user requirements'),
       ),
     ).toBe(true);
-    expect(result.session.contextCheckpoint?.summary).not.toContain(
-      'call_internal_',
-    );
+    expect(result.session.contextCheckpoint?.summary).not.toContain('call_internal_');
   });
 
   it('carries the previous semantic checkpoint into a later automatic compaction', async () => {
@@ -1511,7 +1777,7 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: '继续第二阶段分析。',
-      mode: 'readonly',
+      mode: 'read',
       initialSession: phaseTwoSession,
       maxIterations: 1,
       keepRecentMessages: 4,
@@ -1521,13 +1787,10 @@ describe('ReactAgent', () => {
     expect(result.session.contextCheckpoint?.sequence).toBe(2);
     expect(result.session.contextCheckpoint?.trigger).toBe('auto');
     expect(result.session.contextCheckpoint?.method).toBe('model');
-    expect(result.session.contextCheckpoint?.summary).toContain(
-      'PHASE_TWO_EXACT_1726_50',
-    );
+    expect(result.session.contextCheckpoint?.summary).toContain('PHASE_TWO_EXACT_1726_50');
     const automaticCompactionCalls = calls.filter(
       (call) =>
-        call.metadata?.purpose === 'context-compaction' &&
-        call.metadata?.trigger === 'auto',
+        call.metadata?.purpose === 'context-compaction' && call.metadata?.trigger === 'auto',
     );
     expect(automaticCompactionCalls.length).toBeGreaterThan(0);
     expect(
@@ -1537,23 +1800,17 @@ describe('ReactAgent', () => {
     ).toBe(true);
     expect(
       automaticCompactionCalls.some((call) =>
-        call.messages.some((message) =>
-          message.content.includes('PHASE_TWO_EXACT_1726_50'),
-        ),
+        call.messages.some((message) => message.content.includes('PHASE_TWO_EXACT_1726_50')),
       ),
     ).toBe(true);
-    const normalCalls = calls.filter(
-      (call) => call.metadata?.purpose !== 'context-compaction',
-    );
+    const normalCalls = calls.filter((call) => call.metadata?.purpose !== 'context-compaction');
     const normalCall = normalCalls[normalCalls.length - 1];
     expect(
       normalCall?.messages.some((message) =>
         message.content.includes('PHASE_ONE 与 PHASE_TWO_EXACT_1726_50'),
       ),
     ).toBe(true);
-    expect(result.session.messages.length).toBe(
-      phaseTwoSession.messages.length + 2,
-    );
+    expect(result.session.messages.length).toBe(phaseTwoSession.messages.length + 2);
   });
 
   it('bounds large tool results before persisting them into the session and model context', async () => {
@@ -1561,7 +1818,13 @@ describe('ReactAgent', () => {
     const { provider, calls } = scriptedProviderWithCalls([
       {
         text: '',
-        toolCalls: [{ id: 'large_export', name: 'query_database', arguments: { sql: 'select * from event_logs' } }],
+        toolCalls: [
+          {
+            id: 'large_export',
+            name: 'query_database',
+            arguments: { sql: 'select * from event_logs' },
+          },
+        ],
       },
       {
         text: 'The large result was summarized before analysis.',
@@ -1584,13 +1847,19 @@ describe('ReactAgent', () => {
         })),
       }),
     );
-    const agent = new ReactAgent(new LlmRouter(usage, [provider]), registry, usage, undefined, fixedDependencies());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
 
     const result = await agent.run({
       providerId: 'fake',
       model: 'fake-model',
       userMessage: 'Analyze a large event log export.',
-      mode: 'readonly',
+      mode: 'read',
       maxIterations: 2,
       maxToolResultChars: 260,
     });
@@ -1602,8 +1871,12 @@ describe('ReactAgent', () => {
     expect(result.toolExecutions[0]?.resultPreview).toContain('tool_result_too_large');
     expect(toolMessage?.content.length).toBeLessThanOrEqual(260);
     expect(toolMessage?.content).toContain('tool_result_too_large');
-    expect(calls[1]?.messages.some((message) => message.content.includes('tool_result_too_large'))).toBe(true);
-    expect(calls[1]?.messages.some((message) => message.content.includes('large-payload-499'))).toBe(false);
+    expect(
+      calls[1]?.messages.some((message) => message.content.includes('tool_result_too_large')),
+    ).toBe(true);
+    expect(
+      calls[1]?.messages.some((message) => message.content.includes('large-payload-499')),
+    ).toBe(false);
   });
 
   it('denies tool calls that are registered but not allowed for the current run', async () => {
@@ -1638,7 +1911,13 @@ describe('ReactAgent', () => {
         scriptedProvider([
           {
             text: '',
-            toolCalls: [{ id: 'hidden_write', name: 'execute_sql', arguments: { sql: 'drop table orders' } }],
+            toolCalls: [
+              { id: 'hidden_write', name: 'execute_sql', arguments: { sql: 'drop table orders' } },
+            ],
+          },
+          {
+            text: '当前工具策略不允许结构变更，因此没有执行。',
+            toolCalls: [],
           },
         ]),
       ]),
@@ -1652,13 +1931,13 @@ describe('ReactAgent', () => {
       providerId: 'fake',
       model: 'fake-model',
       userMessage: 'Run a skill that allows readonly query only.',
-      mode: 'full-auto',
+      mode: 'full',
       allowedTools: ['query_database'],
     });
 
-    expect(result.status).toBe('permission_denied');
+    expect(result.status).toBe('done');
     expect(writeExecuted).toBe(false);
-    expect(result.finalText).toBe('Tool is not allowed for this run.');
+    expect(result.finalText).toContain('没有执行');
     expect(result.toolExecutions).toMatchObject([
       {
         toolCallId: 'hidden_write',
@@ -1670,6 +1949,7 @@ describe('ReactAgent', () => {
   });
 
   it('counts user-aborted Agent rounds without calling the model', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointPath());
     const usage = new UsageTracker(await usagePath());
     const { provider, calls } = scriptedProviderWithCalls([
       {
@@ -1683,31 +1963,84 @@ describe('ReactAgent', () => {
       registryWithQueryTool(),
       usage,
       undefined,
-      fixedDependencies(),
+      { ...fixedDependencies(), checkpointStore },
     );
 
     const result = await agent.run({
       providerId: 'fake',
       model: 'fake-model',
       userMessage: 'Start then stop.',
-      mode: 'readonly',
+      mode: 'read',
       signal,
     });
 
     expect(result.status).toBe('aborted');
+    expect(result.completion).toEqual({
+      verified: false,
+      unresolvedTaskIds: [],
+    });
     expect(calls).toHaveLength(0);
+    await expect(checkpointStore.listBySession(result.session.id)).resolves.toMatchObject([
+      { iteration: 0, status: 'aborted' },
+    ]);
     await expect(usage.current()).resolves.toMatchObject({ completedRounds: 1 });
     await expect(usage.roundHistory()).resolves.toMatchObject([{ status: 'aborted' }]);
   });
 
+  it('marks max-iteration exhaustion as unverified and non-successful', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointPath());
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'still_working',
+                name: 'query_database',
+                arguments: { sql: 'select count(*) from orders' },
+              },
+            ],
+          },
+        ]),
+      ]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      { ...fixedDependencies(), checkpointStore },
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Keep investigating until the evidence is complete.',
+      mode: 'read',
+      maxIterations: 1,
+    });
+
+    expect(result.status).toBe('max_iterations_reached');
+    expect(result.completion).toEqual({
+      verified: false,
+      unresolvedTaskIds: [],
+    });
+    await expect(checkpointStore.listBySession(result.session.id)).resolves.toMatchObject([
+      { iteration: 1, status: 'failed' },
+    ]);
+    await expect(usage.roundHistory()).resolves.toMatchObject([
+      { sessionId: result.session.id, status: 'failed' },
+    ]);
+  });
+
   it('does not count provider infrastructure failures as completed Agent rounds', async () => {
+    const checkpointStore = new AgentCheckpointStore(await checkpointPath());
     const usage = new UsageTracker(await usagePath());
     const agent = new ReactAgent(
       new LlmRouter(usage, [throwingProvider('provider timeout')]),
       registryWithQueryTool(),
       usage,
       undefined,
-      fixedDependencies(),
+      { ...fixedDependencies(), checkpointStore },
     );
 
     await expect(
@@ -1715,13 +2048,16 @@ describe('ReactAgent', () => {
         providerId: 'throwing',
         model: 'fake-model',
         userMessage: 'Analyze orders.',
-        mode: 'readonly',
+        mode: 'read',
       }),
     ).rejects.toThrow('provider timeout');
 
     await expect(usage.current()).resolves.toMatchObject({ completedRounds: 0 });
     await expect(usage.roundHistory()).resolves.toMatchObject([
       { sessionId: 'session_test', status: 'failed', errorMessage: 'provider timeout' },
+    ]);
+    await expect(checkpointStore.listBySession('session_test')).resolves.toMatchObject([
+      { iteration: 1, status: 'failed', errorMessage: 'provider timeout' },
     ]);
   });
 });
@@ -1768,7 +2104,10 @@ function scriptedProvider(script: LlmChatResponse[]): LlmProvider {
   return scriptedProviderWithCalls(script).provider;
 }
 
-function scriptedProviderWithCalls(script: LlmChatResponse[]): { provider: LlmProvider; calls: LlmChatRequest[] } {
+function scriptedProviderWithCalls(script: LlmChatResponse[]): {
+  provider: LlmProvider;
+  calls: LlmChatRequest[];
+} {
   const calls: LlmChatRequest[] = [];
   const provider: LlmProvider = {
     id: 'fake',
@@ -1886,7 +2225,7 @@ function longRestoredSession() {
   const session = createAgentSession({
     id: 'session_test',
     title: 'Long restored session',
-    mode: 'readonly',
+    mode: 'read',
     now: fixedDependencies().now,
   });
   appendMessage(

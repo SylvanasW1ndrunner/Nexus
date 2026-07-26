@@ -2,7 +2,18 @@ export * from '@dbagent/core-llm';
 export type {
   AgentContextCheckpoint,
   AgentContextCompactionResult,
+  AgentMode,
   AgentSession,
+  AgentUserEvent,
+  AgentProjectContext,
+  AgentProjectReference,
+} from '@dbagent/core-agent';
+export {
+  initializeAgentProject,
+  findAgentProject,
+  openAgentProject,
+  defaultAgentStateDatabasePath,
+  defaultAgentUserSkillsDirectory,
 } from '@dbagent/core-agent';
 export * from './errors.js';
 export * from './parse-generation.js';

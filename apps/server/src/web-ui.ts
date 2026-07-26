@@ -90,7 +90,7 @@ export const WEB_UI_HTML = `<!doctype html>
             <label>Host<input id="dbHost" value="127.0.0.1"></label>
             <label>Port<input id="dbPort" type="number" value="5432"></label>
           </div>
-          <label>Database<input id="dbName" value="dbagent_demo"></label>
+          <label>Database<input id="dbName" value="schemanaut_demo"></label>
           <label>Username<input id="dbUser" value="postgres"></label>
           <label>Password<input id="dbPassword" type="password" autocomplete="new-password"></label>
           <label class="check"><input id="dbSsl" type="checkbox"> 使用 SSL</label>

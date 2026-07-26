@@ -101,16 +101,16 @@ packages/shared/src/
 
 职责：
 
-| 文件 | 当前职责 |
-|---|---|
-| [`common.ts`](../../packages/shared/src/contracts/common.ts) | 合同版本、Envelope、可传输值、公共错误基础字段 |
-| [`resource.ts`](../../packages/shared/src/contracts/resource.ts) | 资源、关系、事实、观测、状态、事件和变更集 |
-| [`database-sdk.ts`](../../packages/shared/src/contracts/database-sdk.ts) | 已有 SDK 数据库连接、Schema 与执行结果合同 |
-| [`database-runtime.ts`](../../packages/shared/src/contracts/database-runtime.ts) | 已有 SQL 安全、执行与运行时合同 |
-| [`database.ts`](../../packages/shared/src/contracts/database.ts) | 统一连接、能力、任务、事务、操作和数据库错误合同 |
-| [`result.ts`](../../packages/shared/src/contracts/result.ts) | 类型安全的成功/失败结果 |
-| [`validation.ts`](../../packages/shared/src/contracts/validation.ts) | 当前合同的运行时断言、传输编码和 Secret 检查 |
-| [`index.ts`](../../packages/shared/src/contracts/index.ts) | 受控导出 |
+| 文件                                                                             | 当前职责                                         |
+| -------------------------------------------------------------------------------- | ------------------------------------------------ |
+| [`common.ts`](../../packages/shared/src/contracts/common.ts)                     | 合同版本、Envelope、可传输值、公共错误基础字段   |
+| [`resource.ts`](../../packages/shared/src/contracts/resource.ts)                 | 资源、关系、事实、观测、状态、事件和变更集       |
+| [`database-sdk.ts`](../../packages/shared/src/contracts/database-sdk.ts)         | 已有 SDK 数据库连接、Schema 与执行结果合同       |
+| [`database-runtime.ts`](../../packages/shared/src/contracts/database-runtime.ts) | 已有 SQL 安全、执行与运行时合同                  |
+| [`database.ts`](../../packages/shared/src/contracts/database.ts)                 | 统一连接、能力、任务、事务、操作和数据库错误合同 |
+| [`result.ts`](../../packages/shared/src/contracts/result.ts)                     | 类型安全的成功/失败结果                          |
+| [`validation.ts`](../../packages/shared/src/contracts/validation.ts)             | 当前合同的运行时断言、传输编码和 Secret 检查     |
+| [`index.ts`](../../packages/shared/src/contracts/index.ts)                       | 受控导出                                         |
 
 原有散落在根目录的 `domain.ts`、`runtime-contracts.ts` 和 `result.ts` 已删除；现有数据库合同按职责迁入 `contracts/`。兼容性通过根包导出名称维持，不保留两份定义，也不预设 AI SQL、Agent、治理、MCP 或 Skills 的未来字段。
 
@@ -147,11 +147,11 @@ Envelope 用于跨进程、持久化 Snapshot、Fixture 和外部扩展边界。
 
 Node.js 原生值使用显式标签编码：
 
-| 原生值 | 传输形式 |
-|---|---|
-| `bigint` | 十进制字符串及 `bigint` 标签 |
-| `Date` | ISO 8601 字符串及 `datetime` 标签 |
-| `Uint8Array`/`Buffer` | Base64 字符串及 `binary` 标签 |
+| 原生值                | 传输形式                          |
+| --------------------- | --------------------------------- |
+| `bigint`              | 十进制字符串及 `bigint` 标签      |
+| `Date`                | ISO 8601 字符串及 `datetime` 标签 |
+| `Uint8Array`/`Buffer` | Base64 字符串及 `binary` 标签     |
 
 拒绝：
 
@@ -167,14 +167,14 @@ Node.js 原生值使用显式标签编码：
 
 公共错误基础字段：
 
-| 字段 | 含义 |
-|---|---|
-| `code` | 稳定机器错误码 |
-| `message` | 可向用户展示的简明信息 |
-| `detail` | 可选脱敏详情 |
-| `retryable` | 调用方能否按语义重试 |
-| `outcome` | 当前动作确定未改变、已改变或结果未知 |
-| `recovery` | 可选恢复建议 |
+| 字段        | 含义                                 |
+| ----------- | ------------------------------------ |
+| `code`      | 稳定机器错误码                       |
+| `message`   | 可向用户展示的简明信息               |
+| `detail`    | 可选脱敏详情                         |
+| `retryable` | 调用方能否按语义重试                 |
+| `outcome`   | 当前动作确定未改变、已改变或结果未知 |
+| `recovery`  | 可选恢复建议                         |
 
 领域错误可以增加 `category`、`stage`、资源 ID、任务 ID 和 Provider 原始代码，但不能删除公共含义或返回 Secret。
 
@@ -312,15 +312,15 @@ Fixture 是兼容性证据，不是完整业务样例库。
 
 工程入口：
 
-| 边界 | 代码与验收 |
-|---|---|
-| Shared 根出口 | [`packages/shared/src/index.ts`](../../packages/shared/src/index.ts) |
-| SDK 根出口 | [`packages/sdk/src/index.ts`](../../packages/sdk/src/index.ts) |
-| REST 输入与输出 | [`apps/server/src/server.ts`](../../apps/server/src/server.ts) |
-| 合同功能测试 | [`packages/shared/test`](../../packages/shared/test/) |
-| v1 兼容 Fixture | [`packages/shared/test/fixtures/v1`](../../packages/shared/test/fixtures/v1/) |
-| npm 独立解包验收 | [`verify-npm-package.mjs`](../../scripts/verify-npm-package.mjs) |
-| 性能基准 | [`run-public-contracts-benchmark.mjs`](../../scripts/run-public-contracts-benchmark.mjs) |
+| 边界             | 代码与验收                                                                               |
+| ---------------- | ---------------------------------------------------------------------------------------- |
+| Shared 根出口    | [`packages/shared/src/index.ts`](../../packages/shared/src/index.ts)                     |
+| SDK 根出口       | [`packages/sdk/src/index.ts`](../../packages/sdk/src/index.ts)                           |
+| REST 输入与输出  | [`apps/server/src/server.ts`](../../apps/server/src/server.ts)                           |
+| 合同功能测试     | [`packages/shared/test`](../../packages/shared/test/)                                    |
+| v1 兼容 Fixture  | [`packages/shared/test/fixtures/v1`](../../packages/shared/test/fixtures/v1/)            |
+| npm 独立解包验收 | [`verify-npm-package.mjs`](../../scripts/verify-npm-package.mjs)                         |
+| 性能基准         | [`run-public-contracts-benchmark.mjs`](../../scripts/run-public-contracts-benchmark.mjs) |
 
 ## 11. 关键流程
 
@@ -369,16 +369,16 @@ Secret 检查只应用于明确禁止凭据的连接档案、资源、快照、�
 
 基准只测公共合同处理开销，不包含业务运行时、数据库和网络。
 
-| 指标 | 数据规模 | 目标 | 本地实测 |
-|---|---:|---:|---:|
-| 资源合同校验 P95 | 10,000 次 | ≤ 1 ms | 0.0148 ms |
-| 查询提交合同校验 P95 | 10,000 次 | ≤ 1 ms | 0.0044 ms |
-| 普通对象传输编码 P95 | 10,000 次 | ≤ 1 ms | 0.0035 ms |
-| 1,000 行混合结果编码 | 1,000 次 | P95 ≤ 10 ms | 3.5590 ms |
-| 10 MB 公共载荷编码 | 单次 | ≤ 250 ms | 10.0056 ms |
-| Fixture 兼容检查 | 全部当前 Fixture | 100% 通过 | 4/4 |
+| 指标                 |         数据规模 |    验收阈值 |
+| -------------------- | ---------------: | ----------: |
+| 资源合同校验 P95     |        10,000 次 |      ≤ 1 ms |
+| 查询提交合同校验 P95 |        10,000 次 |      ≤ 1 ms |
+| 普通对象传输编码 P95 |        10,000 次 |      ≤ 1 ms |
+| 1,000 行混合结果编码 |         1,000 次 | P95 ≤ 10 ms |
+| 10 MB 公共载荷编码   |             单次 |    ≤ 250 ms |
+| Fixture 兼容检查     | 全部当前 Fixture |   100% 通过 |
 
-本地实测环境为 Node.js 24.14.0、Windows 10、Intel i9-13900HX；结果见 [`performance.json`](../../reports/public-contracts/performance.json)。报告包含环境、样本、阈值、实际值和逐项结论。
+[`performance.json`](../../reports/public-contracts/performance.json) 是 `generatedAt`、运行环境、数据规模、实测值、阈值和逐项结论的唯一事实来源；文档不复制会随机器与候选源码变化的历史数值。
 
 ## 14. 测试入口
 

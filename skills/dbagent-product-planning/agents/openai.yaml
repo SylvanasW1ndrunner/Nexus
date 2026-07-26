@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent Product Planning"
-  short_description: "Plan product modules and milestones"
-  default_prompt: "Use $dbagent-product-planning to choose the next DBAgent milestone and acceptance criteria."

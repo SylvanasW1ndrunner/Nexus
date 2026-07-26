@@ -22,15 +22,27 @@ import type {
   AgentContextCompactionResult,
   AgentRunDependencies,
   AgentRunResult,
+  AgentRunStatus,
   AgentSessionStore,
   AgentSession,
+  AgentSessionListFilter,
+  AgentTaskPlan,
+  AgentArtifactReference,
+  AgentToolApprovalRequest,
+  AgentUserEvent,
   ApprovalProvider,
 } from '@dbagent/core-agent';
+import type { SkillCatalogEntry, SkillOverlay, SkillRefreshResult } from '@dbagent/core-skills';
+import type { SchemaRagEngine, SchemaRagRetrievalProfile } from '@dbagent/core-rag';
 import type {
-  SchemaRagEngine,
-  SchemaRagRetrievalProfile,
-} from '@dbagent/core-rag';
-import type { AiSqlResultStore } from '@dbagent/core-tools';
+  AgentWebAdapter,
+  AiSqlResultStore,
+  McpSecretResolver,
+  McpServerInput,
+  McpServerSource,
+  McpServerStatus,
+  McpTransport,
+} from '@dbagent/core-tools';
 import type { UsageTracker } from '@dbagent/core-usage';
 import type { QueryExecutionResult, QuerySafetyReport, SavedConnection } from '@dbagent/shared';
 import type { DatabaseAgentErrorCode } from './errors.js';
@@ -48,6 +60,11 @@ export type DatabaseAgentRuntimeOptions = {
   credentialResolver?: CredentialResolver;
   databaseAuditSink?: DatabaseAuditSink;
   rag?: SchemaRagEngine;
+  /**
+   * Optional directory for durable Schema RAG snapshots. Relative paths are
+   * resolved from the selected Project root. Omit to keep indexes in memory.
+   */
+  schemaSnapshotDirectory?: string;
   retrievalProfile?: SchemaRagRetrievalProfile;
   createRunId?: () => string;
   createConnectionId?: () => string;
@@ -59,6 +76,20 @@ export type DatabaseAgentRuntimeOptions = {
   sessionStore?: AgentSessionStore;
   sessionDatabasePath?: string;
   resultStore?: AiSqlResultStore;
+  projectDirectory?: string;
+  userSkillsDirectory?: string;
+  /**
+   * Default Session-private Markdown Skills copied into each newly created
+   * Session. Restored Sessions keep their own persisted overlay.
+   */
+  sessionSkills?: SkillOverlay[];
+  webAdapter?: AgentWebAdapter;
+  /** Register the host-permission shell tool. Disabled by default. */
+  enableShellTool?: boolean;
+  dynamicToolDiscovery?: boolean;
+  mcpSecretResolver?: McpSecretResolver;
+  /** Lazily start trusted MCP configurations marked autoStart. Disabled by default. */
+  autoStartMcp?: boolean;
 };
 
 export type PostgresConnectionInput = {
@@ -69,7 +100,7 @@ export type PostgresConnectionInput = {
   database: string;
   username: string;
   password?: string;
-  ssl?: boolean | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
+  ssl?: boolean | 'require' | 'verify-ca' | 'verify-full';
   connectionTimeoutMs?: number;
   statementTimeoutMs?: number;
   readOnly?: boolean;
@@ -110,8 +141,14 @@ export type RunAiSqlAgentInput = {
   mode?: Extract<AgentMode, 'read' | 'edit' | 'full'>;
   session?: AgentSession;
   sessionId?: string;
+  /**
+   * Session-private Markdown Skills for a new Session. This overrides the
+   * Runtime default and cannot be supplied when resuming a Session.
+   */
+  sessionSkills?: SkillOverlay[];
   maxIterations?: number;
   maxToolExecutionMs?: number;
+  onEvent?: (event: AgentUserEvent) => void | Promise<void>;
   signal?: AbortSignal;
 };
 
@@ -125,8 +162,95 @@ export type CompactAiSqlAgentSessionInput = {
 export type CompactAiSqlAgentSessionResult = AgentContextCompactionResult;
 
 export type AiSqlAgentRun = {
-  selectedSkill: string;
+  activatedSkills: string[];
   result: AgentRunResult;
+};
+
+/**
+ * User-facing conversation view. Internal tool messages, tool calls,
+ * knowledge hashes and activated Skill instructions are deliberately omitted.
+ */
+export type AgentSessionView = {
+  id: string;
+  title: string;
+  userId?: string;
+  mode: AgentMode;
+  messages: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    createdAt: string;
+  }>;
+  tokenUsage: LlmUsage;
+  project?: {
+    rootPath: string;
+  };
+  taskPlan?: AgentTaskPlan;
+  artifacts?: AgentArtifactReference[];
+  activeSkills?: SkillCatalogEntry[];
+  aborted: boolean;
+};
+
+export type AiSqlAgentRunView = {
+  activatedSkills: string[];
+  result: {
+    status: AgentRunStatus;
+    session: AgentSessionView;
+    finalText: string;
+    iterations: number;
+    events?: AgentUserEvent[];
+    artifacts?: AgentArtifactReference[];
+    completion?: {
+      verified: boolean;
+      unresolvedTaskIds: string[];
+    };
+  };
+};
+
+export type AgentSessionListInput = AgentSessionListFilter;
+export type AgentSessionListItem = {
+  id: string;
+  title: string;
+  userId?: string;
+  mode: AgentMode;
+  archived: boolean;
+  conversationMessageCount: number;
+  tokenUsage: LlmUsage;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt?: string;
+};
+export type AgentSkillCatalogEntry = SkillCatalogEntry;
+export type AgentSkillRefreshResult = SkillRefreshResult;
+export type AgentSkillListInput = {
+  /** Omit for the shared system/user/Project catalog. */
+  sessionId?: string;
+};
+export type AgentApprovalRequest = AgentToolApprovalRequest;
+
+export type McpServerRegistrationInput = McpServerInput;
+
+export type McpServerSummary = {
+  id: string;
+  name: string;
+  source: McpServerSource;
+  transport: McpTransport;
+  enabled: boolean;
+  autoStart: boolean;
+  running: boolean;
+  status: McpServerStatus;
+  healthy: boolean;
+  warnings: string[];
+};
+
+export type McpServerStartSummary = {
+  server: McpServerSummary;
+  tools: string[];
+};
+
+export type McpServerStopSummary = {
+  serverId: string;
+  removedTools: string[];
+  status: McpServerStatus;
 };
 
 export type ExecuteGeneratedOptions = {

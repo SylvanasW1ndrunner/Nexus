@@ -1,5 +1,5 @@
 {
-  "contract": "dbagent.resource-registry.snapshot",
+  "contract": "schemanaut.resource-registry.snapshot",
   "version": "1.0",
   "payload": {
     "contractVersion": "1.0",

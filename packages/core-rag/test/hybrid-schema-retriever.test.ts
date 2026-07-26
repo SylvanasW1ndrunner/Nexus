@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TableDetail } from '@dbagent/shared';
 import { SchemaRagEngine } from '../src/index.js';
+import { column } from './schema-fixtures.js';
 
 describe('hybrid schema retriever', () => {
   it('keeps explicit column references ahead of broader keyword matches', () => {
@@ -216,22 +217,4 @@ function trafficTables(): TableDetail[] {
       ],
     },
   ];
-}
-
-function column(
-  name: string,
-  ordinal: number,
-  dataType: string,
-  nullable: boolean,
-  comment?: string,
-  isPrimaryKey = false,
-) {
-  return {
-    name,
-    ordinal,
-    dataType,
-    nullable,
-    comment,
-    isPrimaryKey,
-  };
 }

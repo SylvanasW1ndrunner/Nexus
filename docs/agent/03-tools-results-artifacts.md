@@ -1,0 +1,70 @@
+# Tools、结果与产物
+
+## 1. 目的
+
+以一个统一 Tool Registry 承载内置工具、数据库工具、工作区工具、MCP 工具和子 Agent 工具，并通过动态发现与结果投影控制上下文。
+
+## 2. 工具类别
+
+| 类别     | 能力                                    |
+| -------- | --------------------------------------- |
+| 工作状态 | 创建、读取、更新任务                    |
+| 交互     | 请求用户补充和单次批准                  |
+| 能力发现 | 搜索 Tool、加载 Tool Schema、加载 Skill |
+| 工作区   | 列目录、搜索、读取、写入和局部编辑文件  |
+| 终端     | 宿主显式启用后执行有界命令              |
+| 网络     | Web Search 与 Web Fetch 适配器          |
+| 数据库   | 资源、知识、SQL、EXPLAIN 和结果         |
+| 编排     | 创建、补充、等待和停止子 Agent          |
+
+Tool Registry 只提供统一描述、权限、Schema、执行函数和来源元数据。来源协议留在适配器内部。
+
+## 3. 动态发现与调度
+
+- 少量编排工具和高频数据库工具可常驻。
+- 大量 MCP、项目和未来能力只先暴露名称、描述与来源。
+- Agent 通过 Tool Search 加载完整输入 Schema。
+- 只读且相互独立的调用可以并行；写入和有顺序依赖的调用串行。
+- 调度统一处理权限、超时、取消、输出上限、健康和审计。
+
+文件工具默认启用，`shell_run` 默认不注册。只有可信宿主设置 `enableShellTool: true` 后才开放，并且仍要求 `full` 模式。其工作目录受 Project 限制、环境变量采用白名单，但子进程仍继承宿主操作系统权限，不是系统沙箱。
+
+## 4. 数据库计算下推
+
+```text
+自然语言
+→ Agent 生成 SQL
+→ 数据库完成过滤 / 聚合 / Join / Window / 异常检测
+→ 完整结果进入结果存储或用户界面
+→ 最小必要投影进入 Agent
+```
+
+结果投影规则：
+
+- 单值、小型聚合和 Top-N 小结果可以直接返回。
+- 数据形态探索只返回有限样例、枚举或 JSON 结构。
+- 大结果返回列、行数、耗时、截断状态和 Session 隔离的结果句柄。
+- Agent 需要更多证据时，按列、页或范围继续读取。
+- 数据库错误必须返回，以便修正 SQL。
+- 完整业务结果不写入长期模型上下文。
+- 进程内 Result Store 同时限制过期时间、条目数和单结果字符数；关闭 Runtime 或删除 Session 时清理对应句柄。
+
+第一版不默认把数据库结果搬到 Python、Pandas 或模型中再次统计。
+
+## 5. 文件与产物
+
+Agent 可以在打开的项目范围内生成和修改普通文件。复杂 SQL 优先保存到 `sql/`，报告和导出进入用户指定目录或 `artifacts/`。
+
+SDK 使用通用产物引用报告路径、媒体类型、大小和来源，不限制具体文件格式。用户可以继续读取和修改同一脚本。
+
+## 6. 用户返回边界
+
+Tool 可以返回模型完成下一步所需的句柄和语义字段，但用户轨迹不显示内部 Tool Call ID、动作签名、检索分数、知识 Hash 或结果存储 ID。
+
+工程入口：
+
+- Tool Registry：`packages/core-agent/src/tool-registry.ts`
+- 通用工具：`packages/core-tools/src/agent-runtime-tools.ts`
+- 工作区工具：`packages/core-tools/src/workspace-tools.ts`
+- AI SQL 工具：`packages/core-tools/src/ai-sql-tools.ts`
+- 结果存储：`packages/core-tools/src/ai-sql-tools.ts`

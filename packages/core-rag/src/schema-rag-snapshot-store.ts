@@ -456,7 +456,15 @@ function isSchemaRagIndexManifest(
     typeof value.retrievalProfileVersion === 'number' &&
     typeof value.documentCount === 'number' &&
     typeof value.indexVersion === 'string' &&
-    typeof value.createdAt === 'string'
+    typeof value.createdAt === 'string' &&
+    (value.sourceTableCount === undefined ||
+      (typeof value.sourceTableCount === 'number' &&
+        Number.isInteger(value.sourceTableCount) &&
+        value.sourceTableCount >= 0)) &&
+    (value.maxTables === undefined ||
+      (typeof value.maxTables === 'number' &&
+        Number.isInteger(value.maxTables) &&
+        value.maxTables > 0))
   );
 }
 

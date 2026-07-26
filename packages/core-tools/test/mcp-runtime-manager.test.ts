@@ -1,6 +1,7 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ToolRegistry } from '@dbagent/core-agent';
 import {
@@ -10,11 +11,12 @@ import {
   type McpHealthManagerOptions,
   McpRuntimeManager,
   McpToolRegistrationManager,
-  type McpRuntimeClient,
-  type McpServerConfig,
+  type McpRuntimeLauncher,
+  type McpToolSpec,
 } from '../src/index.js';
 
 const tempDirs: string[] = [];
+const FIXTURE_SERVER = fileURLToPath(new URL('./fixtures/mcp-fixture-server.mjs', import.meta.url));
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -35,14 +37,92 @@ describe('McpRuntimeManager', () => {
     const result = await harness.runtime.start('warehouse');
 
     expect(result.tools).toEqual(['warehouse__list_tables']);
+    expect(result.descriptor).toMatchObject({
+      serverId: 'warehouse',
+      capabilities: { tools: { listChanged: true } },
+    });
     expect(result.health.status).toBe('healthy');
     expect(harness.runtime.isRunning('warehouse')).toBe(true);
+    await expect(harness.runtime.ping('warehouse')).resolves.toBeUndefined();
+    await expect(harness.runtime.listResources('warehouse')).resolves.toEqual([]);
+    await expect(harness.runtime.listResourceTemplates('warehouse')).resolves.toEqual([]);
+    await expect(harness.runtime.readResource('warehouse', 'fixture://empty')).resolves.toEqual({
+      contents: [],
+    });
+    await expect(harness.runtime.listPrompts('warehouse')).resolves.toEqual([]);
+    await expect(harness.runtime.getPrompt('warehouse', 'empty')).resolves.toEqual({
+      messages: [],
+    });
     await expect(
       harness.registry.get('warehouse__list_tables')?.handler({ schema: 'public' }, toolContext()),
     ).resolves.toEqual({
       toolName: 'list_tables',
       args: { schema: 'public' },
     });
+  });
+
+  it('coalesces concurrent starts and keeps repeated starts idempotent', async () => {
+    const harness = await runtimeHarness();
+    await harness.store.upsert({
+      id: 'warehouse',
+      name: 'Warehouse Tools',
+      command: 'node',
+    });
+
+    const first = harness.runtime.start('warehouse');
+    const second = harness.runtime.start('warehouse');
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    const repeated = await harness.runtime.start('warehouse');
+
+    expect(second).toBe(first);
+    expect(secondResult).toEqual(firstResult);
+    expect(repeated.tools).toEqual(['warehouse__list_tables']);
+    expect(harness.launchedServers).toEqual(['warehouse']);
+    expect(harness.stoppedClients).toEqual([]);
+  });
+
+  it('restarts a healthy client when its launch configuration changed', async () => {
+    const harness = await runtimeHarness();
+    await harness.store.upsert({
+      id: 'warehouse',
+      name: 'Warehouse Tools',
+      command: 'node',
+      args: ['first.mjs'],
+    });
+    await harness.runtime.start('warehouse');
+    await harness.store.upsert({
+      id: 'warehouse',
+      name: 'Warehouse Tools',
+      command: 'node',
+      args: ['second.mjs'],
+    });
+
+    await harness.runtime.start('warehouse');
+
+    expect(harness.launchedServers).toEqual(['warehouse', 'warehouse']);
+    expect(harness.stoppedClients).toEqual(['warehouse']);
+    expect(harness.runtime.isRunning('warehouse')).toBe(true);
+  });
+
+  it('serializes a start-stop-start race and leaves exactly the final client running', async () => {
+    const harness = await runtimeHarness();
+    await harness.store.upsert({
+      id: 'warehouse',
+      name: 'Warehouse Tools',
+      command: 'node',
+    });
+
+    const firstStart = harness.runtime.start('warehouse');
+    const stop = harness.runtime.stop('warehouse');
+    const finalStart = harness.runtime.start('warehouse');
+    await Promise.all([firstStart, stop, finalStart]);
+
+    expect(harness.launchedServers).toEqual(['warehouse', 'warehouse']);
+    expect(harness.stoppedClients).toEqual(['warehouse']);
+    expect(harness.runtime.isRunning('warehouse')).toBe(true);
+    expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual([
+      'warehouse__list_tables',
+    ]);
   });
 
   it('stops a running MCP server and removes its tools from Agent exposure', async () => {
@@ -59,9 +139,44 @@ describe('McpRuntimeManager', () => {
     expect(harness.stoppedClients).toEqual(['warehouse']);
   });
 
+  it('stops every running MCP server during runtime shutdown without touching inactive configs', async () => {
+    const harness = await runtimeHarness();
+    await harness.store.upsert({
+      id: 'alpha',
+      name: 'Alpha Tools',
+      command: 'node',
+    });
+    await harness.store.upsert({
+      id: 'beta',
+      name: 'Beta Tools',
+      command: 'node',
+    });
+    await harness.store.upsert({
+      id: 'inactive',
+      name: 'Inactive Tools',
+      command: 'node',
+    });
+    await harness.runtime.start('beta');
+    await harness.runtime.start('alpha');
+
+    const stopped = await harness.runtime.stopAll();
+
+    expect(stopped.map((result) => result.serverId)).toEqual(['alpha', 'beta']);
+    expect(harness.stoppedClients).toEqual(['alpha', 'beta']);
+    expect(harness.registry.llmTools()).toEqual([]);
+    expect(harness.runtime.isRunning('alpha')).toBe(false);
+    expect(harness.runtime.isRunning('beta')).toBe(false);
+    expect(harness.runtime.health('inactive').status).toBe('stopped');
+  });
+
   it('does not launch disabled MCP servers and marks them disabled', async () => {
     const harness = await runtimeHarness();
-    await harness.store.upsert({ id: 'disabled', name: 'Disabled', command: 'node', enabled: false });
+    await harness.store.upsert({
+      id: 'disabled',
+      name: 'Disabled',
+      command: 'node',
+      enabled: false,
+    });
 
     const result = await harness.runtime.start('disabled');
 
@@ -93,13 +208,62 @@ describe('McpRuntimeManager', () => {
     const harness = await runtimeHarness();
     await harness.store.upsert({ id: 'auto', name: 'Auto', command: 'node', autoStart: true });
     await harness.store.upsert({ id: 'manual', name: 'Manual', command: 'node', autoStart: false });
-    await harness.store.upsert({ id: 'disabled', name: 'Disabled', command: 'node', autoStart: true, enabled: false });
+    await harness.store.upsert({
+      id: 'disabled',
+      name: 'Disabled',
+      command: 'node',
+      autoStart: true,
+      enabled: false,
+    });
 
     const results = await harness.runtime.startAutoStart();
 
     expect(results.map((result) => result.server.id)).toEqual(['auto']);
     expect(harness.launchedServers).toEqual(['auto']);
     expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual(['auto__list_tables']);
+  });
+
+  it('does not auto-start servers whose autoStart flag was omitted', async () => {
+    const harness = await runtimeHarness();
+    await harness.store.upsert({
+      id: 'manual',
+      name: 'Manual',
+      command: 'node',
+    });
+
+    await expect(harness.runtime.startAutoStart()).resolves.toEqual([]);
+    expect(harness.launchedServers).toEqual([]);
+    expect(harness.runtime.isRunning('manual')).toBe(false);
+  });
+
+  it('atomically replaces Agent tools when the MCP server emits tools/list_changed', async () => {
+    const harness = await runtimeHarness();
+    await harness.store.upsert({ id: 'warehouse', name: 'Warehouse Tools', command: 'node' });
+    await harness.runtime.start('warehouse');
+
+    harness.emitToolsChanged('warehouse', [
+      {
+        name: 'inspect_query',
+        inputSchema: { type: 'object', properties: {} },
+        annotations: { readOnlyHint: true },
+      },
+    ]);
+
+    expect(harness.registry.has('warehouse__list_tables')).toBe(false);
+    expect(harness.registry.has('warehouse__inspect_query')).toBe(true);
+    expect(harness.runtime.health('warehouse')).toMatchObject({
+      status: 'healthy',
+      healthy: true,
+    });
+
+    harness.emitToolsChanged('warehouse', new Error('malformed tool page'));
+
+    expect(harness.registry.llmTools()).toEqual([]);
+    expect(harness.runtime.health('warehouse')).toMatchObject({
+      status: 'unhealthy',
+      healthy: false,
+      lastError: 'MCP tools refresh failed: malformed tool page',
+    });
   });
 
   it('unregisters tools on unexpected exit and restarts due servers without exposing stale tools', async () => {
@@ -140,11 +304,12 @@ describe('McpRuntimeManager', () => {
     ]);
     expect(harness.launchedServers).toEqual(['warehouse', 'warehouse']);
     expect(harness.runtime.isRunning('warehouse')).toBe(true);
-    expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual(['warehouse__list_tables']);
+    expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual([
+      'warehouse__list_tables',
+    ]);
   });
 
   it('reacts to a real stdio process exit by removing stale Agent tools', async () => {
-    const script = await exitAfterToolsListServer();
     const harness = await runtimeHarness({
       health: {
         baseRestartDelayMs: 1_000,
@@ -158,15 +323,21 @@ describe('McpRuntimeManager', () => {
       source: 'user',
       transport: 'stdio',
       command: process.execPath,
-      args: [script],
+      args: [FIXTURE_SERVER, 'exit-after-list'],
       enabled: true,
       autoStart: false,
     });
 
     const started = await harness.runtime.start('volatile');
 
-    expect(started.tools).toEqual(['volatile__echo']);
-    expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual(['volatile__echo']);
+    expect(started.tools).toEqual([
+      'volatile__echo',
+      'volatile__replace_catalog',
+      'volatile__logical_error',
+      'volatile__slow',
+      'volatile__crash',
+    ]);
+    expect(harness.registry.llmTools().map((tool) => tool.name)).toEqual(started.tools);
 
     await waitFor(() => !harness.runtime.isRunning('volatile'));
 
@@ -182,16 +353,20 @@ describe('McpRuntimeManager', () => {
 
 async function runtimeHarness(
   input: {
-    launcher?: (server: McpServerConfig) => McpRuntimeClient;
+    launcher?: McpRuntimeLauncher;
     health?: McpHealthManagerOptions;
   } = {},
 ) {
   const registry = new ToolRegistry();
   const health = new McpHealthManager(input.health);
-  const store = new McpConfigStore(await configPath(), { includeBuiltinDefaults: false });
+  const store = new McpConfigStore(await configPath());
   const tools = new McpToolRegistrationManager(registry);
   const launchedServers: string[] = [];
   const stoppedClients: string[] = [];
+  const toolChangeHandlers = new Map<
+    string,
+    (event: { items: McpToolSpec[] } | { error: Error }) => void
+  >();
   const runtime = new McpRuntimeManager({
     configStore: store,
     health,
@@ -201,6 +376,17 @@ async function runtimeHarness(
       ((server) => {
         launchedServers.push(server.id);
         return {
+          describe() {
+            return {
+              serverId: server.id,
+              transport: server.transport,
+              capabilities: { tools: { listChanged: true } },
+              serverInfo: { name: server.name, version: '1.0.0' },
+            };
+          },
+          ping() {
+            return Promise.resolve();
+          },
           listTools() {
             return Promise.resolve([{ name: 'list_tables', annotations: { readOnlyHint: true } }]);
           },
@@ -210,10 +396,42 @@ async function runtimeHarness(
           stop() {
             stoppedClients.push(server.id);
           },
+          listResources() {
+            return Promise.resolve([]);
+          },
+          listResourceTemplates() {
+            return Promise.resolve([]);
+          },
+          readResource() {
+            return Promise.resolve({ contents: [] });
+          },
+          listPrompts() {
+            return Promise.resolve([]);
+          },
+          getPrompt() {
+            return Promise.resolve({ messages: [] });
+          },
+          onToolsChanged(handler) {
+            toolChangeHandlers.set(server.id, handler);
+            return () => toolChangeHandlers.delete(server.id);
+          },
         };
       }),
   });
-  return { registry, health, store, runtime, launchedServers, stoppedClients };
+  return {
+    registry,
+    health,
+    store,
+    runtime,
+    launchedServers,
+    stoppedClients,
+    emitToolsChanged(serverId: string, input: McpToolSpec[] | Error) {
+      const handler = toolChangeHandlers.get(serverId);
+      if (!handler) throw new Error(`Missing tools change handler for ${serverId}.`);
+      if (input instanceof Error) handler({ error: input });
+      else handler({ items: input });
+    },
+  };
 }
 
 async function configPath(): Promise<string> {
@@ -227,37 +445,12 @@ function toolContext() {
     session: {
       id: 'session_mcp_runtime',
       title: 'mcp runtime',
-      mode: 'readonly' as const,
-      strategy: 'react' as const,
+      mode: 'read' as const,
       messages: [],
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       aborted: false,
     },
   };
-}
-
-async function exitAfterToolsListServer(): Promise<string> {
-  return writeScript(`
-const readline = require('node:readline');
-const rl = readline.createInterface({ input: process.stdin });
-function send(id, result) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n'); }
-rl.on('line', (line) => {
-  const msg = JSON.parse(line);
-  if (msg.method === 'initialize') send(msg.id, { protocolVersion: '2024-11-05', capabilities: {} });
-  if (msg.method === 'tools/list') {
-    send(msg.id, { tools: [{ name: 'echo', description: 'Echo', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }] });
-    setTimeout(() => process.exit(9), 20);
-  }
-});
-`);
-}
-
-async function writeScript(source: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'dbagent-mcp-runtime-process-'));
-  tempDirs.push(dir);
-  const path = join(dir, 'server.cjs');
-  await writeFile(path, source, 'utf8');
-  return path;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {

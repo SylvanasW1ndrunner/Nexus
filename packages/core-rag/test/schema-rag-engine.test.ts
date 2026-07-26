@@ -5,6 +5,7 @@ import {
   extractExplicitSchemaReferences,
   SchemaRagEngine,
 } from '../src/index.js';
+import { column } from './schema-fixtures.js';
 
 describe('extractExplicitSchemaReferences', () => {
   it('parses explicit table and column references from user questions', () => {
@@ -399,22 +400,4 @@ function fixtureTables(): TableDetail[] {
       ],
     },
   ];
-}
-
-function column(
-  name: string,
-  ordinal: number,
-  dataType: string,
-  nullable: boolean,
-  comment?: string,
-  isPrimaryKey = false,
-) {
-  return {
-    name,
-    ordinal,
-    dataType,
-    nullable,
-    comment,
-    isPrimaryKey,
-  };
 }

@@ -125,16 +125,19 @@ runtime.createProfile(profile);
 await runtime.connect(profile.id);
 
 for (let index = 0; index < 100; index += 1) {
-  await runtime.submit({ profileId: profile.id, sql: `warmup-${index}` });
+  await runtime.submit({ profileId: profile.id, sql: `select ${index} as warmup_value` });
 }
 const submitDurations = await measureAsync(JOB_SAMPLES, async (index) => {
-  await runtime.submit({ profileId: profile.id, sql: `select-${index}` });
+  await runtime.submit({ profileId: profile.id, sql: `select ${index} as benchmark_value` });
 });
 
 const cancellableJobs = [];
 for (let index = 0; index < JOB_SAMPLES; index += 1) {
   cancellableJobs.push(
-    await runtime.submit({ profileId: profile.id, sql: `queued-${index}` }),
+    await runtime.submit({
+      profileId: profile.id,
+      sql: `select ${index} as queued_benchmark_value`,
+    }),
   );
 }
 const cancelDurations = await measureAsync(JOB_SAMPLES, async (index) => {
@@ -142,7 +145,10 @@ const cancelDurations = await measureAsync(JOB_SAMPLES, async (index) => {
 });
 
 forceGc();
-const streamJob = await runtime.submit({ profileId: profile.id, sql: 'million-row-stream' });
+const streamJob = await runtime.submit({
+  profileId: profile.id,
+  sql: 'select * from benchmark_million_row_stream',
+});
 const baselineHeap = process.memoryUsage().heapUsed;
 let peakHeap = baselineHeap;
 let streamedRows = 0;
@@ -330,8 +336,8 @@ function createBenchmarkConnector() {
     },
     async submit(context, submission) {
       const id = `job-${jobs.size + 1}`;
-      const queued = submission.sql.startsWith('queued-');
-      const stream = submission.sql === 'million-row-stream';
+      const queued = submission.sql.includes('queued_benchmark_value');
+      const stream = submission.sql === 'select * from benchmark_million_row_stream';
       const job = {
         id,
         profileId: context.profile.id,

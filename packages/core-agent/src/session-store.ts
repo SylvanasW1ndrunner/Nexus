@@ -1,29 +1,35 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync, renameSync } from 'node:fs';
 import { mkdir, rename } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
+import {
+  agentProjectStorageIdentity,
+  assertSameAgentProject,
+} from './project-context.js';
 import { redactPersistedAgentValue } from './redaction.js';
 import type {
   AgentContextCheckpoint,
   AgentMessage,
   AgentMode,
+  AgentProjectReference,
   AgentSession,
+  AgentSubagentRecord,
+  AgentSubagentStore,
   AgentUserPreference,
 } from './types.js';
 
 const DEFAULT_USER_ID = 'local-user';
 const PREFERENCE_CONTEXT_LIMIT = 50;
-type NodeDatabaseSyncConstructor = new (
-  location: string,
-) => NodeDatabaseSync;
+const LEGACY_PROJECT_KEY = 'legacy:unscoped';
+type NodeDatabaseSyncConstructor = new (location: string) => NodeDatabaseSync;
 
 export type AgentSessionSummary = {
   id: string;
   title: string;
   userId?: string;
   mode: AgentMode;
-  strategy: AgentSession['strategy'];
   archived: boolean;
   messageCount: number;
   toolMessageCount: number;
@@ -61,18 +67,16 @@ export type AgentPreferenceUpsertInput = {
 export type AgentSessionWriter = {
   save(input: SaveAgentSessionInput): Promise<AgentSessionSummary>;
   listPreferences?(userId: string, limit?: number): Promise<AgentUserPreference[]>;
-  listContextCheckpoints?(
-    sessionId: string,
-    limit?: number,
-  ): Promise<AgentContextCheckpoint[]>;
+  listContextCheckpoints?(sessionId: string, limit?: number): Promise<AgentContextCheckpoint[]>;
 };
 
 type SessionRow = {
   id: string;
+  project_key: string;
+  project_root: string | null;
   title: string;
   user_id: string | null;
   mode: AgentMode;
-  strategy: AgentSession['strategy'];
   archived: number;
   message_count: number;
   tool_message_count: number;
@@ -83,6 +87,12 @@ type SessionRow = {
   updated_at: string;
   last_message_at: string | null;
   payload_json: string;
+};
+
+type AgentSessionProjectScope = {
+  projectKey: string;
+  projectRoot: string | null;
+  project?: AgentProjectReference;
 };
 
 type PreferenceRow = {
@@ -123,41 +133,63 @@ type ContextCheckpointRow = {
   created_at: string;
 };
 
-export class AgentSessionStore implements AgentSessionWriter {
-  constructor(private readonly filePath: string) {
+type SubagentRow = {
+  id: string;
+  parent_session_id: string;
+  child_session_id: string | null;
+  task: string;
+  status: AgentSubagentRecord['status'];
+  depth: number;
+  summary: string | null;
+  artifact_references_json: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export class AgentSessionStore implements AgentSessionWriter, AgentSubagentStore {
+  private readonly projectScope: AgentSessionProjectScope;
+
+  constructor(
+    private readonly filePath: string,
+    project?: AgentProjectReference,
+  ) {
     if (!filePath.trim()) throw new Error('Agent session database path is required.');
+    this.projectScope = projectScope(project);
+  }
+
+  /**
+   * Returns a Project-bound view over the same SQLite file. Every Session
+   * query and mutation performed through the returned store is scoped in SQL.
+   */
+  forProject(project: AgentProjectReference): AgentSessionStore {
+    return new AgentSessionStore(this.filePath, project);
   }
 
   async save(input: SaveAgentSessionInput): Promise<AgentSessionSummary> {
     const now = input.now ?? new Date().toISOString();
     const session = redactPersistedAgentValue(input.session) as AgentSession;
+    assertSessionMatchesStoreScope(session, this.projectScope);
     return this.withDatabase((database) => {
       const existing = database
-        .prepare(
-          'SELECT archived, created_at FROM agent_sessions WHERE id = ?',
-        )
+        .prepare('SELECT project_key, archived, created_at FROM agent_sessions WHERE id = ?')
         .get(session.id) as
-        | { archived: number; created_at: string }
+        | { project_key: string; archived: number; created_at: string }
         | undefined;
+      if (existing && existing.project_key !== this.projectScope.projectKey) {
+        throw new Error('Agent session id is already owned by another Project.');
+      }
       const persistedMessageCount = Number(
         (
           database
-            .prepare(
-              'SELECT COUNT(*) AS count FROM agent_session_messages WHERE session_id = ?',
-            )
+            .prepare('SELECT COUNT(*) AS count FROM agent_session_messages WHERE session_id = ?')
             .get(session.id) as { count: number }
         ).count,
       );
       if (persistedMessageCount > session.messages.length) {
-        throw new Error(
-          'Agent session history is append-only and cannot be shortened.',
-        );
+        throw new Error('Agent session history is append-only and cannot be shortened.');
       }
-      assertAppendOnlyTail(
-        database,
-        session,
-        persistedMessageCount,
-      );
+      assertAppendOnlyTail(database, session, persistedMessageCount);
       const summary = summarizeSession(
         session,
         existing?.archived === 1,
@@ -167,19 +199,21 @@ export class AgentSessionStore implements AgentSessionWriter {
 
       database.exec('BEGIN IMMEDIATE');
       try {
-        database
-          .prepare(`
+        const sessionWrite = database
+          .prepare(
+            `
             INSERT INTO agent_sessions (
-              id, title, user_id, mode, strategy, archived,
+              id, project_key, project_root, title, user_id, mode, archived,
               message_count, tool_message_count,
               prompt_tokens, completion_tokens, total_tokens,
               created_at, updated_at, last_message_at, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+              project_key = excluded.project_key,
+              project_root = excluded.project_root,
               title = excluded.title,
               user_id = excluded.user_id,
               mode = excluded.mode,
-              strategy = excluded.strategy,
               archived = excluded.archived,
               message_count = excluded.message_count,
               tool_message_count = excluded.tool_message_count,
@@ -189,13 +223,16 @@ export class AgentSessionStore implements AgentSessionWriter {
               updated_at = excluded.updated_at,
               last_message_at = excluded.last_message_at,
               payload_json = excluded.payload_json
-          `)
+            WHERE agent_sessions.project_key = excluded.project_key
+          `,
+          )
           .run(
             session.id,
+            this.projectScope.projectKey,
+            this.projectScope.projectRoot,
             session.title,
             session.userId ?? null,
             session.mode,
-            session.strategy,
             summary.archived ? 1 : 0,
             summary.messageCount,
             summary.toolMessageCount,
@@ -207,27 +244,22 @@ export class AgentSessionStore implements AgentSessionWriter {
             summary.lastMessageAt ?? null,
             JSON.stringify(sessionMetadataPayload(session)),
           );
+        if (Number(sessionWrite.changes) === 0) {
+          throw new Error('Agent session id is already owned by another Project.');
+        }
         const insertMessage = database.prepare(`
           INSERT INTO agent_session_messages (
             session_id, message_index, role, content, created_at,
             tool_call_id, tool_name, tool_calls_json
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `);
-        for (
-          let index = persistedMessageCount;
-          index < session.messages.length;
-          index += 1
-        ) {
+        for (let index = persistedMessageCount; index < session.messages.length; index += 1) {
           const message = session.messages[index];
           if (!message) continue;
           insertMessage.run(...messageRowValues(session.id, index, message));
         }
         if (session.contextCheckpoint) {
-          upsertContextCheckpointRow(
-            database,
-            session.id,
-            session.contextCheckpoint,
-          );
+          upsertContextCheckpointRow(database, session.id, session.contextCheckpoint);
         }
         for (const preference of extractPreferenceCandidates(
           session.messages.slice(persistedMessageCount),
@@ -248,18 +280,15 @@ export class AgentSessionStore implements AgentSessionWriter {
   async load(id: string): Promise<AgentSession | undefined> {
     return this.withDatabase((database) => {
       const row = database
-        .prepare('SELECT payload_json FROM agent_sessions WHERE id = ?')
-        .get(id) as { payload_json: string } | undefined;
+        .prepare('SELECT payload_json FROM agent_sessions WHERE id = ? AND project_key = ?')
+        .get(id, this.projectScope.projectKey) as { payload_json: string } | undefined;
       if (!row) return undefined;
       const messageRows = database
         .prepare(
           'SELECT * FROM agent_session_messages WHERE session_id = ? ORDER BY message_index ASC',
         )
         .all(id) as unknown as SessionMessageRow[];
-      return parseSession(
-        row.payload_json,
-        messageRows.map(messageFromRow),
-      );
+      return parseSession(row.payload_json, messageRows.map(messageFromRow));
     });
   }
 
@@ -277,10 +306,12 @@ export class AgentSessionStore implements AgentSessionWriter {
     const pattern = `%${escapeLike(query)}%`;
     return this.withDatabase((database) => {
       const rows = database
-        .prepare(`
+        .prepare(
+          `
           SELECT *
           FROM agent_sessions
-          WHERE archived = ?
+          WHERE project_key = ?
+            AND archived = ?
             AND (? IS NULL OR user_id = ?)
             AND (
               ? = ''
@@ -295,8 +326,10 @@ export class AgentSessionStore implements AgentSessionWriter {
             )
           ORDER BY updated_at DESC, id ASC
           LIMIT ? OFFSET ?
-        `)
+        `,
+        )
         .all(
+          this.projectScope.projectKey,
           archived ? 1 : 0,
           filter.userId ?? null,
           filter.userId ?? null,
@@ -328,14 +361,14 @@ export class AgentSessionStore implements AgentSessionWriter {
   ): Promise<AgentSessionSummary> {
     return this.withDatabase((database) => {
       const row = database
-        .prepare('SELECT * FROM agent_sessions WHERE id = ?')
-        .get(id) as SessionRow | undefined;
+        .prepare('SELECT * FROM agent_sessions WHERE id = ? AND project_key = ?')
+        .get(id, this.projectScope.projectKey) as SessionRow | undefined;
       if (!row) throw new Error(`Agent session not found: ${id}`);
       database
         .prepare(
-          'UPDATE agent_sessions SET archived = ?, updated_at = ? WHERE id = ?',
+          'UPDATE agent_sessions SET archived = ?, updated_at = ? WHERE id = ? AND project_key = ?',
         )
-        .run(archived ? 1 : 0, now, id);
+        .run(archived ? 1 : 0, now, id, this.projectScope.projectKey);
       return {
         ...summaryFromRow(row),
         archived,
@@ -349,8 +382,8 @@ export class AgentSessionStore implements AgentSessionWriter {
       (database) =>
         Number(
           database
-            .prepare('DELETE FROM agent_sessions WHERE id = ?')
-            .run(id).changes,
+            .prepare('DELETE FROM agent_sessions WHERE id = ? AND project_key = ?')
+            .run(id, this.projectScope.projectKey).changes,
         ) > 0,
     );
   }
@@ -364,10 +397,7 @@ export class AgentSessionStore implements AgentSessionWriter {
   }): Promise<AgentSession> {
     const session = await this.load(input.id);
     if (!session) throw new Error(`Agent session not found: ${input.id}`);
-    if (
-      input.fromMessageIndex < 0 ||
-      input.fromMessageIndex >= session.messages.length
-    ) {
+    if (input.fromMessageIndex < 0 || input.fromMessageIndex >= session.messages.length) {
       throw new Error(`Invalid fork message index: ${input.fromMessageIndex}`);
     }
     const now = input.now ?? new Date().toISOString();
@@ -376,9 +406,7 @@ export class AgentSessionStore implements AgentSessionWriter {
       ...base,
       id: input.newId ?? randomUUID(),
       title: input.title ?? `${session.title} (fork)`,
-      messages: structuredClone(
-        session.messages.slice(0, input.fromMessageIndex + 1),
-      ),
+      messages: structuredClone(session.messages.slice(0, input.fromMessageIndex + 1)),
       aborted: false,
     };
     await this.save({ session: forked, now });
@@ -392,9 +420,7 @@ export class AgentSessionStore implements AgentSessionWriter {
     return markdownSession(session);
   }
 
-  async upsertPreference(
-    input: AgentPreferenceUpsertInput,
-  ): Promise<AgentUserPreference> {
+  async upsertPreference(input: AgentPreferenceUpsertInput): Promise<AgentUserPreference> {
     const preference = normalizePreference(input);
     return this.withDatabase((database) => {
       upsertPreferenceRow(database, preference);
@@ -412,38 +438,44 @@ export class AgentSessionStore implements AgentSessionWriter {
     }
     return this.withDatabase((database) => {
       const rows = database
-        .prepare(`
+        .prepare(
+          `
           SELECT *
           FROM agent_user_preferences
           WHERE user_id = ?
           ORDER BY confidence DESC, updated_at DESC, id ASC
           LIMIT ?
-        `)
+        `,
+        )
         .all(normalizedUserId, limit) as unknown as PreferenceRow[];
       return rows.map(preferenceFromRow);
     });
   }
 
-  async listContextCheckpoints(
-    sessionId: string,
-    limit = 100,
-  ): Promise<AgentContextCheckpoint[]> {
+  async listContextCheckpoints(sessionId: string, limit = 100): Promise<AgentContextCheckpoint[]> {
     const normalizedSessionId = requireText(sessionId, 'sessionId');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
-      throw new Error(
-        'Context checkpoint limit must be an integer from 1 to 1000.',
-      );
+      throw new Error('Context checkpoint limit must be an integer from 1 to 1000.');
     }
     return this.withDatabase((database) => {
       const rows = database
-        .prepare(`
-          SELECT *
-          FROM agent_context_checkpoints
-          WHERE session_id = ?
-          ORDER BY sequence DESC
+        .prepare(
+          `
+          SELECT checkpoint.*
+          FROM agent_context_checkpoints AS checkpoint
+          INNER JOIN agent_sessions AS session
+            ON session.id = checkpoint.session_id
+          WHERE checkpoint.session_id = ?
+            AND session.project_key = ?
+          ORDER BY checkpoint.sequence DESC
           LIMIT ?
-        `)
-        .all(normalizedSessionId, limit) as unknown as ContextCheckpointRow[];
+        `,
+        )
+        .all(
+          normalizedSessionId,
+          this.projectScope.projectKey,
+          limit,
+        ) as unknown as ContextCheckpointRow[];
       return rows.map(contextCheckpointFromRow).reverse();
     });
   }
@@ -453,23 +485,155 @@ export class AgentSessionStore implements AgentSessionWriter {
       (database) =>
         Number(
           database
-            .prepare(
-              'DELETE FROM agent_user_preferences WHERE user_id = ? AND preference_key = ?',
-            )
+            .prepare('DELETE FROM agent_user_preferences WHERE user_id = ? AND preference_key = ?')
             .run(requireText(userId, 'userId'), requireText(key, 'key')).changes,
         ) > 0,
     );
   }
 
-  private async withDatabase<T>(
-    operation: (database: NodeDatabaseSync) => T,
-  ): Promise<T> {
+  saveSubagent(record: AgentSubagentRecord): void {
+    const persisted = redactPersistedAgentValue(record) as AgentSubagentRecord;
+    assertSubagentRecord(persisted);
+    this.withDatabaseSync((database) => {
+      assertRelatedSessionOwnership(
+        database,
+        persisted.parentSessionId,
+        this.projectScope.projectKey,
+        'parent',
+      );
+      if (persisted.childSessionId) {
+        assertRelatedSessionOwnership(
+          database,
+          persisted.childSessionId,
+          this.projectScope.projectKey,
+          'child',
+        );
+      }
+      const result = database
+        .prepare(
+          `
+          INSERT INTO agent_subagents (
+            id, project_key, parent_session_id, child_session_id, task, status,
+            depth, summary, artifact_references_json, error_message,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            parent_session_id = excluded.parent_session_id,
+            child_session_id = excluded.child_session_id,
+            task = excluded.task,
+            status = excluded.status,
+            depth = excluded.depth,
+            summary = excluded.summary,
+            artifact_references_json = excluded.artifact_references_json,
+            error_message = excluded.error_message,
+            updated_at = excluded.updated_at
+          WHERE agent_subagents.project_key = excluded.project_key
+            AND agent_subagents.parent_session_id = excluded.parent_session_id
+            AND agent_subagents.created_at = excluded.created_at
+        `,
+        )
+        .run(
+          persisted.id,
+          this.projectScope.projectKey,
+          persisted.parentSessionId,
+          persisted.childSessionId ?? null,
+          persisted.task,
+          persisted.status,
+          persisted.depth,
+          persisted.summary ?? null,
+          JSON.stringify(persisted.artifactReferences ?? []),
+          persisted.errorMessage ?? null,
+          persisted.createdAt,
+          persisted.updatedAt,
+        );
+      if (Number(result.changes) === 0) {
+        throw new Error('Subagent id is already owned by another parent or Project.');
+      }
+    });
+  }
+
+  loadSubagent(id: string): AgentSubagentRecord | undefined {
+    const normalizedId = requireText(id, 'subagent id');
+    return this.withDatabaseSync((database) => {
+      const row = database
+        .prepare('SELECT * FROM agent_subagents WHERE id = ? AND project_key = ?')
+        .get(normalizedId, this.projectScope.projectKey) as SubagentRow | undefined;
+      return row ? subagentFromRow(row) : undefined;
+    });
+  }
+
+  listSubagents(parentSessionId?: string): AgentSubagentRecord[] {
+    const normalizedParent =
+      parentSessionId === undefined ? undefined : requireText(parentSessionId, 'parentSessionId');
+    return this.withDatabaseSync((database) => {
+      const rows =
+        normalizedParent === undefined
+          ? (database
+              .prepare(
+                `
+                SELECT *
+                FROM agent_subagents
+                WHERE project_key = ?
+                ORDER BY created_at ASC, id ASC
+              `,
+              )
+              .all(this.projectScope.projectKey) as unknown as SubagentRow[])
+          : (database
+              .prepare(
+                `
+                SELECT *
+                FROM agent_subagents
+                WHERE project_key = ? AND parent_session_id = ?
+                ORDER BY created_at ASC, id ASC
+              `,
+              )
+              .all(this.projectScope.projectKey, normalizedParent) as unknown as SubagentRow[]);
+      return rows.map(subagentFromRow);
+    });
+  }
+
+  private withDatabaseSync<T>(operation: (database: NodeDatabaseSync) => T): T {
+    const database = openDatabaseSync(this.filePath);
+    try {
+      return operation(database);
+    } finally {
+      database.close();
+    }
+  }
+
+  private async withDatabase<T>(operation: (database: NodeDatabaseSync) => T): Promise<T> {
     const database = await openDatabase(this.filePath);
     try {
       return operation(database);
     } finally {
       database.close();
     }
+  }
+}
+
+function openDatabaseSync(filePath: string): NodeDatabaseSync {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const sqliteModuleId = ['node', 'sqlite'].join(':');
+  const { DatabaseSync } = createRequire(import.meta.url)(sqliteModuleId) as {
+    DatabaseSync: NodeDatabaseSyncConstructor;
+  };
+  let database: NodeDatabaseSync | undefined;
+  try {
+    database = new DatabaseSync(filePath);
+    initializeDatabase(database);
+    return database;
+  } catch (error) {
+    try {
+      database?.close();
+    } catch {
+      // The original error is more useful than a secondary close failure.
+    }
+    if (!isCorruptDatabaseError(error)) throw error;
+    const quarantinedPath = `${filePath}.corrupt-${Date.now()}`;
+    renameSync(filePath, quarantinedPath);
+    const recovered = new DatabaseSync(filePath);
+    initializeDatabase(recovered);
+    return recovered;
   }
 }
 
@@ -508,10 +672,11 @@ function initializeDatabase(database: NodeDatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS agent_sessions (
       id TEXT PRIMARY KEY,
+      project_key TEXT NOT NULL DEFAULT 'legacy:unscoped',
+      project_root TEXT,
       title TEXT NOT NULL,
       user_id TEXT,
       mode TEXT NOT NULL,
-      strategy TEXT NOT NULL,
       archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
       message_count INTEGER NOT NULL,
       tool_message_count INTEGER NOT NULL,
@@ -561,6 +726,24 @@ function initializeDatabase(database: NodeDatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_agent_context_checkpoints_created
       ON agent_context_checkpoints(session_id, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS agent_subagents (
+      id TEXT PRIMARY KEY,
+      project_key TEXT NOT NULL DEFAULT 'legacy:unscoped',
+      parent_session_id TEXT NOT NULL,
+      child_session_id TEXT,
+      task TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+      depth INTEGER NOT NULL CHECK (depth > 0),
+      summary TEXT,
+      artifact_references_json TEXT NOT NULL DEFAULT '[]',
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_subagents_project_parent_created
+      ON agent_subagents(project_key, parent_session_id, created_at ASC);
+
     CREATE TABLE IF NOT EXISTS agent_user_preferences (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -576,8 +759,188 @@ function initializeDatabase(database: NodeDatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_agent_preferences_user_updated
       ON agent_user_preferences(user_id, confidence DESC, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS agent_store_migrations (
+      migration_key TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+  `);
+  migrateLegacySessionTable(database);
+  migrateLegacySessionProjects(database);
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_user_archive_updated
+      ON agent_sessions(project_key, user_id, archived, updated_at DESC);
   `);
   migrateLegacySessionPayloads(database);
+}
+
+function migrateLegacySessionTable(database: NodeDatabaseSync): void {
+  const columns = database.prepare('PRAGMA table_info(agent_sessions)').all() as unknown as Array<{
+    name: string;
+  }>;
+  if (columns.some((column) => column.name === 'strategy')) {
+    database.exec('ALTER TABLE agent_sessions DROP COLUMN strategy');
+  }
+  if (!columns.some((column) => column.name === 'project_key')) {
+    database.exec(
+      `ALTER TABLE agent_sessions ADD COLUMN project_key TEXT NOT NULL DEFAULT '${LEGACY_PROJECT_KEY}'`,
+    );
+  }
+  if (!columns.some((column) => column.name === 'project_root')) {
+    database.exec('ALTER TABLE agent_sessions ADD COLUMN project_root TEXT');
+  }
+}
+
+function projectScope(project: AgentProjectReference | undefined): AgentSessionProjectScope {
+  if (!project) {
+    return {
+      projectKey: LEGACY_PROJECT_KEY,
+      projectRoot: null,
+    };
+  }
+  const identity = agentProjectStorageIdentity(project);
+  return {
+    ...identity,
+    project: structuredClone(project),
+  };
+}
+
+function assertSessionMatchesStoreScope(
+  session: AgentSession,
+  scope: AgentSessionProjectScope,
+): void {
+  if (!scope.project) {
+    if (session.project) {
+      throw new Error(
+        'Project-owned Agent sessions must be saved through a Project-bound session store.',
+      );
+    }
+    return;
+  }
+  assertSameAgentProject(session.project, scope.project);
+}
+
+function assertSubagentRecord(record: AgentSubagentRecord): void {
+  requireText(record.id, 'subagent id');
+  requireText(record.parentSessionId, 'parentSessionId');
+  if (record.childSessionId !== undefined) requireText(record.childSessionId, 'childSessionId');
+  requireText(record.task, 'subagent task');
+  requireText(record.createdAt, 'subagent createdAt');
+  requireText(record.updatedAt, 'subagent updatedAt');
+  if (!['running', 'completed', 'failed', 'cancelled'].includes(record.status)) {
+    throw new Error(`Unsupported subagent status: ${String(record.status)}.`);
+  }
+  if (!Number.isSafeInteger(record.depth) || record.depth < 1) {
+    throw new Error('Subagent depth must be a positive integer.');
+  }
+  if (
+    record.artifactReferences !== undefined &&
+    !record.artifactReferences.every((reference) => typeof reference === 'string')
+  ) {
+    throw new Error('Subagent artifact references must be strings.');
+  }
+}
+
+function assertRelatedSessionOwnership(
+  database: NodeDatabaseSync,
+  sessionId: string,
+  projectKey: string,
+  relationship: 'parent' | 'child',
+): void {
+  const existing = database
+    .prepare('SELECT project_key FROM agent_sessions WHERE id = ?')
+    .get(sessionId) as { project_key: string } | undefined;
+  if (existing && existing.project_key !== projectKey) {
+    throw new Error(`Subagent ${relationship} session is owned by another Project.`);
+  }
+}
+
+function subagentFromRow(row: SubagentRow): AgentSubagentRecord {
+  const artifactReferences = JSON.parse(row.artifact_references_json) as unknown;
+  if (
+    !Array.isArray(artifactReferences) ||
+    !artifactReferences.every((reference) => typeof reference === 'string')
+  ) {
+    throw new Error(`Stored subagent ${row.id} has invalid artifact references.`);
+  }
+  return {
+    id: row.id,
+    parentSessionId: row.parent_session_id,
+    ...(row.child_session_id === null ? {} : { childSessionId: row.child_session_id }),
+    task: row.task,
+    status: row.status,
+    depth: row.depth,
+    ...(row.summary === null ? {} : { summary: row.summary }),
+    ...(artifactReferences.length === 0 ? {} : { artifactReferences }),
+    ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function projectReferenceFromPayload(payload: string): AgentProjectReference | undefined {
+  try {
+    const value = JSON.parse(payload) as {
+      project?: { rootPath?: unknown; configDirectory?: unknown };
+    };
+    const rootPath = value.project?.rootPath;
+    if (typeof rootPath !== 'string' || !rootPath.trim() || !isAbsolute(rootPath)) return undefined;
+    return {
+      rootPath,
+      configDirectory:
+        typeof value.project?.configDirectory === 'string'
+          ? value.project.configDirectory
+          : '',
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function migrateLegacySessionProjects(database: NodeDatabaseSync): void {
+  const migrationKey = 'session-project-ownership-v1';
+  const alreadyApplied = database
+    .prepare('SELECT 1 AS applied FROM agent_store_migrations WHERE migration_key = ?')
+    .get(migrationKey) as { applied: number } | undefined;
+  if (alreadyApplied) return;
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const appliedAfterLock = database
+      .prepare('SELECT 1 AS applied FROM agent_store_migrations WHERE migration_key = ?')
+      .get(migrationKey) as { applied: number } | undefined;
+    if (appliedAfterLock) {
+      database.exec('COMMIT');
+      return;
+    }
+    const rows = database
+      .prepare(
+        `
+        SELECT id, payload_json
+        FROM agent_sessions
+        WHERE project_key = ? OR project_key IS NULL OR project_key = ''
+      `,
+      )
+      .all(LEGACY_PROJECT_KEY) as unknown as Array<{ id: string; payload_json: string }>;
+    const update = database.prepare(
+      'UPDATE agent_sessions SET project_key = ?, project_root = ? WHERE id = ?',
+    );
+    for (const row of rows) {
+      const reference = projectReferenceFromPayload(row.payload_json);
+      if (!reference) {
+        update.run(LEGACY_PROJECT_KEY, null, row.id);
+        continue;
+      }
+      const identity = agentProjectStorageIdentity(reference);
+      update.run(identity.projectKey, identity.projectRoot, row.id);
+    }
+    database
+      .prepare('INSERT INTO agent_store_migrations (migration_key, applied_at) VALUES (?, ?)')
+      .run(migrationKey, new Date().toISOString());
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function summarizeSession(
@@ -593,7 +956,6 @@ function summarizeSession(
     title: session.title,
     ...(session.userId === undefined ? {} : { userId: session.userId }),
     mode: session.mode,
-    strategy: session.strategy,
     archived,
     messageCount: messages.length,
     toolMessageCount: messages.filter((message) => message.role === 'tool').length,
@@ -610,7 +972,6 @@ function summaryFromRow(row: SessionRow): AgentSessionSummary {
     title: row.title,
     ...(row.user_id === null ? {} : { userId: row.user_id }),
     mode: row.mode,
-    strategy: row.strategy,
     archived: row.archived === 1,
     messageCount: row.message_count,
     toolMessageCount: row.tool_message_count,
@@ -621,25 +982,20 @@ function summaryFromRow(row: SessionRow): AgentSessionSummary {
     },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    ...(row.last_message_at === null
-      ? {}
-      : { lastMessageAt: row.last_message_at }),
+    ...(row.last_message_at === null ? {} : { lastMessageAt: row.last_message_at }),
   };
 }
 
-function parseSession(
-  payload: string,
-  normalizedMessages: AgentMessage[] = [],
-): AgentSession {
-  const parsed = JSON.parse(payload) as AgentSession;
+function parseSession(payload: string, normalizedMessages: AgentMessage[] = []): AgentSession {
+  const currentSession = JSON.parse(payload) as AgentSession;
   const messages =
     normalizedMessages.length > 0
       ? normalizedMessages
-      : Array.isArray(parsed.messages)
-        ? parsed.messages
+      : Array.isArray(currentSession.messages)
+        ? currentSession.messages
         : [];
   return redactPersistedAgentValue({
-    ...parsed,
+    ...currentSession,
     messages,
   }) as AgentSession;
 }
@@ -678,7 +1034,7 @@ function extractPreferenceCandidates(
 }
 
 function isStablePreferenceSentence(sentence: string): boolean {
-  return /(?:以后请|默认(?:使用|采用|不要|优先)?|总是|始终|永远不要|不要再|我偏好|我希望)|(?:\bi prefer\b|\bfrom now on\b|\bby default\b|\bplease always\b|\bplease never\b|\bnever again\b)/i.test(
+  return /(?:以后请|默认(?:使用|采用|不要|优先)?|总是|始终|永远不要|不要再|我偏好)|(?:\bi prefer\b|\bfrom now on\b|\bby default\b|\bplease always\b|\bplease never\b|\bnever again\b)/i.test(
     sentence,
   );
 }
@@ -694,9 +1050,7 @@ function preferenceConfidence(sentence: string): number {
   return 0.7;
 }
 
-function normalizePreference(
-  input: AgentPreferenceUpsertInput,
-): AgentUserPreference {
+function normalizePreference(input: AgentPreferenceUpsertInput): AgentUserPreference {
   const userId = requireText(input.userId, 'userId');
   const key = requireText(input.key, 'key');
   const value = requireText(input.value, 'value');
@@ -711,28 +1065,22 @@ function normalizePreference(
     key,
     value,
     confidence,
-    ...(input.sourceSessionId === undefined
-      ? {}
-      : { sourceSessionId: input.sourceSessionId }),
+    ...(input.sourceSessionId === undefined ? {} : { sourceSessionId: input.sourceSessionId }),
     ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
     createdAt: now,
     updatedAt: now,
   };
 }
 
-function upsertPreferenceRow(
-  database: NodeDatabaseSync,
-  preference: AgentUserPreference,
-): void {
+function upsertPreferenceRow(database: NodeDatabaseSync, preference: AgentUserPreference): void {
   const existing = database
     .prepare(
       'SELECT created_at FROM agent_user_preferences WHERE user_id = ? AND preference_key = ?',
     )
-    .get(preference.userId, preference.key) as
-    | { created_at: string }
-    | undefined;
+    .get(preference.userId, preference.key) as { created_at: string } | undefined;
   database
-    .prepare(`
+    .prepare(
+      `
       INSERT INTO agent_user_preferences (
         id, user_id, preference_key, value, confidence,
         source_session_id, evidence, created_at, updated_at
@@ -743,7 +1091,8 @@ function upsertPreferenceRow(
         source_session_id = excluded.source_session_id,
         evidence = excluded.evidence,
         updated_at = excluded.updated_at
-    `)
+    `,
+    )
     .run(
       preference.id,
       preference.userId,
@@ -764,9 +1113,7 @@ function preferenceFromRow(row: PreferenceRow): AgentUserPreference {
     key: row.preference_key,
     value: row.value,
     confidence: row.confidence,
-    ...(row.source_session_id === null
-      ? {}
-      : { sourceSessionId: row.source_session_id }),
+    ...(row.source_session_id === null ? {} : { sourceSessionId: row.source_session_id }),
     ...(row.evidence === null ? {} : { evidence: row.evidence }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -830,9 +1177,7 @@ function messageRowValues(
 function messageFromRow(row: SessionMessageRow): AgentMessage {
   if (row.role === 'tool') {
     if (!row.tool_call_id || !row.tool_name) {
-      throw new Error(
-        `Persisted tool message is incomplete at index ${row.message_index}.`,
-      );
+      throw new Error(`Persisted tool message is incomplete at index ${row.message_index}.`);
     }
     return {
       role: 'tool',
@@ -874,21 +1219,19 @@ function assertAppendOnlyTail(
 ): void {
   if (persistedMessageCount === 0) return;
   const row = database
-    .prepare(`
+    .prepare(
+      `
       SELECT *
       FROM agent_session_messages
       WHERE session_id = ? AND message_index = ?
-    `)
-    .get(
-      session.id,
-      persistedMessageCount - 1,
-    ) as SessionMessageRow | undefined;
+    `,
+    )
+    .get(session.id, persistedMessageCount - 1) as SessionMessageRow | undefined;
   const current = session.messages[persistedMessageCount - 1];
   if (
     !row ||
     !current ||
-    canonicalMessageJson(messageFromRow(row)) !==
-      canonicalMessageJson(current)
+    canonicalMessageJson(messageFromRow(row)) !== canonicalMessageJson(current)
   ) {
     throw new Error(
       'Agent session history is append-only and existing messages cannot be reordered or modified.',
@@ -917,7 +1260,8 @@ function upsertContextCheckpointRow(
   checkpoint: AgentContextCheckpoint,
 ): void {
   database
-    .prepare(`
+    .prepare(
+      `
       INSERT INTO agent_context_checkpoints (
         session_id, sequence, version, trigger, method, summary,
         covered_message_count, source_token_estimate,
@@ -934,7 +1278,8 @@ function upsertContextCheckpointRow(
         model_context_tokens = excluded.model_context_tokens,
         focus = excluded.focus,
         created_at = excluded.created_at
-    `)
+    `,
+    )
     .run(
       sessionId,
       checkpoint.sequence,
@@ -951,9 +1296,7 @@ function upsertContextCheckpointRow(
     );
 }
 
-function contextCheckpointFromRow(
-  row: ContextCheckpointRow,
-): AgentContextCheckpoint {
+function contextCheckpointFromRow(row: ContextCheckpointRow): AgentContextCheckpoint {
   return {
     version: 1,
     sequence: row.sequence,
@@ -971,7 +1314,8 @@ function contextCheckpointFromRow(
 
 function migrateLegacySessionPayloads(database: NodeDatabaseSync): void {
   const legacyRows = database
-    .prepare(`
+    .prepare(
+      `
       SELECT id, payload_json
       FROM agent_sessions AS session
       WHERE NOT EXISTS (
@@ -979,7 +1323,8 @@ function migrateLegacySessionPayloads(database: NodeDatabaseSync): void {
         FROM agent_session_messages AS message
         WHERE message.session_id = session.id
       )
-    `)
+    `,
+    )
     .all() as unknown as Array<{ id: string; payload_json: string }>;
   const candidates = legacyRows
     .map((row) => {
@@ -1015,16 +1360,9 @@ function migrateLegacySessionPayloads(database: NodeDatabaseSync): void {
       session.messages.forEach((message, index) => {
         insertMessage.run(...messageRowValues(row.id, index, message));
       });
-      updatePayload.run(
-        JSON.stringify(sessionMetadataPayload(session)),
-        row.id,
-      );
+      updatePayload.run(JSON.stringify(sessionMetadataPayload(session)), row.id);
       if (session.contextCheckpoint) {
-        upsertContextCheckpointRow(
-          database,
-          row.id,
-          session.contextCheckpoint,
-        );
+        upsertContextCheckpointRow(database, row.id, session.contextCheckpoint);
       }
     }
     database.exec('COMMIT');
@@ -1034,9 +1372,7 @@ function migrateLegacySessionPayloads(database: NodeDatabaseSync): void {
   }
 }
 
-function sessionWithoutContextCheckpoint(
-  session: AgentSession,
-): AgentSession {
+function sessionWithoutContextCheckpoint(session: AgentSession): AgentSession {
   const cloned = structuredClone(session);
   delete cloned.contextCheckpoint;
   return cloned;
@@ -1069,10 +1405,7 @@ function markdownSession(session: AgentSession): string {
   for (const message of session.messages) {
     lines.push(`## ${message.role} - ${message.createdAt}`, '', message.content, '');
     if (message.role === 'assistant' && message.toolCalls?.length) {
-      lines.push(
-        `Tool calls: ${message.toolCalls.map((tool) => tool.name).join(', ')}`,
-        '',
-      );
+      lines.push(`Tool calls: ${message.toolCalls.map((tool) => tool.name).join(', ')}`, '');
     }
     if (message.role === 'tool') lines.push(`Tool: ${message.toolName}`, '');
   }

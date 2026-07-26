@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
+
+const mutationTails = new Map<string, Promise<void>>();
 
 export type McpTransport = 'stdio' | 'sse' | 'streamable-http';
-export type McpServerSource = 'builtin' | 'imported';
+export type McpServerSource = 'builtin' | 'imported' | 'user';
 export type McpEnvValue = string | { ref: string };
+export type McpHeaderValue = McpEnvValue;
 
 export type McpServerConfig = {
   id: string;
@@ -15,8 +18,10 @@ export type McpServerConfig = {
   enabled: boolean;
   command?: string | undefined;
   args?: string[] | undefined;
+  cwd?: string | undefined;
   url?: string | undefined;
   env?: Record<string, McpEnvValue> | undefined;
+  headers?: Record<string, McpHeaderValue> | undefined;
   description?: string | undefined;
   packageName?: string | undefined;
   installedAt: string;
@@ -32,8 +37,10 @@ export type McpServerInput = {
   enabled?: boolean;
   command?: string;
   args?: string[];
+  cwd?: string;
   url?: string;
   env?: Record<string, McpEnvValue>;
+  headers?: Record<string, McpHeaderValue>;
   description?: string;
   packageName?: string;
 };
@@ -49,49 +56,13 @@ export type McpRemovedServer = {
   secretRefs: string[];
 };
 
-export const defaultBuiltinMcpServers: McpServerInput[] = [
-  {
-    id: 'builtin-memory',
-    name: 'Memory',
-    source: 'builtin',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-memory'],
-    autoStart: false,
-    enabled: true,
-    packageName: '@modelcontextprotocol/server-memory',
-    description: 'Local memory MCP server.',
-  },
-  {
-    id: 'builtin-time',
-    name: 'Time',
-    source: 'builtin',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-time'],
-    autoStart: false,
-    enabled: true,
-    packageName: '@modelcontextprotocol/server-time',
-    description: 'Time and timezone MCP server.',
-  },
-  {
-    id: 'builtin-fetch',
-    name: 'Fetch',
-    source: 'builtin',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-fetch'],
-    autoStart: false,
-    enabled: true,
-    packageName: '@modelcontextprotocol/server-fetch',
-    description: 'Web fetch MCP server.',
-  },
-];
-
 export class McpConfigStore {
   constructor(
     private readonly filePath: string,
-    private readonly options: { now?: () => string; createId?: () => string; includeBuiltinDefaults?: boolean } = {},
+    private readonly options: {
+      now?: () => string;
+      createId?: () => string;
+    } = {},
   ) {}
 
   async load(): Promise<McpConfigFile> {
@@ -99,10 +70,7 @@ export class McpConfigStore {
     if (existing) return existing;
     return {
       version: 1,
-      servers:
-        this.options.includeBuiltinDefaults === false
-          ? []
-          : sortServers(defaultBuiltinMcpServers.map((input) => normalizeServerInput(input, this.clock(), this.createId()))),
+      servers: [],
     };
   }
 
@@ -111,64 +79,93 @@ export class McpConfigStore {
   }
 
   async upsert(input: McpServerInput): Promise<McpServerConfig> {
-    const file = await this.load();
-    const index = file.servers.findIndex((server) => server.id === input.id);
-    const now = this.clock();
-    const current = index === -1 ? undefined : file.servers[index];
-    const server = normalizeServerInput(mergeServerInput(current, input), now, this.createId());
-    const nextServers = [...file.servers];
-    if (index === -1) nextServers.push(server);
-    else nextServers[index] = server;
-    await this.save({ version: 1, servers: sortServers(nextServers) });
-    return server;
+    return this.mutate(async () => {
+      const file = await this.load();
+      const index = file.servers.findIndex((server) => server.id === input.id);
+      const now = this.clock();
+      const current = index === -1 ? undefined : file.servers[index];
+      const server = normalizeServerInput(mergeServerInput(current, input), now, this.createId());
+      const nextServers = [...file.servers];
+      if (index === -1) nextServers.push(server);
+      else nextServers[index] = server;
+      await this.save({ version: 1, servers: sortServers(nextServers) });
+      return server;
+    });
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<McpServerConfig | undefined> {
-    const file = await this.load();
-    const index = file.servers.findIndex((server) => server.id === id);
-    if (index === -1) return undefined;
-    const updated = { ...file.servers[index]!, enabled, updatedAt: this.clock() };
-    file.servers[index] = updated;
-    await this.save({ version: 1, servers: sortServers(file.servers) });
-    return updated;
+    return this.mutate(async () => {
+      const file = await this.load();
+      const index = file.servers.findIndex((server) => server.id === id);
+      if (index === -1) return undefined;
+      const updated = { ...file.servers[index]!, enabled, updatedAt: this.clock() };
+      file.servers[index] = updated;
+      await this.save({ version: 1, servers: sortServers(file.servers) });
+      return updated;
+    });
   }
 
   async setAutoStart(id: string, autoStart: boolean): Promise<McpServerConfig | undefined> {
-    const file = await this.load();
-    const index = file.servers.findIndex((server) => server.id === id);
-    if (index === -1) return undefined;
-    const updated = { ...file.servers[index]!, autoStart, updatedAt: this.clock() };
-    file.servers[index] = updated;
-    await this.save({ version: 1, servers: sortServers(file.servers) });
-    return updated;
+    return this.mutate(async () => {
+      const file = await this.load();
+      const index = file.servers.findIndex((server) => server.id === id);
+      if (index === -1) return undefined;
+      const updated = { ...file.servers[index]!, autoStart, updatedAt: this.clock() };
+      file.servers[index] = updated;
+      await this.save({ version: 1, servers: sortServers(file.servers) });
+      return updated;
+    });
   }
 
   async remove(id: string, options: { deleteSecrets?: boolean } = {}): Promise<McpRemovedServer> {
-    const file = await this.load();
-    const server = file.servers.find((item) => item.id === id);
-    if (!server) return { removed: false, secretRefs: [] };
-    await this.save({ version: 1, servers: sortServers(file.servers.filter((item) => item.id !== id)) });
-    return {
-      removed: true,
-      server,
-      secretRefs: options.deleteSecrets ? collectSecretRefs(server) : [],
-    };
+    return this.mutate(async () => {
+      const file = await this.load();
+      const server = file.servers.find((item) => item.id === id);
+      if (!server) return { removed: false, secretRefs: [] };
+      await this.save({
+        version: 1,
+        servers: sortServers(file.servers.filter((item) => item.id !== id)),
+      });
+      return {
+        removed: true,
+        server,
+        secretRefs: options.deleteSecrets ? collectSecretRefs(server) : [],
+      };
+    });
   }
 
   private async readExisting(): Promise<McpConfigFile | undefined> {
     try {
       return normalizeConfigFile(JSON.parse(await readFile(this.filePath, 'utf8')));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) return undefined;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (error instanceof SyntaxError) {
+        throw new Error('Invalid mcp.json: malformed JSON.', { cause: error });
+      }
       throw error;
     }
   }
 
   private async save(file: McpConfigFile): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.${process.pid}.tmp`;
+    const tempPath = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(tempPath, `${JSON.stringify(file, null, 2)}\n`, 'utf8');
     await rename(tempPath, this.filePath);
+  }
+
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const key = normalizedFileKey(this.filePath);
+    const previous = mutationTails.get(key) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    mutationTails.set(key, tail);
+    void tail.then(() => {
+      if (mutationTails.get(key) === tail) mutationTails.delete(key);
+    });
+    return result;
   }
 
   private clock(): string {
@@ -193,7 +190,11 @@ export function normalizeConfigFile(input: unknown): McpConfigFile {
   return { version: 1, servers: sortServers(servers) };
 }
 
-export function normalizeServerInput(input: McpServerInput & Partial<Pick<McpServerConfig, 'installedAt'>>, now: string, fallbackId: string): McpServerConfig {
+export function normalizeServerInput(
+  input: McpServerInput & Partial<Pick<McpServerConfig, 'installedAt'>>,
+  now: string,
+  fallbackId: string,
+): McpServerConfig {
   const id = normalizeId(input.id ?? fallbackId);
   const source = normalizeSource(input.source);
   const transport = normalizeTransport(input.transport);
@@ -206,8 +207,12 @@ function normalizeServerRecord(input: unknown): McpServerConfig {
   const id = normalizeId(input.id);
   const source = normalizeSource(input.source);
   const transport = normalizeTransport(input.transport);
-  const installedAt = typeof input.installedAt === 'string' && input.installedAt ? input.installedAt : new Date(0).toISOString();
-  const updatedAt = typeof input.updatedAt === 'string' && input.updatedAt ? input.updatedAt : installedAt;
+  const installedAt =
+    typeof input.installedAt === 'string' && input.installedAt
+      ? input.installedAt
+      : new Date(0).toISOString();
+  const updatedAt =
+    typeof input.updatedAt === 'string' && input.updatedAt ? input.updatedAt : installedAt;
   const base = normalizeServerBase(input, id, source, transport, updatedAt, installedAt);
   return normalizeServerByTransport(base);
 }
@@ -220,7 +225,8 @@ function normalizeServerBase(
   now: string,
   installedAt?: string,
 ): McpServerConfig {
-  if (typeof input.name !== 'string' || !input.name.trim()) throw new Error('MCP server name is required.');
+  if (typeof input.name !== 'string' || !input.name.trim())
+    throw new Error('MCP server name is required.');
   return {
     id,
     name: input.name.trim(),
@@ -228,12 +234,20 @@ function normalizeServerBase(
     transport,
     autoStart: input.autoStart === true,
     enabled: input.enabled !== false,
-    ...(typeof input.command === 'string' && input.command.trim() ? { command: input.command.trim() } : {}),
-    ...(Array.isArray(input.args) ? { args: input.args.filter((arg): arg is string => typeof arg === 'string') } : {}),
+    ...(typeof input.command === 'string' && input.command.trim()
+      ? { command: normalizeCommand(input.command, id) }
+      : {}),
+    ...(Array.isArray(input.args) ? { args: normalizeArgs(input.args, id) } : {}),
+    ...(typeof input.cwd === 'string' && input.cwd.trim() ? { cwd: input.cwd.trim() } : {}),
     ...(typeof input.url === 'string' && input.url.trim() ? { url: input.url.trim() } : {}),
     ...(isRecord(input.env) ? { env: normalizeEnv(input.env, id) } : {}),
-    ...(typeof input.description === 'string' && input.description.trim() ? { description: input.description.trim() } : {}),
-    ...(typeof input.packageName === 'string' && input.packageName.trim() ? { packageName: input.packageName.trim() } : {}),
+    ...(isRecord(input.headers) ? { headers: normalizeHeaders(input.headers, id) } : {}),
+    ...(typeof input.description === 'string' && input.description.trim()
+      ? { description: input.description.trim() }
+      : {}),
+    ...(typeof input.packageName === 'string' && input.packageName.trim()
+      ? { packageName: input.packageName.trim() }
+      : {}),
     installedAt: installedAt ?? now,
     updatedAt: now,
   };
@@ -244,14 +258,17 @@ function normalizeServerByTransport(server: McpServerConfig): McpServerConfig {
     if (!server.command) throw new Error(`MCP stdio server ${server.id} requires a command.`);
     const stdioServer = { ...server };
     delete stdioServer.url;
+    delete stdioServer.headers;
     return stdioServer;
   }
 
   if (!server.url) throw new Error(`MCP ${server.transport} server ${server.id} requires a URL.`);
-  if (!/^https?:\/\//i.test(server.url)) throw new Error(`MCP server ${server.id} URL must use http or https.`);
+  validateRemoteUrl(server.url, server.id);
   const remoteServer = { ...server };
   delete remoteServer.command;
   delete remoteServer.args;
+  delete remoteServer.cwd;
+  delete remoteServer.env;
   return remoteServer;
 }
 
@@ -269,15 +286,21 @@ function mergeServerInput(
   assignDefined(merged, 'enabled', input.enabled ?? current?.enabled);
   assignDefined(merged, 'command', input.command ?? current?.command);
   assignDefined(merged, 'args', input.args ?? current?.args);
+  assignDefined(merged, 'cwd', input.cwd ?? current?.cwd);
   assignDefined(merged, 'url', input.url ?? current?.url);
   assignDefined(merged, 'env', input.env ?? current?.env);
+  assignDefined(merged, 'headers', input.headers ?? current?.headers);
   assignDefined(merged, 'description', input.description ?? current?.description);
   assignDefined(merged, 'packageName', input.packageName ?? current?.packageName);
   assignDefined(merged, 'installedAt', current?.installedAt);
   return merged;
 }
 
-function assignDefined<T extends object, K extends keyof T>(target: T, key: K, value: T[K] | undefined): void {
+function assignDefined<T extends object, K extends keyof T>(
+  target: T,
+  key: K,
+  value: T[K] | undefined,
+): void {
   if (value !== undefined) target[key] = value;
 }
 
@@ -302,41 +325,178 @@ function normalizeEnv(env: Record<string, unknown>, serverId: string): Record<st
 }
 
 function collectSecretRefs(server: McpServerConfig): string[] {
-  return Object.values(server.env ?? {})
-    .filter((value): value is { ref: string } => isRecord(value) && typeof value.ref === 'string')
-    .map((value) => value.ref)
-    .sort((left, right) => left.localeCompare(right));
+  return [
+    ...new Set(
+      [...Object.values(server.env ?? {}), ...Object.values(server.headers ?? {})]
+        .filter(
+          (value): value is { ref: string } => isRecord(value) && typeof value.ref === 'string',
+        )
+        .map((value) => value.ref),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
 }
 
 function normalizeId(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error('MCP server id is required.');
   const normalized = value.trim();
-  if (!/^[a-zA-Z0-9._-]+$/.test(normalized)) throw new Error(`Invalid MCP server id: ${normalized}.`);
+  if (!/^[a-zA-Z0-9._-]+$/.test(normalized))
+    throw new Error(`Invalid MCP server id: ${normalized}.`);
   return normalized;
 }
 
 function normalizeSource(value: unknown): McpServerSource {
   if (value === 'builtin') return value;
-  return 'imported';
+  if (value === 'imported') return value;
+  return 'user';
 }
 
 function normalizeTransport(value: unknown): McpTransport {
+  if (value === undefined || value === 'stdio') return 'stdio';
   if (value === 'sse' || value === 'streamable-http') return value;
-  return 'stdio';
+  throw new Error(
+    `Invalid MCP transport: ${typeof value === 'string' ? value : typeof value}.`,
+  );
 }
 
 function normalizeEnvName(value: string): string {
   const normalized = value.trim();
-  if (!/^[A-Z_][A-Z0-9_]*$/i.test(normalized)) throw new Error(`Invalid MCP env var name: ${value}.`);
+  if (!/^[A-Z_][A-Z0-9_]*$/i.test(normalized))
+    throw new Error(`Invalid MCP env var name: ${value}.`);
+  return normalized;
+}
+
+function normalizeHeaders(
+  headers: Record<string, unknown>,
+  serverId: string,
+): Record<string, McpHeaderValue> {
+  const output: Record<string, McpHeaderValue> = {};
+  for (const [rawName, rawValue] of Object.entries(headers)) {
+    const name = normalizeHeaderName(rawName);
+    if (typeof rawValue === 'string') {
+      if (looksSensitiveHeaderName(name) || looksLikeSecret(rawValue)) {
+        throw new Error(`MCP header ${name} for ${serverId} must be stored as a keychain ref.`);
+      }
+      output[name] = rawValue;
+      continue;
+    }
+    if (isRecord(rawValue) && typeof rawValue.ref === 'string' && rawValue.ref.trim()) {
+      output[name] = { ref: rawValue.ref.trim() };
+      continue;
+    }
+    throw new Error(`Invalid MCP header value for ${name}.`);
+  }
+  return output;
+}
+
+function normalizeHeaderName(value: string): string {
+  const normalized = value.trim();
+  if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(normalized)) {
+    throw new Error(`Invalid MCP HTTP header name: ${value}.`);
+  }
   return normalized;
 }
 
 function looksSensitiveEnvName(name: string): boolean {
-  return /(KEY|TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL|PRIVATE)/i.test(name);
+  return (
+    /(KEY|TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL|PRIVATE)/i.test(name) ||
+    /^(DATABASE_URL|DB_URL|JDBC_URL|POSTGRES(?:QL)?_URL|MYSQL_URL|MARIADB_URL|MONGODB_URI|MONGO_URI|REDIS_URL|CONNECTION_STRING|DSN|DATABASE_DSN|DB_DSN)$/i.test(
+      name,
+    )
+  );
+}
+
+function looksSensitiveHeaderName(name: string): boolean {
+  return (
+    /^(authorization|proxy-authorization|cookie|set-cookie)$/i.test(name) ||
+    /(api[-_]?key|token|secret|credential)/i.test(name)
+  );
 }
 
 function looksLikeSecret(value: string): boolean {
-  return /\b(sk-[a-z0-9_-]{12,}|Bearer\s+[a-z0-9._-]{12,})\b/i.test(value);
+  return (
+    /\b(sk-[a-z0-9_-]{12,}|Bearer\s+[a-z0-9._-]{12,})\b/i.test(value) ||
+    /(?:[a-z][a-z0-9+.-]*:\/\/|jdbc:)[^/\s:@]+:[^@\s/]+@/i.test(value) ||
+    /(?:^|[?;&\s])(?:password|passwd|pwd|token|api[-_]?key|secret|credential)\s*=\s*[^;&\s]+/i.test(
+      value,
+    )
+  );
+}
+
+function normalizeCommand(value: string, serverId: string): string {
+  const command = value.trim();
+  if (looksLikeSecret(command) || looksSensitiveArgument(command)) {
+    throw new Error(`MCP command for ${serverId} must not contain inline credentials.`);
+  }
+  return command;
+}
+
+function normalizeArgs(values: unknown[], serverId: string): string[] {
+  const args = values.filter((value): value is string => typeof value === 'string');
+  for (const arg of args) {
+    if (looksLikeSecret(arg) || looksSensitiveArgument(arg)) {
+      throw new Error(`MCP args for ${serverId} must not contain inline credentials.`);
+    }
+  }
+  return args;
+}
+
+function looksSensitiveArgument(value: string): boolean {
+  return (
+    /^--?(?:password|passwd|pwd|token|access-token|api[-_]?key|secret|credential|authorization|auth|dsn|database-url|db-url|connection-string)(?:=|$)/i.test(
+      value.trim(),
+    ) ||
+    /(?:^|[;,\s])(?:DATABASE_URL|DB_URL|JDBC_URL|POSTGRES(?:QL)?_URL|MYSQL_URL|MONGODB_URI|REDIS_URL|CONNECTION_STRING|DSN)\s*=/i.test(
+      value,
+    )
+  );
+}
+
+function validateRemoteUrl(value: string, serverId: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`MCP server ${serverId} URL must use http or https.`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`MCP server ${serverId} URL must use http or https.`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`MCP server ${serverId} URL must not contain userinfo credentials.`);
+  }
+  for (const [name, parameterValue] of url.searchParams) {
+    if (looksSensitiveQueryName(name) || looksLikeSecret(parameterValue)) {
+      throw new Error(`MCP server ${serverId} URL must not contain credential query parameters.`);
+    }
+  }
+  if (url.protocol === 'http:' && !isLoopbackHostname(url.hostname)) {
+    throw new Error(`MCP server ${serverId} must use HTTPS unless it targets loopback.`);
+  }
+}
+
+function looksSensitiveQueryName(name: string): boolean {
+  return /^(?:password|passwd|pwd|token|access_token|api[-_]?key|secret|credential|authorization|auth|dsn|database_url|db_url|connection_string)$/i.test(
+    name,
+  );
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '');
+  if (normalized === 'localhost' || normalized.endsWith('.localhost') || normalized === '::1') {
+    return true;
+  }
+  const octets = normalized.split('.');
+  if (octets.length !== 4 || octets.some((octet) => !/^\d{1,3}$/.test(octet))) return false;
+  const numbers = octets.map(Number);
+  return numbers.every((octet) => octet >= 0 && octet <= 255) && numbers[0] === 127;
+}
+
+function normalizedFileKey(filePath: string): string {
+  const absolute = resolve(filePath);
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
 }
 
 function sortServers(servers: McpServerConfig[]): McpServerConfig[] {

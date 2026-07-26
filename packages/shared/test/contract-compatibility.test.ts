@@ -16,22 +16,22 @@ import {
 const fixtures = [
   {
     name: 'resource-snapshot',
-    contract: 'dbagent.resource-registry.snapshot',
+    contract: 'schemanaut.resource-registry.snapshot',
     validate: assertResourceRegistrySnapshot,
   },
   {
     name: 'connection-profile',
-    contract: 'dbagent.database.connection-profile',
+    contract: 'schemanaut.database.connection-profile',
     validate: assertConnectionProfile,
   },
   {
     name: 'query-submission',
-    contract: 'dbagent.database.query-submission',
+    contract: 'schemanaut.database.query-submission',
     validate: assertQuerySubmission,
   },
   {
     name: 'database-error',
-    contract: 'dbagent.database.error',
+    contract: 'schemanaut.database.error',
     validate: assertDatabaseAccessError,
   },
 ] as const;

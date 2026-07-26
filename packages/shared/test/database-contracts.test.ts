@@ -60,9 +60,9 @@ describe('database public contracts', () => {
         }),
       ).issues[0],
     ).toMatchObject({ code: 'SECRET_MATERIAL' });
-    expect(() =>
-      assertConnectionProfile(profile({ endpoints: [] })),
-    ).toThrowError(ContractValidationError);
+    expect(() => assertConnectionProfile(profile({ endpoints: [] }))).toThrowError(
+      ContractValidationError,
+    );
     expect(
       captureContractFailure(() =>
         assertConnectionProfile(
@@ -83,6 +83,32 @@ describe('database public contracts', () => {
     });
   });
 
+  it('validates an optional resource scope on connection profiles', () => {
+    expect(() =>
+      assertConnectionProfile(
+        profile({
+          scope: {
+            tenantId: 'tenant-a',
+            projectId: 'analytics',
+            environment: 'production',
+          },
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertConnectionProfile({
+        ...profile(),
+        scope: { tenantId: 'tenant-a', unsupported: 'leak' },
+      }),
+    ).toThrowError(ContractValidationError);
+    expect(() =>
+      assertConnectionProfile({
+        ...profile(),
+        scope: { tenantId: '   ' },
+      }),
+    ).toThrowError(ContractValidationError);
+  });
+
   it('validates query limits and native values at the public boundary', () => {
     expect(() =>
       assertQuerySubmission({
@@ -94,7 +120,7 @@ describe('database public contracts', () => {
         authorization: {
           actorId: 'operator-1',
           approvalId: 'approval-1',
-          permissionMode: 'all-writes-approved',
+          permissionMode: 'read',
         },
       }),
     ).not.toThrow();
@@ -104,9 +130,7 @@ describe('database public contracts', () => {
       { profileId: 'profile-1', sql: 'select 1', maximumCost: -1 },
       { profileId: 'profile-1', sql: 'select 1', params: [Number.NaN] },
     ]) {
-      expect(() => assertQuerySubmission(invalid)).toThrowError(
-        ContractValidationError,
-      );
+      expect(() => assertQuerySubmission(invalid)).toThrowError(ContractValidationError);
     }
   });
 

@@ -8,7 +8,7 @@ Thank you for helping build an open database-agent runtime.
 
 ### Before you start
 
-- Use Node.js 22.5 or newer and pnpm 9.
+- Use Node.js 22.13 or newer and pnpm 9.
 - Search existing issues before opening a new one.
 - Discuss large API or architecture changes in an issue first.
 - Never commit `.env` files, credentials, database dumps, customer data, generated release archives, or benchmark reports containing sensitive data.
@@ -49,7 +49,7 @@ Unless explicitly stated otherwise, contributions intentionally submitted to thi
 
 ### 开始之前
 
-- 使用 Node.js 22.5 或更高版本与 pnpm 9。
+- 使用 Node.js 22.13 或更高版本与 pnpm 9。
 - 新建 Issue 前先搜索现有问题。
 - 大型 API 或架构变更先通过 Issue 讨论。
 - 禁止提交 `.env`、凭据、数据库转储、客户数据、生成的发行包，或包含敏感数据的性能报告。

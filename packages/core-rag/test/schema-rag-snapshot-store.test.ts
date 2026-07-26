@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { TableDetail } from '@dbagent/shared';
 import { SchemaRagEngine, SchemaRagSnapshotStore } from '../src/index.js';
+import { column } from './schema-fixtures.js';
 
 describe('SchemaRagSnapshotStore', () => {
   it('round-trips a connection-level schema index through the real file system', async () => {
@@ -217,15 +218,4 @@ function fixtureTables(): TableDetail[] {
       ],
     },
   ];
-}
-
-function column(name: string, ordinal: number, dataType: string, nullable: boolean, comment?: string, isPrimaryKey = false) {
-  return {
-    name,
-    ordinal,
-    dataType,
-    nullable,
-    comment,
-    isPrimaryKey,
-  };
 }

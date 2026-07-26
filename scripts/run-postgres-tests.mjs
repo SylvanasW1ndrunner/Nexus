@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { Socket } from 'node:net';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -16,8 +17,16 @@ const require = createRequire(join(root, 'packages', 'core-db', 'package.json'))
 const { Client } = require('pg');
 const localVitest = join(root, 'node_modules', 'vitest', 'vitest.mjs');
 const hasLocalVitest = existsSync(localVitest);
-const command = hasLocalVitest ? process.execPath : process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+const command = hasLocalVitest
+  ? process.execPath
+  : process.platform === 'win32'
+    ? 'pnpm.cmd'
+    : 'pnpm';
+const scenarioReportDirectory = join(root, 'reports', 'postgres-scenarios');
+const scenarioRunId = `${new Date().toISOString().replaceAll(/[:.]/g, '-')}-${randomUUID()}`;
+process.env.DBAGENT_TEST_RUN_ID = scenarioRunId;
 
+await resetScenarioReports();
 await assertPostgresReachable();
 await prepareDatabases();
 
@@ -30,6 +39,116 @@ await runVitest('packages/core-db/test/postgres-connector.integration.test.ts', 
 await runVitest('packages/sdk/test/postgres.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
+await runVitest('packages/sdk/test/postgres-scenarios.integration.test.ts', {
+  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
+});
+await runNodeScript('scripts/tests/postgres-scenario-performance.mjs', {
+  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
+});
+await writeScenarioManifest();
+
+async function resetScenarioReports() {
+  await mkdir(scenarioReportDirectory, { recursive: true });
+  const reportNames = ['functional.json', 'performance.json', 'manifest.json'];
+  if (process.env.DBAGENT_RUN_SDK_LIVE === '1') reportNames.push('live.json');
+  for (const name of reportNames) {
+    await rm(join(scenarioReportDirectory, name), { force: true });
+  }
+}
+
+async function writeScenarioManifest() {
+  const functionalPath = join(scenarioReportDirectory, 'functional.json');
+  const performancePath = join(scenarioReportDirectory, 'performance.json');
+  const functionalText = await readFile(functionalPath, 'utf8');
+  const performanceText = await readFile(performancePath, 'utf8');
+  const functional = JSON.parse(functionalText);
+  const performance = JSON.parse(performanceText);
+  if (
+    functional.runId !== scenarioRunId ||
+    performance.runId !== scenarioRunId ||
+    functional.passed !== true ||
+    performance.passed !== true
+  ) {
+    throw new Error('Scenario reports do not belong to this successful test run.');
+  }
+  const fixtureFiles = [
+    'scripts/dev-db/init.sql',
+    'scripts/dev-db/scenarios/ecommerce.sql',
+    'scripts/dev-db/scenarios/traffic-cleaning.sql',
+    'scripts/dev-db/scenarios/big-science.sql',
+  ];
+  const fixtureDigest = createHash('sha256');
+  for (const file of fixtureFiles) {
+    fixtureDigest.update(file);
+    fixtureDigest.update(await readFile(join(root, file)));
+  }
+  const git = gitState();
+  let live;
+  const livePath = join(scenarioReportDirectory, 'live.json');
+  if (process.env.DBAGENT_RUN_SDK_LIVE === '1') {
+    const liveText = await readFile(livePath, 'utf8');
+    const liveReport = JSON.parse(liveText);
+    if (liveReport.runId !== scenarioRunId || liveReport.passed !== true) {
+      throw new Error('Live scenario report does not belong to this successful test run.');
+    }
+    live = {
+      path: 'live.json',
+      sha256: sha256(liveText),
+      runCount: liveReport.actualRunCount,
+      passed: liveReport.passed,
+    };
+  }
+  const manifest = {
+    generatedAt: new Date().toISOString(),
+    runId: scenarioRunId,
+    database: 'dbagent_core_db_test',
+    git,
+    fixtures: {
+      files: fixtureFiles,
+      sha256: fixtureDigest.digest('hex'),
+    },
+    reports: {
+      functional: {
+        path: 'functional.json',
+        sha256: sha256(functionalText),
+        runCount: functional.actualRunCount,
+        passed: functional.passed,
+      },
+      performance: {
+        path: 'performance.json',
+        sha256: sha256(performanceText),
+        scenarioCount: performance.scenarios.length,
+        passed: performance.passed,
+      },
+      ...(live === undefined ? {} : { live }),
+    },
+    passed: true,
+  };
+  const temporaryPath = join(scenarioReportDirectory, `manifest-${scenarioRunId}.tmp`);
+  await writeFile(temporaryPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  await rename(temporaryPath, join(scenarioReportDirectory, 'manifest.json'));
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function gitState() {
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  const status = spawnSync('git', ['status', '--porcelain'], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  return {
+    commit: commit.status === 0 ? commit.stdout.trim() : 'unavailable',
+    dirty: status.status === 0 ? status.stdout.trim().length > 0 : undefined,
+  };
+}
 
 async function assertPostgresReachable() {
   const host = process.env.DBAGENT_TEST_PG_HOST ?? '127.0.0.1';
@@ -70,7 +189,9 @@ function canOpenTcpConnection(host, port, timeoutMs) {
 
 async function prepareDatabases() {
   const databases = ['dbagent_core_db_test'];
-  const maintenance = new Client(connectionConfig(process.env.DBAGENT_TEST_PG_MAINTENANCE_DATABASE ?? 'postgres'));
+  const maintenance = new Client(
+    connectionConfig(process.env.DBAGENT_TEST_PG_MAINTENANCE_DATABASE ?? 'postgres'),
+  );
   await maintenance.connect();
   try {
     for (const database of databases) {
@@ -84,6 +205,11 @@ async function prepareDatabases() {
   await coreDb.connect();
   try {
     await coreDb.query(await readFile(join(root, 'scripts', 'dev-db', 'init.sql'), 'utf8'));
+    for (const scenario of ['ecommerce.sql', 'traffic-cleaning.sql', 'big-science.sql']) {
+      await coreDb.query(
+        await readFile(join(root, 'scripts', 'dev-db', 'scenarios', scenario), 'utf8'),
+      );
+    }
   } finally {
     await coreDb.end();
   }
@@ -141,6 +267,33 @@ function runVitest(testFile, env) {
         return;
       }
       reject(new Error(`${testFile} failed with exit code ${code ?? 1}`));
+    });
+  });
+}
+
+function runNodeScript(scriptFile, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(root, scriptFile)], {
+      cwd: root,
+      env: {
+        ...process.env,
+        ...env,
+        DBAGENT_RUN_POSTGRES_TESTS: '1',
+      },
+      stdio: 'inherit',
+    });
+
+    child.on('error', reject);
+    child.on('exit', (code, signal) => {
+      if (signal) {
+        process.kill(process.pid, signal);
+        return;
+      }
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${scriptFile} failed with exit code ${code ?? 1}`));
     });
   });
 }

@@ -4,6 +4,12 @@ import type { DatabaseAgentRuntimePort } from '../src/server.js';
 import type {
   CapabilityDescriptor,
   AgentContextCheckpoint,
+  AgentApprovalRequest,
+  AgentSessionListInput,
+  AgentSessionListItem,
+  AgentSessionView,
+  AgentSkillCatalogEntry,
+  AgentSkillRefreshResult,
   AiSqlAgentRun,
   CompactAiSqlAgentSessionInput,
   CompactAiSqlAgentSessionResult,
@@ -14,15 +20,21 @@ import type {
   PostgresConnectionInput,
   QueryJob,
   RunAiSqlAgentInput,
+  McpServerRegistrationInput,
+  McpServerStartSummary,
+  McpServerStopSummary,
+  McpServerSummary,
   RuntimeStatus,
   SchemaIndexSnapshot,
   SqlRunSnapshot,
 } from '@dbagent/sdk';
 import {
   DATABASE_CAPABILITIES,
+  DatabaseAgentError,
   DatabaseAgentRuntime,
   createStableRelationId,
   createStableResourceId,
+  toAgentSessionView,
 } from '@dbagent/sdk';
 import type { SavedConnection } from '@dbagent/shared';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -33,7 +45,7 @@ describe('SchemaNaut local server', () => {
 
   afterEach(async () => {
     if (!started) return;
-    await new Promise<void>((resolve) => started!.server.close(() => resolve()));
+    await started.close();
     started = undefined;
   });
 
@@ -114,38 +126,625 @@ describe('SchemaNaut local server', () => {
       sessionId: 'api-session',
     });
     expect(agent).toMatchObject({
-      selectedSkill: 'query-and-answer',
+      activatedSkills: ['query-and-answer'],
       result: {
         status: 'done',
         session: { id: 'api-session' },
       },
     });
+    expect(JSON.stringify(agent)).not.toMatch(
+      /toolExecutions|knowledgeSnapshot|catalogRootHash|internalNodeId|instructions/,
+    );
     expect(runtime.lastAgentInput).toMatchObject({
       message: '继续分析订单',
       mode: 'read',
       sessionId: 'api-session',
     });
 
-    const compacted = await postJson(
-      started.url,
-      '/v1/agent/sessions/api-session/compact',
-      { focus: '保留 SQL 和精确结果' },
-    );
+    const compacted = await postJson(started.url, '/v1/agent/sessions/api-session/compact', {
+      focus: '保留 SQL 和精确结果',
+    });
     expect(compacted).toMatchObject({
       status: 'compacted',
+      session: {
+        id: 'api-session',
+        messages: [{ role: 'user' }, { role: 'assistant' }],
+      },
+      report: {
+        phase: 'compacted',
+        trigger: 'manual',
+        originalTokenEstimate: 20_000,
+        finalTokenEstimate: 2_000,
+      },
       checkpoint: {
         sequence: 1,
         trigger: 'manual',
         focus: '保留 SQL 和精确结果',
       },
     });
+    expect(JSON.stringify(compacted)).not.toMatch(
+      /role":"tool|toolCalls|knowledgeSnapshot|catalogRootHash|internalNodeId|instructions|modelContextTokens|availablePromptTokens|toolCount|maskedToolResultCount|steps/,
+    );
     const checkpoints = await getJson(
       started.url,
       '/v1/agent/sessions/api-session/context-checkpoints',
     );
-    expect(checkpoints).toMatchObject([
-      { sequence: 1, trigger: 'manual' },
+    expect(checkpoints).toMatchObject([{ sequence: 1, trigger: 'manual' }]);
+    expect(JSON.stringify(checkpoints)).not.toMatch(
+      /method|modelContextTokens|knowledgeSnapshot|hash/i,
+    );
+  });
+
+  it('provides public Agent management, semantic SSE, Skills, approvals and MCP lifecycle APIs', async () => {
+    const runtime = new FakeRuntime();
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const capabilities = await getJson(started.url, '/v1/capabilities');
+    expect(capabilities).toMatchObject({
+      safety: {
+        permissionModes: ['read', 'edit', 'full'],
+        oneTimeApproval: true,
+      },
+    });
+
+    await expect(
+      getJson(started.url, '/v1/agent/sessions?limit=20&offset=0'),
+    ).resolves.toMatchObject([
+      {
+        id: 'api-session',
+        mode: 'read',
+        conversationMessageCount: 2,
+      },
     ]);
+    const session = await getJson(started.url, '/v1/agent/sessions/api-session');
+    expect(session).toMatchObject({
+      id: 'api-session',
+      messages: [
+        { role: 'user', content: '继续分析订单' },
+        { role: 'assistant', content: '已继续分析。' },
+      ],
+      activeSkills: [{ name: 'query-and-answer', scope: 'system' }],
+    });
+    expect(JSON.stringify(session)).not.toMatch(
+      /role":"tool|toolCalls|activeTools|knowledgeSnapshot|private-root-hash|instructions/,
+    );
+
+    const steered = await postJson(
+      started.url,
+      '/v1/agent/sessions/api-session/steer',
+      { message: '补充按地区分组' },
+      202,
+    );
+    expect(steered).toEqual({ accepted: true });
+
+    await expect(getJson(started.url, '/v1/agent/skills')).resolves.toMatchObject([
+      { name: 'query-and-answer', scope: 'system' },
+    ]);
+    await expect(postJson(started.url, '/v1/agent/skills/refresh', {})).resolves.toMatchObject({
+      changed: true,
+      revision: 2,
+      issueCount: 0,
+      conflictCount: 0,
+    });
+
+    await expect(getJson(started.url, '/v1/agent/approvals')).resolves.toMatchObject([
+      { id: 'approval-1', status: 'pending', toolName: 'sql_execute' },
+    ]);
+    await expect(
+      postJson(started.url, '/v1/agent/approvals/approval-1/resolve', {
+        approved: true,
+        resolvedBy: 'api-user',
+      }),
+    ).resolves.toEqual({ resolved: true, approved: true });
+
+    const createdMcp = await postJson(
+      started.url,
+      '/v1/agent/mcp',
+      {
+        id: 'company-tools',
+        name: 'Company Tools',
+        transport: 'streamable-http',
+        url: 'https://mcp.example.test',
+        headers: {
+          Authorization: { ref: 'mcp:company-tools:authorization' },
+        },
+      },
+      201,
+    );
+    expect(createdMcp).toMatchObject({
+      id: 'company-tools',
+      transport: 'streamable-http',
+      status: 'stopped',
+    });
+    expect(JSON.stringify(createdMcp)).not.toMatch(
+      /Authorization|mcp:company-tools:authorization|headers/,
+    );
+    await expect(
+      postJson(started.url, '/v1/agent/mcp/company-tools/start', {}),
+    ).resolves.toMatchObject({
+      server: { id: 'company-tools', status: 'healthy', running: true },
+      tools: ['mcp__company-tools__lookup'],
+    });
+    await expect(getJson(started.url, '/v1/agent/mcp')).resolves.toMatchObject([
+      { id: 'company-tools', status: 'healthy', running: true },
+    ]);
+    await expect(
+      postJson(started.url, '/v1/agent/mcp/company-tools/stop', {}),
+    ).resolves.toMatchObject({
+      serverId: 'company-tools',
+      status: 'stopped',
+    });
+
+    const streamResponse = await fetch(`${started.url}/v1/agent/run/stream`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        message: '继续分析订单',
+        sessionId: 'api-session',
+      }),
+    });
+    expect(streamResponse.status).toBe(200);
+    expect(streamResponse.headers.get('content-type')).toContain('text/event-stream');
+    const streamText = await streamResponse.text();
+    expect(streamText).toContain('event: plan-updated');
+    expect(streamText).toContain('event: result');
+    expect(streamText).not.toMatch(
+      /toolExecutions|knowledgeSnapshot|catalogRootHash|internalNodeId/,
+    );
+
+    const removedMcp = await fetch(`${started.url}/v1/agent/mcp/company-tools`, {
+      method: 'DELETE',
+    });
+    expect(removedMcp.status).toBe(200);
+    expect(await removedMcp.json()).toEqual({ removed: true });
+
+    const deletedSession = await fetch(`${started.url}/v1/agent/sessions/api-session`, {
+      method: 'DELETE',
+    });
+    expect(deletedSession.status).toBe(200);
+    expect(await deletedSession.json()).toEqual({ deleted: true });
+  });
+
+  it('awaits runtime cleanup through the public server close lifecycle', async () => {
+    let releaseCleanup: (() => void) | undefined;
+    const cleanupGate = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    let cleanupFinished = false;
+    const runtime = Object.assign(new FakeRuntime(), {
+      async close(): Promise<void> {
+        await cleanupGate;
+        cleanupFinished = true;
+      },
+    });
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const closing = started.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(cleanupFinished).toBe(false);
+
+    releaseCleanup?.();
+    await closing;
+    expect(cleanupFinished).toBe(true);
+    started = undefined;
+  });
+
+  it('aborts active Agent requests before waiting for the HTTP server to close', async () => {
+    const runtime = new FakeRuntime();
+    let observedSignal: AbortSignal | undefined;
+    let markStarted: (() => void) | undefined;
+    const runStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    runtime.runAgent = async (input) => {
+      observedSignal = input.signal;
+      markStarted?.();
+      await new Promise<never>((_, reject) => {
+        input.signal?.addEventListener(
+          'abort',
+          () => reject(new DatabaseAgentError('ABORTED', 'shutdown', false)),
+          { once: true },
+        );
+      });
+    };
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const url = new URL(started.url);
+    const request = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: '/v1/agent/run',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    });
+    request.on('error', () => undefined);
+    request.end(JSON.stringify({ message: 'abort during shutdown' }));
+    await runStarted;
+
+    const closing = started.close();
+    let closedPromptly = false;
+    try {
+      closedPromptly = await Promise.race([
+        closing.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+      ]);
+      expect(closedPromptly).toBe(true);
+      expect(observedSignal?.aborted).toBe(true);
+    } finally {
+      if (!closedPromptly) request.destroy();
+      await closing;
+      started = undefined;
+    }
+  });
+
+  it('starts shutdown before a low-level Node server.close waits on active requests', async () => {
+    const runtime = new FakeRuntime();
+    let observedSignal: AbortSignal | undefined;
+    let markStarted: (() => void) | undefined;
+    const runStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    runtime.runAgent = async (input) => {
+      observedSignal = input.signal;
+      markStarted?.();
+      await new Promise<never>((_, reject) => {
+        input.signal?.addEventListener(
+          'abort',
+          () => reject(new DatabaseAgentError('ABORTED', 'shutdown', false)),
+          { once: true },
+        );
+      });
+    };
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const url = new URL(started.url);
+    const request = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: '/v1/agent/run',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    });
+    request.on('error', () => undefined);
+    request.end(JSON.stringify({ message: 'low-level shutdown' }));
+    await runStarted;
+
+    const rawClosed = new Promise<void>((resolve, reject) => {
+      started?.server.close((error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+    const closedPromptly = await Promise.race([
+      rawClosed.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+
+    expect(closedPromptly).toBe(true);
+    expect(observedSignal?.aborted).toBe(true);
+    await started.close();
+    started = undefined;
+  });
+
+  it('cancels non-streaming Agent work when the HTTP client disconnects', async () => {
+    const runtime = new FakeRuntime();
+    const originalRunAgent = runtime.runAgent.bind(runtime);
+    let observedSignal: AbortSignal | undefined;
+    let markStarted: (() => void) | undefined;
+    const runStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let releaseRun: (() => void) | undefined;
+    const runGate = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    runtime.runAgent = async (input) => {
+      observedSignal = input.signal;
+      markStarted?.();
+      await runGate;
+      return originalRunAgent(input);
+    };
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const url = new URL(started.url);
+    const request = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: '/v1/agent/run',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    });
+    request.on('error', () => undefined);
+    request.end(JSON.stringify({ message: 'cancel on disconnect' }));
+    await runStarted;
+    expect(observedSignal).toBeDefined();
+    const abortObserved = new Promise<void>((resolve) => {
+      if (observedSignal?.aborted) resolve();
+      else observedSignal?.addEventListener('abort', () => resolve(), { once: true });
+    });
+    request.destroy();
+    await Promise.race([
+      abortObserved,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('HTTP disconnect did not abort Agent work.')), 1_000),
+      ),
+    ]);
+    releaseRun?.();
+
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
+  it('cancels non-streaming LLM work when the HTTP client disconnects', async () => {
+    let observedSignal: AbortSignal | undefined;
+    let markStarted: (() => void) | undefined;
+    const callStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let releaseCall: (() => void) | undefined;
+    const callGate = new Promise<void>((resolve) => {
+      releaseCall = resolve;
+    });
+    const runtime = Object.assign(new FakeRuntime(), {
+      async llmChat(
+        request: Parameters<NonNullable<DatabaseAgentRuntimePort['llmChat']>>[0],
+      ) {
+        observedSignal = request.signal;
+        markStarted?.();
+        await callGate;
+        return { text: 'done', toolCalls: [] };
+      },
+    });
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const url = new URL(started.url);
+    const request = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: '/v1/llm/chat',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    });
+    request.on('error', () => undefined);
+    request.end(JSON.stringify({ messages: [{ role: 'user', content: 'cancel me' }] }));
+    await callStarted;
+    expect(observedSignal).toBeDefined();
+    const abortObserved = new Promise<void>((resolve) => {
+      if (observedSignal?.aborted) resolve();
+      else observedSignal?.addEventListener('abort', () => resolve(), { once: true });
+    });
+    request.destroy();
+    await Promise.race([
+      abortObserved,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('HTTP disconnect did not abort LLM work.')), 1_000),
+      ),
+    ]);
+    releaseCall?.();
+
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
+  it('keeps process-backed stdio MCP management disabled by default and supports explicit opt-in', async () => {
+    const runtime = new FakeRuntime();
+    await runtime.upsertMcpServer({
+      id: 'persisted-stdio',
+      name: 'Persisted stdio',
+      transport: 'stdio',
+      command: 'node',
+    });
+    runtime.mcpUpsertCalls = 0;
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const createBlocked = await fetch(`${started.url}/v1/agent/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        id: 'new-stdio',
+        name: 'New stdio',
+        transport: 'stdio',
+        command: 'node',
+      }),
+    });
+    expect(createBlocked.status).toBe(403);
+    await expect(createBlocked.json()).resolves.toMatchObject({
+      error: { code: 'PROCESS_MCP_DISABLED' },
+    });
+    expect(runtime.mcpUpsertCalls).toBe(0);
+
+    const startBlocked = await fetch(`${started.url}/v1/agent/mcp/persisted-stdio/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(startBlocked.status).toBe(403);
+    await expect(startBlocked.json()).resolves.toMatchObject({
+      error: { code: 'PROCESS_MCP_DISABLED' },
+    });
+    expect(runtime.mcpStartCalls).toBe(0);
+
+    const capabilities = await getJson(started.url, '/v1/capabilities');
+    expect(capabilities).toMatchObject({
+      safety: { restProcessMcpManagement: false },
+    });
+
+    await started.close();
+    started = undefined;
+
+    const optedInRuntime = new FakeRuntime();
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime: optedInRuntime,
+      createProvider: fakeProviderFactory,
+      allowProcessMcpManagement: true,
+    });
+    await expect(
+      postJson(
+        started.url,
+        '/v1/agent/mcp',
+        {
+          id: 'opted-in-stdio',
+          name: 'Opted-in stdio',
+          transport: 'stdio',
+          command: 'node',
+        },
+        201,
+      ),
+    ).resolves.toMatchObject({ id: 'opted-in-stdio', transport: 'stdio' });
+    await expect(
+      postJson(started.url, '/v1/agent/mcp/opted-in-stdio/start', {}),
+    ).resolves.toMatchObject({
+      server: { id: 'opted-in-stdio', running: true },
+    });
+    expect(optedInRuntime.mcpUpsertCalls).toBe(1);
+    expect(optedInRuntime.mcpStartCalls).toBe(1);
+  });
+
+  it('accepts only loopback Host, same-origin browser requests, and JSON request bodies', async () => {
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime: new FakeRuntime(),
+      createProvider: fakeProviderFactory,
+    });
+
+    const hostileHost = await rawHttpRequest(started.url, {
+      path: '/health',
+      headers: { host: 'attacker.example' },
+    });
+    expect(hostileHost.status).toBe(403);
+    expect(hostileHost.json).toMatchObject({ error: { code: 'LOCAL_ACCESS_ONLY' } });
+
+    const crossOrigin = await fetch(`${started.url}/health`, {
+      headers: { origin: 'https://attacker.example' },
+    });
+    expect(crossOrigin.status).toBe(403);
+    await expect(crossOrigin.json()).resolves.toMatchObject({
+      error: { code: 'ORIGIN_FORBIDDEN' },
+    });
+
+    const sameOrigin = await fetch(`${started.url}/health`, {
+      headers: { origin: started.url },
+    });
+    expect(sameOrigin.status).toBe(200);
+
+    const wrongContentType = await fetch(`${started.url}/v1/schema/index`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: '{}',
+    });
+    expect(wrongContentType.status).toBe(415);
+    await expect(wrongContentType.json()).resolves.toMatchObject({
+      error: { code: 'UNSUPPORTED_MEDIA_TYPE' },
+    });
+
+    const emptyBody = await fetch(`${started.url}/v1/schema/index`, { method: 'POST' });
+    expect(emptyBody.status).toBe(200);
+  });
+
+  it('bounds REST Agent execution settings before invoking the runtime', async () => {
+    const runtime = new FakeRuntime();
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const capabilities = await getJson(started.url, '/v1/capabilities');
+    expect(capabilities).toMatchObject({
+      limits: {
+        maxAgentIterations: 64,
+        maxToolExecutionMs: 300_000,
+      },
+    });
+
+    for (const body of [
+      { message: 'too many rounds', maxIterations: 65 },
+      { message: 'no rounds', maxIterations: 0 },
+      { message: 'tool timeout too large', maxToolExecutionMs: 300_001 },
+      { message: 'tool timeout must be positive', maxToolExecutionMs: 0 },
+    ]) {
+      const response = await fetch(`${started.url}/v1/agent/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: 'INVALID_INPUT' },
+      });
+    }
+    expect(runtime.lastAgentInput).toBeUndefined();
+  });
+
+  it('redacts credentials and local paths from public errors', async () => {
+    const runtime = new FakeRuntime();
+    runtime.generateError = new DatabaseAgentError(
+      'QUERY_FAILED',
+      'Failed at C:\\Users\\alice\\.config\\provider.json with apiKey=sk-test-secret-123456 and postgresql://admin:db-password@127.0.0.1/demo',
+      false,
+    );
+    started = await startDatabaseAgentServer({
+      port: 0,
+      runtime,
+      createProvider: fakeProviderFactory,
+    });
+
+    const response = await fetch(`${started.url}/v1/query/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ question: 'trigger the provider failure' }),
+    });
+    expect(response.status).toBe(502);
+    const text = await response.text();
+    expect(text).toContain('[REDACTED]');
+    expect(text).toContain('[LOCAL_PATH]');
+    expect(text).not.toMatch(
+      /alice|provider\.json|sk-test-secret-123456|db-password|postgresql:\/\/admin:/,
+    );
+
+    runtime.generateError = new Error(
+      'unexpected failure at /home/service/config.json token=raw-secret-value',
+    );
+    const internal = await postJson(
+      started.url,
+      '/v1/query/generate',
+      { question: 'trigger an internal failure' },
+      500,
+    );
+    expect(internal).toEqual({
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'Internal server error.',
+        retryable: false,
+      },
+    });
   });
 
   it('returns stable errors for invalid JSON, missing runs, and unknown routes', async () => {
@@ -203,8 +802,10 @@ describe('SchemaNaut local server', () => {
 
   it('discovers model metadata during setup without generating model output', async () => {
     let chatCalls = 0;
+    const runtime = new DatabaseAgentRuntime({ sessionDatabasePath: ':memory:' });
     started = await startDatabaseAgentServer({
       port: 0,
+      runtime,
       createProvider: () => ({
         id: 'metadata-provider',
         name: 'Metadata Provider',
@@ -257,9 +858,71 @@ describe('SchemaNaut local server', () => {
     });
   });
 
+  it('applies one resource scope to details, state, observations, relations, and events', async () => {
+    const runtime = new DatabaseAgentRuntime({ sessionDatabasePath: ':memory:' });
+    const observedAt = '2026-07-26T00:00:00.000Z';
+    const source = {
+      sourceId: 'scope-test',
+      sourceType: 'manual' as const,
+      observedAt,
+    };
+    runtime.resources.upsertResource({
+      id: 'resource-team-a',
+      kind: 'database',
+      nativeId: 'team-a-db',
+      canonicalName: 'team-a-db',
+      scope: { tenantId: 'team-a' },
+      version: 1,
+      firstSeenAt: observedAt,
+      updatedAt: observedAt,
+      sources: [source],
+    });
+    runtime.resources.upsertResource({
+      id: 'resource-team-b',
+      kind: 'database',
+      nativeId: 'team-b-db',
+      canonicalName: 'team-b-db',
+      scope: { tenantId: 'team-b' },
+      version: 1,
+      firstSeenAt: observedAt,
+      updatedAt: observedAt,
+      sources: [source],
+    });
+    runtime.resources.addObservation({
+      id: 'observation-team-b',
+      resourceId: 'resource-team-b',
+      category: 'health',
+      status: 'healthy',
+      observedAt,
+      expiresAt: '2026-07-27T00:00:00.000Z',
+      source,
+    });
+    started = await startDatabaseAgentServer({ port: 0, runtime });
+
+    expect(
+      await getJson(started.url, '/v1/resources/resource-team-a?tenantId=team-a'),
+    ).toMatchObject({ id: 'resource-team-a' });
+    for (const suffix of ['', '/state', '/observations', '/relations']) {
+      const response = await fetch(
+        `${started.url}/v1/resources/resource-team-b${suffix}?tenantId=team-a`,
+      );
+      expect(response.status, suffix || '/detail').toBe(404);
+    }
+    const events = await getJson(started.url, '/v1/resource-events?tenantId=team-a&limit=20');
+    expect(events.items).toEqual([
+      expect.objectContaining({ resourceId: 'resource-team-a' }),
+    ]);
+  });
+
   it('exposes the complete connector, profile, resource, query, transaction and operation API', async () => {
-    const connector = createApiTestConnector();
-    const runtime = new DatabaseAgentRuntime({ connectors: [connector] });
+    let submittedParams: readonly unknown[] | undefined;
+    const connector = createApiTestConnector((params) => {
+      submittedParams = params;
+    });
+    const runtime = new DatabaseAgentRuntime({
+      connectors: [connector],
+      sessionDatabasePath: ':memory:',
+    });
     started = await startDatabaseAgentServer({ port: 0, runtime });
 
     const connectors = (await getJson(started.url, '/v1/database/connectors')) as unknown as Array<{
@@ -281,10 +944,15 @@ describe('SchemaNaut local server', () => {
         principal: 'tester',
         purpose: 'admin',
         readOnly: false,
+        scope: { tenantId: 'api-tenant', projectId: 'api-project' },
       }),
     });
     expect(createdResponse.status).toBe(201);
-    expect(await createdResponse.json()).toMatchObject({ id: 'api-profile', principal: 'tester' });
+    expect(await createdResponse.json()).toMatchObject({
+      id: 'api-profile',
+      principal: 'tester',
+      scope: { tenantId: 'api-tenant', projectId: 'api-project' },
+    });
     expect(await getJson(started.url, '/v1/database/profiles')).toEqual([
       expect.objectContaining({ id: 'api-profile' }),
     ]);
@@ -310,9 +978,9 @@ describe('SchemaNaut local server', () => {
         credential: { username: 'tester', password: 'never-return-this' },
       }),
     ).toMatchObject({ status: 'connected' });
-    expect(
-      await getJson(started.url, '/v1/database/profiles/api-profile/health'),
-    ).toMatchObject({ status: 'healthy' });
+    expect(await getJson(started.url, '/v1/database/profiles/api-profile/health')).toMatchObject({
+      status: 'healthy',
+    });
     expect(
       await getJson(started.url, '/v1/database/profiles/api-profile/capabilities'),
     ).toMatchObject({ connectorId: 'api-test' });
@@ -320,34 +988,34 @@ describe('SchemaNaut local server', () => {
       await postJson(started.url, '/v1/database/profiles/api-profile/discover', {}),
     ).toMatchObject({ pages: 1, resources: 2, relations: 1 });
 
-    const resources = await getJson(
-      started.url,
-      '/v1/database/resources?kinds=table&limit=10',
-    );
+    const resources = await getJson(started.url, '/v1/database/resources?kinds=table&limit=10');
     const tableId = (resources.items as Array<{ id: string }>)[0]!.id;
     expect(resources.items).toEqual([expect.objectContaining({ kind: 'table' })]);
+    expect(
+      await getJson(
+        started.url,
+        '/v1/database/resources?kinds=table&tenantId=api-tenant&projectId=api-project&limit=10',
+      ),
+    ).toMatchObject({ items: [expect.objectContaining({ id: tableId })] });
+    expect(
+      await getJson(
+        started.url,
+        '/v1/database/resources?kinds=table&tenantId=other-tenant&limit=10',
+      ),
+    ).toMatchObject({ items: [] });
     expect(
       await getJson(started.url, `/v1/database/resources/${encodeURIComponent(tableId)}`),
     ).toMatchObject({ canonicalName: 'orders' });
     expect(
-      await getJson(
-        started.url,
-        `/v1/database/resources/${encodeURIComponent(tableId)}/relations`,
-      ),
+      await getJson(started.url, `/v1/database/resources/${encodeURIComponent(tableId)}/relations`),
     ).toEqual([expect.objectContaining({ kind: 'contains' })]);
     expect(
-      await getJson(
-        started.url,
-        '/v1/resources?kinds=table&engine=api-mock&limit=10',
-      ),
+      await getJson(started.url, '/v1/resources?kinds=table&engine=api-mock&limit=10'),
     ).toMatchObject({
       items: [expect.objectContaining({ id: tableId, kind: 'table' })],
     });
     expect(
-      await getJson(
-        started.url,
-        `/v1/resources/${encodeURIComponent(tableId)}`,
-      ),
+      await getJson(started.url, `/v1/resources/${encodeURIComponent(tableId)}`),
     ).toMatchObject({ canonicalName: 'orders' });
     expect(
       await getJson(
@@ -367,23 +1035,15 @@ describe('SchemaNaut local server', () => {
     const secondNode = requireTestRecord(traversalNodes[1], 'traversal.nodes[1]');
     expect(requireTestRecord(firstNode.resource, 'firstNode.resource').id).toBe(tableId);
     expect(firstNode.depth).toBe(0);
-    expect(requireTestRecord(secondNode.resource, 'secondNode.resource').kind).toBe(
-      'database',
-    );
+    expect(requireTestRecord(secondNode.resource, 'secondNode.resource').kind).toBe('database');
     expect(secondNode.depth).toBe(1);
-    const traversalRelations = requireTestArray(
-      traversal.relations,
-      'traversal.relations',
+    const traversalRelations = requireTestArray(traversal.relations, 'traversal.relations');
+    expect(requireTestRecord(traversalRelations[0], 'traversal.relations[0]').kind).toBe(
+      'contains',
     );
-    expect(
-      requireTestRecord(traversalRelations[0], 'traversal.relations[0]').kind,
-    ).toBe('contains');
     expect(traversal.truncated).toBe(false);
     expect(
-      await getJson(
-        started.url,
-        `/v1/resources/${encodeURIComponent(tableId)}/state`,
-      ),
+      await getJson(started.url, `/v1/resources/${encodeURIComponent(tableId)}/state`),
     ).toMatchObject({
       resourceId: tableId,
       status: 'unknown',
@@ -395,22 +1055,18 @@ describe('SchemaNaut local server', () => {
     );
     expect(
       requireTestArray(events.items, 'events.items').some(
-        (item) =>
-          requireTestRecord(item, 'events.items[]').type === 'resource-created',
+        (item) => requireTestRecord(item, 'events.items[]').type === 'resource-created',
       ),
     ).toBe(true);
-    const invalidTraversal = await fetch(
-      `${started.url}/v1/resources/traverse`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          startResourceIds: [tableId],
-          maxDepth: 33,
-          maxResources: 10,
-        }),
-      },
-    );
+    const invalidTraversal = await fetch(`${started.url}/v1/resources/traverse`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        startResourceIds: [tableId],
+        maxDepth: 33,
+        maxResources: 10,
+      }),
+    });
     expect(invalidTraversal.status).toBe(400);
     expect(await invalidTraversal.json()).toMatchObject({
       error: { code: 'TRAVERSAL_LIMIT_INVALID' },
@@ -421,29 +1077,35 @@ describe('SchemaNaut local server', () => {
       sql: 'select 1',
       executionMode: 'sync',
       timeoutMs: 1_000,
+      params: [
+        { $schemanautType: 'bigint', value: '9007199254740993' },
+        { $schemanautType: 'datetime', value: '2026-07-23T00:00:00.000Z' },
+        { $schemanautType: 'binary', encoding: 'base64', value: 'AP8=' },
+      ],
     });
     expect(query).toMatchObject({ state: 'succeeded' });
+    expect(submittedParams?.[0]).toBe(9_007_199_254_740_993n);
+    expect(submittedParams?.[1]).toEqual(new Date('2026-07-23T00:00:00.000Z'));
+    expect(submittedParams?.[2]).toEqual(Uint8Array.from([0, 255]));
     const jobId = query.id as string;
     const handleId = (query.result as { id: string }).id;
     expect(await getJson(started.url, `/v1/database/queries/${jobId}`)).toMatchObject({
       id: jobId,
     });
-    expect(
-      await getJson(started.url, `/v1/database/results/${handleId}?limit=1`),
-    ).toMatchObject({
+    expect(await getJson(started.url, `/v1/database/results/${handleId}?limit=1`)).toMatchObject({
       rows: [
         {
           value: 1,
           big: {
-            $dbagentType: 'bigint',
+            $schemanautType: 'bigint',
             value: '9007199254740993',
           },
           at: {
-            $dbagentType: 'datetime',
+            $schemanautType: 'datetime',
             value: '2026-07-23T00:00:00.000Z',
           },
           binary: {
-            $dbagentType: 'binary',
+            $schemanautType: 'binary',
             encoding: 'base64',
             value: 'AP8=',
           },
@@ -472,7 +1134,7 @@ describe('SchemaNaut local server', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         profileId: 'api-profile',
-        sql: 'queued',
+        sql: 'select 1 /* queued */',
         executionMode: 'async',
       }),
     });
@@ -495,11 +1157,9 @@ describe('SchemaNaut local server', () => {
     expect(transactionResponse.status).toBe(201);
     const transaction = (await transactionResponse.json()) as { id: string };
     expect(
-      await postJson(
-        started.url,
-        `/v1/database/transactions/${transaction.id}/savepoints`,
-        { name: 'before_change' },
-      ),
+      await postJson(started.url, `/v1/database/transactions/${transaction.id}/savepoints`, {
+        name: 'before_change',
+      }),
     ).toMatchObject({ savepoints: ['before_change'] });
     expect(
       await postJson(
@@ -509,11 +1169,7 @@ describe('SchemaNaut local server', () => {
       ),
     ).toMatchObject({ state: 'active' });
     expect(
-      await postJson(
-        started.url,
-        `/v1/database/transactions/${transaction.id}/commit`,
-        {},
-      ),
+      await postJson(started.url, `/v1/database/transactions/${transaction.id}/commit`, {}),
     ).toMatchObject({ state: 'committed' });
 
     expect(
@@ -572,9 +1228,9 @@ describe('SchemaNaut local server', () => {
       expect.arrayContaining([expect.objectContaining({ action: 'database.operation.analyze' })]),
     );
 
-    expect(
-      await postJson(started.url, '/v1/database/profiles/api-profile/disconnect', {}),
-    ).toEqual({ disconnected: true });
+    expect(await postJson(started.url, '/v1/database/profiles/api-profile/disconnect', {})).toEqual(
+      { disconnected: true },
+    );
     const deleted = await fetch(`${started.url}/v1/database/profiles/api-profile`, {
       method: 'DELETE',
     });
@@ -593,13 +1249,14 @@ async function postJson(
   baseUrl: string,
   path: string,
   body: Record<string, unknown>,
+  expectedStatus = 200,
 ): Promise<Record<string, unknown>> {
   const response = await fetch(`${baseUrl}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  expect(response.status).toBe(200);
+  expect(response.status).toBe(expectedStatus);
   return (await response.json()) as Record<string, unknown>;
 }
 
@@ -646,10 +1303,56 @@ async function postChunkedJson(
   });
 }
 
-function requireTestRecord(
-  value: unknown,
-  name: string,
-): Record<string, unknown> {
+async function rawHttpRequest(
+  baseUrl: string,
+  options: {
+    path: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+): Promise<{ status: number; text: string; json: Record<string, unknown> }> {
+  const url = new URL(baseUrl);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: options.path,
+        method: options.method ?? 'GET',
+        headers: options.headers,
+      },
+      (response) => {
+        const chunks: Uint8Array[] = [];
+        response.on('data', (rawChunk: unknown) => {
+          const chunk =
+            typeof rawChunk === 'string'
+              ? Buffer.from(rawChunk)
+              : rawChunk instanceof Uint8Array
+                ? Buffer.from(rawChunk)
+                : Buffer.from(String(rawChunk));
+          chunks.push(chunk);
+        });
+        response.on('end', () => {
+          try {
+            const text = Buffer.concat(chunks).toString('utf8');
+            resolve({
+              status: response.statusCode ?? 0,
+              text,
+              json: text ? (JSON.parse(text) as Record<string, unknown>) : {},
+            });
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
+      },
+    );
+    request.on('error', reject);
+    request.end(options.body);
+  });
+}
+
+function requireTestRecord(value: unknown, name: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new TypeError(`${name} must be an object.`);
   }
@@ -682,8 +1385,31 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
   private connected = false;
   private indexed = false;
   private readonly runs = new Map<string, SqlRunSnapshot>();
-  lastIndexOptions?: IndexSchemaOptions;
+  private sessionDeleted = false;
+  private readonly mcpServers = new Map<string, McpServerSummary>();
+  private readonly pendingApprovals = new Map<string, AgentApprovalRequest>([
+    [
+      'approval-1',
+      {
+        id: 'approval-1',
+        status: 'pending',
+        mode: 'read',
+        sessionId: 'api-session',
+        toolCallId: 'tool-call-1',
+        toolName: 'sql_execute',
+        dangerLevel: 'medium',
+        readonly: false,
+        argumentPreview: '{"sql":"UPDATE orders SET status = \\"paid\\""}',
+        createdAt: '2026-07-24T00:00:00.000Z',
+        updatedAt: '2026-07-24T00:00:00.000Z',
+      },
+    ],
+  ]);
+  lastIndexOptions: IndexSchemaOptions | undefined;
   lastAgentInput?: RunAiSqlAgentInput;
+  generateError?: Error;
+  mcpUpsertCalls = 0;
+  mcpStartCalls = 0;
 
   configureProvider(): void {
     this.configured = true;
@@ -749,13 +1475,37 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
       connected: this.connected,
       schema: this.schemaStatus(),
       runCount: this.runs.size,
+      llm: {
+        modelCount: 0,
+        metrics: {
+          requests: 0,
+          completed: 0,
+          failed: 0,
+          cancelled: 0,
+          cacheHits: 0,
+          retries: 0,
+          fallbacks: 0,
+          totalPromptTokens: 0,
+          totalCompletionTokens: 0,
+          totalCost: 0,
+          latencyMs: { p50: 0, p95: 0, p99: 0, max: 0 },
+          byModel: {},
+        },
+      },
     };
   }
 
-  runAgent(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun> {
+  async runAgent(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun> {
     this.lastAgentInput = input;
-    return Promise.resolve({
-      selectedSkill: 'query-and-answer',
+    await input.onEvent?.({
+      id: 'event-1',
+      sessionId: 'api-session',
+      type: 'plan-updated',
+      message: '已制定查询计划。',
+      createdAt: '2026-07-24T00:00:00.000Z',
+    });
+    return {
+      activatedSkills: ['query-and-answer'],
       result: {
         status: 'done',
         session: fakeAgentSession(),
@@ -763,6 +1513,146 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
         iterations: 1,
         toolExecutions: [],
       },
+    };
+  }
+
+  steerAgentSession(sessionId: string, message: string): boolean {
+    return sessionId === 'api-session' && message.length > 0;
+  }
+
+  listAgentSessions(input: AgentSessionListInput = {}): Promise<AgentSessionListItem[]> {
+    void input;
+    if (this.sessionDeleted) return Promise.resolve([]);
+    return Promise.resolve([
+      {
+        id: 'api-session',
+        title: 'API Agent Session',
+        mode: 'read',
+        archived: false,
+        conversationMessageCount: 2,
+        tokenUsage: {
+          promptTokens: 100,
+          completionTokens: 20,
+          totalTokens: 120,
+        },
+        createdAt: '2026-07-24T00:00:00.000Z',
+        updatedAt: '2026-07-24T00:00:01.000Z',
+        lastMessageAt: '2026-07-24T00:00:01.000Z',
+      },
+    ]);
+  }
+
+  getAgentSession(sessionId: string): Promise<AgentSessionView | undefined> {
+    const publicView = toAgentSessionView(fakeAgentSession());
+    return Promise.resolve(
+      sessionId === 'api-session' && !this.sessionDeleted
+        ? Object.assign(publicView, {
+            knowledgeSnapshot: { catalogRootHash: 'must-not-leak' },
+            activeTools: ['internal-tool'],
+          })
+        : undefined,
+    );
+  }
+
+  deleteAgentSession(sessionId: string): Promise<boolean> {
+    if (sessionId !== 'api-session' || this.sessionDeleted) {
+      return Promise.resolve(false);
+    }
+    this.sessionDeleted = true;
+    return Promise.resolve(true);
+  }
+
+  listAgentSkills(): Promise<AgentSkillCatalogEntry[]> {
+    return Promise.resolve([
+      {
+        name: 'query-and-answer',
+        description: 'Generate and run a database query.',
+        scope: 'system',
+      },
+    ]);
+  }
+
+  refreshSkills(): Promise<AgentSkillRefreshResult> {
+    return Promise.resolve({
+      changed: true,
+      revision: 2,
+      skills: [
+        {
+          name: 'query-and-answer',
+          description: 'Generate and run a database query.',
+          scope: 'system',
+        },
+      ],
+      issues: [],
+      conflicts: [],
+    });
+  }
+
+  listAgentApprovals(): AgentApprovalRequest[] {
+    return [...this.pendingApprovals.values()];
+  }
+
+  resolveAgentApproval(requestId: string, approved: boolean): boolean {
+    void approved;
+    return this.pendingApprovals.delete(requestId);
+  }
+
+  listMcpServers(): Promise<McpServerSummary[]> {
+    return Promise.resolve([...this.mcpServers.values()]);
+  }
+
+  upsertMcpServer(input: McpServerRegistrationInput): Promise<McpServerSummary> {
+    this.mcpUpsertCalls += 1;
+    const server: McpServerSummary = {
+      id: input.id ?? 'company-tools',
+      name: input.name,
+      source: input.source ?? 'user',
+      transport: input.transport ?? 'stdio',
+      enabled: input.enabled ?? true,
+      autoStart: input.autoStart ?? false,
+      running: false,
+      status: 'stopped',
+      healthy: false,
+      warnings: [],
+    };
+    this.mcpServers.set(server.id, server);
+    return Promise.resolve(server);
+  }
+
+  removeMcpServer(serverId: string): Promise<boolean> {
+    return Promise.resolve(this.mcpServers.delete(serverId));
+  }
+
+  startMcpServer(serverId: string): Promise<McpServerStartSummary> {
+    this.mcpStartCalls += 1;
+    const current = this.mcpServers.get(serverId)!;
+    const server = {
+      ...current,
+      running: true,
+      status: 'healthy' as const,
+      healthy: true,
+    };
+    this.mcpServers.set(serverId, server);
+    return Promise.resolve({
+      server,
+      tools: [`mcp__${serverId}__lookup`],
+    });
+  }
+
+  stopMcpServer(serverId: string): Promise<McpServerStopSummary> {
+    const current = this.mcpServers.get(serverId);
+    if (current) {
+      this.mcpServers.set(serverId, {
+        ...current,
+        running: false,
+        status: 'stopped',
+        healthy: false,
+      });
+    }
+    return Promise.resolve({
+      serverId,
+      removedTools: [`mcp__${serverId}__lookup`],
+      status: 'stopped',
     });
   }
 
@@ -809,6 +1699,7 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
   }
 
   generate(): Promise<GeneratedSqlRun> {
+    if (this.generateError) return Promise.reject(this.generateError);
     const run: GeneratedSqlRun = {
       runId: 'run-1',
       status: 'awaiting_execution',
@@ -834,8 +1725,15 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
   executeGenerated(runId: string): Promise<ExecutedSqlRun> {
     const generated = this.runs.get(runId)!;
     const executed: ExecutedSqlRun = {
-      ...generated,
+      runId: generated.runId,
       status: 'completed',
+      question: generated.question,
+      sql: generated.sql,
+      explanation: generated.explanation,
+      assumptions: generated.assumptions,
+      evidence: generated.evidence,
+      safety: generated.safety,
+      createdAt: generated.createdAt,
       execution: {
         queryId: 'query-1',
         columns: [
@@ -866,12 +1764,30 @@ function fakeAgentSession(
     id: 'api-session',
     title: 'API Agent Session',
     mode: 'read',
-    strategy: 'react',
     messages: [
       {
         role: 'user',
         content: '继续分析订单',
         createdAt: '2026-07-24T00:00:00.000Z',
+      },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          {
+            id: 'tool-call-1',
+            name: 'sql_execute',
+            arguments: { sql: 'SELECT * FROM orders' },
+          },
+        ],
+        createdAt: '2026-07-24T00:00:00.500Z',
+      },
+      {
+        role: 'tool',
+        toolCallId: 'tool-call-1',
+        toolName: 'sql_execute',
+        content: '{"internalNodeId":"node-1","rows":[{"id":1}]}',
+        createdAt: '2026-07-24T00:00:00.750Z',
       },
       {
         role: 'assistant',
@@ -884,14 +1800,28 @@ function fakeAgentSession(
       completionTokens: 20,
       totalTokens: 120,
     },
+    activeTools: ['sql_execute', 'tool_search'],
+    activeSkills: [
+      {
+        name: 'query-and-answer',
+        description: 'Generate and run a database query.',
+        scope: 'system',
+        instructions: 'Internal Skill workflow that must not be returned.',
+      },
+    ],
+    knowledgeSnapshot: {
+      connectionId: 'connection-1',
+      knowledgeSnapshotId: 'snapshot-internal',
+      catalogRootHash: 'private-root-hash',
+      retrievalProfileId: 'profile-internal',
+      indexVersion: 'version-internal',
+    },
     ...(contextCheckpoint === undefined ? {} : { contextCheckpoint }),
     aborted: false,
   };
 }
 
-function fakeContextCheckpoint(
-  focus?: string,
-): AgentContextCheckpoint {
+function fakeContextCheckpoint(focus?: string): AgentContextCheckpoint {
   return {
     version: 1,
     sequence: 1,
@@ -907,7 +1837,9 @@ function fakeContextCheckpoint(
   };
 }
 
-function createApiTestConnector(): DatabaseConnector {
+function createApiTestConnector(
+  onSubmit?: (params: readonly unknown[] | undefined) => void,
+): DatabaseConnector {
   const observedAt = '2026-07-23T00:00:00.000Z';
   const databaseId = createStableResourceId({
     sourceNamespace: 'api-test',
@@ -1045,8 +1977,9 @@ function createApiTestConnector(): DatabaseConnector {
       });
     },
     submit(context, submission) {
+      onSubmit?.(submission.params);
       const id = `job-${jobs.size + 1}`;
-      const queued = submission.sql === 'queued';
+      const queued = submission.sql === 'select 1 /* queued */';
       const job: QueryJob = {
         id,
         profileId: context.profile.id,

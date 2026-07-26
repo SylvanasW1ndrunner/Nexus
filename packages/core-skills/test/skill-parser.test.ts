@@ -1,61 +1,161 @@
 import { describe, expect, it } from 'vitest';
-import { parseSkillDefinition, parseSkillDocument } from '../src/index.js';
+import { parseSkillDocument, parseSkillMetadata, type SkillParseContext } from '../src/index.js';
 
-describe('Skill parsing', () => {
-  it('parses YAML and normalizes extension metadata', () => {
-    const skill = parseSkillDefinition(
+const context: SkillParseContext = {
+  scope: 'project',
+  sourceId: 'project',
+  sourcePath: 'C:/workspace/.schemanaut/skills/order-analysis/SKILL.md',
+  bundleRoot: 'C:/workspace/.schemanaut/skills/order-analysis',
+  sourceOrder: 0,
+  expectedName: 'order-analysis',
+};
+
+describe('Agent Skills document parsing', () => {
+  it('parses real YAML frontmatter and keeps Markdown instructions separate', () => {
+    const document = parseSkillDocument(
       [
-        'name: lock_diagnosis',
-        'title: 锁等待诊断',
-        'description: 分析数据库阻塞链',
-        'tags: [postgres, operations]',
-        'allowed_tools: [diagnose_locks]',
-        'steps:',
-        '  - 采集锁信息',
-        '  - 解释阻塞关系',
-        'output_format: markdown',
+        '\uFEFF---\r',
+        'name: order-analysis\r',
+        'description: >\r',
+        '  生成订单统计 SQL，并让数据库完成聚合。\r',
+        '  用户询问订单趋势或金额时使用。\r',
+        'license: Apache-2.0\r',
+        'compatibility: 需要数据库查询工具\r',
+        'metadata:\r',
+        '  author: SchemaNaut\r',
+        '  version: "1.2.0"\r',
+        '  schemanaut: "auto-and-explicit"\r',
+        'allowed-tools: Read Bash(git status) sql_execute\r',
+        'user-invocable: true\r',
+        '---\r',
+        '\r',
+        '# 订单分析\r',
+        '\r',
+        '让数据库执行统计，不要读取整张表。\r',
       ].join('\n'),
-      'organization',
-      'lock.yaml',
+      context,
     );
 
-    expect(skill).toMatchObject({
-      name: 'lock_diagnosis',
-      title: '锁等待诊断',
-      tags: ['postgres', 'operations'],
-      allowedTools: ['diagnose_locks'],
-      source: 'organization',
-      sourcePath: 'lock.yaml',
+    expect(document).toMatchObject({
+      name: 'order-analysis',
+      description: '生成订单统计 SQL，并让数据库完成聚合。 用户询问订单趋势或金额时使用。',
+      scope: 'project',
+      license: 'Apache-2.0',
+      compatibility: '需要数据库查询工具',
+      metadata: {
+        author: 'SchemaNaut',
+        version: '1.2.0',
+        schemanaut: 'auto-and-explicit',
+      },
+      preapprovedTools: ['Read', 'Bash(git status)', 'sql_execute'],
+      extensions: { 'user-invocable': true },
     });
+    expect(document.instructions).toContain('让数据库执行统计');
   });
 
-  it('parses an importable SKILL.md bundle and uses its body as instructions', () => {
-    const skill = parseSkillDocument(
+  it('returns Tier-1 metadata without carrying the Markdown body', () => {
+    const descriptor = parseSkillMetadata(
       [
         '---',
-        'name: health_check',
-        'description: 检查数据库健康状态',
-        'allowed_tools: [database_health_snapshot]',
-        'natural_language_keywords: [健康检查]',
+        'name: order-analysis',
+        'description: 生成订单统计 SQL。',
         '---',
-        '# 工作流',
-        '',
-        '先读取健康快照，再解释异常，不执行写操作。',
+        '# 这段正文只应在激活后读取',
       ].join('\n'),
-      'imported',
-      'health/SKILL.md',
-      'health',
+      context,
     );
 
-    expect(skill.systemAddition).toContain('先读取健康快照');
-    expect(skill.bundleRoot).toBe('health');
-    expect(skill.source).toBe('imported');
+    expect('instructions' in descriptor).toBe(false);
+    expect(JSON.stringify(descriptor)).not.toContain('只应在激活后读取');
   });
 
-  it('rejects missing descriptions and unsupported output formats', () => {
-    expect(() => parseSkillDefinition('name: invalid', 'imported')).toThrow('description');
+  it('rejects flat YAML, JSON manifests and invalid standard fields', () => {
+    expect(() => parseSkillDocument('name: order-analysis\ndescription: legacy', context)).toThrow(
+      'must start with YAML frontmatter',
+    );
     expect(() =>
-      parseSkillDefinition('name: invalid\ndescription: demo\noutput_format: html', 'imported'),
-    ).toThrow('output_format');
+      parseSkillDocument('{"name":"order-analysis","description":"legacy"}', context),
+    ).toThrow('must start with YAML frontmatter');
+    expect(() =>
+      parseSkillDocument(
+        ['---', 'name: Order_Analysis', 'description: invalid', '---'].join('\n'),
+        {
+          scope: context.scope,
+          sourceId: context.sourceId,
+          sourcePath: context.sourcePath,
+          bundleRoot: context.bundleRoot,
+          sourceOrder: context.sourceOrder,
+        },
+      ),
+    ).toThrow('lowercase letters');
+    expect(() =>
+      parseSkillDocument(
+        [
+          '---',
+          'name: order-analysis',
+          'description: valid',
+          'metadata:',
+          '  nested:',
+          '    unsupported: true',
+          '---',
+        ].join('\n'),
+        context,
+      ),
+    ).toThrow('metadata.nested');
+    expect(() =>
+      parseSkillDocument(
+        [
+          '---',
+          'name: order-analysis',
+          'description: valid',
+          'allowed-tools:',
+          '  - Read',
+          '---',
+        ].join('\n'),
+        context,
+      ),
+    ).toThrow('space-separated string');
+  });
+
+  it('enforces the directory-name rule and rejects duplicate YAML keys', () => {
+    expect(() =>
+      parseSkillDocument(
+        ['---', 'name: another-name', 'description: valid', '---'].join('\n'),
+        context,
+      ),
+    ).toThrow('must match its parent directory');
+
+    expect(() =>
+      parseSkillDocument(
+        ['---', 'name: order-analysis', 'description: first', 'description: second', '---'].join(
+          '\n',
+        ),
+        context,
+      ),
+    ).toThrow('Map keys must be unique');
+  });
+
+  it('rejects aliases and oversized descriptions', () => {
+    expect(() =>
+      parseSkillDocument(
+        [
+          '---',
+          'name: order-analysis',
+          'description: valid',
+          'metadata: &metadata',
+          '  author: SchemaNaut',
+          'copied: *metadata',
+          '---',
+        ].join('\n'),
+        context,
+      ),
+    ).toThrow();
+
+    expect(() =>
+      parseSkillDocument(
+        ['---', 'name: order-analysis', `description: ${'x'.repeat(1_025)}`, '---'].join('\n'),
+        context,
+      ),
+    ).toThrow('1024');
   });
 });

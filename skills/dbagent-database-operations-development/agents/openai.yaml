@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent Database Operations"
-  short_description: "Build governed database diagnostics"
-  default_prompt: "Use $dbagent-database-operations-development to add a safe database operations capability."

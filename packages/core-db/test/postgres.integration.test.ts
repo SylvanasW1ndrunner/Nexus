@@ -128,6 +128,149 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
     expect(describeAfterDisconnect.error.code).toBe('CONNECTION_FAILED');
   });
 
+  it('uses a database read-only transaction to block side effects hidden inside SELECT', async () => {
+    const driver = new PostgresDriver();
+    const writableConfig = {
+      ...config,
+      id: 'integration-postgres-agent-read-boundary',
+      readOnly: false,
+    };
+    const connected = await driver.connect(writableConfig);
+    expect(connected.ok).toBe(true);
+    if (!connected.ok) return;
+
+    const suffix = `${process.pid}_${Date.now()}`;
+    const tableName = `dbagent_read_boundary_${suffix}`;
+    const functionName = `dbagent_volatile_writer_${suffix}`;
+    try {
+      const setup = await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `
+            create table ${tableName} (
+              id bigint generated always as identity primary key,
+              note text not null
+            );
+            create function ${functionName}()
+            returns integer
+            language plpgsql
+            volatile
+            as $body$
+            begin
+              insert into ${tableName}(note) values ('hidden write');
+              return 1;
+            end
+            $body$;
+          `,
+          confirmed: true,
+        },
+        connected.data,
+      );
+      expect(setup.ok).toBe(true);
+
+      const readAuthorizedConnection = {
+        ...connected.data,
+        readOnly: true,
+      };
+      const blocked = await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `select ${functionName}() as result`,
+        },
+        readAuthorizedConnection,
+      );
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.error).toMatchObject({
+        code: 'READ_ONLY_VIOLATION',
+        retryable: false,
+      });
+
+      const afterBlocked = await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `select count(*)::int as count from ${tableName}`,
+        },
+        connected.data,
+      );
+      expect(afterBlocked.ok).toBe(true);
+      if (!afterBlocked.ok) return;
+      expect(afterBlocked.data.rows).toEqual([{ count: 0 }]);
+
+      const allowed = await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `select ${functionName}() as result`,
+        },
+        connected.data,
+      );
+      expect(allowed.ok).toBe(true);
+      if (!allowed.ok) return;
+      expect(allowed.data.rows).toEqual([{ result: 1 }]);
+
+      const afterAllowed = await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `select count(*)::int as count from ${tableName}`,
+        },
+        connected.data,
+      );
+      expect(afterAllowed.ok).toBe(true);
+      if (!afterAllowed.ok) return;
+      expect(afterAllowed.data.rows).toEqual([{ count: 1 }]);
+    } finally {
+      await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: `
+            drop function if exists ${functionName}();
+            drop table if exists ${tableName};
+          `,
+          confirmed: true,
+        },
+        connected.data,
+      );
+      await driver.disconnect(writableConfig.id);
+    }
+  }, 30_000);
+
+  it('propagates AbortSignal to PostgreSQL backend cancellation', async () => {
+    const driver = new PostgresDriver();
+    const writableConfig = {
+      ...config,
+      id: 'integration-postgres-abort-signal',
+      readOnly: false,
+    };
+    const connected = await driver.connect(writableConfig);
+    expect(connected.ok).toBe(true);
+    if (!connected.ok) return;
+
+    const controller = new AbortController();
+    const started = performance.now();
+    const timer = setTimeout(() => controller.abort(), 75);
+    try {
+      const result = await driver.execute(
+        {
+          connectionId: writableConfig.id,
+          sql: 'select pg_sleep(10)',
+          timeoutMs: 5_000,
+        },
+        connected.data,
+        { signal: controller.signal },
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error).toMatchObject({
+        code: 'QUERY_CANCELLED',
+        retryable: false,
+      });
+      expect(performance.now() - started).toBeLessThan(3_000);
+    } finally {
+      clearTimeout(timer);
+      await driver.disconnect(writableConfig.id);
+    }
+  }, 30_000);
+
   it('rolls back failed write batches on writable connections', async () => {
     const driver = new PostgresDriver();
     const writableConfig = {
@@ -299,7 +442,8 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
       expect(result.data.messages).toEqual([
         expect.objectContaining({
           level: 'warning',
-          message: 'Statement 1 returned 26 row(s); only 25 row(s) are included because of the row limit.',
+          message:
+            'Statement 1 returned 26 row(s); only 25 row(s) are included because of the row limit.',
         }),
       ]);
     } finally {
@@ -412,5 +556,4 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
       await driver.disconnect(writableConfig.id);
     }
   });
-
 });

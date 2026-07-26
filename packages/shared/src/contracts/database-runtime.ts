@@ -2,6 +2,7 @@ import type {
   ConnectionId,
   ConnectionStatus,
   DatabaseEngine,
+  DbColumnValue,
   QueryResultRow,
   QueryRiskLevel,
   UsageMode,
@@ -42,7 +43,7 @@ export type QueryRequest = {
   queryId?: string;
   connectionId: ConnectionId;
   sql: string;
-  params?: unknown[];
+  params?: DbColumnValue[];
   limit?: number;
   timeoutMs?: number;
   dryRun?: boolean;

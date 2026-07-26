@@ -6,36 +6,42 @@
 
 ## 2. Agent 运行方式
 
-Agent 使用 ReAct 循环：
+Agent 使用单一自适应循环。ReAct 是每轮行动和观察的基础思路，结构化 Plan 是跨轮保存目标、任务、证据和完成状态的工作状态：
 
 ```text
 理解当前目标
-→ 选择工具
+→ 简单任务快速执行 / 复杂任务建立计划
+→ 发现并选择 Skill 与 Tool
 → 获得数据库事实或错误
-→ 更新判断
-→ 继续调用工具或给出最终结果
+→ 更新任务、证据和判断
+→ 验证完成标准
+→ 继续、换路、请求补充或给出最终结果
 ```
 
-自主探索来自模型对工具的选择、当前观察结果和内置 Skill 的工作路径。Skills 不是工具，也不是业务知识。
+自主探索来自模型对工具的选择、当前观察结果和内置 Skill 的工作路径。运行时根据重复动作和信息增量要求 Agent 在无进展时换路；最大轮数只作为熔断。
 
-运行时控制最大轮数、SQL 尝试次数、工具结果大小、失败次数、超时、取消、Checkpoint 和审计。Token 与金额只记录用量，不设置默认消费上限。用户看到工具、参数摘要、数据库结果、审批状态和修正过程，但不展示模型隐藏思维链。
+当用户明确要求最终 SQL 必须使用或连接指定配置表、字典表或其他资源时，内置 Skill 要求这些资源参与最终 SQL，而不是只被分别探查。业务语义是否真正落实由场景用例和数据库结果验收，不通过字符串包含关系替代 SQL 语义判断。
+
+运行时控制工具结果大小、超时、取消、Checkpoint 和内部审计。Token 与金额只记录用量，不设置默认消费上限。用户看到目标、计划进度、SQL、必要结果、审批、重要修正和产物，不直接看到内部工具负载与评测轨迹。
 
 ## 3. 常驻内置工具
 
-| 工具 | 用途 | 最低权限 |
-|---|---|---|
-| `resource_list` | 在数据库、Schema 或表范围内列出可用资源 | 读 |
-| `resource_get` | 按表、列、约束、索引、关系和业务知识读取资源事实 | 读 |
-| `knowledge_search` | 精确、全文、向量和图融合检索 | 读 |
-| `sql_execute` | 统一执行 SELECT、DML 和 DDL；权限由 SQL 动态分类 | 动态 |
-| `sql_explain` | 获取查询计划，不执行写入 | 读 |
-| `result_read` | 分页或按范围读取大型结果 | 读 |
+| 工具               | 用途                                             | 最低权限 |
+| ------------------ | ------------------------------------------------ | -------- |
+| `resource_list`    | 在数据库、Schema 或表范围内列出可用资源          | 读       |
+| `resource_get`     | 按表、列、约束、索引、关系和业务知识读取资源事实 | 读       |
+| `knowledge_search` | 精确、全文、向量和图融合检索                     | 读       |
+| `sql_execute`      | 统一执行 SELECT、DML 和 DDL；权限由 SQL 动态分类 | 动态     |
+| `sql_explain`      | 获取查询计划，不执行写入                         | 读       |
+| `result_read`      | 在确有需要时读取大型结果的有界页面或范围         | 读       |
 
 当前连接由运行环境提供，模型不需要在每次调用中重复猜测 `connectionId`。工具输出默认紧凑，并支持 limit、cursor、range 和截断标记。
 
 Schema 新鲜度、SQL 权限分类、审批弹窗和 DDL 后知识更新是运行时内部行为，不暴露为模型工具。
 
 知识库的节点 ID、父子索引、关系索引、Merkle Hash、快照 ID、检索评分和命中原因只用于 Tool 内部检索、校验与审计，不属于 Tool 返回合同，也不能进入模型对话。`resource_get` 只返回数据库语义分组；`knowledge_search` 只返回命中的表、列、约束、注释和业务知识。
+
+数据库统计计算由 SQL 下推到数据库完成。单值、小聚合和 Top-N 小结果可以进入 Agent；大型结果只返回元数据和句柄。Agent 不读取整表后在模型侧统计。
 
 ## 4. 内置通用 Skills
 
@@ -57,32 +63,34 @@ Schema 新鲜度、SQL 权限分类、审批弹窗和 DDL 后知识更新是运�
 
 在 SQL 执行失败时激活。读取结构和错误信息、修正 SQL，并在运行时重试上限内再次执行。
 
-Skill 定义包含触发词、适用信号、推荐工具、可用工具范围、步骤、停止条件和运行上限。只注入当前选中的 Skill，不把全部 Skill 放入 Prompt。
+每个系统 Skill 是独立目录中的标准 `SKILL.md`。初始上下文只提供名称、描述、作用域和路径；正文、引用与脚本在选中后读取。步骤和停止条件写在 Markdown 正文，不再构造专有 Skill 清单格式和运行上限字段。
 
-Skill 引用稳定工具能力名，不能引用实现文件和内部类名。确定性的安全与一致性要求必须写入代码，不能依赖 Skill 文本。
+Skill 引用稳定工具能力名，不能引用实现文件和内部类名。标准字段保持 Agent Skills 生态语义，产品扩展放入 `metadata.schemanaut`。确定性的安全与一致性要求必须写入代码，不能依赖 Skill 文本。
 
 ## 5. 扩展层
 
 ```text
-常驻 AI SQL 工具
-→ 按需加载的治理/运维能力包
-→ 用户 MCP Server
-→ 用户导入 Skills
+常驻编排与高频 AI SQL 工具
+→ Tool Search 动态加载的通用工具
+→ 官方 SDK 接入的用户 MCP Server
+→ System / User / Project / Session Skills
 ```
 
-当治理和运维工具数量增长时，运行时只向模型暴露当前任务需要的能力包。MCP 和用户 Skills 不得扩大当前数据库账号、系统权限或本次运行授权。
+MCP 和用户 Skills 不得扩大当前数据库账号、系统权限或本次运行授权。治理与运维能力不进入首个开源版本。
 
 ## 6. Session、上下文压缩与知识引用
 
 Session 独立保存：
 
 - 用户和助手消息。
-- 工具调用与结果摘要。
+- 任务计划、完成标准和证据引用。
+- 工具调用与最小结果摘要。
 - SQL、审批和执行状态。
 - 上下文压缩检查点与 Token 使用量。
-- 当轮使用的 `knowledgeSnapshotId`、`catalogRootHash`、`retrievalProfileId` 和 `indexVersion`。
+- 项目引用、子 Agent 和产物引用。
+- 当轮知识版本的内部审计引用。
 
-上述知识版本字段只保存在运行时与审计记录中，不转换为模型消息。Session 不复制知识库内容；历史运行通过快照引用说明当时使用的知识版本，新一轮默认使用最新快照。
+知识版本字段只保存在运行时与内部审计记录中，不转换为模型消息或用户轨迹。Session 不复制知识库内容；新一轮默认检索最新知识。
 
 ### 6.1 压缩语义
 
@@ -141,14 +149,15 @@ Session 消息按序追加到 SQLite，压缩不会重写历史消息。Session 
 ## 7. 工程路径
 
 - Agent 循环：[`packages/core-agent/src/react-agent.ts`](../../packages/core-agent/src/react-agent.ts)
+- Agent 模块总设计：[`docs/agent/README.md`](../agent/README.md)
 - 权限管理：[`packages/core-agent/src/permission-manager.ts`](../../packages/core-agent/src/permission-manager.ts)
 - 工具注册：[`packages/core-agent/src/tool-registry.ts`](../../packages/core-agent/src/tool-registry.ts)
 - 上下文窗口、自动/手动压缩：[`packages/core-agent/src/context-manager.ts`](../../packages/core-agent/src/context-manager.ts)
 - Session 与检查点存储：[`packages/core-agent/src/session-store.ts`](../../packages/core-agent/src/session-store.ts)
 - AI SQL 工具：[`packages/core-tools/src/ai-sql-tools.ts`](../../packages/core-tools/src/ai-sql-tools.ts)
 - Tool 语义返回边界：[`packages/core-tools/src/agent-knowledge-projection.ts`](../../packages/core-tools/src/agent-knowledge-projection.ts)
-- Skills：[`packages/core-skills/src/builtin-skills.ts`](../../packages/core-skills/src/builtin-skills.ts)
-- Skill 自动选择：[`packages/core-skills/src/skill-matcher.ts`](../../packages/core-skills/src/skill-matcher.ts)
+- 系统 Skills：[`packages/core-skills/skills`](../../packages/core-skills/skills)
+- Skill 检索与调用：[`packages/core-skills/src/skill-search.ts`](../../packages/core-skills/src/skill-search.ts)
 - SDK 手动压缩入口：[`packages/sdk/src/runtime.ts`](../../packages/sdk/src/runtime.ts)
 - REST 接口：[`apps/server/src/server.ts`](../../apps/server/src/server.ts)
 - 长会话性能基线：[`scripts/run-context-compaction-benchmark.mjs`](../../scripts/run-context-compaction-benchmark.mjs)

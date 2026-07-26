@@ -1,5 +1,5 @@
 {
-  "contract": "dbagent.database.query-submission",
+  "contract": "schemanaut.database.query-submission",
   "version": "1.0",
   "payload": {
     "profileId": "profile-1",

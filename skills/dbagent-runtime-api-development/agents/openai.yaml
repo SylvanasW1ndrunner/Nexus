@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent Runtime and API"
-  short_description: "Build the DBAgent runtime and APIs"
-  default_prompt: "Use $dbagent-runtime-api-development to implement a DBAgent SDK or REST runtime slice."

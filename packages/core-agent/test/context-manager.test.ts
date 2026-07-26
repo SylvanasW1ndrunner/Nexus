@@ -22,19 +22,14 @@ describe('Agent context management', () => {
       mode: 'read',
       now,
     });
-    appendMessage(
-      session,
-      createMessage({ role: 'user', content: '查一下订单数' }, now),
-    );
+    appendMessage(session, createMessage({ role: 'user', content: '查一下订单数' }, now));
 
     const context = buildAgentContext(session, tools(), {
       modelContextTokens: 2_000,
       maxOutputTokens: 200,
     });
 
-    expect(context.messages).toEqual([
-      { role: 'user', content: '查一下订单数' },
-    ]);
+    expect(context.messages).toEqual([{ role: 'user', content: '查一下订单数' }]);
     expect(context.requiresCompaction).toBe(false);
     expect(context.compression).toMatchObject({
       phase: 'healthy',
@@ -66,8 +61,7 @@ describe('Agent context management', () => {
     expect(context.compression.level).toBe('tool-output-masking');
     const shortenedToolOutput = context.messages.find(
       (message) =>
-        message.role === 'tool' &&
-        message.content.includes('Earlier tool output shortened'),
+        message.role === 'tool' && message.content.includes('Earlier tool output shortened'),
     );
     expect(shortenedToolOutput).toBeDefined();
     expect(context.compression.finalTokenEstimate).toBeLessThan(
@@ -93,10 +87,7 @@ describe('Agent context management', () => {
       .filter((message) => message.role !== 'system')
       .slice(0, plan?.coveredConversationMessageCount);
     const lastCovered = covered.at(-1);
-    expect(
-      lastCovered?.role === 'assistant' &&
-        Boolean(lastCovered.toolCalls?.length),
-    ).toBe(false);
+    expect(lastCovered?.role === 'assistant' && Boolean(lastCovered.toolCalls?.length)).toBe(false);
     expect(plan?.sourceMessages.length).toBeGreaterThan(0);
   });
 
@@ -113,21 +104,21 @@ describe('Agent context management', () => {
     );
 
     expect(plan).toBeDefined();
-    expect(plan?.sourceBatches.length).toBeGreaterThan(1);
-    for (const batch of plan?.sourceBatches ?? []) {
+    if (!plan) {
+      throw new Error('Expected a context compaction plan for the long session.');
+    }
+    expect(plan.sourceBatches.length).toBeGreaterThan(1);
+    for (const batch of plan.sourceBatches) {
       const finalMessage = batch.at(-1);
-      expect(
-        finalMessage?.role === 'assistant' &&
-          Boolean(finalMessage.toolCalls?.length),
-      ).toBe(false);
+      expect(finalMessage?.role === 'assistant' && Boolean(finalMessage.toolCalls?.length)).toBe(
+        false,
+      );
       const request = buildAgentContextCompactionRequest({
         sourceMessages: batch,
-        maxToolResultChars: plan?.requestMaxToolResultChars,
-        maxMessageTokens: plan?.requestMaxMessageTokens,
+        maxToolResultChars: plan.requestMaxToolResultChars,
+        maxMessageTokens: plan.requestMaxMessageTokens,
       });
-      expect(estimatePromptTokens(request)).toBeLessThanOrEqual(
-        plan?.availablePromptTokens ?? 0,
-      );
+      expect(estimatePromptTokens(request)).toBeLessThanOrEqual(plan.availablePromptTokens);
     }
   });
 
@@ -149,13 +140,7 @@ describe('Agent context management', () => {
       ),
     );
     for (let index = 0; index < 8; index += 1) {
-      appendMessage(
-        session,
-        createMessage(
-          { role: 'assistant', content: `recent-${index}` },
-          now,
-        ),
-      );
+      appendMessage(session, createMessage({ role: 'assistant', content: `recent-${index}` }, now));
     }
 
     const plan = createAgentContextCompactionPlan(
@@ -172,9 +157,7 @@ describe('Agent context management', () => {
     expect(estimatePromptTokens(plan?.requestMessages ?? [])).toBeLessThanOrEqual(
       plan?.availablePromptTokens ?? 0,
     );
-    expect(plan?.requestMessages[1]?.content).toContain(
-      'full text remains in session history',
-    );
+    expect(plan?.requestMessages[1]?.content).toContain('full text remains in session history');
     expect(plan?.requestMessages[1]?.content).toContain('public.orders.amount');
   });
 
@@ -197,8 +180,7 @@ describe('Agent context management', () => {
       session,
       plan,
       method: 'model',
-      summary:
-        '## Goal\n统计订单。\n## Database facts and SQL\norders.amount 是金额列。',
+      summary: '## Goal\n统计订单。\n## Database facts and SQL\norders.amount 是金额列。',
       now: now(),
     });
 
@@ -207,9 +189,7 @@ describe('Agent context management', () => {
       maxOutputTokens: 300,
       keepRecentMessages: 5,
     });
-    const visibleText = context.messages
-      .map((message) => message.content)
-      .join('\n');
+    const visibleText = context.messages.map((message) => message.content).join('\n');
 
     expect(session.messages).toHaveLength(originalCount);
     expect(visibleText).toContain('orders.amount 是金额列');
@@ -255,9 +235,7 @@ describe('Agent context management', () => {
 
     expect(secondPlan?.previousSummary).toContain('第一阶段');
     expect(
-      secondPlan?.requestMessages.some((message) =>
-        message.content.includes('第一阶段'),
-      ),
+      secondPlan?.requestMessages.some((message) => message.content.includes('第一阶段')),
     ).toBe(true);
     expect(secondPlan?.coveredConversationMessageCount).toBeGreaterThan(
       firstPlan.coveredConversationMessageCount,
@@ -289,9 +267,7 @@ describe('Agent context management', () => {
     expect(plan?.trigger).toBe('manual');
     expect(plan?.focus).toBe('重点保留已执行 SQL 和精确金额。');
     expect(
-      plan?.requestMessages.some((message) =>
-        message.content.includes('<manual_focus>'),
-      ),
+      plan?.requestMessages.some((message) => message.content.includes('<manual_focus>')),
     ).toBe(true);
   });
 
@@ -324,13 +300,7 @@ describe('Agent context management', () => {
       mode: 'read',
       now,
     });
-    appendMessage(
-      session,
-      createMessage(
-        { role: 'user', content: '订单数据 '.repeat(500) },
-        now,
-      ),
-    );
+    appendMessage(session, createMessage({ role: 'user', content: '订单数据 '.repeat(500) }, now));
 
     const context = buildAgentContext(session, tools(), {
       modelContextTokens: 200,
@@ -339,41 +309,25 @@ describe('Agent context management', () => {
 
     expect(context.compression.phase).toBe('window_exceeded');
     expect(context.requiresCompaction).toBe(true);
-    expect(context.compression.warnings.join(' ')).toContain(
-      'model input capacity',
-    );
-    expect(context.compression.warnings.join(' ').toLowerCase()).not.toContain(
-      'budget',
-    );
+    expect(context.compression.warnings.join(' ')).toContain('model input capacity');
+    expect(context.compression.warnings.join(' ').toLowerCase()).not.toContain('budget');
   });
 
   it('estimates messages and tool definitions together', () => {
-    expect(
-      estimatePromptTokens(
-        [{ role: 'user', content: '订单 GMV' }],
-        tools(),
-      ),
-    ).toBeGreaterThan(0);
+    expect(estimatePromptTokens([{ role: 'user', content: '订单 GMV' }], tools())).toBeGreaterThan(
+      0,
+    );
   });
 });
 
-function sessionWithToolRounds(
-  count: number,
-  payloadChars: number,
-) {
+function sessionWithToolRounds(count: number, payloadChars: number) {
   const session = createAgentSession({
     id: 'long-session',
     title: 'Long session',
     mode: 'read',
     now,
   });
-  appendMessage(
-    session,
-    createMessage(
-      { role: 'user', content: '统计订单并保留精确结果。' },
-      now,
-    ),
-  );
+  appendMessage(session, createMessage({ role: 'user', content: '统计订单并保留精确结果。' }, now));
   for (let index = 1; index <= count; index += 1) {
     appendToolRound(session, index, payloadChars);
   }

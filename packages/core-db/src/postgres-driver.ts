@@ -184,6 +184,13 @@ export class PostgresDriver implements IDatabaseDriver {
     connection: SavedConnection,
     observer?: QueryExecutionObserver,
   ): Promise<Result<QueryExecutionResult>> {
+    if (observer?.signal?.aborted) {
+      return err({
+        code: 'QUERY_CANCELLED',
+        message: 'PostgreSQL query was cancelled before execution.',
+        retryable: false,
+      });
+    }
     const safety = analyzeSqlSafety(request.sql, { readOnly: connection.readOnly });
     if (safety.statementKind === 'EMPTY') {
       return err({
@@ -240,6 +247,7 @@ export class PostgresDriver implements IDatabaseDriver {
     const started = performance.now();
     const queryId = request.queryId ?? randomUUID();
     let client: PgPoolClient | undefined;
+    let stopAbortCancellation: (() => void) | undefined;
     try {
       client = await pool.connect();
       this.observeClient(connection.id, client);
@@ -250,6 +258,18 @@ export class PostgresDriver implements IDatabaseDriver {
           connectionId: connection.id,
           backendPid,
         });
+        stopAbortCancellation = registerAbortCancellation(observer?.signal, () =>
+          this.cancel(
+            {
+              queryId,
+              connectionId: connection.id,
+              decision: 'cancel-backend',
+              backendPid,
+              message: 'The caller aborted the PostgreSQL query.',
+            },
+            connection,
+          ),
+        );
       }
       const rowLimit = normalizeQueryRowLimit(request.limit);
       const pagedSql = resolvePageableReadSql(request.sql, safety, transactionMode.data);
@@ -262,6 +282,7 @@ export class PostgresDriver implements IDatabaseDriver {
                 request.params,
                 rowLimit,
                 queryTimeout.data,
+                connection.readOnly,
               ),
             }
           : safety.requiresConfirmation || transactionMode.data === 'rollback'
@@ -272,20 +293,39 @@ export class PostgresDriver implements IDatabaseDriver {
                 transactionMode.data === 'rollback',
                 queryTimeout.data,
               )
-            : {
-                results: normalizePgResults(
-                  await executeWithSessionTimeout(
+            : connection.readOnly
+              ? {
+                  results: await executeReadOnlyStatement(
                     client,
                     request.sql,
                     request.params,
                     queryTimeout.data,
                   ),
-                ),
-              };
-      return ok(toQueryExecutionResult(execution.results, safety, started, queryId, rowLimit, execution.transaction));
+                }
+              : {
+                  results: normalizePgResults(
+                    await executeWithSessionTimeout(
+                      client,
+                      request.sql,
+                      request.params,
+                      queryTimeout.data,
+                    ),
+                  ),
+                };
+      return ok(
+        toQueryExecutionResult(
+          execution.results,
+          safety,
+          started,
+          queryId,
+          rowLimit,
+          execution.transaction,
+        ),
+      );
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
     } finally {
+      stopAbortCancellation?.();
       client?.release();
     }
   }
@@ -327,10 +367,9 @@ export class PostgresDriver implements IDatabaseDriver {
               [request.backendPid],
             )
           : await cancelBackendWithDedicatedClient(config, request.backendPid)
-        : await pool!.query<{ cancelled: boolean }>(
-            'select pg_cancel_backend($1) as cancelled',
-            [request.backendPid],
-          );
+        : await pool!.query<{ cancelled: boolean }>('select pg_cancel_backend($1) as cancelled', [
+            request.backendPid,
+          ]);
       if (!result.rows[0]?.cancelled) {
         return err({
           code: 'QUERY_FAILED',
@@ -647,7 +686,8 @@ export class PostgresDriver implements IDatabaseDriver {
           pg_is_in_recovery() as in_recovery
       `);
       const row = result.rows[0];
-      if (!row) return err({ code: 'QUERY_FAILED', message: 'PostgreSQL returned no server identity.' });
+      if (!row)
+        return err({ code: 'QUERY_FAILED', message: 'PostgreSQL returned no server identity.' });
       return ok({
         database: row.database_name,
         currentUser: row.current_user_name,
@@ -996,7 +1036,8 @@ export class PostgresDriver implements IDatabaseDriver {
           (select max(extract(epoch from replay_lag)) from pg_stat_replication) as maximum_replay_lag_seconds
       `);
       const row = result.rows[0];
-      if (!row) return err({ code: 'QUERY_FAILED', message: 'PostgreSQL returned no runtime state.' });
+      if (!row)
+        return err({ code: 'QUERY_FAILED', message: 'PostgreSQL returned no runtime state.' });
       const replayLag = toOptionalNumber(row.maximum_replay_lag_seconds);
       return ok({
         totalSessions: Number(row.total_sessions),
@@ -1049,7 +1090,9 @@ export class PostgresDriver implements IDatabaseDriver {
     const started = performance.now();
     try {
       const operation = input.operation === 'analyze' ? 'ANALYZE' : 'VACUUM';
-      await pool.query(`${operation} ${quoteIdentifier(input.schema)}.${quoteIdentifier(input.table)}`);
+      await pool.query(
+        `${operation} ${quoteIdentifier(input.schema)}.${quoteIdentifier(input.table)}`,
+      );
       return ok({ elapsedMs: Math.round(performance.now() - started) });
     } catch (error) {
       return err(classifyPostgresRuntimeError(error));
@@ -1099,11 +1142,27 @@ export class PostgresDriver implements IDatabaseDriver {
     transactionId: string,
     request: QueryRequest,
     observer?: QueryExecutionObserver,
+    options: { enforceReadOnly?: boolean } = {},
   ): Promise<Result<QueryExecutionResult>> {
+    if (observer?.signal?.aborted) {
+      return err({
+        code: 'QUERY_CANCELLED',
+        message: 'PostgreSQL query was cancelled before execution.',
+        retryable: false,
+      });
+    }
     const active = this.transactions.get(transactionId);
     if (!active) return err({ code: 'NOT_FOUND', message: 'Transaction was not found.' });
     if (active.transaction.state !== 'active' && active.transaction.state !== 'failed') {
       return err({ code: 'QUERY_FAILED', message: `Transaction is ${active.transaction.state}.` });
+    }
+    if (options.enforceReadOnly && !active.transaction.readOnly) {
+      return err({
+        code: 'READ_ONLY_VIOLATION',
+        message:
+          'A read-authorized query can only use a database transaction created as read-only.',
+        retryable: false,
+      });
     }
     const safety = analyzeSqlSafety(request.sql, { readOnly: active.transaction.readOnly });
     if (safety.statementKind === 'EMPTY') {
@@ -1138,6 +1197,7 @@ export class PostgresDriver implements IDatabaseDriver {
     if (!queryTimeout.ok) return queryTimeout;
     const started = performance.now();
     const queryId = request.queryId ?? randomUUID();
+    let stopAbortCancellation: (() => void) | undefined;
     try {
       const backendPid = await resolveBackendPid(active.client);
       if (backendPid) {
@@ -1146,6 +1206,18 @@ export class PostgresDriver implements IDatabaseDriver {
           connectionId: active.connection.id,
           backendPid,
         });
+        stopAbortCancellation = registerAbortCancellation(observer?.signal, () =>
+          this.cancel(
+            {
+              queryId,
+              connectionId: active.connection.id,
+              decision: 'cancel-backend',
+              backendPid,
+              message: 'The caller aborted the PostgreSQL query.',
+            },
+            active.connection,
+          ),
+        );
       }
       const rowLimit = normalizeQueryRowLimit(request.limit);
       const pagedSql = resolvePageableReadSql(request.sql, safety, 'auto');
@@ -1171,6 +1243,8 @@ export class PostgresDriver implements IDatabaseDriver {
     } catch (error) {
       active.transaction = { ...active.transaction, state: 'failed' };
       return err(classifyPostgresRuntimeError(error));
+    } finally {
+      stopAbortCancellation?.();
     }
   }
 
@@ -1291,8 +1365,13 @@ function normalizePgTextArray(value: string[] | string | null): string[] {
 }
 
 function resolveTransactionMode(request: QueryRequest): Result<'auto' | 'rollback'> {
-  const transactionMode = request.transactionMode ?? (request.dryRun === true ? 'rollback' : 'auto');
-  if (request.dryRun === true && request.transactionMode !== undefined && request.transactionMode !== 'rollback') {
+  const transactionMode =
+    request.transactionMode ?? (request.dryRun === true ? 'rollback' : 'auto');
+  if (
+    request.dryRun === true &&
+    request.transactionMode !== undefined &&
+    request.transactionMode !== 'rollback'
+  ) {
     return err({
       code: 'VALIDATION_ERROR',
       message: 'dryRun=true conflicts with transactionMode=auto.',
@@ -1339,12 +1418,15 @@ function validateParameterizedBatch(sql: string, params?: unknown[]) {
   return {
     code: 'UNSUPPORTED_OPERATION' as const,
     message: 'Parameterized multi-statement SQL is not supported.',
-    detail: 'Run one parameterized statement at a time, or inline-reviewed literal SQL for confirmed scripts.',
+    detail:
+      'Run one parameterized statement at a time, or inline-reviewed literal SQL for confirmed scripts.',
   };
 }
 
 function findUnsupportedRollbackStatement(sql: string): string | undefined {
-  for (const statement of splitSqlStatements(stripSqlComments(sql)).map((segment) => segment.text)) {
+  for (const statement of splitSqlStatements(stripSqlComments(sql)).map(
+    (segment) => segment.text,
+  )) {
     const normalized = statement.trim().replace(/\s+/g, ' ').toUpperCase();
     if (!normalized) continue;
     if (normalized === 'VACUUM' || normalized.startsWith('VACUUM ')) return statement.trim();
@@ -1379,11 +1461,12 @@ async function executePagedRead(
   params: unknown[] | undefined,
   rowLimit: number,
   timeoutMs: number | undefined,
+  readOnly: boolean,
 ): Promise<SafePgQueryResult[]> {
-  const cursorName = `dbagent_cursor_${randomUUID().replace(/-/g, '')}`;
+  const cursorName = `schemanaut_cursor_${randomUUID().replace(/-/g, '')}`;
   const fetchCount = rowLimit + 1;
   try {
-    await client.query('BEGIN READ ONLY');
+    await client.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
     await setLocalStatementTimeout(client, timeoutMs);
     await executeTimedQuery(
       client,
@@ -1410,6 +1493,28 @@ async function executePagedRead(
   }
 }
 
+async function executeReadOnlyStatement(
+  client: PgPoolClient,
+  sql: string,
+  params: unknown[] | undefined,
+  timeoutMs: number | undefined,
+): Promise<SafePgQueryResult[]> {
+  try {
+    await client.query('BEGIN READ ONLY');
+    await setLocalStatementTimeout(client, timeoutMs);
+    const results = normalizePgResults(await executeTimedQuery(client, sql, params, timeoutMs));
+    await client.query('COMMIT');
+    return results;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Preserve the original database error; rollback failure is secondary.
+    }
+    throw error;
+  }
+}
+
 async function executePagedReadInActiveTransaction(
   client: PgPoolClient,
   sql: string,
@@ -1417,7 +1522,7 @@ async function executePagedReadInActiveTransaction(
   rowLimit: number,
   timeoutMs: number | undefined,
 ): Promise<SafePgQueryResult[]> {
-  const cursorName = `dbagent_cursor_${randomUUID().replace(/-/g, '')}`;
+  const cursorName = `schemanaut_cursor_${randomUUID().replace(/-/g, '')}`;
   const fetchCount = rowLimit + 1;
   try {
     await setLocalStatementTimeout(client, timeoutMs);
@@ -1463,9 +1568,7 @@ async function executeInTransaction(
     await client.query('BEGIN');
     transaction.started = true;
     await setLocalStatementTimeout(client, timeoutMs);
-    const results = normalizePgResults(
-      await executeTimedQuery(client, sql, params, timeoutMs),
-    );
+    const results = normalizePgResults(await executeTimedQuery(client, sql, params, timeoutMs));
     if (rollbackOnly) {
       await client.query('ROLLBACK');
       transaction.rolledBack = true;
@@ -1564,6 +1667,25 @@ async function executeTimedQuery(
   }
 }
 
+function registerAbortCancellation(
+  signal: AbortSignal | undefined,
+  cancel: () => Promise<unknown>,
+): (() => void) | undefined {
+  if (!signal) return undefined;
+  const abort = () => {
+    void cancel().catch(() => {
+      // The running query remains authoritative. If backend cancellation fails,
+      // its normal timeout or database result still settles the execution.
+    });
+  };
+  if (signal.aborted) {
+    abort();
+    return undefined;
+  }
+  signal.addEventListener('abort', abort, { once: true });
+  return () => signal.removeEventListener('abort', abort);
+}
+
 function postgresErrorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
   const code = (error as { code?: unknown }).code;
@@ -1592,10 +1714,9 @@ async function cancelBackendWithDedicatedClient(
   const client = new Client(toPgConfig(config));
   try {
     await client.connect();
-    return await client.query<{ cancelled: boolean }>(
-      'select pg_cancel_backend($1) as cancelled',
-      [backendPid],
-    );
+    return await client.query<{ cancelled: boolean }>('select pg_cancel_backend($1) as cancelled', [
+      backendPid,
+    ]);
   } finally {
     await client.end().catch(() => undefined);
   }
@@ -1653,7 +1774,11 @@ function toQueryExecutionResult(
   return result;
 }
 
-function toQueryResultSet(result: SafePgQueryResult, index: number, rowLimit: number): QueryResultSet {
+function toQueryResultSet(
+  result: SafePgQueryResult,
+  index: number,
+  rowLimit: number,
+): QueryResultSet {
   const sourceRowCount = result.rowCount ?? result.rows.length;
   const truncated = result.rows.length > rowLimit;
   const hasMore = truncated;
@@ -1686,14 +1811,16 @@ function buildQueryMessages(resultSets: QueryResultSet[]): QueryExecutionMessage
     }
   }
   if (resultSets.length <= 1) return messages;
-  messages.push(...resultSets.map((set) => ({
-    level: 'info' as const,
-    statementIndex: set.index,
-    message:
-      set.columns.length > 0
-        ? `Statement ${set.index + 1} returned ${set.rowCount} row(s).`
-        : `Statement ${set.index + 1} completed with command ${set.command || 'UNKNOWN'} and affected ${set.rowCount} row(s).`,
-  })));
+  messages.push(
+    ...resultSets.map((set) => ({
+      level: 'info' as const,
+      statementIndex: set.index,
+      message:
+        set.columns.length > 0
+          ? `Statement ${set.index + 1} returned ${set.rowCount} row(s).`
+          : `Statement ${set.index + 1} completed with command ${set.command || 'UNKNOWN'} and affected ${set.rowCount} row(s).`,
+    })),
+  );
   return messages;
 }
 
@@ -1739,9 +1866,16 @@ function toPgConfig(config: DatabaseConnectionConfig) {
   const ssl =
     config.ssl === undefined || config.ssl === false
       ? undefined
-      : config.ssl === 'verify-ca' || config.ssl === 'verify-full'
+      : config.ssl === 'verify-full'
         ? { rejectUnauthorized: true }
-        : { rejectUnauthorized: false };
+        : config.ssl === 'verify-ca'
+          ? {
+              rejectUnauthorized: true,
+              // PostgreSQL verify-ca validates the certificate chain but,
+              // unlike verify-full, deliberately skips hostname matching.
+              checkServerIdentity: () => undefined,
+            }
+          : { rejectUnauthorized: false };
   return {
     host: config.host,
     port: config.port,
@@ -1756,7 +1890,7 @@ function toPgConfig(config: DatabaseConnectionConfig) {
     statement_timeout: config.statementTimeoutMs ?? 60_000,
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,
-    application_name: 'DBAgent',
+    application_name: 'SchemaNaut',
     options: config.readOnly ? '-c default_transaction_read_only=on' : undefined,
   };
 }

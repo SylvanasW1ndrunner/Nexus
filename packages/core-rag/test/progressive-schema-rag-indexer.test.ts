@@ -1,15 +1,120 @@
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { TableDetail } from '@dbagent/shared';
 import {
   ProgressiveSchemaRagIndexer,
   SchemaRagEngine,
   SchemaRagSnapshotStore,
+  type SchemaRagEmbeddingAdapter,
+  type SchemaRagRetrievalProfile,
 } from '../src/index.js';
+import { column } from './schema-fixtures.js';
 
 describe('ProgressiveSchemaRagIndexer', () => {
+  it('does not expose a partially indexed schema when embedding generation fails', async () => {
+    const profile: SchemaRagRetrievalProfile = {
+      id: 'failing-embedding-profile',
+      version: 1,
+      backend: { type: 'memory' },
+      embedding: {
+        providerInstanceId: 'embedding-provider',
+        modelId: 'embedding-model',
+        dimensions: 2,
+        normalization: 'l2',
+        distanceMetric: 'cosine',
+        requestTemplateVersion: 'v1',
+      },
+    };
+    const engine = new SchemaRagEngine({
+      retrievalProfile: profile,
+      embeddingAdapter: {
+        embed: () => Promise.reject(new Error('embedding unavailable')),
+      },
+    });
+    const indexer = new ProgressiveSchemaRagIndexer({ engine });
+
+    await expect(
+      indexer.indexAsync({
+        connectionId: 'failed-embedding',
+        tables: fixtureTables().slice(0, 1),
+      }),
+    ).rejects.toThrow('embedding unavailable');
+
+    expect(engine.hasIndex('failed-embedding')).toBe(false);
+    expect(indexer.getStatus('failed-embedding')).toMatchObject({
+      ready: false,
+      stage: 'failed',
+    });
+  });
+
+  it('restores the previous ready index when durable snapshot persistence fails', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'schemanaut-rag-save-failure-'));
+    const blockedRoot = path.join(directory, 'not-a-directory');
+    await writeFile(blockedRoot, 'blocked', 'utf8');
+    const engine = new SchemaRagEngine();
+    engine.index({
+      connectionId: 'warehouse',
+      tables: [fixtureTables()[0]!],
+    });
+    const previousCatalog = engine.getCatalog('warehouse');
+    const indexer = new ProgressiveSchemaRagIndexer({
+      engine,
+      snapshotStore: new SchemaRagSnapshotStore({ rootDir: blockedRoot }),
+    });
+
+    await expect(
+      indexer.index({
+        connectionId: 'warehouse',
+        tables: [fixtureTables()[1]!],
+      }),
+    ).rejects.toThrow();
+
+    expect(engine.getCatalog('warehouse').catalogRootHash).toBe(previousCatalog.catalogRootHash);
+    expect(engine.hasTable({ connectionId: 'warehouse', schema: 'public', table: 'campaign_events' }))
+      .toBe(true);
+    expect(engine.hasTable({ connectionId: 'warehouse', schema: 'public', table: 'conversions' }))
+      .toBe(false);
+  });
+
+  it('persists vectors when progressive indexing uses an asynchronous embedding adapter', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-progressive-async-'));
+    const profile: SchemaRagRetrievalProfile = {
+      id: 'async-profile',
+      version: 1,
+      backend: { type: 'memory' },
+      embedding: {
+        providerInstanceId: 'embedding-provider',
+        modelId: 'embedding-model',
+        dimensions: 2,
+        normalization: 'l2',
+        distanceMetric: 'cosine',
+        requestTemplateVersion: 'v1',
+      },
+    };
+    const embed = vi.fn<SchemaRagEmbeddingAdapter['embed']>(({ texts }) =>
+      Promise.resolve(texts.map(() => [1, 0])),
+    );
+    const engine = new SchemaRagEngine({
+      retrievalProfile: profile,
+      embeddingAdapter: { embed },
+    });
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    const indexer = new ProgressiveSchemaRagIndexer({ engine, snapshotStore: store });
+
+    const result = await indexer.indexAsync({
+      connectionId: 'async-warehouse',
+      tables: fixtureTables().slice(0, 1),
+      indexedAt: '2026-07-24T00:00:00.000Z',
+    });
+    const restored = await store.load('async-warehouse');
+
+    expect(embed).toHaveBeenCalledOnce();
+    expect(result.index.vectors).toBeDefined();
+    expect(restored?.vectors).toEqual(result.index.vectors);
+  });
+
   it('indexes schema metadata, records progressive stages, and persists a snapshot', async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-progressive-'));
     const engine = new SchemaRagEngine();
@@ -149,6 +254,110 @@ describe('ProgressiveSchemaRagIndexer', () => {
         })
         .map((item) => item.document.id),
     ).toContain('table:public.conversions');
+  });
+
+  it('rebuilds and persists embedding vectors after an incremental table upsert', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'schemanaut-rag-upsert-vectors-'));
+    const profile: SchemaRagRetrievalProfile = {
+      id: 'incremental-vector-profile',
+      version: 1,
+      backend: { type: 'memory' },
+      embedding: {
+        providerInstanceId: 'embedding-provider',
+        modelId: 'embedding-model',
+        dimensions: 2,
+        normalization: 'l2',
+        distanceMetric: 'cosine',
+        requestTemplateVersion: 'v1',
+      },
+    };
+    const embed = vi.fn<SchemaRagEmbeddingAdapter['embed']>(({ texts }) =>
+      Promise.resolve(texts.map(() => [1, 0])),
+    );
+    const engine = new SchemaRagEngine({ embeddingAdapter: { embed } });
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    const indexer = new ProgressiveSchemaRagIndexer({ engine, snapshotStore: store });
+    await indexer.indexAsync({
+      connectionId: 'incremental-warehouse',
+      tables: [fixtureTables()[0]!],
+      retrievalProfile: profile,
+    });
+
+    const result = await indexer.upsertTables({
+      connectionId: 'incremental-warehouse',
+      tables: [fixtureTables()[1]!],
+    });
+    const restored = await store.load('incremental-warehouse');
+    const expectedVectorIds = result.index.documents.map((document) => document.id).sort();
+
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect(Object.keys(result.index.vectors ?? {}).sort()).toEqual(expectedVectorIds);
+    expect(Object.keys(restored?.vectors ?? {}).sort()).toEqual(expectedVectorIds);
+    expect(result.status).toMatchObject({ stage: 'ready', ready: true });
+  });
+
+  it('rolls back an incremental index and its vectors when snapshot persistence fails', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'schemanaut-rag-upsert-rollback-'));
+    const blockedRoot = path.join(directory, 'not-a-directory');
+    await writeFile(blockedRoot, 'blocked', 'utf8');
+    const profile: SchemaRagRetrievalProfile = {
+      id: 'incremental-rollback-profile',
+      version: 1,
+      backend: { type: 'memory' },
+      embedding: {
+        providerInstanceId: 'embedding-provider',
+        modelId: 'embedding-model',
+        dimensions: 2,
+        normalization: 'l2',
+        distanceMetric: 'cosine',
+        requestTemplateVersion: 'v1',
+      },
+    };
+    const engine = new SchemaRagEngine({
+      retrievalProfile: profile,
+      embeddingAdapter: {
+        embed: ({ texts }) => Promise.resolve(texts.map(() => [1, 0])),
+      },
+    });
+    const initial = await engine.indexAsync({
+      connectionId: 'rollback-warehouse',
+      tables: [fixtureTables()[0]!],
+    });
+    const previousCatalogRootHash = initial.catalog?.catalogRootHash;
+    const previousVectors = structuredClone(initial.vectors);
+    const indexer = new ProgressiveSchemaRagIndexer({
+      engine,
+      snapshotStore: new SchemaRagSnapshotStore({ rootDir: blockedRoot }),
+    });
+
+    await expect(
+      indexer.upsertTables({
+        connectionId: 'rollback-warehouse',
+        tables: [fixtureTables()[1]!],
+      }),
+    ).rejects.toThrow();
+
+    const restored = engine.createCheckpoint('rollback-warehouse').index;
+    expect(restored?.catalog?.catalogRootHash).toBe(previousCatalogRootHash);
+    expect(restored?.vectors).toEqual(previousVectors);
+    expect(
+      engine.hasTable({
+        connectionId: 'rollback-warehouse',
+        schema: 'public',
+        table: 'campaign_events',
+      }),
+    ).toBe(true);
+    expect(
+      engine.hasTable({
+        connectionId: 'rollback-warehouse',
+        schema: 'public',
+        table: 'conversions',
+      }),
+    ).toBe(false);
+    expect(indexer.getStatus('rollback-warehouse')).toMatchObject({
+      stage: 'failed',
+      ready: false,
+    });
   });
 
   it('reports idle when no snapshot exists for a connection', async () => {
@@ -294,24 +503,6 @@ function fixtureTables(): TableDetail[] {
       ],
     },
   ];
-}
-
-function column(
-  name: string,
-  ordinal: number,
-  dataType: string,
-  nullable: boolean,
-  comment?: string,
-  isPrimaryKey = false,
-) {
-  return {
-    name,
-    ordinal,
-    dataType,
-    nullable,
-    comment,
-    isPrimaryKey,
-  };
 }
 
 function commerceOrdersTable(): TableDetail {

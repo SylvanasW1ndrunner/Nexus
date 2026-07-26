@@ -1,0 +1,65 @@
+{
+  "generatedAt": "2026-07-26T16:17:02.864Z",
+  "runId": "2026-07-26T16-16-08-420Z-2526eb4a-b983-434f-a3a5-2956cdcd81b2",
+  "environment": {
+    "node": "v24.14.0",
+    "os": "win32 10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "postgres": "16.14"
+  },
+  "configuration": {
+    "warmupIterations": 3,
+    "measuredIterations": 20,
+    "thresholdsOverridableByEnvironment": true
+  },
+  "scale": {
+    "ecommerce_orders": 20008,
+    "ecommerce_items": 20009,
+    "raw_events": 20017,
+    "science_observations": 24000,
+    "science_partitions": 2
+  },
+  "scenarios": [
+    {
+      "name": "ecommerce-finance",
+      "warmupIterations": 3,
+      "measuredIterations": 20,
+      "p50Ms": 51.139,
+      "p95Ms": 58.543,
+      "maxMs": 59.24,
+      "thresholdMs": 250,
+      "passed": true
+    },
+    {
+      "name": "traffic-cleaning-anomaly",
+      "warmupIterations": 3,
+      "measuredIterations": 20,
+      "p50Ms": 610.203,
+      "p95Ms": 629.832,
+      "maxMs": 651.69,
+      "thresholdMs": 750,
+      "passed": true
+    },
+    {
+      "name": "big-science-statistics",
+      "warmupIterations": 3,
+      "measuredIterations": 20,
+      "p50Ms": 42.73,
+      "p95Ms": 46.867,
+      "maxMs": 50.74,
+      "thresholdMs": 500,
+      "passed": true
+    },
+    {
+      "name": "big-science-result-page",
+      "warmupIterations": 3,
+      "measuredIterations": 20,
+      "p50Ms": 20.065,
+      "p95Ms": 23.4,
+      "maxMs": 24.162,
+      "thresholdMs": 1000,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

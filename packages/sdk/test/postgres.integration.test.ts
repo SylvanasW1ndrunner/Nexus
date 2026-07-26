@@ -9,7 +9,7 @@ import type {
 } from '@dbagent/core-llm';
 import { OpenAICompatibleProvider } from '@dbagent/core-llm';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DatabaseAgentRuntime } from '../src/index.js';
+import { DatabaseAgentRuntime, type DatabaseAgentRuntimeOptions } from '../src/index.js';
 
 const runPostgresTests = process.env.DBAGENT_RUN_POSTGRES_TESTS === '1';
 const runLiveModel = process.env.DBAGENT_RUN_SDK_LIVE === '1';
@@ -17,9 +17,7 @@ const tempDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    tempDirectories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    tempDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
@@ -74,9 +72,7 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
       const llmMetricsBefore = runtime.llmMetrics();
       expect(databaseMetricsBefore.discoveryPages).toBeGreaterThan(0);
       expect(databaseMetricsBefore.resources).toBeGreaterThan(0);
-      expect(
-        runtime.resources.query({ kinds: ['table'], limit: 500 }).items,
-      ).toEqual(
+      expect(runtime.resources.query({ kinds: ['table'], limit: 500 }).items).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ canonicalName: 'public.orders' }),
           expect.objectContaining({ canonicalName: 'public.users' }),
@@ -85,11 +81,11 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
 
       const output = await runtime.runAgent({
         userId: 'integration-user',
-        message: '统计每个城市已支付或退款订单的净收入、订单数和最大单笔净收入。',
+        message: '/query-and-answer 统计每个城市已支付或退款订单的净收入、订单数和最大单笔净收入。',
         mode: 'read',
       });
 
-      expect(output.selectedSkill).toBe('query-and-answer');
+      expect(output.activatedSkills).toContain('query-and-answer');
       expect(output.result.status).toBe('done');
       expect(output.result.toolExecutions.map((item) => item.toolName)).toEqual([
         'knowledge_search',
@@ -105,82 +101,78 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
       expect(executionPreview).toContain('Beijing');
       expect(executionPreview).toContain('Shenzhen');
       expect(executionPreview).toContain('1726.50');
-      expect(
-        output.result.session.knowledgeSnapshot?.knowledgeSnapshotId,
-      ).toMatch(/^knowledge:/);
-      expect(
-        typeof output.result.session.knowledgeSnapshot?.catalogRootHash,
-      ).toBe('string');
-      expect(
-        typeof output.result.session.knowledgeSnapshot?.retrievalProfileId,
-      ).toBe('string');
+      expect(output.result.session.knowledgeSnapshot?.knowledgeSnapshotId).toMatch(/^knowledge:/);
+      expect(typeof output.result.session.knowledgeSnapshot?.catalogRootHash).toBe('string');
+      expect(typeof output.result.session.knowledgeSnapshot?.retrievalProfileId).toBe('string');
       expect(provider.requests).toHaveLength(4);
       expectModelRequestsToExcludeKnowledgeInternals(provider.requests, [
         runtime.status().connection!.id,
       ]);
       const databaseMetricsAfter = runtime.database.metrics();
       const llmMetricsAfter = runtime.llmMetrics();
-      const queryAudit = runtime.database
-        .listAuditEvents({ limit: 50 })
-        .filter((event) => event.action === 'database.query.submit');
-      expect(
-        databaseMetricsAfter.submittedQueries -
-          databaseMetricsBefore.submittedQueries,
-      ).toBe(2);
-      expect(queryAudit).toHaveLength(2);
-      expect(queryAudit).toEqual(
+      const queryAuditEvents = runtime.database.listAuditEvents({ limit: 50 });
+      const querySubmissions = queryAuditEvents.filter(
+        (event) => event.action === 'database.query.submit',
+      );
+      const queryCompletions = queryAuditEvents.filter(
+        (event) => event.action === 'database.query.complete',
+      );
+      expect(databaseMetricsAfter.submittedQueries - databaseMetricsBefore.submittedQueries).toBe(
+        2,
+      );
+      expect(querySubmissions).toHaveLength(2);
+      expect(querySubmissions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: 'unknown',
+            authorization: {
+              actorId: 'integration-user',
+              permissionMode: 'read',
+            },
+          }),
+        ]),
+      );
+      expect(queryCompletions).toHaveLength(2);
+      expect(queryCompletions).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             status: 'succeeded',
             authorization: {
               actorId: 'integration-user',
-              permissionMode: 'all-writes-approved',
+              permissionMode: 'read',
             },
           }),
         ]),
       );
       expect(llmMetricsAfter.requests - llmMetricsBefore.requests).toBe(4);
       expect(llmMetricsAfter.completed - llmMetricsBefore.completed).toBe(4);
-      expect(llmMetricsAfter.totalPromptTokens).toBeGreaterThan(
-        llmMetricsBefore.totalPromptTokens,
-      );
-      await printAgentScenarioLog(
-        'real-postgres-complex-english',
-        output,
-        provider.requests,
-        {
-          llmGateway: {
-            requests:
-              llmMetricsAfter.requests - llmMetricsBefore.requests,
-            completed:
-              llmMetricsAfter.completed - llmMetricsBefore.completed,
-            promptTokens:
-              llmMetricsAfter.totalPromptTokens -
-              llmMetricsBefore.totalPromptTokens,
-            completionTokens:
-              llmMetricsAfter.totalCompletionTokens -
-              llmMetricsBefore.totalCompletionTokens,
-          },
-          databaseAccess: {
-            discoveryPages: databaseMetricsAfter.discoveryPages,
-            submittedQueries:
-              databaseMetricsAfter.submittedQueries -
-              databaseMetricsBefore.submittedQueries,
-            successfulQueryAudits: queryAudit.filter(
-              (event) => event.status === 'succeeded',
-            ).length,
-          },
-          resourceState: {
-            resources: databaseMetricsAfter.resources,
-            relations: databaseMetricsAfter.relations,
-          },
-          publicContracts: {
-            connectionProfile: 'validated by DatabaseAccessRuntime',
-            discoveredResources: 'validated by ResourceRegistry',
-            querySubmissions: 'validated by DatabaseAccessRuntime',
-          },
+      expect(llmMetricsAfter.totalPromptTokens).toBeGreaterThan(llmMetricsBefore.totalPromptTokens);
+      await printAgentScenarioLog('real-postgres-complex-english', output, provider.requests, {
+        llmGateway: {
+          requests: llmMetricsAfter.requests - llmMetricsBefore.requests,
+          completed: llmMetricsAfter.completed - llmMetricsBefore.completed,
+          promptTokens: llmMetricsAfter.totalPromptTokens - llmMetricsBefore.totalPromptTokens,
+          completionTokens:
+            llmMetricsAfter.totalCompletionTokens - llmMetricsBefore.totalCompletionTokens,
         },
-      );
+        databaseAccess: {
+          discoveryPages: databaseMetricsAfter.discoveryPages,
+          submittedQueries:
+            databaseMetricsAfter.submittedQueries - databaseMetricsBefore.submittedQueries,
+          successfulQueryAudits: queryCompletions.filter(
+            (event) => event.status === 'succeeded',
+          ).length,
+        },
+        resourceState: {
+          resources: databaseMetricsAfter.resources,
+          relations: databaseMetricsAfter.relations,
+        },
+        publicContracts: {
+          connectionProfile: 'validated by DatabaseAccessRuntime',
+          discoveredResources: 'validated by ResourceRegistry',
+          querySubmissions: 'validated by DatabaseAccessRuntime',
+        },
+      });
     } finally {
       await runtime.close();
     }
@@ -301,9 +293,379 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
         status: 'success',
       });
       expect(searchRun.result.toolExecutions[0]!.resultPreview).toContain(tableName);
+      expect(searchRun.result.session.knowledgeSnapshot?.catalogRootHash).not.toBe(
+        createRun.result.session.knowledgeSnapshot?.catalogRootHash,
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('applies approved UPDATE and DDL once without leaking authority to the next call or Session state', async () => {
+    const suffix = `${process.pid}_${Date.now()}`;
+    const tableName = `agent_approval_probe_${suffix}`;
+    const qualifiedTable = `public.${tableName}`;
+    const approvedUpdate = `UPDATE ${qualifiedTable} SET value = 1 WHERE id = 1`;
+    const deniedUpdate = `UPDATE ${qualifiedTable} SET value = 2 WHERE id = 1`;
+    const approvedDdl = `ALTER TABLE ${qualifiedTable} ADD COLUMN approved_note text`;
+    const deniedDdl = `ALTER TABLE ${qualifiedTable} ADD COLUMN bypass_note text`;
+    const verifySql = `
+      SELECT
+        p.value,
+        EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = '${tableName}'
+            AND column_name = 'approved_note'
+        ) AS approved_note_exists,
+        EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = '${tableName}'
+            AND column_name = 'bypass_note'
+        ) AS bypass_note_exists
+      FROM ${qualifiedTable} p
+      WHERE p.id = 1
+    `;
+    const provider = new ScriptedAgentProvider([
+      toolCall('approved-update', 'sql_execute', { sql: approvedUpdate }),
+      finalAnswer('The approved update completed.'),
+      toolCall('denied-update', 'sql_execute', { sql: deniedUpdate }),
+      finalAnswer('The second update was not approved and was not executed.'),
+      toolCall('approved-ddl', 'sql_execute', { sql: approvedDdl }),
+      finalAnswer('The approved DDL completed.'),
+      toolCall('denied-ddl', 'sql_execute', { sql: deniedDdl }),
+      finalAnswer('The second DDL was not approved and was not executed.'),
+      toolCall('verify-one-time-authorization', 'sql_execute', {
+        sql: verifySql,
+        previewRows: 5,
+      }),
+      finalAnswer('The approved changes exist and both unapproved changes are absent.'),
+    ]);
+    const approvalDecisions = [true, false, true, false];
+    const approvalRequests: Array<{
+      sessionId?: string;
+      toolCallId: string;
+      requiredPermission?: string;
+      approved: boolean;
+    }> = [];
+    const runtime = await connectedRuntime(
+      provider,
+      'one-time-approval',
+      'deterministic-integration-model',
+      {
+        approvalProvider(request) {
+          const approved = approvalDecisions.shift();
+          if (approved === undefined) {
+            throw new Error(`Unexpected approval request for ${request.toolCall.id}`);
+          }
+          approvalRequests.push({
+            ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+            toolCallId: request.toolCall.id,
+            ...(request.tool.requiredPermission === undefined
+              ? {}
+              : { requiredPermission: request.tool.requiredPermission }),
+            approved,
+          });
+          return {
+            approved,
+            requestId: `approval-${request.toolCall.id}`,
+            approvedBy: 'postgres-integration-user',
+          };
+        },
+      },
+    );
+
+    try {
+      await submitRuntimeSql(
+        runtime,
+        `CREATE TABLE ${qualifiedTable} (id integer PRIMARY KEY, value integer NOT NULL);
+         INSERT INTO ${qualifiedTable} (id, value) VALUES (1, 0)`,
+      );
+      await runtime.indexSchema();
+
+      const first = await runtime.runAgent({
+        userId: 'postgres-integration-user',
+        message: 'Apply the first approved value update.',
+        mode: 'read',
+      });
+      const sessionId = first.result.session.id;
+      expect(first.result.toolExecutions[0]).toMatchObject({
+        toolCallId: 'approved-update',
+        status: 'success',
+        approval: { requestId: 'approval-approved-update' },
+      });
+
+      const second = await runtime.runAgent({
+        userId: 'postgres-integration-user',
+        sessionId,
+        message: 'Try a second value update; this requires a new decision.',
+        mode: 'read',
+      });
+      expect(second.result.toolExecutions[0]).toMatchObject({
+        toolCallId: 'denied-update',
+        status: 'denied',
+      });
+      expect(second.result.toolExecutions[0]).not.toHaveProperty('approval');
+
+      const third = await runtime.runAgent({
+        userId: 'postgres-integration-user',
+        sessionId,
+        message: 'Add the approved_note column after approval.',
+        mode: 'read',
+      });
+      expect(third.result.toolExecutions[0]).toMatchObject({
+        toolCallId: 'approved-ddl',
+        status: 'success',
+        approval: { requestId: 'approval-approved-ddl' },
+      });
+
+      const fourth = await runtime.runAgent({
+        userId: 'postgres-integration-user',
+        sessionId,
+        message: 'Try to add bypass_note; this requires another decision.',
+        mode: 'read',
+      });
+      expect(fourth.result.toolExecutions[0]).toMatchObject({
+        toolCallId: 'denied-ddl',
+        status: 'denied',
+      });
+      expect(fourth.result.toolExecutions[0]).not.toHaveProperty('approval');
+
+      const verification = await runtime.runAgent({
+        userId: 'postgres-integration-user',
+        sessionId,
+        message: 'Verify the value and both column-existence facts.',
+        mode: 'read',
+      });
+      expect(verification.result.toolExecutions[0]).toMatchObject({
+        toolCallId: 'verify-one-time-authorization',
+        status: 'success',
+      });
+      expect(verification.result.toolExecutions[0]?.resultPreview).toContain('"value":1');
+      expect(verification.result.toolExecutions[0]?.resultPreview).toContain(
+        '"approved_note_exists":true',
+      );
+      expect(verification.result.toolExecutions[0]?.resultPreview).toContain(
+        '"bypass_note_exists":false',
+      );
+
+      expect(approvalRequests).toEqual([
+        {
+          sessionId,
+          toolCallId: 'approved-update',
+          requiredPermission: 'edit',
+          approved: true,
+        },
+        {
+          sessionId,
+          toolCallId: 'denied-update',
+          requiredPermission: 'edit',
+          approved: false,
+        },
+        {
+          sessionId,
+          toolCallId: 'approved-ddl',
+          requiredPermission: 'full',
+          approved: true,
+        },
+        {
+          sessionId,
+          toolCallId: 'denied-ddl',
+          requiredPermission: 'full',
+          approved: false,
+        },
+      ]);
+      const queryAuditEvents = runtime.database.listAuditEvents({ limit: 100 });
+      const querySubmissions = queryAuditEvents.filter(
+        (event) => event.action === 'database.query.submit',
+      );
+      const queryCompletions = queryAuditEvents.filter(
+        (event) => event.action === 'database.query.complete',
+      );
+      expect(querySubmissions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: 'unknown',
+            authorization: {
+              actorId: 'postgres-integration-user',
+              approvalId: 'approval-approved-update',
+              permissionMode: 'edit',
+            },
+          }),
+          expect.objectContaining({
+            status: 'unknown',
+            authorization: {
+              actorId: 'postgres-integration-user',
+              approvalId: 'approval-approved-ddl',
+              permissionMode: 'full',
+            },
+          }),
+        ]),
+      );
+      expect(queryCompletions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: 'succeeded',
+            authorization: {
+              actorId: 'postgres-integration-user',
+              approvalId: 'approval-approved-update',
+              permissionMode: 'edit',
+            },
+          }),
+          expect.objectContaining({
+            status: 'succeeded',
+            authorization: {
+              actorId: 'postgres-integration-user',
+              approvalId: 'approval-approved-ddl',
+              permissionMode: 'full',
+            },
+          }),
+        ]),
+      );
       expect(
-        searchRun.result.session.knowledgeSnapshot?.catalogRootHash,
-      ).not.toBe(createRun.result.session.knowledgeSnapshot?.catalogRootHash);
+        queryAuditEvents.some(
+          (event) =>
+            event.authorization?.approvalId === 'approval-denied-update' ||
+            event.authorization?.approvalId === 'approval-denied-ddl',
+        ),
+      ).toBe(false);
+    } finally {
+      await submitRuntimeSql(runtime, `DROP TABLE IF EXISTS ${qualifiedTable}`);
+      await runtime.close();
+    }
+  }, 120_000);
+
+  it('does not let an Agent approval bypass a physically read-only PostgreSQL connection', async () => {
+    const sql = `
+      UPDATE public.orders
+      SET refunded_amount = refunded_amount
+      WHERE order_no = 'ORD-1001'
+    `;
+    const provider = new ScriptedAgentProvider([
+      toolCall('read-only-update', 'sql_execute', { sql }),
+      finalAnswer('The database hard boundary rejected the update.'),
+    ]);
+    const runtime = await connectedRuntime(
+      provider,
+      'read-only-approved-update',
+      'deterministic-integration-model',
+      {
+        readOnly: true,
+        approvalProvider: () => ({
+          approved: true,
+          requestId: 'approval-read-only-update',
+          approvedBy: 'postgres-integration-user',
+        }),
+      },
+    );
+
+    try {
+      await runtime.indexSchema();
+      const output = await runtime.runAgent({
+        userId: 'postgres-integration-user',
+        message: 'Attempt the approved no-op update on this read-only connection.',
+        mode: 'read',
+      });
+
+      expect(output.result.toolExecutions[0]).toMatchObject({
+        toolCallId: 'read-only-update',
+        status: 'failed',
+        approval: { requestId: 'approval-read-only-update' },
+      });
+      expect(output.result.toolExecutions[0]?.resultPreview).toContain('blocked by read-only mode');
+      const queryAudits = runtime.database
+        .listAuditEvents({ limit: 20 })
+        .filter((event) => event.action === 'database.query.submit');
+      const queryAudit = queryAudits.find(
+        (event) => event.authorization?.approvalId === 'approval-read-only-update',
+      );
+      expect(
+        queryAudit,
+        JSON.stringify(
+          {
+            toolExecutions: output.result.toolExecutions,
+            queryAudits,
+          },
+          null,
+          2,
+        ),
+      ).toMatchObject({
+        status: 'unknown',
+        authorization: {
+          actorId: 'postgres-integration-user',
+          approvalId: 'approval-read-only-update',
+          permissionMode: 'edit',
+        },
+      });
+      expect(queryAudit?.jobId).toBeTruthy();
+      const terminalJob = await runtime.database.getJob(queryAudit!.jobId!);
+      expect(terminalJob).toMatchObject({
+        state: 'failed',
+        error: { code: 'READ_ONLY_VIOLATION' },
+      });
+      expect(
+        runtime.database
+          .listAuditEvents({ limit: 20 })
+          .find(
+            (event) =>
+              event.action === 'database.query.complete' && event.jobId === terminalJob.id,
+          ),
+      ).toMatchObject({
+        status: 'failed',
+        errorCode: 'READ_ONLY_VIOLATION',
+        authorization: {
+          actorId: 'postgres-integration-user',
+          approvalId: 'approval-read-only-update',
+          permissionMode: 'edit',
+        },
+      });
+      expect(runtime.status().connection?.readOnly).toBe(true);
+    } finally {
+      await runtime.close();
+    }
+  }, 120_000);
+
+  it('cancels a timed-out SQL tool through the Database Access job pipeline', async () => {
+    const provider = new ScriptedAgentProvider([
+      toolCall('slow-query', 'sql_execute', {
+        sql: 'SELECT pg_sleep(10)',
+        timeoutMs: 30_000,
+      }),
+      finalAnswer('查询已超时并取消，没有继续等待。'),
+    ]);
+    const runtime = await connectedRuntime(provider, 'cancel-agent');
+
+    try {
+      await runtime.indexSchema();
+      const before = runtime.database.metrics();
+      const startedAt = performance.now();
+      const output = await runtime.runAgent({
+        userId: 'integration-user',
+        message: '执行一个慢查询，用于验证取消链路。',
+        mode: 'read',
+        maxToolExecutionMs: 100,
+      });
+      const durationMs = performance.now() - startedAt;
+
+      expect(output.result.status).toBe('done');
+      expect(output.result.toolExecutions[0]).toMatchObject({
+        toolName: 'sql_execute',
+        status: 'failed',
+      });
+      expect(output.result.toolExecutions[0]?.resultPreview).toContain('超时');
+      expect(durationMs).toBeLessThan(3_000);
+      const cancellationWaitStarted = performance.now();
+      while (
+        runtime.database.metrics().cancelledQueries - before.cancelledQueries === 0 &&
+        performance.now() - cancellationWaitStarted < 1_000
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(runtime.database.metrics().cancelledQueries - before.cancelledQueries).toBe(1);
+      expect(performance.now() - startedAt).toBeLessThan(3_000);
     } finally {
       await runtime.close();
     }
@@ -313,14 +675,9 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
 describe.skipIf(!runLiveModel)('DatabaseAgentRuntime live model + PostgreSQL Agent', () => {
   it('uses SiliconFlow tool calling to inspect JSON shape and execute the grounded query', async () => {
     const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
-    expect(
-      apiKey,
-      '需要 TEST_SILICONFLOW_API_KEY 或 DBAGENT_LLM_API_KEY',
-    ).toBeTruthy();
+    expect(apiKey, '需要 TEST_SILICONFLOW_API_KEY 或 DBAGENT_LLM_API_KEY').toBeTruthy();
     const model =
-      process.env.TEST_SILICONFLOW_MODEL ??
-      process.env.DBAGENT_LLM_MODEL ??
-      'Qwen/Qwen3-32B';
+      process.env.TEST_SILICONFLOW_MODEL ?? process.env.DBAGENT_LLM_MODEL ?? 'Qwen/Qwen3-32B';
     const provider = new RecordingProvider(
       new OpenAICompatibleProvider({
         id: 'sdk-live',
@@ -388,55 +745,37 @@ describe.skipIf(!runLiveModel)('DatabaseAgentRuntime live model + PostgreSQL Age
       const queryAudit = runtime.database
         .listAuditEvents({ limit: 50 })
         .filter((event) => event.action === 'database.query.submit');
-      expect(
-        databaseMetricsAfter.submittedQueries -
-          databaseMetricsBefore.submittedQueries,
-      ).toBe(executions.length);
-      expect(queryAudit).toHaveLength(executions.length);
-      expect(
-        llmMetricsAfter.requests - llmMetricsBefore.requests,
-      ).toBe(provider.requests.length);
-      expect(
-        llmMetricsAfter.completed - llmMetricsBefore.completed,
-      ).toBe(provider.requests.length);
-      await printAgentScenarioLog(
-        'siliconflow-real-postgres-json',
-        output,
-        provider.requests,
-        {
-          endToEndDurationMs: scenarioDurationMs,
-          llmGateway: {
-            requests:
-              llmMetricsAfter.requests - llmMetricsBefore.requests,
-            completed:
-              llmMetricsAfter.completed - llmMetricsBefore.completed,
-            promptTokens:
-              llmMetricsAfter.totalPromptTokens -
-              llmMetricsBefore.totalPromptTokens,
-            completionTokens:
-              llmMetricsAfter.totalCompletionTokens -
-              llmMetricsBefore.totalCompletionTokens,
-          },
-          databaseAccess: {
-            discoveryPages: databaseMetricsAfter.discoveryPages,
-            submittedQueries:
-              databaseMetricsAfter.submittedQueries -
-              databaseMetricsBefore.submittedQueries,
-            successfulQueryAudits: queryAudit.filter(
-              (event) => event.status === 'succeeded',
-            ).length,
-          },
-          resourceState: {
-            resources: databaseMetricsAfter.resources,
-            relations: databaseMetricsAfter.relations,
-          },
-          publicContracts: {
-            connectionProfile: 'validated by DatabaseAccessRuntime',
-            discoveredResources: 'validated by ResourceRegistry',
-            querySubmissions: 'validated by DatabaseAccessRuntime',
-          },
-        },
+      expect(databaseMetricsAfter.submittedQueries - databaseMetricsBefore.submittedQueries).toBe(
+        executions.length,
       );
+      expect(queryAudit).toHaveLength(executions.length);
+      expect(llmMetricsAfter.requests - llmMetricsBefore.requests).toBe(provider.requests.length);
+      expect(llmMetricsAfter.completed - llmMetricsBefore.completed).toBe(provider.requests.length);
+      await printAgentScenarioLog('siliconflow-real-postgres-json', output, provider.requests, {
+        endToEndDurationMs: scenarioDurationMs,
+        llmGateway: {
+          requests: llmMetricsAfter.requests - llmMetricsBefore.requests,
+          completed: llmMetricsAfter.completed - llmMetricsBefore.completed,
+          promptTokens: llmMetricsAfter.totalPromptTokens - llmMetricsBefore.totalPromptTokens,
+          completionTokens:
+            llmMetricsAfter.totalCompletionTokens - llmMetricsBefore.totalCompletionTokens,
+        },
+        databaseAccess: {
+          discoveryPages: databaseMetricsAfter.discoveryPages,
+          submittedQueries:
+            databaseMetricsAfter.submittedQueries - databaseMetricsBefore.submittedQueries,
+          successfulQueryAudits: queryAudit.filter((event) => event.status === 'succeeded').length,
+        },
+        resourceState: {
+          resources: databaseMetricsAfter.resources,
+          relations: databaseMetricsAfter.relations,
+        },
+        publicContracts: {
+          connectionProfile: 'validated by DatabaseAccessRuntime',
+          discoveredResources: 'validated by ResourceRegistry',
+          querySubmissions: 'validated by DatabaseAccessRuntime',
+        },
+      });
     } finally {
       await runtime.close();
     }
@@ -447,6 +786,7 @@ async function connectedRuntime(
   provider: LlmProvider,
   name: string,
   model = 'deterministic-integration-model',
+  options: Pick<DatabaseAgentRuntimeOptions, 'approvalProvider'> & { readOnly?: boolean } = {},
 ): Promise<DatabaseAgentRuntime> {
   const directory = await mkdtemp(join(tmpdir(), `dbagent-${name}-`));
   tempDirectories.push(directory);
@@ -454,6 +794,9 @@ async function connectedRuntime(
     provider,
     model,
     sessionDatabasePath: join(directory, 'agent.db'),
+    ...(options.approvalProvider === undefined
+      ? {}
+      : { approvalProvider: options.approvalProvider }),
   });
   await runtime.connect({
     name: `SDK PostgreSQL ${name}`,
@@ -462,15 +805,29 @@ async function connectedRuntime(
     database: process.env.DBAGENT_TEST_PG_DATABASE ?? 'dbagent_core_db_test',
     username: process.env.DBAGENT_TEST_PG_USER ?? 'postgres',
     password: process.env.DBAGENT_TEST_PG_PASSWORD ?? 'postgres',
+    ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
   });
   return runtime;
 }
 
-function toolCall(
-  id: string,
-  name: string,
-  args: Record<string, unknown>,
-): LlmChatResponse {
+async function submitRuntimeSql(runtime: DatabaseAgentRuntime, sql: string): Promise<void> {
+  const profile = runtime.database.listProfiles()[0];
+  if (!profile) throw new Error('PostgreSQL integration profile is missing.');
+  const job = await runtime.database.submit({
+    profileId: profile.id,
+    sql,
+    executionMode: 'sync',
+    confirmed: true,
+    authorization: { permissionMode: 'full' },
+  });
+  if (job.state !== 'succeeded') {
+    throw new Error(
+      `PostgreSQL integration setup/cleanup failed: ${job.error?.message ?? job.state}`,
+    );
+  }
+}
+
+function toolCall(id: string, name: string, args: Record<string, unknown>): LlmChatResponse {
   return {
     text: '',
     toolCalls: [{ id, name, arguments: args }],
@@ -510,16 +867,16 @@ class RecordingProvider implements LlmProvider {
   readonly id: string;
   readonly name: string;
   readonly mode: LlmProvider['mode'];
-  readonly protocol: string | undefined;
-  readonly capabilities: LlmProvider['capabilities'];
+  readonly protocol?: string;
+  readonly capabilities?: NonNullable<LlmProvider['capabilities']>;
   readonly requests: LlmChatRequest[] = [];
 
   constructor(private readonly inner: LlmProvider) {
     this.id = inner.id;
     this.name = inner.name;
     this.mode = inner.mode;
-    this.protocol = inner.protocol;
-    this.capabilities = inner.capabilities;
+    if (inner.protocol !== undefined) this.protocol = inner.protocol;
+    if (inner.capabilities !== undefined) this.capabilities = inner.capabilities;
   }
 
   chat(request: LlmChatRequest): Promise<LlmChatResponse> {
@@ -527,10 +884,7 @@ class RecordingProvider implements LlmProvider {
     return this.inner.chat(request);
   }
 
-  isAvailable(
-    model?: string,
-    signal?: AbortSignal,
-  ): Promise<LlmProviderAvailability> {
+  isAvailable(model?: string, signal?: AbortSignal): Promise<LlmProviderAvailability> {
     return this.inner.isAvailable(model, signal);
   }
 }
@@ -605,9 +959,7 @@ async function printAgentScenarioLog(
       result: execution.resultPreview,
     })),
     modelRequestLeakCheck: 'passed',
-    ...(foundationIntegration === undefined
-      ? {}
-      : { foundationIntegration }),
+    ...(foundationIntegration === undefined ? {} : { foundationIntegration }),
     rounds,
   };
   const serialized = `${JSON.stringify(log, null, 2)}\n`;

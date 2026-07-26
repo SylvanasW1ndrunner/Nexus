@@ -113,7 +113,8 @@ export class AgentToolApprovalBroker {
           }
         : undefined;
 
-      if (request.signal && onAbort) request.signal.addEventListener('abort', onAbort, { once: true });
+      if (request.signal && onAbort)
+        request.signal.addEventListener('abort', onAbort, { once: true });
       this.pending.set(approvalRequest.id, {
         resolve,
         timeout,
@@ -146,6 +147,25 @@ export class AgentToolApprovalBroker {
 
   cancel(id: string, reason = 'approval request was cancelled'): boolean {
     return this.finish(id, 'cancelled', { approved: false, reason });
+  }
+
+  cancelSession(
+    sessionId: string,
+    reason = 'approval request was superseded by new user input',
+  ): number {
+    const normalized = sessionId.trim();
+    if (!normalized) return 0;
+    let cancelled = 0;
+    for (const request of this.requests.values()) {
+      if (
+        request.status === 'pending' &&
+        request.sessionId === normalized &&
+        this.cancel(request.id, reason)
+      ) {
+        cancelled += 1;
+      }
+    }
+    return cancelled;
   }
 
   private listByStatus(status: AgentToolApprovalRequestStatus): AgentToolApprovalRequest[] {

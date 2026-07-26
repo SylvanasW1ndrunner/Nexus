@@ -77,8 +77,6 @@ const RUN_STATUSES = new Set([
   'done',
   'aborted',
   'max_iterations_reached',
-  'permission_denied',
-  'tool_failed',
 ] satisfies AgentRunStatus[]);
 
 const TOOL_STATUSES = new Set([
@@ -87,15 +85,7 @@ const TOOL_STATUSES = new Set([
   'failed',
 ] satisfies AgentToolExecutionRecord['status'][]);
 
-const AGENT_MODES = new Set([
-  'read',
-  'edit',
-  'full',
-  'ask',
-  'auto',
-  'full-auto',
-  'readonly',
-] satisfies AgentMode[]);
+const AGENT_MODES = new Set(['read', 'edit', 'full'] satisfies AgentMode[]);
 
 const USAGE_MODES = new Set(['byok', 'managed'] satisfies UsageMode[]);
 
@@ -120,7 +110,11 @@ export function parseAgentEvalSuiteManifest(input: unknown): AgentEvalSuite {
 
   const suiteInput = objectRecord(root.suite, 'Agent eval suite manifest suite');
   const suiteId = requiredNonEmptyString(suiteInput, 'suiteId', 'Agent eval suite manifest suite');
-  const suiteName = requiredNonEmptyString(suiteInput, 'suiteName', 'Agent eval suite manifest suite');
+  const suiteName = requiredNonEmptyString(
+    suiteInput,
+    'suiteName',
+    'Agent eval suite manifest suite',
+  );
   const casesInput = requiredArray(suiteInput, 'cases', 'Agent eval suite manifest suite');
   if (casesInput.length === 0) {
     throw new Error('Agent eval suite manifest suite must contain at least one case.');
@@ -135,7 +129,10 @@ export function parseAgentEvalSuiteManifest(input: unknown): AgentEvalSuite {
   const notes = optionalStringArray(suiteInput, 'notes', 'Agent eval suite manifest suite');
 
   const cases = casesInput.map((item, index) => parseCase(item, index));
-  assertUnique(cases.map((item) => item.case.id), 'Agent eval suite case id');
+  assertUnique(
+    cases.map((item) => item.case.id),
+    'Agent eval suite case id',
+  );
 
   return {
     suiteId,
@@ -228,7 +225,12 @@ function optionalToolExpectations(
       ...(maxCalls === undefined ? {} : { maxCalls }),
       ...(expectation.caseSensitive === undefined
         ? {}
-        : { caseSensitive: booleanValue(expectation.caseSensitive, `${expectationLabel} caseSensitive`) }),
+        : {
+            caseSensitive: booleanValue(
+              expectation.caseSensitive,
+              `${expectationLabel} caseSensitive`,
+            ),
+          }),
       ...(argumentIncludes === undefined ? {} : { argumentIncludes }),
       ...(argumentExcludes === undefined ? {} : { argumentExcludes }),
       ...(resultIncludes === undefined ? {} : { resultIncludes }),
@@ -292,7 +294,11 @@ function arrayValue(value: unknown, label: string): unknown[] {
   return value;
 }
 
-function requiredNonEmptyString(record: Record<string, unknown>, key: string, label: string): string {
+function requiredNonEmptyString(
+  record: Record<string, unknown>,
+  key: string,
+  label: string,
+): string {
   if (record[key] === undefined) throw new Error(`${label} ${key} is required.`);
   const value = stringValue(record[key], `${label} ${key}`);
   if (!value.trim()) throw new Error(`${label} ${key} cannot be empty.`);

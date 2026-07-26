@@ -1,8 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import type { QueryExecutionResult, SavedConnection } from '../src/index.js';
+import type {
+  DbColumnValue,
+  QueryExecutionResult,
+  QueryRequest,
+  SavedConnection,
+} from '../src/index.js';
+
+type Equal<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends <Value>() => Value extends Right ? 1 : 2
+    ? true
+    : false;
+type Expect<Condition extends true> = Condition;
+type QueryParamsUseDatabaseValues = Expect<
+  Equal<NonNullable<QueryRequest['params']>, DbColumnValue[]>
+>;
 
 describe('runtime contracts', () => {
   it('describes the public database connection and query result boundary', () => {
+    const queryParamsUseDatabaseValues: QueryParamsUseDatabaseValues = true;
     const connection: SavedConnection = {
       id: 'connection-1',
       name: 'analytics',
@@ -33,5 +48,6 @@ describe('runtime contracts', () => {
 
     expect(connection.readOnly).toBe(true);
     expect(result.rows).toEqual([{ count: 1 }]);
+    expect(queryParamsUseDatabaseValues).toBe(true);
   });
 });

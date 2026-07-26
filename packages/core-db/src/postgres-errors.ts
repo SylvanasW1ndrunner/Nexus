@@ -1,6 +1,12 @@
 import type { AppError } from '@dbagent/shared';
 
-const retryableNetworkCodes = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNREFUSED']);
+const retryableNetworkCodes = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ESOCKETTIMEDOUT',
+  'ECONNREFUSED',
+]);
 
 export function classifyPostgresConnectionError(error: unknown): AppError {
   const code = getErrorCode(error);
@@ -37,7 +43,8 @@ export function classifyPostgresConnectionError(error: unknown): AppError {
     return {
       code: 'DB_PORT_CLOSED',
       message: 'PostgreSQL port refused the connection.',
-      detail: 'Check that PostgreSQL is running, listening on the configured host/port, and allowed by the firewall.',
+      detail:
+        'Check that PostgreSQL is running, listening on the configured host/port, and allowed by the firewall.',
       retryable: true,
     };
   }
@@ -46,7 +53,8 @@ export function classifyPostgresConnectionError(error: unknown): AppError {
     return {
       code: 'DB_CONNECTION_TIMEOUT',
       message: 'PostgreSQL connection timed out.',
-      detail: 'Check network reachability, VPN, security groups, firewall rules, and whether the server accepts remote TCP connections.',
+      detail:
+        'Check network reachability, VPN, security groups, firewall rules, and whether the server accepts remote TCP connections.',
       retryable: true,
     };
   }
@@ -55,7 +63,8 @@ export function classifyPostgresConnectionError(error: unknown): AppError {
     return {
       code: 'DB_CONNECTION_INTERRUPTED',
       message: 'PostgreSQL connection was interrupted.',
-      detail: 'The remote server or network closed the connection. Retry after checking VPN, proxy, and server logs.',
+      detail:
+        'The remote server or network closed the connection. Retry after checking VPN, proxy, and server logs.',
       retryable: true,
     };
   }
@@ -105,6 +114,15 @@ export function classifyPostgresRuntimeError(error: unknown): AppError {
     return {
       code: 'QUERY_CANCELLED',
       message: 'PostgreSQL query was cancelled.',
+      detail: message,
+      retryable: false,
+    };
+  }
+
+  if (code === '25006' || /read-only transaction/i.test(message)) {
+    return {
+      code: 'READ_ONLY_VIOLATION',
+      message: 'PostgreSQL rejected a write inside a read-only transaction.',
       detail: message,
       retryable: false,
     };

@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   LlmGateway,
+  LlmProviderError,
   OpenAICompatibleProvider,
   StructuredOutputValidator,
   type LlmProvider,
@@ -24,6 +25,47 @@ describe('LLM security boundaries', () => {
     await expect(
       provider.chat({ model: 'm', messages: [{ role: 'user', content: 'test' }] }),
     ).rejects.not.toThrow(secret);
+  });
+
+  it('redacts sensitive default header values from error messages and nested details', async () => {
+    const authorizationToken = 'custom-authorization-token';
+    const customSecret = 'custom-header-secret';
+    const provider = new OpenAICompatibleProvider({
+      id: 'header-redaction',
+      name: 'header-redaction',
+      apiKey: 'ordinary-api-key',
+      baseUrl: 'https://example.invalid/v1',
+      defaultHeaders: {
+        Authorization: `Bearer ${authorizationToken}`,
+        'X-Custom-Secret': customSecret,
+      },
+      fetch: async () => {
+        throw new LlmProviderError(
+          'LLM_NETWORK_ERROR',
+          `upstream echoed ${authorizationToken}`,
+          true,
+          undefined,
+          {
+            nested: {
+              diagnostic: `request header was ${customSecret}`,
+            },
+          },
+        );
+      },
+    });
+
+    const error = await provider
+      .chat({ model: 'm', messages: [{ role: 'user', content: 'test' }] })
+      .catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(LlmProviderError);
+    const serialized = JSON.stringify({
+      message: (error as LlmProviderError).message,
+      detail: (error as LlmProviderError).detail,
+    });
+    expect(serialized).toContain('[REDACTED]');
+    expect(serialized).not.toContain(authorizationToken);
+    expect(serialized).not.toContain(customSecret);
   });
 
   it('stores no prompt, response, user id or tenant id in telemetry', async () => {
@@ -60,7 +102,11 @@ function okProvider(): LlmProvider {
     name: 'safe',
     mode: 'private',
     async chat() {
-      return { text: 'safe response', toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+      return {
+        text: 'safe response',
+        toolCalls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      };
     },
     async isAvailable() {
       return { available: true };

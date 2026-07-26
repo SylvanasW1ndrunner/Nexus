@@ -6,6 +6,7 @@ import type {
   LlmTool,
 } from '@dbagent/core-llm';
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
+import { stringifyPublicJson } from '@dbagent/shared';
 import type { AgentAuditLogWriter, AgentAuditRunStatus } from './audit-log-store.js';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import {
@@ -18,21 +19,26 @@ import {
   type AgentContextBuildOutput,
   type AgentContextManagerOptions,
 } from './context-manager.js';
-import {
-  blockedAgentFinalText,
-  blockedAgentToolResultMessage,
-  sanitizeAgentOutputText,
-  sanitizeAgentOutputValue,
-} from './output-safety.js';
-import { PermissionManager } from './permission-manager.js';
+import { PermissionManager, requiredPermissionForTool } from './permission-manager.js';
+import { assertSameAgentProject } from './project-context.js';
 import { addUsage, appendMessage, createAgentSession, createMessage } from './session.js';
-import { redactPersistedAgentValue } from './redaction.js';
+import { redactPersistedAgentString, redactPersistedAgentValue } from './redaction.js';
+import { AgentRunCoordinator } from './run-coordinator.js';
 import type { AgentSessionWriter } from './session-store.js';
 import { persistAgentStreamEvents } from './stream-store.js';
 import type { AgentStreamStore } from './stream-store.js';
-import { assessAgentTaskSafety } from './task-safety.js';
-import { classifyAgentToolFailure } from './tool-failure-classifier.js';
+import {
+  isAgentTaskPlanComplete,
+  renderAgentTaskPlanContext,
+  unresolvedAgentTasks,
+} from './task-plan.js';
+import {
+  classifyAgentToolExecutionFailure,
+  classifyAgentToolFailure,
+} from './tool-failure-classifier.js';
+import { createSingleToolCallExecutionGrant } from './tool-execution-authorization.js';
 import type { ToolRegistry } from './tool-registry.js';
+import { AgentUserEventProjector, isUserRelevantAgentEvent } from './user-events.js';
 import type {
   AgentSession,
   AgentRunDependencies,
@@ -43,10 +49,11 @@ import type {
   AgentToolApprovalRecord,
   AgentToolExecutionRecord,
   AgentToolHandler,
+  AgentToolSource,
   AgentContextCompressionReport,
   AgentContextCompactionResult,
   AgentManualContextCompactionOptions,
-  AgentOutputRedactionReason,
+  AgentUserEvent,
   ApprovalProvider,
 } from './types.js';
 
@@ -57,7 +64,7 @@ const PREFERENCE_CONTEXT_PREFIX = '用户长期偏好（自动提炼，可由用
 const MAX_AUTO_COMPACTIONS_PER_ITERATION = 2;
 const MIN_COMPACTION_REDUCTION_RATIO = 0.05;
 const MAX_COMPACTION_OUTPUT_TOKENS = 4_096;
-
+const TOOL_ABORT_SETTLE_TIMEOUT_MS = 500;
 export class ReactAgent {
   private readonly permissionManager: PermissionManager;
   private readonly now: () => string;
@@ -66,6 +73,7 @@ export class ReactAgent {
   private readonly sessionStore: AgentSessionWriter | undefined;
   private readonly streamStore: AgentStreamStore | undefined;
   private readonly auditLog: AgentAuditLogWriter | undefined;
+  private readonly runCoordinator: AgentRunCoordinator;
 
   constructor(
     private readonly llmRouter: LlmRouter,
@@ -81,6 +89,24 @@ export class ReactAgent {
     this.sessionStore = dependencies.sessionStore;
     this.streamStore = dependencies.streamStore;
     this.auditLog = dependencies.auditLog;
+    this.runCoordinator = dependencies.runCoordinator ?? new AgentRunCoordinator();
+  }
+
+  steer(sessionId: string, message: string): boolean {
+    return this.runCoordinator.steer(sessionId, message, this.now());
+  }
+
+  isSessionActive(sessionId: string): boolean {
+    return this.runCoordinator.isActive(sessionId);
+  }
+
+  async runSessionOperation<T>(sessionId: string, operation: () => T | Promise<T>): Promise<T> {
+    const finish = this.runCoordinator.begin(sessionId, this.now());
+    try {
+      return await operation();
+    } finally {
+      finish();
+    }
   }
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
@@ -95,6 +121,16 @@ export class ReactAgent {
             ...(options.knowledgeSnapshot === undefined
               ? {}
               : { knowledgeSnapshot: options.knowledgeSnapshot }),
+            ...(options.project === undefined ? {} : { project: options.project }),
+            ...(options.activatedSkills === undefined
+              ? {}
+              : { activeSkills: options.activatedSkills }),
+            ...(options.sessionSkills === undefined
+              ? {}
+              : { sessionSkills: options.sessionSkills }),
+            ...(options.subagentDepth === undefined
+              ? {}
+              : { subagentDepth: options.subagentDepth }),
             now: this.now,
           })
         : cloneSessionForRun(
@@ -102,435 +138,632 @@ export class ReactAgent {
             options.mode,
             options.knowledgeSnapshot,
             options.userId,
+            options.project,
+            options.activatedSkills,
+            options.subagentDepth,
           );
-    const pinnedPreferenceMessages = await loadStoredPreferenceMessages(
-      session,
-      this.sessionStore,
-    );
-    appendMessage(session, createMessage({ role: 'user', content: options.userMessage }, this.now));
-    await this.saveSession(session);
+    const finishActiveRun = this.runCoordinator.begin(session.id, this.now());
+    try {
+      const userEvents: AgentUserEvent[] = [];
+      const eventProjector = new AgentUserEventProjector(options.eventSink, {
+        now: this.now,
+      });
+      const emitUserEvent = async (draft: Parameters<AgentUserEventProjector['emit']>[1]) => {
+        const event = await eventProjector.emit(session.id, draft);
+        if (isUserRelevantAgentEvent(event)) userEvents.push(event);
+      };
+      const pinnedPreferenceMessages = await loadStoredPreferenceMessages(
+        session,
+        this.sessionStore,
+      );
+      appendMessage(
+        session,
+        createMessage({ role: 'user', content: options.userMessage }, this.now),
+      );
+      await emitUserEvent({
+        type: 'goal-understood',
+        message: '已理解本次请求，正在结合当前数据库与项目上下文处理。',
+      });
+      await this.saveSession(session);
 
-    const usageMode = options.usageMode ?? 'byok';
-    const maxIterations = options.maxIterations ?? 25;
-    await this.auditLog?.append({
-      type: 'run_started',
-      timestamp: this.now(),
-      sessionId: session.id,
-      mode: session.mode,
-      usageMode,
-      maxIterations,
-      ...(options.allowedTools === undefined ? {} : { allowedTools: options.allowedTools }),
-    });
-    const finishRunAudit = async (
-      status: AgentAuditRunStatus,
-      iterations: number,
-      finalTextPreview?: string,
-      errorMessage?: string,
-    ) => {
+      const usageMode = options.usageMode ?? 'byok';
+      const maxIterations = options.maxIterations ?? 25;
       await this.auditLog?.append({
-        type: 'run_finished',
+        type: 'run_started',
         timestamp: this.now(),
         sessionId: session.id,
-        status,
-        iterations,
-        durationMs: Math.max(0, Date.now() - runStartedAt),
-        ...(finalTextPreview === undefined ? {} : { finalTextPreview }),
-        ...(errorMessage === undefined ? {} : { errorMessage }),
+        mode: session.mode,
+        usageMode,
+        maxIterations,
+        ...(options.allowedTools === undefined ? {} : { allowedTools: options.allowedTools }),
       });
-    };
-    const toolExecutions: AgentToolExecutionRecord[] = [];
-    const contextCompression: AgentContextCompressionReport[] = [];
-    let finalText = '';
-
-    const safety = assessAgentTaskSafety(options.userMessage, options.taskSafety);
-    if (safety.blocked) {
-      finalText = safety.finalText ?? 'Request blocked by Agent safety policy.';
-      appendMessage(session, createMessage({ role: 'assistant', content: finalText }, this.now));
-      await this.saveSession(session);
-      await finishRunAudit('safety_blocked', 0, finalText, safety.reason);
-      return {
-        status: 'safety_blocked',
-        session,
-        finalText,
-        iterations: 0,
-        toolExecutions: [],
-        contextCompression,
+      const finishRunAudit = async (
+        status: AgentAuditRunStatus,
+        iterations: number,
+        finalTextPreview?: string,
+        errorMessage?: string,
+      ) => {
+        await this.auditLog?.append({
+          type: 'run_finished',
+          timestamp: this.now(),
+          sessionId: session.id,
+          status,
+          iterations,
+          durationMs: Math.max(0, Date.now() - runStartedAt),
+          ...(finalTextPreview === undefined ? {} : { finalTextPreview }),
+          ...(errorMessage === undefined ? {} : { errorMessage }),
+        });
       };
-    }
+      const toolExecutions: AgentToolExecutionRecord[] = [];
+      const contextCompression: AgentContextCompressionReport[] = [];
+      let finalText = '';
 
-    const round = await this.usageTracker.startConversationRound(session.id, usageMode);
-    let roundClosed = false;
-    const closeRound = async (status: 'success' | 'aborted' | 'failed', errorMessage?: string) => {
-      if (roundClosed) return;
-      roundClosed = true;
-      await this.usageTracker.endConversationRound(round, status, errorMessage);
-    };
+      const round = await this.usageTracker.startConversationRound(session.id, usageMode);
+      let roundClosed = false;
+      const closeRound = async (
+        status: 'success' | 'aborted' | 'failed',
+        errorMessage?: string,
+      ) => {
+        if (roundClosed) return;
+        roundClosed = true;
+        await this.usageTracker.endConversationRound(round, status, errorMessage);
+      };
 
-    const maxConsecutiveToolFailures = options.maxConsecutiveToolFailures ?? 3;
-    const maxToolExecutionMs = options.maxToolExecutionMs ?? 60_000;
-    const iterationOffset = normalizeNonNegativeInteger(options.initialIteration, 0);
-    const maxToolResultChars = normalizePositiveInteger(
-      options.maxToolResultChars,
-      DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS,
-    );
-    const allowedToolSet = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
-    const modelContext = this.resolveModelContext(
-      options.providerId,
-      options.model,
-    );
-    const contextOptions: AgentContextManagerOptions = {
-      ...modelContext,
-      ...(options.keepRecentMessages === undefined
-        ? {}
-        : { keepRecentMessages: options.keepRecentMessages }),
-      ...(options.maxToolResultChars === undefined
-        ? {}
-        : { maxToolResultChars: options.maxToolResultChars }),
-      pinnedMessages: pinnedPreferenceMessages,
-      activeTask: options.userMessage,
-    };
-    let currentIteration = 0;
-    let consecutiveToolFailures = 0;
-    const saveCheckpoint = async (
-      iteration: number,
-      status: 'running' | 'done' | 'aborted' | 'failed',
-      errorMessage?: string,
-    ) => {
-      await this.checkpointStore?.save({
-        session,
-        iteration,
-        status,
-        toolExecutions,
-        finalText,
-        ...(errorMessage === undefined ? {} : { errorMessage }),
-        now: this.now(),
-      });
-    };
-
-    try {
-      for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-        currentIteration = iteration;
-        const checkpointIteration = iterationOffset + iteration;
-        if (options.signal?.aborted || session.aborted) {
-          await saveCheckpoint(iterationOffset + iteration - 1, 'aborted');
-          await this.saveSession(session);
-          await closeRound('aborted');
-          await finishRunAudit('aborted', iteration - 1, finalText);
-          return { status: 'aborted', session, finalText, iterations: iteration - 1, toolExecutions, contextCompression };
-        }
-
-        await saveCheckpoint(checkpointIteration, 'running');
-        const llmTools = this.toolRegistry.llmTools(options.allowedTools);
-        let context = buildAgentContext(
+      const maxConsecutiveToolFailures = options.maxConsecutiveToolFailures ?? 3;
+      const maxToolExecutionMs = options.maxToolExecutionMs ?? 60_000;
+      const iterationOffset = normalizeNonNegativeInteger(options.initialIteration, 0);
+      const maxToolResultChars = normalizePositiveInteger(
+        options.maxToolResultChars,
+        DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS,
+      );
+      const allowedToolSet =
+        options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
+      const modelContext = this.resolveModelContext(options.providerId, options.model);
+      const contextOptions: AgentContextManagerOptions = {
+        ...modelContext,
+        ...(options.keepRecentMessages === undefined
+          ? {}
+          : { keepRecentMessages: options.keepRecentMessages }),
+        ...(options.maxToolResultChars === undefined
+          ? {}
+          : { maxToolResultChars: options.maxToolResultChars }),
+        pinnedMessages: runtimePinnedMessages(
+          pinnedPreferenceMessages,
           session,
-          llmTools,
-          contextOptions,
-        );
-        const compressionReportCountBefore = contextCompression.length;
-        for (
-          let compactionAttempt = 0;
-          context.requiresCompaction &&
-          compactionAttempt < MAX_AUTO_COMPACTIONS_PER_ITERATION;
-          compactionAttempt += 1
-        ) {
-          const beforeTokens = context.compression.finalTokenEstimate;
-          const compacted = await this.compactSessionContext({
-            providerId: options.providerId,
-            model: options.model,
-            session,
-            round,
-            trigger: 'auto',
-            context,
-            contextOptions,
-            tools: llmTools,
-            iteration,
-            ...(options.signal === undefined
-              ? {}
-              : { signal: options.signal }),
-          });
-          context = compacted.context;
-          if (compacted.status === 'skipped') break;
-          contextCompression.push(compacted.report);
-          const reduction =
-            beforeTokens <= 0
-              ? 1
-              : (beforeTokens - context.compression.finalTokenEstimate) /
-                beforeTokens;
-          if (reduction < MIN_COMPACTION_REDUCTION_RATIO) break;
-        }
-        if (contextCompression.length === compressionReportCountBefore) {
-          contextCompression.push(context.compression);
-        }
-        if (context.compression.phase !== 'healthy') {
-          await this.auditLog?.append({
-            type: 'context_compaction_observed',
-            timestamp: this.now(),
-            sessionId: session.id,
-            iteration,
-            compression: context.compression,
-          });
-        }
-        if (
-          context.compression.finalTokenEstimate >
-          context.compression.availablePromptTokens
-        ) {
-          throw new Error(
-            'The active Agent context still exceeds the model input capacity after compaction.',
-          );
-        }
-        const request = {
-          model: options.model,
-          messages: context.messages,
-          tools: context.tools,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
-        };
-        await this.auditLog?.append({
-          type: 'model_call_started',
-          timestamp: this.now(),
-          sessionId: session.id,
+          options.projectInstructions,
+          options.skillCatalog,
+        ),
+        activeTask: options.userMessage,
+      };
+      let currentIteration = 0;
+      let consecutiveToolFailures = 0;
+      const actionObservations = new Map<string, { observation: string; repeats: number }>();
+      const resultMetadata = (status: AgentRunResult['status']) => ({
+        events: [...userEvents],
+        artifacts: structuredClone(session.artifacts ?? []),
+        completion: {
+          verified:
+            status === 'done' &&
+            (session.taskPlan === undefined || isAgentTaskPlanComplete(session.taskPlan)),
+          unresolvedTaskIds: unresolvedAgentTasks(session.taskPlan).map((task) => task.id),
+        },
+      });
+      const saveCheckpoint = async (
+        iteration: number,
+        status: 'running' | 'done' | 'aborted' | 'failed',
+        errorMessage?: string,
+      ) => {
+        await this.checkpointStore?.save({
+          session,
           iteration,
-          providerId: options.providerId,
-          model: options.model,
-          toolCount: context.tools.length,
+          status,
+          toolExecutions,
+          finalText,
+          ...(errorMessage === undefined ? {} : { errorMessage }),
+          now: this.now(),
         });
-        const modelStartedAt = Date.now();
-        const response = await this.callModel({
-          providerId: options.providerId,
-          model: options.model,
-          request,
-          round,
-          sessionId: session.id,
-        });
-        const safeResponseText = sanitizeAgentOutputText(response.text, options.outputSafety);
-        const safeToolCalls = sanitizeAgentOutputValue(response.toolCalls, options.outputSafety).value;
-        await this.auditLog?.append({
-          type: 'model_call_finished',
-          timestamp: this.now(),
-          sessionId: session.id,
-          iteration,
-          providerId: options.providerId,
-          model: options.model,
-          durationMs: Math.max(0, Date.now() - modelStartedAt),
-          toolCallCount: response.toolCalls.length,
-          textChars: safeResponseText.value.length,
-          ...(response.usage === undefined ? {} : { usage: response.usage }),
-        });
-        addUsage(session, response.usage);
+      };
 
-        const assistantText = safeResponseText.blocked ? blockedAgentFinalText(options.outputSafety) : safeResponseText.value;
-        appendMessage(session, createMessage({ role: 'assistant', content: assistantText, toolCalls: safeToolCalls }, this.now));
-        await this.saveSession(session);
-        await saveCheckpoint(checkpointIteration, 'running');
-
-        if (response.toolCalls.length === 0) {
-          finalText = safeResponseText.blocked ? blockedAgentFinalText(options.outputSafety) : safeResponseText.value;
-          await saveCheckpoint(checkpointIteration, 'done');
-          await this.saveSession(session);
-          await closeRound('success');
-          const status = safeResponseText.blocked ? 'safety_blocked' : 'done';
-          await finishRunAudit(status, iteration, finalText);
-          return { status, session, finalText, iterations: iteration, toolExecutions, contextCompression };
-        }
-
-        for (const toolCall of response.toolCalls) {
-          const startedAt = Date.now();
-          await this.auditLog?.append({
-            type: 'tool_call_started',
-            timestamp: this.now(),
-            sessionId: session.id,
-            iteration,
-            toolCallId: toolCall.id,
-            toolName: toolCall.name,
-            argumentPreview: serializeToolArguments(toolCall.arguments, options.outputSafety),
-          });
-          if (allowedToolSet !== undefined && !allowedToolSet.has(toolCall.name)) {
-            const record = executionRecord(
-              toolCall.id,
-              toolCall.name,
-              'denied',
-              startedAt,
-              toolCall.arguments,
-              'Tool not allowed by run policy.',
-              { failure: classifyAgentToolFailure('Tool not allowed by run policy.'), outputSafety: options.outputSafety },
-            );
-            toolExecutions.push(record);
-            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
-            await saveCheckpoint(checkpointIteration, 'running');
-            appendMessage(
-              session,
-              createMessage(
-                {
-                  role: 'tool',
-                  toolCallId: toolCall.id,
-                  toolName: toolCall.name,
-                  content: JSON.stringify({ error: 'Tool is not allowed for this run.' }),
-                },
-                this.now,
-              ),
-            );
+      try {
+        for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+          currentIteration = iteration;
+          const checkpointIteration = iterationOffset + iteration;
+          const steeringMessages = this.runCoordinator.consume(session.id);
+          for (const steering of steeringMessages) {
+            appendMessage(session, {
+              role: 'user',
+              content: steering.content,
+              createdAt: steering.createdAt,
+            });
+            await emitUserEvent({
+              type: 'goal-understood',
+              message: '已收到新的补充要求，正在调整当前计划。',
+            });
+          }
+          if (steeringMessages.length > 0) await this.saveSession(session);
+          if (options.signal?.aborted || session.aborted) {
+            await saveCheckpoint(iterationOffset + iteration - 1, 'aborted');
             await this.saveSession(session);
-            finalText = 'Tool is not allowed for this run.';
-            await saveCheckpoint(checkpointIteration, 'done');
-            await closeRound('success');
-            await finishRunAudit('permission_denied', iteration, finalText);
+            await closeRound('aborted');
+            await finishRunAudit('aborted', iteration - 1, finalText);
             return {
-              status: 'permission_denied',
+              status: 'aborted',
               session,
               finalText,
-              iterations: iteration,
+              iterations: iteration - 1,
               toolExecutions,
+              ...resultMetadata('aborted'),
               contextCompression,
             };
           }
 
-          const tool = this.toolRegistry.get(toolCall.name);
-          if (!tool) {
-            const record = executionRecord(
-              toolCall.id,
-              toolCall.name,
-              'failed',
-              startedAt,
-              toolCall.arguments,
-              'Tool is not registered.',
-              { failure: classifyAgentToolFailure('Tool is not registered.'), outputSafety: options.outputSafety },
-            );
-            toolExecutions.push(record);
-            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
-            consecutiveToolFailures += 1;
-            await saveCheckpoint(checkpointIteration, 'running');
-            appendMessage(
+          await saveCheckpoint(checkpointIteration, 'running');
+          contextOptions.pinnedMessages = runtimePinnedMessages(
+            pinnedPreferenceMessages,
+            session,
+            options.projectInstructions,
+            options.skillCatalog,
+          );
+          const visibleNames = visibleToolNames(this.toolRegistry, session, options);
+          const llmTools = this.toolRegistry.llmTools(visibleNames);
+          const visibleToolSet =
+            options.dynamicToolDiscovery === true ? new Set(visibleNames ?? []) : undefined;
+          let context = buildAgentContext(session, llmTools, contextOptions);
+          const compressionReportCountBefore = contextCompression.length;
+          for (
+            let compactionAttempt = 0;
+            context.requiresCompaction && compactionAttempt < MAX_AUTO_COMPACTIONS_PER_ITERATION;
+            compactionAttempt += 1
+          ) {
+            const beforeTokens = context.compression.finalTokenEstimate;
+            const compacted = await this.compactSessionContext({
+              providerId: options.providerId,
+              model: options.model,
               session,
-              createMessage(
-                {
-                  role: 'tool',
-                  toolCallId: toolCall.id,
-                  toolName: toolCall.name,
-                  content: JSON.stringify({ error: 'Tool is not registered.' }),
-                },
-                this.now,
-              ),
-            );
-            await this.saveSession(session);
-            await saveCheckpoint(checkpointIteration, 'running');
-            if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
-              finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
-              await saveCheckpoint(checkpointIteration, 'failed', finalText);
-              await closeRound('failed', finalText);
-              await finishRunAudit('tool_failed', iteration, finalText, finalText);
-              return {
-                status: 'tool_failed',
-                session,
-                finalText,
-                iterations: iteration,
-                toolExecutions,
-                contextCompression,
-              };
-            }
-            continue;
-          }
-
-          const effectiveTool =
-            tool.resolveRequiredPermission === undefined
-              ? tool
-              : {
-                  ...tool,
-                  requiredPermission: tool.resolveRequiredPermission(toolCall.arguments),
-                };
-          const permission = await this.permissionManager.checkDetailed({
-            mode: session.mode,
-            tool: effectiveTool,
-            toolCall,
-            sessionId: session.id,
-            sessionTitle: session.title,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          });
-
-          if (permission.decision !== 'allow') {
-            const record = executionRecord(
-              toolCall.id,
-              tool.name,
-              'denied',
-              startedAt,
-              toolCall.arguments,
-              `Permission: ${permission.decision}`,
-              { failure: classifyAgentToolFailure(`Permission: ${permission.decision}`), outputSafety: options.outputSafety },
-            );
-            toolExecutions.push(record);
-            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
-            await saveCheckpoint(checkpointIteration, 'running');
-            appendMessage(
-              session,
-              createMessage(
-                {
-                  role: 'tool',
-                  toolCallId: toolCall.id,
-                  toolName: tool.name,
-                  content: JSON.stringify({ error: 'Permission denied.', permission: permission.decision }),
-                },
-                this.now,
-              ),
-            );
-            await this.saveSession(session);
-            await saveCheckpoint(checkpointIteration, 'running');
-            if (permission.decision === 'deny') {
-              finalText = 'Permission denied.';
-              await saveCheckpoint(checkpointIteration, 'done');
-              await this.saveSession(session);
-              await closeRound('success');
-              await finishRunAudit('permission_denied', iteration, finalText);
-              return {
-                status: 'permission_denied',
-                session,
-                finalText,
-                iterations: iteration,
-                toolExecutions,
-                contextCompression,
-              };
-            }
-            continue;
-          }
-
-          const approval =
-            permission.source === 'approval-provider'
-              ? ({
-                  granted: true,
-                  source: permission.source,
-                  toolCallId: toolCall.id,
-                  toolName: tool.name,
-                  approvedAt: permission.approvedAt ?? this.now(),
-                  ...(permission.approvalRequestId === undefined ? {} : { requestId: permission.approvalRequestId }),
-                  ...(permission.approvedBy === undefined ? {} : { approvedBy: permission.approvedBy }),
-                  ...(permission.reason === undefined ? {} : { reason: permission.reason }),
-                } satisfies AgentToolApproval)
-              : undefined;
-          const approvalMetadata = approvalRecord(approval);
-
-          try {
-            const context = {
-              session,
-              ...(options.signal === undefined ? {} : { signal: options.signal }),
-              ...(approval === undefined ? {} : { approval }),
-            };
-            const result = await executeToolWithTimeout(
-              tool.name,
-              tool.handler,
-              toolCall.arguments,
+              round,
+              trigger: 'auto',
               context,
-              maxToolExecutionMs,
+              contextOptions,
+              tools: llmTools,
+              iteration,
+              ...(options.signal === undefined ? {} : { signal: options.signal }),
+            });
+            context = compacted.context;
+            if (compacted.status === 'skipped') break;
+            contextCompression.push(compacted.report);
+            const reduction =
+              beforeTokens <= 0
+                ? 1
+                : (beforeTokens - context.compression.finalTokenEstimate) / beforeTokens;
+            if (reduction < MIN_COMPACTION_REDUCTION_RATIO) break;
+          }
+          if (contextCompression.length === compressionReportCountBefore) {
+            contextCompression.push(context.compression);
+          }
+          if (context.compression.phase !== 'healthy') {
+            await this.auditLog?.append({
+              type: 'context_compaction_observed',
+              timestamp: this.now(),
+              sessionId: session.id,
+              iteration,
+              compression: context.compression,
+            });
+          }
+          if (context.compression.finalTokenEstimate > context.compression.availablePromptTokens) {
+            throw new Error(
+              'The active Agent context still exceeds the model input capacity after compaction.',
             );
-            const safeResult = sanitizeAgentOutputValue(result, options.outputSafety);
-            if (safeResult.blocked) {
-              const preview = blockedAgentToolResultMessage(safeResult.reasons, options.outputSafety);
-              const record = executionRecord(toolCall.id, tool.name, 'failed', startedAt, toolCall.arguments, preview, {
-                outputSafety: options.outputSafety,
-                failure: { failureKind: 'output_safety', retryable: true },
-                blocked: true,
-                redactionReasons: safeResult.reasons,
-                ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
+          }
+          const request = {
+            model: options.model,
+            messages: context.messages,
+            tools: context.tools,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          };
+          await this.auditLog?.append({
+            type: 'model_call_started',
+            timestamp: this.now(),
+            sessionId: session.id,
+            iteration,
+            providerId: options.providerId,
+            model: options.model,
+            toolCount: context.tools.length,
+          });
+          const modelStartedAt = Date.now();
+          const response = await this.callModel({
+            providerId: options.providerId,
+            model: options.model,
+            request,
+            round,
+            sessionId: session.id,
+          });
+          const persistedResponseText = redactPersistedAgentString(response.text);
+          const persistedToolCalls = redactPersistedAgentValue(
+            response.toolCalls,
+          ) as LlmChatResponse['toolCalls'];
+          await this.auditLog?.append({
+            type: 'model_call_finished',
+            timestamp: this.now(),
+            sessionId: session.id,
+            iteration,
+            providerId: options.providerId,
+            model: options.model,
+            durationMs: Math.max(0, Date.now() - modelStartedAt),
+            toolCallCount: response.toolCalls.length,
+            textChars: persistedResponseText.length,
+            ...(response.usage === undefined ? {} : { usage: response.usage }),
+          });
+          addUsage(session, response.usage);
+
+          appendMessage(
+            session,
+            createMessage(
+              {
+                role: 'assistant',
+                content: persistedResponseText,
+                toolCalls: persistedToolCalls,
+              },
+              this.now,
+            ),
+          );
+          await this.saveSession(session);
+          await saveCheckpoint(checkpointIteration, 'running');
+
+          if (response.toolCalls.length === 0) {
+            finalText = persistedResponseText;
+            if (looksLikeUnparsedToolInvocation(finalText)) {
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'system',
+                    content:
+                      'The previous response contained textual tool-call markup that the provider did not expose as a standard tool call. Do not claim completion and do not repeat tool markup in text. Retry the needed action through the provider tool-calling API, or explain that the configured model/provider cannot call tools.',
+                  },
+                  this.now,
+                ),
+              );
+              await emitUserEvent({
+                type: 'correcting',
+                message: '模型返回的工具调用格式未被 Provider 识别，正在改用标准工具调用重试。',
               });
+              await this.saveSession(session);
+              continue;
+            }
+            const unresolved = unresolvedAgentTasks(session.taskPlan);
+            if (unresolved.length > 0) {
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'system',
+                    content: [
+                      'Completion verification failed: the task plan still has unresolved work.',
+                      `Unresolved tasks: ${unresolved
+                        .map((task) => `${task.id}: ${task.title}`)
+                        .join('; ')}`,
+                      'Continue working, update the plan, and attach concrete evidence before giving a final answer.',
+                    ].join('\n'),
+                  },
+                  this.now,
+                ),
+              );
+              await emitUserEvent({
+                type: 'correcting',
+                message: '验收条件尚未全部满足，正在继续检查和补全。',
+              });
+              await this.saveSession(session);
+              continue;
+            }
+            await emitUserEvent({
+              type: 'completed',
+              message: '任务已完成并通过当前验收检查。',
+            });
+            await saveCheckpoint(checkpointIteration, 'done');
+            await this.saveSession(session);
+            await closeRound('success');
+            await finishRunAudit('done', iteration, finalText);
+            return {
+              status: 'done',
+              session,
+              finalText,
+              iterations: iteration,
+              toolExecutions,
+              ...resultMetadata('done'),
+              contextCompression,
+            };
+          }
+
+          for (const toolCall of response.toolCalls) {
+            const startedAt = Date.now();
+            const tool = this.toolRegistry.get(toolCall.name);
+            const planBeforeTool = JSON.stringify(session.taskPlan ?? null);
+            const artifactIdsBeforeTool = new Set(
+              (session.artifacts ?? []).map((artifact) => artifact.id),
+            );
+            const actionSignature = stableActionSignature(toolCall.name, toolCall.arguments);
+            await emitUserEvent({
+              type: toolCall.name.includes('sql') ? 'sql-prepared' : 'exploring',
+              message: userToolProgressMessage(toolCall.name),
+              ...(typeof toolCall.arguments.sql === 'string'
+                ? { sql: toolCall.arguments.sql }
+                : {}),
+            });
+            await this.auditLog?.append({
+              type: 'tool_call_started',
+              timestamp: this.now(),
+              sessionId: session.id,
+              iteration,
+              toolCallId: toolCall.id,
+              toolName: toolCall.name,
+              argumentPreview: serializeToolArguments(toolCall.arguments),
+            });
+            if (allowedToolSet !== undefined && !allowedToolSet.has(toolCall.name)) {
+              const record = executionRecord(
+                toolCall.id,
+                toolCall.name,
+                'denied',
+                startedAt,
+                toolCall.arguments,
+                'Tool not allowed by run policy.',
+                {
+                  failure: classifyAgentToolFailure('Tool not allowed by run policy.'),
+                },
+              );
               toolExecutions.push(record);
-              await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
+              await this.auditLog?.append(
+                toolFinishedAuditEvent(session.id, iteration, record, this.now()),
+              );
+              await saveCheckpoint(checkpointIteration, 'running');
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'tool',
+                    toolCallId: toolCall.id,
+                    toolName: toolCall.name,
+                    content: JSON.stringify({ error: 'Tool is not allowed for this run.' }),
+                  },
+                  this.now,
+                ),
+              );
+              await this.saveSession(session);
+              await emitUserEvent({
+                type: 'correcting',
+                message: '当前运行策略不允许这项操作，正在寻找无需该工具的替代路径。',
+              });
+              continue;
+            }
+
+            if (visibleToolSet !== undefined && !visibleToolSet.has(toolCall.name)) {
+              const message = 'Tool is not active. Discover it with tool_search before use.';
+              const record = executionRecord(
+                toolCall.id,
+                toolCall.name,
+                'failed',
+                startedAt,
+                toolCall.arguments,
+                message,
+                {
+                  failure: classifyAgentToolFailure(message),
+                },
+              );
+              toolExecutions.push(record);
               consecutiveToolFailures += 1;
+              await this.auditLog?.append(
+                toolFinishedAuditEvent(session.id, iteration, record, this.now()),
+              );
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'tool',
+                    toolCallId: toolCall.id,
+                    toolName: toolCall.name,
+                    content: JSON.stringify({ error: message }),
+                  },
+                  this.now,
+                ),
+              );
+              await emitUserEvent({
+                type: 'correcting',
+                message: '该扩展工具尚未发现，正在先查询可用能力。',
+              });
+              await saveCheckpoint(checkpointIteration, 'running');
+              await this.saveSession(session);
+              continue;
+            }
+
+            if (!tool) {
+              const record = executionRecord(
+                toolCall.id,
+                toolCall.name,
+                'failed',
+                startedAt,
+                toolCall.arguments,
+                'Tool is not registered.',
+                {
+                  failure: classifyAgentToolFailure('Tool is not registered.'),
+                },
+              );
+              toolExecutions.push(record);
+              await this.auditLog?.append(
+                toolFinishedAuditEvent(session.id, iteration, record, this.now()),
+              );
+              consecutiveToolFailures += 1;
+              await saveCheckpoint(checkpointIteration, 'running');
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'tool',
+                    toolCallId: toolCall.id,
+                    toolName: toolCall.name,
+                    content: JSON.stringify({ error: 'Tool is not registered.' }),
+                  },
+                  this.now,
+                ),
+              );
+              await this.saveSession(session);
+              await saveCheckpoint(checkpointIteration, 'running');
+              if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
+                appendRecoveryInstruction(
+                  session,
+                  consecutiveToolFailures,
+                  record.resultPreview,
+                  this.now,
+                );
+                consecutiveToolFailures = 0;
+                await emitUserEvent({
+                  type: 'correcting',
+                  message: '连续尝试没有取得进展，正在更换工具或查询方式。',
+                });
+              }
+              continue;
+            }
+
+            const effectiveTool =
+              tool.resolveRequiredPermission === undefined
+                ? tool
+                : {
+                    ...tool,
+                    requiredPermission: tool.resolveRequiredPermission(toolCall.arguments),
+                  };
+            const requiredPermission = requiredPermissionForTool(effectiveTool);
+            const invocation = {
+              toolCallId: toolCall.id,
+              toolName: tool.name,
+              requiredPermission,
+            };
+            const permission = await this.permissionManager.checkDetailed(
+              {
+                mode: session.mode,
+                tool: effectiveTool,
+                toolCall,
+                sessionId: session.id,
+                sessionTitle: session.title,
+                ...(options.signal === undefined ? {} : { signal: options.signal }),
+              },
+              async () => {
+                await emitUserEvent({
+                  type: 'approval-required',
+                  message: `需要你的许可后才能执行：${tool.name}`,
+                  ...(typeof toolCall.arguments.sql === 'string'
+                    ? { sql: toolCall.arguments.sql }
+                    : {}),
+                });
+              },
+            );
+
+            if (permission.decision !== 'allow') {
+              const record = executionRecord(
+                toolCall.id,
+                tool.name,
+                'denied',
+                startedAt,
+                toolCall.arguments,
+                `Permission: ${permission.decision}`,
+                {
+                  failure: classifyAgentToolFailure(`Permission: ${permission.decision}`),
+                },
+              );
+              toolExecutions.push(record);
+              await this.auditLog?.append(
+                toolFinishedAuditEvent(session.id, iteration, record, this.now()),
+              );
+              await saveCheckpoint(checkpointIteration, 'running');
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'tool',
+                    toolCallId: toolCall.id,
+                    toolName: tool.name,
+                    content: JSON.stringify({
+                      error: 'Permission denied.',
+                      permission: permission.decision,
+                    }),
+                  },
+                  this.now,
+                ),
+              );
+              await this.saveSession(session);
+              await saveCheckpoint(checkpointIteration, 'running');
+              await emitUserEvent({
+                type:
+                  permission.source === 'missing-approval-provider'
+                    ? 'needs-user-input'
+                    : 'correcting',
+                message:
+                  permission.source === 'missing-approval-provider'
+                    ? `需要许可才能执行：${tool.name}`
+                    : '该操作未获许可，正在保留现有结果并尝试其他路径。',
+              });
+              continue;
+            }
+
+            const approval =
+              permission.source === 'approval-provider'
+                ? ({
+                    granted: true,
+                    source: permission.source,
+                    sessionId: session.id,
+                    toolCallId: toolCall.id,
+                    toolName: tool.name,
+                    grantedPermission: requiredPermission,
+                    approvedAt: permission.approvedAt ?? this.now(),
+                    ...(permission.approvalRequestId === undefined
+                      ? {}
+                      : { requestId: permission.approvalRequestId }),
+                    ...(permission.approvedBy === undefined
+                      ? {}
+                      : { approvedBy: permission.approvedBy }),
+                    ...(permission.reason === undefined ? {} : { reason: permission.reason }),
+                  } satisfies AgentToolApproval)
+                : undefined;
+            const approvalMetadata = approvalRecord(approval);
+
+            try {
+              const context = {
+                session,
+                ...(options.allowedTools === undefined
+                  ? {}
+                  : { allowedTools: options.allowedTools }),
+                ...(options.signal === undefined ? {} : { runSignal: options.signal }),
+                ...(options.signal === undefined ? {} : { signal: options.signal }),
+                invocation,
+                ...(approval === undefined ? {} : { approval }),
+                ...(approval === undefined
+                  ? {}
+                  : {
+                      executionGrant: createSingleToolCallExecutionGrant(approval),
+                    }),
+              };
+              const result = await executeToolWithTimeout(
+                tool.name,
+                tool.handler,
+                toolCall.arguments,
+                context,
+                maxToolExecutionMs,
+              );
+              const persistedResult = persistedSuccessfulToolResult(tool.source, result);
+              const preview = serializeToolResult(persistedResult, maxToolResultChars);
+              const record = executionRecord(
+                toolCall.id,
+                tool.name,
+                'success',
+                startedAt,
+                toolCall.arguments,
+                preview,
+                {
+                  ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
+                },
+              );
+              toolExecutions.push(record);
+              await this.auditLog?.append(
+                toolFinishedAuditEvent(session.id, iteration, record, this.now()),
+              );
+              consecutiveToolFailures = 0;
               appendMessage(
                 session,
                 createMessage(
@@ -543,121 +776,160 @@ export class ReactAgent {
                   this.now,
                 ),
               );
+              const noProgress = observeActionResult(actionObservations, actionSignature, preview);
+              if (noProgress) {
+                appendMessage(
+                  session,
+                  createMessage(
+                    {
+                      role: 'system',
+                      content:
+                        'No-progress guard: this unchanged action produced the same observation repeatedly. Choose a materially different tool, query, or source before retrying.',
+                    },
+                    this.now,
+                  ),
+                );
+                await emitUserEvent({
+                  type: 'correcting',
+                  message: '重复操作没有带来新信息，正在切换探索路径。',
+                });
+              }
+              if (JSON.stringify(session.taskPlan ?? null) !== planBeforeTool) {
+                await emitUserEvent({
+                  type: 'plan-updated',
+                  message: planProgressMessage(session),
+                });
+              }
+              for (const artifact of session.artifacts ?? []) {
+                if (artifactIdsBeforeTool.has(artifact.id)) continue;
+                await emitUserEvent({
+                  type: 'artifact-created',
+                  message: `已生成产物：${artifact.path}`,
+                  artifact,
+                });
+              }
+              if (isSqlExecutionTool(tool.name)) {
+                await emitUserEvent({
+                  type: 'sql-executed',
+                  message: sqlExecutionProgressMessage(persistedResult),
+                  ...(typeof toolCall.arguments.sql === 'string'
+                    ? { sql: toolCall.arguments.sql }
+                    : {}),
+                  ...sqlExecutionMetrics(persistedResult),
+                });
+                const successfulSqlCount = toolExecutions.filter(
+                  (execution) =>
+                    execution.status === 'success' && isSqlExecutionTool(execution.toolName),
+                ).length;
+                if (successfulSqlCount === 6 || successfulSqlCount === 10) {
+                  appendMessage(
+                    session,
+                    createMessage(
+                      {
+                        role: 'system',
+                        content:
+                          successfulSqlCount === 6
+                            ? 'Exploration checkpoint: several SQL observations are already available. If they cover the required schema and business rules, stop probing and execute the single final SQL that answers the user.'
+                            : 'Exploration checkpoint: do not run another diagnostic probe. Execute the final requested SQL now using established facts, or state the one specific missing fact that prevents completion.',
+                      },
+                      this.now,
+                    ),
+                  );
+                }
+              }
+              await this.saveSession(session);
+              await saveCheckpoint(checkpointIteration, 'running');
+            } catch (error) {
+              const message = limitSerializedToolResult(
+                redactPersistedAgentString(error instanceof Error ? error.message : String(error)),
+                maxToolResultChars,
+              );
+              const record = executionRecord(
+                toolCall.id,
+                tool.name,
+                'failed',
+                startedAt,
+                toolCall.arguments,
+                message,
+                {
+                  failure: classifyAgentToolExecutionFailure(tool.name, message),
+                  ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
+                },
+              );
+              toolExecutions.push(record);
+              await this.auditLog?.append(
+                toolFinishedAuditEvent(session.id, iteration, record, this.now()),
+              );
+              consecutiveToolFailures += 1;
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'tool',
+                    toolCallId: toolCall.id,
+                    toolName: tool.name,
+                    content: JSON.stringify({ error: message }),
+                  },
+                  this.now,
+                ),
+              );
               await this.saveSession(session);
               await saveCheckpoint(checkpointIteration, 'running');
               if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
-                finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
-                await saveCheckpoint(checkpointIteration, 'failed', finalText);
-                await this.saveSession(session);
-                await closeRound('failed', finalText);
-                await finishRunAudit('tool_failed', iteration, finalText, finalText);
-                return {
-                  status: 'tool_failed',
+                appendRecoveryInstruction(
                   session,
-                  finalText,
-                  iterations: iteration,
-                  toolExecutions,
-                  contextCompression,
-                };
+                  consecutiveToolFailures,
+                  record.resultPreview,
+                  this.now,
+                );
+                consecutiveToolFailures = 0;
+                await emitUserEvent({
+                  type: 'correcting',
+                  message: '连续执行失败，正在根据错误信息更换工具或查询方式。',
+                });
               }
-              continue;
-            }
-            const preview = serializeToolResult(safeResult.value, maxToolResultChars);
-            const record = executionRecord(toolCall.id, tool.name, 'success', startedAt, toolCall.arguments, preview, {
-              outputSafety: options.outputSafety,
-              redacted: safeResult.redacted,
-              redactionReasons: safeResult.reasons,
-              ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
-            });
-            toolExecutions.push(record);
-            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
-            consecutiveToolFailures = 0;
-            appendMessage(
-              session,
-              createMessage(
-                {
-                  role: 'tool',
-                  toolCallId: toolCall.id,
-                  toolName: tool.name,
-                  content: preview,
-                },
-                this.now,
-              ),
-            );
-            await this.saveSession(session);
-            await saveCheckpoint(checkpointIteration, 'running');
-          } catch (error) {
-            const message = limitSerializedToolResult(error instanceof Error ? error.message : String(error), maxToolResultChars);
-            const record = executionRecord(
-              toolCall.id,
-              tool.name,
-              'failed',
-              startedAt,
-              toolCall.arguments,
-              message,
-              {
-                failure: classifyAgentToolFailure(message),
-                outputSafety: options.outputSafety,
-                ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
-              },
-            );
-            toolExecutions.push(record);
-            await this.auditLog?.append(toolFinishedAuditEvent(session.id, iteration, record, this.now()));
-            consecutiveToolFailures += 1;
-            appendMessage(
-              session,
-              createMessage(
-                {
-                  role: 'tool',
-                  toolCallId: toolCall.id,
-                  toolName: tool.name,
-                  content: JSON.stringify({ error: message }),
-                },
-                this.now,
-              ),
-            );
-            await this.saveSession(session);
-            await saveCheckpoint(checkpointIteration, 'running');
-            if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
-              finalText = failureStopText(consecutiveToolFailures, record.resultPreview);
-              await saveCheckpoint(checkpointIteration, 'failed', finalText);
-              await this.saveSession(session);
-              await closeRound('failed', finalText);
-              await finishRunAudit('tool_failed', iteration, finalText, finalText);
-              return {
-                status: 'tool_failed',
-                session,
-                finalText,
-                iterations: iteration,
-                toolExecutions,
-                contextCompression,
-              };
             }
           }
         }
-      }
 
-      finalText = 'Max iterations reached.';
-      await saveCheckpoint(iterationOffset + maxIterations, 'done');
-      await this.saveSession(session);
-      await closeRound('success');
-      await finishRunAudit('max_iterations_reached', maxIterations, finalText);
-      return {
-        status: 'max_iterations_reached',
-        session,
-        finalText,
-        iterations: maxIterations,
-        toolExecutions,
-        contextCompression,
-      };
-    } catch (error) {
-      const status = options.signal?.aborted || session.aborted ? 'aborted' : 'failed';
-      const message = error instanceof Error ? error.message : String(error);
-      await saveCheckpoint(iterationOffset + currentIteration, status, message);
-      await this.saveSession(session);
-      await closeRound(status, message);
-      await finishRunAudit(status, currentIteration, finalText, message);
-      throw error;
+        finalText = incompleteRunText(session, toolExecutions);
+        appendMessage(session, createMessage({ role: 'assistant', content: finalText }, this.now));
+        await emitUserEvent({
+          type: 'needs-user-input',
+          message: '当前信息或执行路径不足以完成全部验收条件，已说明缺少的内容。',
+        });
+        const maxIterationsMessage =
+          'Agent reached the maximum iteration limit before completion verification succeeded.';
+        await saveCheckpoint(
+          iterationOffset + maxIterations,
+          'failed',
+          maxIterationsMessage,
+        );
+        await this.saveSession(session);
+        await closeRound('failed', maxIterationsMessage);
+        await finishRunAudit('max_iterations_reached', maxIterations, finalText);
+        return {
+          status: 'max_iterations_reached',
+          session,
+          finalText,
+          iterations: maxIterations,
+          toolExecutions,
+          ...resultMetadata('max_iterations_reached'),
+          contextCompression,
+        };
+      } catch (error) {
+        const status = options.signal?.aborted || session.aborted ? 'aborted' : 'failed';
+        const message = redactPersistedAgentString(
+          error instanceof Error ? error.message : String(error),
+        );
+        await saveCheckpoint(iterationOffset + currentIteration, status, message);
+        await this.saveSession(session);
+        await closeRound(status, message);
+        await finishRunAudit(status, currentIteration, finalText, message);
+        throw error;
+      }
+    } finally {
+      finishActiveRun();
     }
   }
 
@@ -665,68 +937,66 @@ export class ReactAgent {
     options: AgentManualContextCompactionOptions,
   ): Promise<AgentContextCompactionResult> {
     const session = cloneSessionForCompaction(options.session);
-    const pinnedPreferenceMessages = await loadStoredPreferenceMessages(
-      session,
-      this.sessionStore,
-    );
-    const tools = this.toolRegistry.llmTools(options.allowedTools);
-    const contextOptions: AgentContextManagerOptions = {
-      ...this.resolveModelContext(options.providerId, options.model),
-      ...(options.keepRecentMessages === undefined
-        ? {}
-        : { keepRecentMessages: options.keepRecentMessages }),
-      ...(options.maxToolResultChars === undefined
-        ? {}
-        : { maxToolResultChars: options.maxToolResultChars }),
-      pinnedMessages: pinnedPreferenceMessages,
-    };
-    const before = buildAgentContext(session, tools, contextOptions);
-    const round = await this.usageTracker.startConversationRound(
-      session.id,
-      options.usageMode ?? 'byok',
-    );
+    const finishActiveRun = this.runCoordinator.begin(session.id, this.now());
     try {
-      const output = await this.compactSessionContext({
-        providerId: options.providerId,
-        model: options.model,
+      const pinnedPreferenceMessages = await loadStoredPreferenceMessages(
         session,
-        round,
-        trigger: 'manual',
-        context: before,
-        contextOptions,
-        tools,
-        ...(options.focus?.trim() ? { focus: options.focus.trim() } : {}),
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      });
-      await this.usageTracker.endConversationRound(round, 'success');
-      return {
-        status: output.status,
-        session,
-        report:
-          output.status === 'skipped'
-            ? { ...output.report, trigger: 'manual' }
-            : output.report,
-        ...(output.checkpoint === undefined
-          ? {}
-          : { checkpoint: output.checkpoint }),
-      };
-    } catch (error) {
-      await this.usageTracker.endConversationRound(
-        round,
-        'failed',
-        error instanceof Error ? error.message : String(error),
+        this.sessionStore,
       );
-      throw error;
+      const tools = this.toolRegistry.llmTools(options.allowedTools);
+      const contextOptions: AgentContextManagerOptions = {
+        ...this.resolveModelContext(options.providerId, options.model),
+        ...(options.keepRecentMessages === undefined
+          ? {}
+          : { keepRecentMessages: options.keepRecentMessages }),
+        ...(options.maxToolResultChars === undefined
+          ? {}
+          : { maxToolResultChars: options.maxToolResultChars }),
+        pinnedMessages: pinnedPreferenceMessages,
+      };
+      const before = buildAgentContext(session, tools, contextOptions);
+      const round = await this.usageTracker.startConversationRound(
+        session.id,
+        options.usageMode ?? 'byok',
+      );
+      try {
+        const output = await this.compactSessionContext({
+          providerId: options.providerId,
+          model: options.model,
+          session,
+          round,
+          trigger: 'manual',
+          context: before,
+          contextOptions,
+          tools,
+          ...(options.focus?.trim() ? { focus: options.focus.trim() } : {}),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+        await this.usageTracker.endConversationRound(round, 'success');
+        return {
+          status: output.status,
+          session,
+          report:
+            output.status === 'skipped' ? { ...output.report, trigger: 'manual' } : output.report,
+          ...(output.checkpoint === undefined ? {} : { checkpoint: output.checkpoint }),
+        };
+      } catch (error) {
+        await this.usageTracker.endConversationRound(
+          round,
+          'failed',
+          redactPersistedAgentString(error instanceof Error ? error.message : String(error)),
+        );
+        throw error;
+      }
+    } finally {
+      finishActiveRun();
     }
   }
 
   private resolveModelContext(
     providerId: string,
     model: string,
-  ): Pick<
-    AgentContextManagerOptions,
-    'modelContextTokens' | 'maxOutputTokens'
-  > {
+  ): Pick<AgentContextManagerOptions, 'modelContextTokens' | 'maxOutputTokens'> {
     const registered =
       this.llmRouter.gateway.registry.find(providerId, model) ??
       this.llmRouter.gateway.registerModel({ providerId, model });
@@ -767,20 +1037,14 @@ export class ReactAgent {
         ),
       );
       let rollingSummary = plan.previousSummary;
-      for (
-        let batchIndex = 0;
-        batchIndex < plan.sourceBatches.length;
-        batchIndex += 1
-      ) {
+      for (let batchIndex = 0; batchIndex < plan.sourceBatches.length; batchIndex += 1) {
         const sourceMessages = plan.sourceBatches[batchIndex] ?? [];
         const response = await this.llmRouter.chat(
           input.providerId,
           {
             model: input.model,
             messages: buildAgentContextCompactionRequest({
-              ...(rollingSummary?.trim()
-                ? { previousSummary: rollingSummary.trim() }
-                : {}),
+              ...(rollingSummary?.trim() ? { previousSummary: rollingSummary.trim() } : {}),
               sourceMessages,
               ...(plan.focus === undefined ? {} : { focus: plan.focus }),
               maxToolResultChars: plan.requestMaxToolResultChars,
@@ -799,9 +1063,7 @@ export class ReactAgent {
         );
         addUsage(input.session, response.usage);
         if (response.toolCalls.length > 0 || !response.text.trim()) {
-          throw new Error(
-            'Context compaction model returned no usable summary.',
-          );
+          throw new Error('Context compaction model returned no usable summary.');
         }
         rollingSummary = response.text;
       }
@@ -821,11 +1083,7 @@ export class ReactAgent {
     });
     input.session.contextCheckpoint = checkpoint;
     await this.saveSession(input.session);
-    const context = buildAgentContext(
-      input.session,
-      input.tools,
-      input.contextOptions,
-    );
+    const context = buildAgentContext(input.session, input.tools, input.contextOptions);
     const report = compactionAppliedReport({
       before: input.context,
       after: context,
@@ -835,9 +1093,7 @@ export class ReactAgent {
       type: 'context_compaction_applied',
       timestamp: this.now(),
       sessionId: input.session.id,
-      ...(input.iteration === undefined
-        ? {}
-        : { iteration: input.iteration }),
+      ...(input.iteration === undefined ? {} : { iteration: input.iteration }),
       trigger: input.trigger,
       method,
       durationMs: Math.max(0, Date.now() - startedAt),
@@ -851,7 +1107,9 @@ export class ReactAgent {
     };
   }
 
-  private async saveSession(session: Parameters<AgentSessionWriter['save']>[0]['session']): Promise<void> {
+  private async saveSession(
+    session: Parameters<AgentSessionWriter['save']>[0]['session'],
+  ): Promise<void> {
     await this.sessionStore?.save({ session, now: this.now() });
   }
 
@@ -876,7 +1134,12 @@ export class ReactAgent {
 
     let response: LlmChatResponse | undefined;
     const events = this.llmRouter.stream(input.providerId, input.request, { round: input.round });
-    for await (const event of persistAgentStreamEvents(this.streamStore, stream.id, events, this.now)) {
+    for await (const event of persistAgentStreamEvents(
+      this.streamStore,
+      stream.id,
+      events,
+      this.now,
+    )) {
       if (event.type === 'finish') response = event.response;
     }
 
@@ -918,10 +1181,14 @@ function cloneSessionForRun(
   mode: AgentRunOptions['mode'],
   knowledgeSnapshot: AgentRunOptions['knowledgeSnapshot'],
   userId: AgentRunOptions['userId'],
+  project: AgentRunOptions['project'],
+  activatedSkills: AgentRunOptions['activatedSkills'],
+  subagentDepth: AgentRunOptions['subagentDepth'],
 ): AgentSession {
   if (session.userId && userId && session.userId !== userId) {
     throw new Error('Agent session belongs to a different user.');
   }
+  if (project) assertSameAgentProject(session.project, project);
   return {
     ...session,
     mode: mode ?? session.mode,
@@ -935,6 +1202,20 @@ function cloneSessionForRun(
         ? {}
         : { knowledgeSnapshot: structuredClone(session.knowledgeSnapshot) }
       : { knowledgeSnapshot: structuredClone(knowledgeSnapshot) }),
+    ...(project === undefined
+      ? session.project === undefined
+        ? {}
+        : { project: structuredClone(session.project) }
+      : { project: structuredClone(project) }),
+    ...mergeActivatedSkills(session.activeSkills, activatedSkills),
+    ...(session.sessionSkills === undefined
+      ? {}
+      : { sessionSkills: structuredClone(session.sessionSkills) }),
+    ...(subagentDepth === undefined
+      ? session.subagentDepth === undefined
+        ? {}
+        : { subagentDepth: session.subagentDepth }
+      : { subagentDepth }),
     ...(session.contextCheckpoint === undefined
       ? {}
       : { contextCheckpoint: structuredClone(session.contextCheckpoint) }),
@@ -942,6 +1223,112 @@ function cloneSessionForRun(
     tokenUsage: { ...session.tokenUsage },
     aborted: false,
   };
+}
+
+function mergeActivatedSkills(
+  existing: AgentSession['activeSkills'],
+  incoming: AgentRunOptions['activatedSkills'],
+): Pick<AgentSession, 'activeSkills'> | Record<string, never> {
+  if (!existing && !incoming) return {};
+  const merged = new Map(
+    (existing ?? []).map((skill) => [`${skill.scope}:${skill.name}`, structuredClone(skill)]),
+  );
+  for (const skill of incoming ?? []) {
+    merged.set(`${skill.scope}:${skill.name}`, structuredClone(skill));
+  }
+  return { activeSkills: [...merged.values()] };
+}
+
+function runtimePinnedMessages(
+  preferences: LlmMessage[],
+  session: AgentSession,
+  projectInstructions?: string,
+  skillCatalog: AgentRunOptions['skillCatalog'] = [],
+): LlmMessage[] {
+  const taskPlan = renderAgentTaskPlanContext(session.taskPlan);
+  return [
+    {
+      role: 'system',
+      content: [
+        'You are SchemaNaut, an autonomous database and SQL agent.',
+        'Use tools to inspect facts instead of guessing. Prefer database-side SQL for aggregation, statistics, cleaning, and anomaly detection; never pull an entire dataset into model context.',
+        'Create a task plan only for genuinely multi-step work; a single database question normally needs direct discovery, one final SQL query, and result verification. Verify any plan acceptance criteria with concrete tool evidence before claiming completion.',
+        'When a request refers to configured thresholds, rules, dictionaries, or mappings, find and use the corresponding database resources. Never invent configured business values.',
+        'For dirty JSON or event streams, validate required fields and formats before casting, use business dictionaries when present, and deduplicate by the stated business key and arrival order.',
+        'When the visible tools do not cover a needed capability, use tool_search before calling the discovered tool.',
+        'For complex or reusable SQL, discover the project file tools and save a readable script under sql/ when that artifact helps the user.',
+        'When an action fails or permission is denied, use the observation to choose another valid path. Do not repeat an unchanged action without new information.',
+        'Once the requested final SQL has executed successfully and its result satisfies the goal, stop exploring and answer from that verified result.',
+        'Keep user-facing explanations concise. Do not expose internal hashes, retrieval scores, node identifiers, action signatures, or hidden implementation state.',
+      ].join('\n'),
+    },
+    ...(projectInstructions?.trim()
+      ? [
+          {
+            role: 'system' as const,
+            content: `Project guidance:\n${projectInstructions.trim()}`,
+          },
+        ]
+      : []),
+    ...preferences,
+    ...(skillCatalog.length > 0
+      ? [
+          {
+            role: 'system' as const,
+            content: [
+              'Available Skills (load a Skill only when its guidance is relevant):',
+              ...skillCatalog.map(
+                (skill) => `- ${skill.name} [${skill.scope}]: ${skill.description}`,
+              ),
+            ].join('\n'),
+          },
+        ]
+      : []),
+    ...(session.activeSkills ?? []).map((skill) => ({
+      role: 'system' as const,
+      content: [
+        `<activated_skill name="${skill.name}" scope="${skill.scope}">`,
+        skill.instructions,
+        '</activated_skill>',
+      ].join('\n'),
+    })),
+    ...(taskPlan ? [{ role: 'system' as const, content: taskPlan }] : []),
+  ];
+}
+
+const ALWAYS_VISIBLE_TOOL_NAMES = new Set([
+  'task_plan_create',
+  'task_update',
+  'task_list',
+  'tool_search',
+  'tool_describe',
+  'skill_search',
+  'skill_load',
+  'skill_resource_read',
+  'resource_list',
+  'resource_get',
+  'knowledge_search',
+  'sql_execute',
+  'sql_explain',
+  'result_read',
+]);
+
+function visibleToolNames(
+  registry: ToolRegistry,
+  session: AgentSession,
+  options: AgentRunOptions,
+): string[] | undefined {
+  if (options.dynamicToolDiscovery !== true) return options.allowedTools;
+  const allowed = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
+  const active = new Set(session.activeTools ?? []);
+  return registry
+    .list()
+    .map((tool) => tool.name)
+    .filter(
+      (name) =>
+        (allowed === undefined || allowed.has(name)) &&
+        (ALWAYS_VISIBLE_TOOL_NAMES.has(name) || active.has(name)),
+    );
 }
 
 function cloneSessionForCompaction(session: AgentSession): AgentSession {
@@ -963,10 +1350,7 @@ async function loadStoredPreferenceMessages(
   store: AgentSessionWriter | undefined,
 ): Promise<LlmMessage[]> {
   if (!store?.listPreferences) return [];
-  const preferences = await store.listPreferences(
-    session.userId ?? DEFAULT_AGENT_USER_ID,
-    50,
-  );
+  const preferences = await store.listPreferences(session.userId ?? DEFAULT_AGENT_USER_ID, 50);
   if (preferences.length === 0) return [];
   return [
     {
@@ -974,8 +1358,7 @@ async function loadStoredPreferenceMessages(
       content: [
         PREFERENCE_CONTEXT_PREFIX,
         ...preferences.map(
-          (preference) =>
-            `- ${preference.value}（置信度 ${preference.confidence.toFixed(2)}）`,
+          (preference) => `- ${preference.value}（置信度 ${preference.confidence.toFixed(2)}）`,
         ),
       ].join('\n'),
     },
@@ -986,9 +1369,36 @@ function serializeToolResult(result: unknown, maxChars: number): string {
   return limitSerializedToolResult(stringifyToolResult(result), maxChars);
 }
 
-function serializeToolArguments(args: Record<string, unknown>, outputSafety?: AgentRunOptions['outputSafety']): string {
+function persistedSuccessfulToolResult(
+  source: AgentToolSource | undefined,
+  result: unknown,
+): unknown {
+  const redacted = redactPersistedAgentValue(result);
+  if (
+    source !== 'database' ||
+    !result ||
+    typeof result !== 'object' ||
+    Array.isArray(result) ||
+    !redacted ||
+    typeof redacted !== 'object' ||
+    Array.isArray(redacted)
+  ) {
+    return redacted;
+  }
+
+  const originalRecord = result as Record<string, unknown>;
+  const redactedRecord = redacted as Record<string, unknown>;
+  for (const businessResultKey of ['rows', 'plan']) {
+    if (Object.hasOwn(originalRecord, businessResultKey)) {
+      redactedRecord[businessResultKey] = structuredClone(originalRecord[businessResultKey]);
+    }
+  }
+  return redactedRecord;
+}
+
+function serializeToolArguments(args: Record<string, unknown>): string {
   return limitSerializedToolResult(
-    stringifyToolResult(sanitizeAgentOutputValue(redactPersistedAgentValue(args), outputSafety).value),
+    stringifyToolResult(redactPersistedAgentValue(args)),
     DEFAULT_MAX_PERSISTED_TOOL_ARGUMENT_CHARS,
   );
 }
@@ -996,12 +1406,11 @@ function serializeToolArguments(args: Record<string, unknown>, outputSafety?: Ag
 function stringifyToolResult(result: unknown): string {
   if (typeof result === 'string') return result;
   try {
-    const serialized = JSON.stringify(result);
-    return serialized === undefined ? String(result) : serialized;
+    return stringifyPublicJson(result);
   } catch (error) {
     return JSON.stringify({
       error: 'Tool result could not be serialized.',
-      reason: error instanceof Error ? error.message : String(error),
+      reason: redactPersistedAgentString(error instanceof Error ? error.message : String(error)),
     });
   }
 }
@@ -1044,7 +1453,7 @@ function executionRecord(
   resultPreview: string,
   metadata: ExecutionRecordMetadata = {},
 ): AgentToolExecutionRecord {
-  const argumentPreview = serializeToolArguments(args, metadata.outputSafety);
+  const argumentPreview = serializeToolArguments(args);
   return {
     toolCallId,
     toolName,
@@ -1055,25 +1464,21 @@ function executionRecord(
     ...(metadata.failure === undefined
       ? {}
       : { failureKind: metadata.failure.failureKind, retryable: metadata.failure.retryable }),
-    ...(metadata.redacted === true ? { redacted: true } : {}),
-    ...(metadata.blocked === true ? { blocked: true } : {}),
-    ...(metadata.redactionReasons && metadata.redactionReasons.length > 0
-      ? { redactionReasons: metadata.redactionReasons }
-      : {}),
     ...(metadata.approval === undefined ? {} : { approval: metadata.approval }),
   };
 }
 
 type ExecutionRecordMetadata = {
-  failure?: { failureKind: NonNullable<AgentToolExecutionRecord['failureKind']>; retryable: boolean };
-  outputSafety?: AgentRunOptions['outputSafety'];
-  redacted?: boolean;
-  blocked?: boolean;
-  redactionReasons?: AgentOutputRedactionReason[];
+  failure?: {
+    failureKind: NonNullable<AgentToolExecutionRecord['failureKind']>;
+    retryable: boolean;
+  };
   approval?: AgentToolApprovalRecord;
 };
 
-function approvalRecord(approval: AgentToolApproval | undefined): AgentToolApprovalRecord | undefined {
+function approvalRecord(
+  approval: AgentToolApproval | undefined,
+): AgentToolApprovalRecord | undefined {
   if (!approval) return undefined;
   return {
     source: approval.source,
@@ -1102,15 +1507,140 @@ function toolFinishedAuditEvent(
     resultPreview: record.resultPreview,
     ...(record.failureKind === undefined ? {} : { failureKind: record.failureKind }),
     ...(record.retryable === undefined ? {} : { retryable: record.retryable }),
-    ...(record.redacted === undefined ? {} : { redacted: record.redacted }),
-    ...(record.blocked === undefined ? {} : { blocked: record.blocked }),
-    ...(record.redactionReasons === undefined ? {} : { redactionReasons: record.redactionReasons }),
     ...(record.approval === undefined ? {} : { approval: record.approval }),
   };
 }
 
-function failureStopText(failureCount: number, lastError: string): string {
-  return `连续 ${failureCount} 次工具执行失败，已停止 Agent 任务。最后一次错误：${lastError}`;
+function appendRecoveryInstruction(
+  session: AgentSession,
+  failureCount: number,
+  lastError: string,
+  now: () => string,
+): void {
+  appendMessage(
+    session,
+    createMessage(
+      {
+        role: 'system',
+        content: [
+          `Recovery required after ${failureCount} consecutive tool failures.`,
+          `Latest observation: ${lastError}`,
+          'Do not repeat the same unchanged action. Inspect the error, discover another available tool, simplify the query, or ask the user only when essential information is genuinely missing.',
+        ].join('\n'),
+      },
+      now,
+    ),
+  );
+}
+
+function stableActionSignature(toolName: string, args: Record<string, unknown>): string {
+  return `${toolName}:${stableJson(args)}`;
+}
+
+function looksLikeUnparsedToolInvocation(value: string): boolean {
+  return (
+    /<tool_calls?\b[^>]*>[\s\S]*<\/tool_calls?>/i.test(value) ||
+    /<tool_call\b[^>]*>[\s\S]*<\/tool_call>/i.test(value) ||
+    /<tool_calls?>[\s\S]*<tool_call\b/i.test(value) ||
+    /<tool_calls?>[\s\S]*<(?:\|?DSML\|?|｜DSML｜)?invoke\b/i.test(value) ||
+    /<(?:\|?DSML\|?|｜DSML｜)invoke\b[\s\S]*<(?:\|?DSML\|?|｜DSML｜)parameter\b/i.test(value)
+  );
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function observeActionResult(
+  observations: Map<string, { observation: string; repeats: number }>,
+  action: string,
+  observation: string,
+): boolean {
+  const previous = observations.get(action);
+  const repeats = previous?.observation === observation ? previous.repeats + 1 : 0;
+  observations.set(action, { observation, repeats });
+  return repeats >= 2;
+}
+
+function userToolProgressMessage(toolName: string): string {
+  if (toolName.includes('schema') || toolName.includes('knowledge')) {
+    return '正在检查相关表结构和业务知识。';
+  }
+  if (toolName.includes('sql')) return '正在准备或验证 SQL。';
+  if (toolName.includes('skill')) return '正在读取适用于当前任务的操作指引。';
+  if (toolName.includes('search') || toolName.includes('find')) {
+    return '正在查找完成任务所需的信息。';
+  }
+  if (toolName.includes('subagent')) return '正在并行处理一个独立子任务。';
+  return '正在执行下一步并检查结果。';
+}
+
+function planProgressMessage(session: AgentSession): string {
+  const plan = session.taskPlan;
+  if (!plan) return '任务计划已更新。';
+  const completed = plan.tasks.filter(
+    (task) => task.status === 'completed' || task.status === 'cancelled',
+  ).length;
+  return `任务计划已更新：${completed}/${plan.tasks.length} 项已完成。`;
+}
+
+function isSqlExecutionTool(toolName: string): boolean {
+  return /(?:^|_)(?:sql_)?execute$|sql_execute|query_execute/i.test(toolName);
+}
+
+function sqlExecutionProgressMessage(result: unknown): string {
+  const rowCount = numericResultField(result, 'rowCount');
+  const affectedRows = numericResultField(result, 'affectedRows');
+  if (affectedRows !== undefined) {
+    return `SQL 已执行，影响 ${affectedRows} 行。`;
+  }
+  if (rowCount !== undefined) return `SQL 已执行，结果共 ${rowCount} 行。`;
+  return 'SQL 已执行，正在核对结果。';
+}
+
+function sqlExecutionMetrics(result: unknown): {
+  metrics?: { rowCount?: number; affectedRows?: number };
+} {
+  const rowCount = numericResultField(result, 'rowCount');
+  const affectedRows = numericResultField(result, 'affectedRows');
+  if (rowCount === undefined && affectedRows === undefined) return {};
+  return {
+    metrics: {
+      ...(rowCount === undefined ? {} : { rowCount }),
+      ...(affectedRows === undefined ? {} : { affectedRows }),
+    },
+  };
+}
+
+function numericResultField(value: unknown, key: 'rowCount' | 'affectedRows'): number | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === 'number' && Number.isFinite(field) ? field : undefined;
+}
+
+function incompleteRunText(session: AgentSession, executions: AgentToolExecutionRecord[]): string {
+  const unresolved = unresolvedAgentTasks(session.taskPlan);
+  const latestFailure = [...executions]
+    .reverse()
+    .find((execution) => execution.status !== 'success');
+  return [
+    unresolved.length > 0
+      ? `仍未完成：${unresolved.map((task) => task.title).join('、')}。`
+      : '当前执行轮次已经用完，但还没有得到可验证的完成结果。',
+    latestFailure ? `最近的问题：${latestFailure.resultPreview}` : undefined,
+    '你可以补充缺失的连接、权限或业务条件后继续当前会话；已有上下文和产物会保留。',
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join('\n');
 }
 
 async function executeToolWithTimeout(
@@ -1138,7 +1668,11 @@ async function executeToolWithTimeout(
   const timeoutPromise = new Promise<never>((_, reject) => {
     const rejectOnAbort = () => {
       reject(
-        new Error(timedOut ? toolTimeoutMessage(toolName, timeoutMs) : 'Agent run was aborted during tool execution.'),
+        new Error(
+          timedOut
+            ? toolTimeoutMessage(toolName, timeoutMs)
+            : 'Agent run was aborted during tool execution.',
+        ),
       );
     };
     controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
@@ -1147,15 +1681,38 @@ async function executeToolWithTimeout(
       controller.abort(new Error(toolTimeoutMessage(toolName, timeoutMs)));
     }, timeoutMs);
   });
+  const handlerPromise = Promise.resolve().then(() =>
+    handler(args, { ...context, signal: controller.signal }),
+  );
 
   try {
-    return await Promise.race([
-      Promise.resolve(handler(args, { ...context, signal: controller.signal })),
-      timeoutPromise,
-    ]);
+    return await Promise.race([handlerPromise, timeoutPromise]);
   } finally {
     if (timeout) clearTimeout(timeout);
     parentSignal?.removeEventListener('abort', abortFromParent);
+    if (controller.signal.aborted) {
+      await waitForToolCleanup(handlerPromise, TOOL_ABORT_SETTLE_TIMEOUT_MS);
+    }
+  }
+}
+
+async function waitForToolCleanup(
+  handlerPromise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      handlerPromise.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>((resolvePromise) => {
+        timeout = setTimeout(resolvePromise, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 

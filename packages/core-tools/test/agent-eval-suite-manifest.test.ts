@@ -37,7 +37,7 @@ describe('Agent eval suite manifest parser', () => {
             maxIterations: 5,
             run: {
               allowedTools: ['search_schema', 'query_database'],
-              mode: 'readonly',
+              mode: 'read',
               maxIterations: 5,
               maxToolExecutionMs: 10_000,
             },
@@ -69,7 +69,7 @@ describe('Agent eval suite manifest parser', () => {
           },
           run: {
             allowedTools: ['search_schema', 'query_database'],
-            mode: 'readonly',
+            mode: 'read',
             maxIterations: 5,
             maxToolExecutionMs: 10_000,
           },

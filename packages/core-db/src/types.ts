@@ -18,7 +18,7 @@ export type DatabaseConnectionConfig = {
   database: string;
   username: string;
   password?: string;
-  ssl?: boolean | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
+  ssl?: boolean | 'require' | 'verify-ca' | 'verify-full';
   readOnly: boolean;
   maxClients?: number;
   connectionTimeoutMs?: number;
@@ -41,6 +41,12 @@ export type TableSummary = {
 
 export type QueryExecutionObserver = {
   onBackendPid?(input: { queryId: string; connectionId: ConnectionId; backendPid: number }): void;
+  /**
+   * Cancels the in-flight database operation when the caller abandons it.
+   * Drivers that can address a running backend should propagate this signal
+   * to that backend instead of only abandoning the local Promise.
+   */
+  signal?: AbortSignal;
 };
 
 export interface IDatabaseDriver {
@@ -53,7 +59,14 @@ export interface IDatabaseDriver {
     connection: SavedConnection,
     observer?: QueryExecutionObserver,
   ): Promise<Result<QueryExecutionResult>>;
-  cancel?(request: QueryCancelResponse, connection: SavedConnection): Promise<Result<QueryCancelResponse>>;
+  cancel?(
+    request: QueryCancelResponse,
+    connection: SavedConnection,
+  ): Promise<Result<QueryCancelResponse>>;
   listTables(connectionId: ConnectionId): Promise<Result<TableSummary[]>>;
-  describeTable(connectionId: ConnectionId, schema: string, table: string): Promise<Result<TableDetail>>;
+  describeTable(
+    connectionId: ConnectionId,
+    schema: string,
+    table: string,
+  ): Promise<Result<TableDetail>>;
 }

@@ -128,9 +128,17 @@ describe('PostgresDriver runtime errors', () => {
     expect(result.ok).toBe(true);
     expect(calls).toEqual([
       ['BEGIN READ ONLY'],
-      [expect.stringMatching(/^DECLARE dbagent_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select email from users where email like \$1 limit 10$/), ["%' OR 1=1 --"]],
-      [expect.stringMatching(/^FETCH FORWARD 10001 FROM dbagent_cursor_[a-f0-9]+$/), undefined],
-      [expect.stringMatching(/^CLOSE dbagent_cursor_[a-f0-9]+$/)],
+      [
+        expect.stringMatching(
+          /^DECLARE schemanaut_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select email from users where email like \$1 limit 10$/,
+        ),
+        ["%' OR 1=1 --"],
+      ],
+      [
+        expect.stringMatching(/^FETCH FORWARD 10001 FROM schemanaut_cursor_[a-f0-9]+$/),
+        undefined,
+      ],
+      [expect.stringMatching(/^CLOSE schemanaut_cursor_[a-f0-9]+$/)],
       ['COMMIT'],
     ]);
   });
@@ -171,9 +179,17 @@ describe('PostgresDriver runtime errors', () => {
     expect(calls).toEqual([
       ['BEGIN READ ONLY'],
       ["select set_config('statement_timeout', $1, true)", ['250ms']],
-      [expect.stringMatching(/^DECLARE dbagent_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select 1 as value$/), undefined],
-      [expect.stringMatching(/^FETCH FORWARD 10001 FROM dbagent_cursor_[a-f0-9]+$/), undefined],
-      [expect.stringMatching(/^CLOSE dbagent_cursor_[a-f0-9]+$/)],
+      [
+        expect.stringMatching(
+          /^DECLARE schemanaut_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select 1 as value$/,
+        ),
+        undefined,
+      ],
+      [
+        expect.stringMatching(/^FETCH FORWARD 10001 FROM schemanaut_cursor_[a-f0-9]+$/),
+        undefined,
+      ],
+      [expect.stringMatching(/^CLOSE schemanaut_cursor_[a-f0-9]+$/)],
       ['COMMIT'],
     ]);
   });

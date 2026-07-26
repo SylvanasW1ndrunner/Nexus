@@ -1,0 +1,4 @@
+interface:
+  display_name: "SchemaNaut Product Planning"
+  short_description: "Plan product modules and milestones"
+  default_prompt: "Use $schemanaut-product-planning to choose the next SchemaNaut milestone and acceptance criteria."

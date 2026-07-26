@@ -14,8 +14,6 @@ export class McpToolRegistrationManager {
 
   registerServerTools(options: McpServerToolRegistrationOptions): RegisteredMcpTool[] {
     this.unregisterServerTools(options.serverId);
-    const before = new Set(this.registry.list().map((tool) => tool.name));
-
     try {
       const registered = registerMcpTools({
         ...options,
@@ -24,7 +22,7 @@ export class McpToolRegistrationManager {
       this.byServer.set(options.serverId, registered);
       return registered;
     } catch (error) {
-      this.rollbackNewTools(before);
+      this.byServer.delete(options.serverId);
       throw error;
     }
   }
@@ -44,13 +42,5 @@ export class McpToolRegistrationManager {
 
   listAll(): RegisteredMcpTool[] {
     return [...this.byServer.values()].flatMap((tools) => [...tools]);
-  }
-
-  private rollbackNewTools(before: Set<string>): void {
-    for (const tool of this.registry.list()) {
-      if (!before.has(tool.name)) {
-        this.registry.unregister(tool.name);
-      }
-    }
   }
 }

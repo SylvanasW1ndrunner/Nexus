@@ -5,12 +5,19 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "package.json"],
+  "files": [
+    "dist",
+    "skills",
+    "package.json"
+  ],
   "scripts": {
     "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "vitest": "^2.1.8"

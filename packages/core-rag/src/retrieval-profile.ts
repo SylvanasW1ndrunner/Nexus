@@ -68,6 +68,8 @@ export function createSchemaRagIndexManifest(input: {
   profile: SchemaRagRetrievalProfile;
   documentCount: number;
   createdAt?: string;
+  sourceTableCount?: number;
+  maxTables?: number;
 }): SchemaRagIndexManifest {
   const profile = normalizeRetrievalProfile(input.profile);
   const createdAt = input.createdAt ?? new Date().toISOString();
@@ -82,6 +84,10 @@ export function createSchemaRagIndexManifest(input: {
     retrievalProfileVersion: profile.version,
     ...(fingerprint === undefined ? {} : { embeddingFingerprint: fingerprint }),
     documentCount: input.documentCount,
+    ...(input.sourceTableCount === undefined
+      ? {}
+      : { sourceTableCount: nonNegativeInteger(input.sourceTableCount, 0) }),
+    ...(input.maxTables === undefined ? {} : { maxTables: positiveInteger(input.maxTables, 1) }),
     indexVersion: hashCanonical({
       catalogRootHash: input.catalog.catalogRootHash,
       profileId: profile.id,
@@ -89,6 +95,8 @@ export function createSchemaRagIndexManifest(input: {
       backend: profile.backend,
       embeddingFingerprint: fingerprint ?? null,
       documentCount: input.documentCount,
+      sourceTableCount: input.sourceTableCount ?? null,
+      maxTables: input.maxTables ?? null,
     }),
     createdAt,
   };

@@ -76,7 +76,7 @@
 - `LlmGateway` 是新业务调用模型的唯一入口。
 - 支持同步对话、流式事件、异步批量任务、Embedding 和 Rerank。
 - 每次请求生成 `requestId` 与 `traceId`，并统一错误、用量、成本和路由结果。
-- SDK、REST API、NL2SQL 和 Agent 兼容入口全部经过 Gateway。
+- SDK、REST API、NL2SQL 和 Agent Runtime 入口全部经过 Gateway。
 - 异步任务支持提交、进度查询、完成、失败和取消。
 
 **达到的效果**
@@ -107,7 +107,7 @@
 - 使用 JSON Schema 校验 JSON Object、结构化响应和 Tool Call 参数。
 - 支持移除标准 Markdown JSON 围栏后再校验，但不修造业务字段。
 - 非法结构允许有限次数的纠正再生成，并计入尝试、Token 和成本。
-- 新 Gateway 默认拒绝未知工具和非法参数；Agent 兼容入口由 Agent 权限管理器处理未授权工具。
+- Gateway 默认拒绝未知工具和非法参数；Agent Runtime 入口由 Agent 权限管理器处理未授权工具。
 
 **达到的效果**
 
@@ -213,47 +213,47 @@ sequenceDiagram
 
 ## 4. 公共工程合同
 
-| 合同 | 作用 | 代码 |
-|---|---|---|
-| `LlmProvider` | Provider 必须实现的统一能力 | [`types.ts`](../../packages/core-llm/src/types.ts) |
-| `LlmChatRequest/Response` | 消息、工具、结构化输出、推理、用量与取消 | [`types.ts`](../../packages/core-llm/src/types.ts) |
-| `LlmModelProfile` | 能力、限制、价格、数据策略和健康 | [`model-registry.ts`](../../packages/core-llm/src/model-registry.ts) |
-| `LlmTaskProfile` | 任务硬要求和偏好 | [`routing.ts`](../../packages/core-llm/src/routing.ts) |
-| `LlmGatewayChatInput/Result` | Gateway 输入、路由结果、尝试与成本 | [`llm-gateway.ts`](../../packages/core-llm/src/llm-gateway.ts) |
-| `LlmAsyncJob` | 异步任务状态、进度、结果和取消 | [`async-jobs.ts`](../../packages/core-llm/src/async-jobs.ts) |
-| `LlmTelemetryEvent` | 调用链事件与可观测字段 | [`telemetry.ts`](../../packages/core-llm/src/telemetry.ts) |
+| 合同                         | 作用                                     | 代码                                                                 |
+| ---------------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
+| `LlmProvider`                | Provider 必须实现的统一能力              | [`types.ts`](../../packages/core-llm/src/types.ts)                   |
+| `LlmChatRequest/Response`    | 消息、工具、结构化输出、推理、用量与取消 | [`types.ts`](../../packages/core-llm/src/types.ts)                   |
+| `LlmModelProfile`            | 能力、限制、价格、数据策略和健康         | [`model-registry.ts`](../../packages/core-llm/src/model-registry.ts) |
+| `LlmTaskProfile`             | 任务硬要求和偏好                         | [`routing.ts`](../../packages/core-llm/src/routing.ts)               |
+| `LlmGatewayChatInput/Result` | Gateway 输入、路由结果、尝试与成本       | [`llm-gateway.ts`](../../packages/core-llm/src/llm-gateway.ts)       |
+| `LlmAsyncJob`                | 异步任务状态、进度、结果和取消           | [`async-jobs.ts`](../../packages/core-llm/src/async-jobs.ts)         |
+| `LlmTelemetryEvent`          | 调用链事件与可观测字段                   | [`telemetry.ts`](../../packages/core-llm/src/telemetry.ts)           |
 
 模型内部思维过程不是公共合同。平台只传递厂商允许公开的文本、工具结果、完成原因和用量。
 
 ## 5. 组件与代码路径
 
-| 组件 | 职责 | 源码 | 主要测试 |
-|---|---|---|---|
-| 公共合同 | 消息、流、工具、Embedding、Rerank、能力和错误 | [`types.ts`](../../packages/core-llm/src/types.ts) | [`openai-compatible-provider.test.ts`](../../packages/core-llm/test/openai-compatible-provider.test.ts) |
-| 统一网关 | 同步/流式/批量、路由、预算、可靠性、用量 | [`llm-gateway.ts`](../../packages/core-llm/src/llm-gateway.ts) | [`llm-gateway.test.ts`](../../packages/core-llm/test/llm-gateway.test.ts) |
-| 模型注册 | Provider、模型、能力、限制、数据策略和健康 | [`model-registry.ts`](../../packages/core-llm/src/model-registry.ts) | [`model-routing.test.ts`](../../packages/core-llm/test/model-routing.test.ts) |
-| 路由策略 | 分层约束、偏好、候选和成本计算 | [`routing.ts`](../../packages/core-llm/src/routing.ts) | [`model-routing.test.ts`](../../packages/core-llm/test/model-routing.test.ts) |
-| OpenAI-compatible | 国内云、本地和私有兼容协议 | [`openai-compatible-provider.ts`](../../packages/core-llm/src/openai-compatible-provider.ts) | [`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts) |
-| Anthropic 原生协议 | Messages、Tool Use 和流事件转换 | [`anthropic-provider.ts`](../../packages/core-llm/src/anthropic-provider.ts) | [`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts) |
-| Provider 预设 | 国内云、Ollama 和 vLLM 配置模板 | [`provider-presets.ts`](../../packages/core-llm/src/provider-presets.ts) | [`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts) |
-| 模型元数据发现 | 读取模型目录、能力、上下文和模型信息 | [`openai-compatible-provider.ts`](../../packages/core-llm/src/openai-compatible-provider.ts)、[`anthropic-provider.ts`](../../packages/core-llm/src/anthropic-provider.ts) | [`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts) |
-| Prompt 与上下文 | 模板、指纹、Token 估算、裁剪和不可信内容隔离 | [`prompt-runtime.ts`](../../packages/core-llm/src/prompt-runtime.ts) | [`prompt-structured.test.ts`](../../packages/core-llm/test/prompt-structured.test.ts) |
-| 结构化校验 | JSON Schema 与 Tool Call 参数校验 | [`structured-output.ts`](../../packages/core-llm/src/structured-output.ts) | [`prompt-structured.test.ts`](../../packages/core-llm/test/prompt-structured.test.ts) |
-| 稳定性 | 并发、队列、速率、取消和熔断 | [`reliability.ts`](../../packages/core-llm/src/reliability.ts) | [`reliability-budget.test.ts`](../../packages/core-llm/test/reliability-budget.test.ts) |
-| 预算 | 预留、范围配额、实际结算和拒绝 | [`budget.ts`](../../packages/core-llm/src/budget.ts) | [`reliability-budget.test.ts`](../../packages/core-llm/test/reliability-budget.test.ts) |
-| 响应缓存 | 租户隔离、TTL、命名空间和 LRU | [`response-cache.ts`](../../packages/core-llm/src/response-cache.ts) | [`llm-gateway.test.ts`](../../packages/core-llm/test/llm-gateway.test.ts) |
-| 异步任务 | 批量并发、进度、终态和取消 | [`async-jobs.ts`](../../packages/core-llm/src/async-jobs.ts) | [`llm-entrypoints.test.ts`](../../packages/core-llm/test/entrypoints/llm-entrypoints.test.ts) |
-| 观测 | 脱敏事件、指标和分模型统计 | [`telemetry.ts`](../../packages/core-llm/src/telemetry.ts) | [`llm-security.test.ts`](../../packages/core-llm/test/security/llm-security.test.ts) |
-| Agent 兼容门面 | 旧 Agent 调用统一迁移到 Gateway | [`llm-router.ts`](../../packages/core-llm/src/llm-router.ts) | [`llm-router.test.ts`](../../packages/core-llm/test/llm-router.test.ts) |
-| SDK 入口 | 模型配置、元数据发现、对话、流、任务和指标 | [`runtime.ts`](../../packages/sdk/src/runtime.ts) | [`runtime.test.ts`](../../packages/sdk/test/runtime.test.ts) |
-| REST 与 WebUI | 模型 API、SSE、任务和管理界面 | [`server.ts`](../../apps/server/src/server.ts)、[`web-ui.ts`](../../apps/server/src/web-ui.ts) | [`server.test.ts`](../../apps/server/test/server.test.ts) |
+| 组件               | 职责                                          | 源码                                                                                                                                                                       | 主要测试                                                                                                |
+| ------------------ | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| 公共合同           | 消息、流、工具、Embedding、Rerank、能力和错误 | [`types.ts`](../../packages/core-llm/src/types.ts)                                                                                                                         | [`openai-compatible-provider.test.ts`](../../packages/core-llm/test/openai-compatible-provider.test.ts) |
+| 统一网关           | 同步/流式/批量、路由、预算、可靠性、用量      | [`llm-gateway.ts`](../../packages/core-llm/src/llm-gateway.ts)                                                                                                             | [`llm-gateway.test.ts`](../../packages/core-llm/test/llm-gateway.test.ts)                               |
+| 模型注册           | Provider、模型、能力、限制、数据策略和健康    | [`model-registry.ts`](../../packages/core-llm/src/model-registry.ts)                                                                                                       | [`model-routing.test.ts`](../../packages/core-llm/test/model-routing.test.ts)                           |
+| 路由策略           | 分层约束、偏好、候选和成本计算                | [`routing.ts`](../../packages/core-llm/src/routing.ts)                                                                                                                     | [`model-routing.test.ts`](../../packages/core-llm/test/model-routing.test.ts)                           |
+| OpenAI-compatible  | 国内云、本地和私有兼容协议                    | [`openai-compatible-provider.ts`](../../packages/core-llm/src/openai-compatible-provider.ts)                                                                               | [`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts)                   |
+| Anthropic 原生协议 | Messages、Tool Use 和流事件转换               | [`anthropic-provider.ts`](../../packages/core-llm/src/anthropic-provider.ts)                                                                                               | [`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts)                   |
+| Provider 预设      | 国内云、Ollama 和 vLLM 配置模板               | [`provider-presets.ts`](../../packages/core-llm/src/provider-presets.ts)                                                                                                   | [`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts)                   |
+| 模型元数据发现     | 读取模型目录、能力、上下文和模型信息          | [`openai-compatible-provider.ts`](../../packages/core-llm/src/openai-compatible-provider.ts)、[`anthropic-provider.ts`](../../packages/core-llm/src/anthropic-provider.ts) | [`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts)                   |
+| Prompt 与上下文    | 模板、指纹、Token 估算、裁剪和不可信内容隔离  | [`prompt-runtime.ts`](../../packages/core-llm/src/prompt-runtime.ts)                                                                                                       | [`prompt-structured.test.ts`](../../packages/core-llm/test/prompt-structured.test.ts)                   |
+| 结构化校验         | JSON Schema 与 Tool Call 参数校验             | [`structured-output.ts`](../../packages/core-llm/src/structured-output.ts)                                                                                                 | [`prompt-structured.test.ts`](../../packages/core-llm/test/prompt-structured.test.ts)                   |
+| 稳定性             | 并发、队列、速率、取消和熔断                  | [`reliability.ts`](../../packages/core-llm/src/reliability.ts)                                                                                                             | [`reliability-budget.test.ts`](../../packages/core-llm/test/reliability-budget.test.ts)                 |
+| 预算               | 预留、范围配额、实际结算和拒绝                | [`budget.ts`](../../packages/core-llm/src/budget.ts)                                                                                                                       | [`reliability-budget.test.ts`](../../packages/core-llm/test/reliability-budget.test.ts)                 |
+| 响应缓存           | 租户隔离、TTL、命名空间和 LRU                 | [`response-cache.ts`](../../packages/core-llm/src/response-cache.ts)                                                                                                       | [`llm-gateway.test.ts`](../../packages/core-llm/test/llm-gateway.test.ts)                               |
+| 异步任务           | 批量并发、进度、终态和取消                    | [`async-jobs.ts`](../../packages/core-llm/src/async-jobs.ts)                                                                                                               | [`llm-entrypoints.test.ts`](../../packages/core-llm/test/entrypoints/llm-entrypoints.test.ts)           |
+| 观测               | 脱敏事件、指标和分模型统计                    | [`telemetry.ts`](../../packages/core-llm/src/telemetry.ts)                                                                                                                 | [`llm-security.test.ts`](../../packages/core-llm/test/security/llm-security.test.ts)                    |
+| Agent Runtime 门面 | Agent 模型调用统一经过 Gateway                | [`llm-router.ts`](../../packages/core-llm/src/llm-router.ts)                                                                                                               | [`llm-router.test.ts`](../../packages/core-llm/test/llm-router.test.ts)                                 |
+| SDK 入口           | 模型配置、元数据发现、对话、流、任务和指标    | [`runtime.ts`](../../packages/sdk/src/runtime.ts)                                                                                                                          | [`runtime.test.ts`](../../packages/sdk/test/runtime.test.ts)                                            |
+| REST 与 WebUI      | 模型 API、SSE、任务和管理界面                 | [`server.ts`](../../apps/server/src/server.ts)、[`web-ui.ts`](../../apps/server/src/web-ui.ts)                                                                             | [`server.test.ts`](../../apps/server/test/server.test.ts)                                               |
 
 ## 6. 使用方式
 
 ### 6.1 SDK
 
 ```ts
-import { DatabaseAgentRuntime, OpenAICompatibleProvider } from '@dbagent/sdk';
+import { DatabaseAgentRuntime, OpenAICompatibleProvider } from '@nwlworkshop/schemanaut';
 
 const runtime = new DatabaseAgentRuntime({
   tenantId: 'team-a',
@@ -276,17 +276,17 @@ const response = await runtime.llmChat(
 
 ### 6.2 REST API
 
-| 方法与路径 | 用途 |
-|---|---|
-| `GET /v1/llm/provider-presets` | 获取无密钥 Provider 预设 |
-| `POST /v1/llm/setup` | 配置当前模型并读取模型目录与元数据 |
-| `GET /v1/llm/models` | 查看模型与健康档案 |
-| `GET /v1/llm/metrics` | 查看 Token、成本、延迟和错误指标 |
-| `POST /v1/llm/chat` | 同步对话 |
-| `POST /v1/llm/chat/stream` | SSE 流式对话 |
-| `POST /v1/llm/jobs` | 提交异步批量任务 |
-| `GET /v1/llm/jobs/:id` | 查询任务 |
-| `DELETE /v1/llm/jobs/:id` | 取消任务 |
+| 方法与路径                     | 用途                               |
+| ------------------------------ | ---------------------------------- |
+| `GET /v1/llm/provider-presets` | 获取无密钥 Provider 预设           |
+| `POST /v1/llm/setup`           | 配置当前模型并读取模型目录与元数据 |
+| `GET /v1/llm/models`           | 查看模型与健康档案                 |
+| `GET /v1/llm/metrics`          | 查看 Token、成本、延迟和错误指标   |
+| `POST /v1/llm/chat`            | 同步对话                           |
+| `POST /v1/llm/chat/stream`     | SSE 流式对话                       |
+| `POST /v1/llm/jobs`            | 提交异步批量任务                   |
+| `GET /v1/llm/jobs/:id`         | 查询任务                           |
+| `DELETE /v1/llm/jobs/:id`      | 取消任务                           |
 
 WebUI 的“模型管理”区域使用同一组 API，只负责配置、模型档案和指标查看，不提供主动验证入口。
 
@@ -294,33 +294,33 @@ WebUI 的“模型管理”区域使用同一组 API，只负责配置、模型�
 
 ### 7.1 自动化质量门
 
-| 验证项 | 本次结果 |
-|---|---:|
-| `core-llm` 测试 | 52 通过 |
-| Provider 适配器 | 5 通过；断言元数据发现不调用生成接口 |
-| SDK/API 入口 | 20 通过，2 个 PostgreSQL 环境测试跳过 |
-| 真实功能验收 | 7/7 通过；含硅基流动 NL2SQL + PostgreSQL 执行 |
-| 全仓库 lint | 10/10 包通过 |
-| 全仓库 typecheck/build | 18/18 任务通过 |
-| 全仓库回归 | 403 通过，7 个 PostgreSQL 环境测试跳过 |
+| 验证项                                      | 当前候选门禁                                                                                                    |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `core-llm`、Provider、SDK/API 与 Agent 入口 | 纳入全仓确定性回归并通过                                                                                        |
+| 全仓构建、TypeScript、ESLint 与差异格式     | 通过                                                                                                            |
+| 全仓确定性回归                              | 通过；精确的文件数、用例数与跳过数见[上线前审计矩阵](../../reports/pre-release-audit/00-traceability-matrix.md) |
+| 真实 PostgreSQL                             | 独立门禁通过；其中需要真实 LLM 的用例明确跳过                                                                   |
+| 真实 LLM                                    | 本次未获外部 Token 消耗授权，未执行且不计为通过                                                                 |
 
 测试范围包括 Provider 合同、元数据解析、路由、结构化输出、预算、缓存、租户隔离、Secret 脱敏、故障注入、熔断、取消、SDK/API/Agent 入口和异步任务。工程测试使用确定性 Provider 或模拟元数据响应，不调用用户模型。
 
+用例数量会随回归测试增加而变化，本功能文档不复制历史计数。本次候选版本的精确测试统计、源码状态和外部证据缺口统一由上线前审计矩阵记录。
+
 ### 7.2 平台性能
 
-测试条件：1,000 个有效样本、并发 50、Node.js v24.14.0、Windows、i9-13900HX。测试使用进程内确定性 Provider，仅测 SchemaNaut 平台开销，不包含外部模型、网络和排队时间。
+基准使用 1,000 个有效样本、并发 50 和进程内确定性 Provider，只测 SchemaNaut 平台开销，不包含外部模型、网络和排队时间。
 
-| 指标 | 目标 | 实测 P95 | 结果 |
-|---|---:|---:|---|
-| 路由决策 | ≤ 20 ms | 0.0192 ms | 通过 |
-| 约 8KB 中英混合文本 Token 估算 | ≤ 5 ms | 0.1702 ms | 通过 |
-| JSON Schema 结构校验 | ≤ 5 ms | 0.0133 ms | 通过 |
-| Gateway 调用路径 | ≤ 50 ms | 2.2318 ms | 通过 |
-| 流事件转发 | ≤ 50 ms | 0.0014 ms | 通过 |
-| 异步任务提交 | ≤ 50 ms | 0.0036 ms | 通过 |
-| 取消传播 | ≤ 100 ms | 0.0226 ms | 通过 |
+| 指标                               | 验收阈值 |
+| ---------------------------------- | -------: |
+| 路由决策 P95                       |  ≤ 20 ms |
+| 约 8KB 中英混合文本 Token 估算 P95 |   ≤ 5 ms |
+| JSON Schema 结构校验 P95           |   ≤ 5 ms |
+| Gateway 调用路径 P95               |  ≤ 50 ms |
+| 流事件转发 P95                     |  ≤ 50 ms |
+| 异步任务提交 P95                   |  ≤ 50 ms |
+| 取消传播 P95                       | ≤ 100 ms |
 
-完整原始结果：[性能报告](../../reports/llm-platform/performance.json)。性能报告中的 `gatewayMetrics.latencyMs` 还包含批量任务在并发控制下的端到端平台停留时间；上表的 `gatewayTotalMs` 是用于验收的单次 Gateway 处理路径。
+[性能报告](../../reports/llm-platform/performance.json)是实测值的唯一事实来源，包含 `generatedAt`、运行环境、样本规模、P50/P95/P99、阈值和逐项结论；文档不复制会随机器与候选源码变化的历史数值。报告中的 `gatewayMetrics.latencyMs` 还包含批量任务在并发控制下的端到端平台停留时间；用于门禁的单次 Gateway 处理路径是 `gatewayTotalMs`。
 
 ### 7.3 零 Token 模型元数据发现
 
@@ -333,17 +333,16 @@ WebUI 的“模型管理”区域使用同一组 API，只负责配置、模型�
 
 本地 Ollama 的 `qwen2.5-coder:14b` 元数据读取结果包含 `tools`、32,768 上下文、`qwen2` 家族、14.8B 参数量和 `Q4_K_M` 量化信息；因此档案把 Tool Calling 记录为 Provider 声明支持。这个结果只表达元数据声明，不承诺模型在所有提示下都能正确调用工具。
 
-### 7.4 真实功能与性能验收
+### 7.4 历史 opt-in 真实 Endpoint 记录（非本次候选门禁）
 
-真实 Endpoint 只用于显式启动的工程测试，不接入 SDK、REST API 或 WebUI 的产品功能，也不在默认 CI 中运行。
+真实 Endpoint 只用于显式启动的工程测试，不接入 SDK、REST API 或 WebUI 的产品功能，也不在默认 CI 中运行。以下内容来自已有的 opt-in 归档；它们没有在 2026-07-26 本次候选源码上重新执行，因此不能作为本次发布门禁的通过证据。
 
-- 功能链路：硅基流动 `deepseek-ai/DeepSeek-V4-Pro` 完成 Schema 索引、RAG 上下文构建、NL2SQL、安全检查、人工批准后的 PostgreSQL 查询执行；真实模型用例耗时 14.34 秒。
-- 数据库链路：连接、元数据读取、真实 JOIN、只读写入阻断和断开连接全部通过。
-- 真实 API 小样本：3 个同步请求 P50 4.07 秒、P95 69.92 秒，共 2,314 Token。
-- 真实流式请求：首 Token 93.41 秒、总耗时 93.48 秒，共 3,460 Token。
-- 结论：SchemaNaut 调用与计量链路正常；当前模型对短请求仍产生大量推理 Token，长尾延迟主要取决于模型和供应商服务。3 个样本只作为当前环境基线，不代表供应商 SLA 或并发容量。
+- 既有功能归档记录过硅基流动 `deepseek-ai/DeepSeek-V4-Pro` 的 Schema 索引、RAG 上下文构建、NL2SQL、安全检查、批准后 PostgreSQL 执行和数据库只读阻断链路。
+- [`live-performance.json`](../../reports/llm-platform/live-performance.json) 的 `generatedAt` 为 2026-07-23；其中 3 个同步请求 P50 4.07 秒、P95 69.92 秒，共 2,314 Token。
+- 同一历史报告记录的流式请求首 Token 为 93.41 秒、总耗时 93.48 秒，共 3,460 Token。
+- 这些小样本只说明当时环境中的调用与计量链路，不代表当前候选、供应商 SLA 或并发容量。
 
-无凭据报告：[真实 API 性能报告](../../reports/llm-platform/live-performance.json)。
+本次候选的最终审计明确记录“真实 LLM 未获付费 Token 授权，未执行”；获得授权后必须针对待发布的同一源码状态重新运行，才能形成发布证据。
 
 ## 8. 测试入口
 
@@ -361,7 +360,7 @@ pnpm lint
 pnpm test
 ```
 
-前六个分层与平台测试不访问真实模型。`test:functional:live` 和 `test:performance:live` 会显式读取本地 `.env` 中的硅基流动凭据并产生费用；前者还会重建专用的 `dbagent_core_db_test` 数据库。
+前六个分层与平台测试不访问真实模型。`test:functional:live` 和 `test:performance:live` 会显式读取本地 `.env` 中的硅基流动凭据并产生费用；前者还会重建专用的 `dbagent_core_db_test` 数据库。本次候选未执行这两项付费门禁。
 
 关键测试代码：
 
@@ -376,7 +375,7 @@ pnpm test
 
 ## 9. 依赖与安全说明
 
-结构化输出使用 `ajv@8.20.0`：MIT 许可、纯 JavaScript/TypeScript、无原生二进制和运行时下载。npm 打包脚本同时记录 Ajv 及其传递依赖的许可证。
+结构化输出使用 `ajv@8.20.0`：MIT 许可、纯 JavaScript/TypeScript、无原生二进制和运行时下载。手写 JSON Schema 校验会遗漏组合关键字、错误路径和方言行为，因此不采用；Ajv 被封装在模型结构校验层，其对象模型不进入公共合同。发行说明列出直接运行时依赖，传递依赖的许可证文件由各 npm 包随安装树提供。
 
 安全边界：
 

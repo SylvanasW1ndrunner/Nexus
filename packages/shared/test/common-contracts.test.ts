@@ -14,20 +14,20 @@ import {
 
 describe('common public contracts', () => {
   it('creates and validates versioned envelopes without inventing domain fields', () => {
-    const envelope = createContractEnvelope('dbagent.resource.snapshot', {
+    const envelope = createContractEnvelope('schemanaut.resource.snapshot', {
       resourceId: 'resource-1',
     });
 
     expect(envelope).toEqual({
-      contract: 'dbagent.resource.snapshot',
+      contract: 'schemanaut.resource.snapshot',
       version: CURRENT_CONTRACT_VERSION,
       payload: { resourceId: 'resource-1' },
     });
-    expect(() => assertContractEnvelope(envelope, 'dbagent.resource.snapshot')).not.toThrow();
+    expect(() => assertContractEnvelope(envelope, 'schemanaut.resource.snapshot')).not.toThrow();
     expect(() =>
       assertContractEnvelope(
         { ...envelope, version: '2.0' },
-        'dbagent.resource.snapshot',
+        'schemanaut.resource.snapshot',
       ),
     ).toThrowError(ContractValidationError);
     expect(
@@ -49,9 +49,9 @@ describe('common public contracts', () => {
 
     const portable = toPortableValue(input);
     expect(portable).toMatchObject({
-      count: { $dbagentType: 'bigint', value: '9007199254740993' },
-      at: { $dbagentType: 'datetime', value: '2026-07-23T00:00:00.000Z' },
-      binary: { $dbagentType: 'binary', encoding: 'base64', value: 'AAH+/w==' },
+      count: { $schemanautType: 'bigint', value: '9007199254740993' },
+      at: { $schemanautType: 'datetime', value: '2026-07-23T00:00:00.000Z' },
+      binary: { $schemanautType: 'binary', encoding: 'base64', value: 'AAH+/w==' },
     });
     const decoded = fromPortableValue(portable) as typeof input;
     expect(decoded.count).toBe(input.count);

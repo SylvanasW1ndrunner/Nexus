@@ -1,0 +1,33 @@
+{
+  "generatedAt": "2026-07-26T16:17:03.127Z",
+  "runId": "2026-07-26T16-16-08-420Z-2526eb4a-b983-434f-a3a5-2956cdcd81b2",
+  "database": "dbagent_core_db_test",
+  "git": {
+    "commit": "cca716781b17ba454fda0f4e82a7f03cfbe60bc9",
+    "dirty": true
+  },
+  "fixtures": {
+    "files": [
+      "scripts/dev-db/init.sql",
+      "scripts/dev-db/scenarios/ecommerce.sql",
+      "scripts/dev-db/scenarios/traffic-cleaning.sql",
+      "scripts/dev-db/scenarios/big-science.sql"
+    ],
+    "sha256": "225e1b63f7d05356e10d0e91f2bd90e5f7776efa7da0981a0a33d7a20c2b9562"
+  },
+  "reports": {
+    "functional": {
+      "path": "functional.json",
+      "sha256": "eea2a6c7345e5da30a7eb578787aa2986aea168bdd5eebcb699633617cd17def",
+      "runCount": 11,
+      "passed": true
+    },
+    "performance": {
+      "path": "performance.json",
+      "sha256": "ca76566c63b23b6c9ea949b5ee6374ad8c403e28c6b1defa8612781e263476a0",
+      "scenarioCount": 4,
+      "passed": true
+    }
+  },
+  "passed": true
+}

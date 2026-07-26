@@ -11,5 +11,6 @@ export * from './reliability.js';
 export * from './response-cache.js';
 export * from './routing.js';
 export * from './structured-output.js';
+export * from './stream-safety.js';
 export * from './telemetry.js';
 export * from './types.js';

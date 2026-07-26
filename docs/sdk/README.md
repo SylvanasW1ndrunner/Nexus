@@ -2,16 +2,19 @@
 
 [中文](README.zh-CN.md) · [API Reference](api-reference.md) · [Project README](../../README.md)
 
-This guide covers the public Node.js/TypeScript SDK shipped as `@nwlworkshop/schemanaut`.
+This guide shows how to use SchemaNaut v1 through the TypeScript SDK, local REST API, and CLI. All examples describe the current source API.
 
-> The package name is planned but not published to npm yet. Build and install the local archive while the project is in alpha.
+SchemaNaut v1 is an AI SQL Agent, not a database IDE and not an AI governance/operations Agent.
 
 ## 1. Requirements and installation
 
-- Node.js 22.5 or newer
-- ESM application or a build tool that can consume ESM
-- PostgreSQL for the current complete reference connector
-- A tool-capable LLM for Agent workflows
+- Node.js 22.13 or newer (durable Sessions use `node:sqlite`; the `--experimental-sqlite` startup flag is not required, but Node 22 still labels the module experimental)
+- ESM application, or a build tool that consumes ESM
+- PostgreSQL
+- An OpenAI-compatible endpoint or Anthropic Messages endpoint
+- A model with tool calling for `runAgent()`
+
+The public npm package is not published yet. Build and install the archive locally:
 
 ```bash
 pnpm install
@@ -19,55 +22,90 @@ pnpm package:npm
 npm install ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
 ```
 
-The package contains JavaScript, TypeScript declarations, the CLI, bilingual README and SDK documentation, license files, and third-party notices.
+The planned package name is `@nwlworkshop/schemanaut`.
+CLI examples use `npx schemanaut` so they resolve the command from this local installation.
 
-## 2. Runtime lifecycle
+## 2. Runtime, Project, and Session
 
-`DatabaseAgentRuntime` is the main entrypoint. A typical lifecycle is:
+These concepts have different lifecycles:
 
-1. Create a model provider and runtime.
-2. Test or open a database connection.
-3. Build the Schema knowledge index.
-4. Run the Agent or generate SQL.
-5. Inspect results, audit records, resources, and metrics.
-6. Call `close()` during application shutdown.
+- `DatabaseAgentRuntime` owns model providers, the active database connection, knowledge index, tools, Skills, MCP clients, result handles, and Session access.
+- A Project is a selected directory containing reusable instructions and extensions. Pass it as `projectDirectory`.
+- A Session is one isolated, durable conversation. Its messages, task plan, artifacts, active tools and Skills, token usage, and context checkpoints are stored together.
+
+By default, Session state is stored in the OS user-data directory returned by `defaultAgentStateDatabasePath()`, not inside the Project:
+
+- Windows: `%LOCALAPPDATA%\SchemaNaut\schemanaut.db`
+- Linux/macOS fallback: `~/.local/share/SchemaNaut/schemanaut.db`
+
+Set `sessionDatabasePath` when an application needs a dedicated state file.
+Multiple Projects may safely share one state file. The Runtime binds its Session store to the normalized `projectDirectory`; list, load, update, archive, delete, fork, export, compaction, checkpoint, Skill lookup, resume, and REST/CLI Session operations are filtered by that Project in SQLite. A foreign Project receives the same not-found result as an unknown Session.
+
+Initialize a Project once:
 
 ```ts
-import {
-  DatabaseAgentRuntime,
-  createProviderFromPreset,
-} from '@nwlworkshop/schemanaut';
+import { initializeAgentProject } from '@nwlworkshop/schemanaut';
+
+const project = await initializeAgentProject('/srv/acme-data');
+console.log(project.configDirectory);
+```
+
+The resulting layout is:
+
+```text
+acme-data/
+├── .schemanaut/
+│   ├── AGENT.md
+│   ├── settings.json
+│   ├── mcp.json
+│   └── skills/
+├── sql/
+└── artifacts/
+```
+
+`.schemanaut/AGENT.md` contains reusable project guidance. Do not put credentials in it. A Session is bound to its Project and cannot be resumed through a Runtime opened on a different Project.
+
+## 3. Create and close a Runtime
+
+```ts
+import { DatabaseAgentRuntime, createProviderFromPreset } from '@nwlworkshop/schemanaut';
+
+const apiKey = process.env.LLM_API_KEY;
+if (!apiKey) throw new Error('LLM_API_KEY is required');
 
 const runtime = new DatabaseAgentRuntime({
-  tenantId: 'local-team',
+  tenantId: 'acme',
+  projectDirectory: '/srv/acme-data',
+  sessionDatabasePath: '/srv/acme-state/schemanaut.db',
   provider: createProviderFromPreset('siliconflow', {
-    apiKey: process.env.LLM_API_KEY,
+    apiKey,
   }),
   model: process.env.LLM_MODEL!,
 });
 
 try {
-  // Use the runtime.
+  // Connect, index, and run work here.
 } finally {
   await runtime.close();
 }
 ```
 
-If `sessionDatabasePath` is omitted, Agent sessions are stored in `.schemanaut/schemanaut.db` under the process working directory.
+Call `close()` during application shutdown. It cancels pending broker approvals, stops running MCP servers, disconnects the shortcut PostgreSQL connection, and closes the unified database runtime.
 
-## 3. Model providers
+## 4. Configure a model provider
 
-### Provider presets
+### Presets
 
-The built-in presets are `siliconflow`, `deepseek`, `zhipu`, `moonshot`, `ollama`, and `vllm`.
+OpenAI-compatible presets are available for `siliconflow`, `deepseek`, `zhipu`, `moonshot`, `ollama`, and `vllm`:
 
 ```ts
 import { createProviderFromPreset } from '@nwlworkshop/schemanaut';
 
+const apiKey = process.env.LLM_API_KEY;
+if (!apiKey) throw new Error('LLM_API_KEY is required');
+
 const cloud = createProviderFromPreset('deepseek', {
-  apiKey: process.env.LLM_API_KEY,
-  timeoutMs: 60_000,
-  maxRetries: 1,
+  apiKey,
 });
 
 const local = createProviderFromPreset('ollama', {
@@ -75,25 +113,29 @@ const local = createProviderFromPreset('ollama', {
 });
 ```
 
-Presets declare known protocol capabilities. `discoverLlmModels()` reads the provider's model list and metadata endpoint; it does not send a capability-test prompt.
+Preset capabilities are metadata, not a live prompt-based capability test. `runtime.discoverLlmModels()` queries the provider's model metadata/list endpoint without sending a capability-test message.
 
-### Generic OpenAI-compatible endpoint
+### OpenAI-compatible gateways and relay services
+
+Most relay services differ from an official OpenAI-compatible service only by endpoint, model name, and authentication. Configure those explicitly:
 
 ```ts
 import { OpenAICompatibleProvider } from '@nwlworkshop/schemanaut';
 
+const apiKey = process.env.LLM_API_KEY;
+if (!apiKey) throw new Error('LLM_API_KEY is required');
+
 const provider = new OpenAICompatibleProvider({
-  id: 'private-gateway',
-  name: 'Private gateway',
+  id: 'company-gateway',
+  name: 'Company gateway',
   baseUrl: process.env.LLM_BASE_URL!,
-  apiKey: process.env.LLM_API_KEY,
-  allowUnauthenticated: false,
+  apiKey,
   timeoutMs: 60_000,
   maxRetries: 1,
 });
 ```
 
-For a private endpoint without authentication, set `allowUnauthenticated: true`.
+Set `allowUnauthenticated: true` only for a trusted endpoint that requires no key.
 
 ### Anthropic Messages
 
@@ -105,20 +147,18 @@ const provider = new AnthropicProvider({
 });
 ```
 
-### Configure or replace a provider later
+Provider and model can also be configured after construction:
 
 ```ts
-runtime.configureProvider(provider, 'your-model-id');
+runtime.configureProvider(provider, 'model-id');
 const models = await runtime.discoverLlmModels();
 const status = runtime.status();
 ```
 
-## 4. PostgreSQL shortcut
-
-The high-level shortcut is the simplest way to use the first reference connector.
+## 5. Connect PostgreSQL and index Schema
 
 ```ts
-const input = {
+const connectionInput = {
   host: process.env.DB_HOST ?? '127.0.0.1',
   port: Number(process.env.DB_PORT ?? 5432),
   database: process.env.DB_NAME!,
@@ -130,342 +170,620 @@ const input = {
   statementTimeoutMs: 30_000,
 };
 
-const test = await runtime.testConnection(input);
+const test = await runtime.testConnection(connectionInput);
 console.log(test.latencyMs, test.readOnly);
 
-const connection = await runtime.connect(input);
-console.log(connection.id);
+const connection = await runtime.connect(connectionInput);
+const schema = await runtime.indexSchema({ maxTables: 500 });
+console.log(connection.id, schema.tableCount, schema.columnCount);
 ```
 
-`connect()` disconnects the previous shortcut connection before opening a new one. Passwords are passed to the connector but are not stored in the public connection profile.
+`connect()` replaces the previous shortcut connection. `indexSchema()` accepts 1–1,000 relations; its default is 200. Set `schemaSnapshotDirectory` in the Runtime options to persist successful indexes; relative paths are resolved from the selected Project root.
 
-## 5. Build and refresh the knowledge index
+Snapshot files are application data, not an encrypted secret store. They contain plaintext Schema names, comments, business-glossary text, and derived vectors. The embedding host must restrict directory access and define its own backup, retention, and secure-deletion policy.
 
-```ts
-const snapshot = await runtime.indexSchema({ maxTables: 500 });
-console.log(snapshot);
-```
+The knowledge layer uses a database → schema → relation → column hierarchy. It supports exact/full-text retrieval, relationship expansion, and optional embedding/reranking. Choose an embedding model that covers both the user's language and database identifiers; SchemaNaut does not force a Chinese-only model.
 
-The public shortcut accepts 1–1,000 relations per indexing run. The default is 200. The knowledge layer builds a hierarchical catalog and retrieval index from discovered resources and relations.
+Successful DDL executed through the built-in Agent SQL tool refreshes the active index. The default unified PostgreSQL path also compares a stable schema revision before SQL generation and Agent runs, so external DDL is refreshed automatically. Hosts using a custom compatibility `driver` must call `indexSchema()` after out-of-band schema changes.
 
-When an Agent SQL tool changes Schema, the built-in integration refreshes the active index. If Schema changes outside SchemaNaut, call `indexSchema()` again before the next Agent run. Use `schemaStatus()` to check readiness.
-
-An optional retrieval profile can bind embedding and reranking to model providers already registered in the LLM gateway:
+## 6. Run the plan-guided AI SQL Agent
 
 ```ts
-const runtime = new DatabaseAgentRuntime({
-  provider,
-  model: process.env.LLM_MODEL!,
-  retrievalProfile: {
-    id: 'bilingual-schema',
-    version: 1,
-    backend: { type: 'memory', bm25K1: 1.2, bm25B: 0.75 },
-    embedding: {
-      providerInstanceId: 'private-gateway',
-      modelId: process.env.EMBEDDING_MODEL!,
-      dimensions: 1024,
-      normalization: 'l2',
-      distanceMetric: 'cosine',
-      requestTemplateVersion: '1',
-    },
-    defaultLimit: 8,
-    defaultMaxContextTokens: 1_500,
-    graphHops: 1,
-    rrfK: 60,
-  },
-});
-```
-
-Use an embedding model appropriate for both the user's natural language and the identifiers stored in the database. The SDK does not force a Chinese-only embedding model.
-
-## 6. Run the AI SQL Agent
-
-```ts
-const first = await runtime.runAgent({
+const run = await runtime.runAgent({
   userId: 'user-42',
-  message: '从 Kafka 事件表的 JSON value 中提取渠道，统计本周每天的支付金额。',
+  message: 'Extract channel from the Kafka event JSON and calculate paid revenue by day this week.',
   mode: 'read',
   maxIterations: 12,
   maxToolExecutionMs: 30_000,
+  onEvent: async (event) => {
+    console.log(event.type, event.message);
+    if (event.sql) console.log(event.sql);
+  },
 });
 
-console.log(first.selectedSkill);
-console.log(first.result.status);
-console.log(first.result.finalText);
-console.table(first.result.toolExecutions);
+console.log(run.activatedSkills);
+console.log(run.result.status);
+console.log(run.result.finalText);
+console.log(run.result.session.id);
+console.log(run.result.completion);
 ```
 
-The Agent receives tool results intended for the task. Internal catalog hashes, node identifiers, and tree indexes remain inside the knowledge implementation and are not part of the model-facing retrieval result.
+The SDK is a trusted integration surface: `runAgent()` returns the complete `AiSqlAgentRun`, including tool execution records and context-compression reports when present. Use the public Session management methods described below for a user-facing projection. The local REST API always returns that de-internalized projection.
 
-### Continue a session
+`runAgent()` uses one adaptive, plan-guided ReAct loop:
 
-```ts
-const continued = await runtime.runAgent({
-  sessionId: first.result.session.id,
-  message: '按渠道再拆分，并说明异常波动。',
-  mode: 'read',
-});
+1. understand the goal;
+2. create or update a task plan when useful;
+3. discover and activate only the required Skills and tools;
+4. retrieve Schema or inspect small data samples;
+5. generate and execute SQL;
+6. observe database errors or results and change course;
+7. verify task evidence before reporting completion.
+
+There is no user-selectable Agent strategy. `activatedSkills` is the list actually active in the returned Session.
+
+The `onEvent` callback receives user-facing semantic events only:
+
+```text
+goal-understood
+plan-updated
+exploring
+sql-prepared
+approval-required
+sql-executed
+correcting
+artifact-created
+completed
+needs-user-input
 ```
 
-Pass either `session` or `sessionId`, never both.
+Internal reasoning, knowledge hashes, node IDs, ranking scores, and evaluation traces are intentionally not projected into this event stream.
 
-### Permission and approval
+## 7. Built-in project tools and subagents
+
+The Runtime registers general tools in addition to database and knowledge tools:
+
+- `workspace_list`, `workspace_read`, and `workspace_search` read Project files;
+- `workspace_write` and `workspace_edit` create or modify Project files and register artifacts;
+- `shell_run` runs a bounded command only when the host opts in with `enableShellTool: true`;
+- `web_search` and `web_fetch` are registered only when the host provides `webAdapter`;
+- `subagent_spawn`, `subagent_list`, `subagent_wait`, and `subagent_stop` manage bounded child tasks.
+
+Dedicated file tools reject absolute paths, traversal outside the Project, and symlink escapes. `shell_run` is not registered by default. When enabled, its working directory must be inside the Project and its child environment is reduced to ordinary operating-system variables, but the process still inherits the SchemaNaut host's OS permissions. It is not an OS sandbox.
+
+The host web adapter is also the network policy boundary. It must enforce the application's destination allowlist, authentication, rate limits, and SSRF protections.
+
+A child Agent has the same generic Runtime capabilities and Project reference, but an independent conversation context and only the delegated goal. The parent receives its status, summary, and artifact references rather than the child's full context.
+
+## 8. Permission and approval
+
+`runAgent()` accepts `read`, `edit`, or `full`:
+
+| Mode   | Automatic authority                                                              |
+| ------ | -------------------------------------------------------------------------------- |
+| `read` | Schema inspection and read-only SQL                                              |
+| `edit` | `read` plus row changes, Project file changes, and other non-destructive edits   |
+| `full` | `edit` plus DDL, destructive actions, shell commands, and administrative actions |
+
+When a tool requires more authority than the mode, `approvalProvider` is called:
 
 ```ts
 const runtime = new DatabaseAgentRuntime({
   provider,
   model,
   approvalProvider: async ({ mode, tool, toolCall, sessionId }) => {
-    return await requestApprovalInYourApplication({
+    const approved = await showApprovalDialog({
       mode,
+      sessionId,
       toolName: tool.name,
       arguments: toolCall.arguments,
-      sessionId,
     });
+
+    return approved
+      ? {
+          approved: true,
+          requestId: crypto.randomUUID(),
+          approvedBy: 'operator-7',
+          approvedAt: new Date().toISOString(),
+        }
+      : false;
   },
 });
 ```
 
-`approvalProvider` may return a boolean or:
+Approval is evidence for that tool call only. Rejection is returned to the Agent as an observation; it may replan or explain what additional authority is required.
+
+When `approvalProvider` is omitted, the Runtime installs a built-in approval broker. This is the simplest path for a WebUI or REST host:
 
 ```ts
-{
-  approved: true,
-  requestId: 'approval-123',
-  approvedBy: 'operator-7',
-  approvedAt: new Date().toISOString(),
-  reason: 'Reviewed in the change workflow',
+const pending = runtime.listAgentApprovals();
+
+if (pending[0]) {
+  const resolved = runtime.resolveAgentApproval(pending[0].id, true, {
+    resolvedBy: 'operator-7',
+    reason: 'Reviewed in the operations console.',
+  });
+  console.log(resolved);
 }
 ```
 
-Without an approval provider, an action outside the active `read`, `edit`, or `full` mode remains unapproved.
+`listAgentApprovals()` returns pending requests only. The broker waits up to five minutes by default; its argument preview is redacted and limited to 2,000 characters. Supplying a custom `approvalProvider` replaces the broker, so these management methods then return no broker-owned requests.
 
-## 7. Session history and context compaction
+Application modes do not override database grants. Use a least-privilege PostgreSQL account, and remember that `readOnly: true` at connection time prevents writes even if Agent mode is `edit` or `full`.
 
-The durable SQLite store keeps the complete message history. Context compaction changes only the model's active working view.
+## 9. Continue, steer, and compact Sessions
+
+Resume a Session by ID:
+
+```ts
+const continued = await runtime.runAgent({
+  sessionId: run.result.session.id,
+  message: 'Break that down by channel and compare it with last week.',
+  mode: 'read',
+});
+```
+
+Pass `session` or `sessionId`, never both. Transcripts, plans, artifacts, and result handles are isolated between Sessions. Session IDs are also Project-scoped: even `runtime.sessions`, the low-level management facade, cannot read or mutate a Session owned by another Project. When `userId` is present, explicit preference statements may be distilled into the user preference layer and reused by other Sessions for that same user; manage them with `runtime.sessions.listPreferences()`, `upsertPreference()`, and `deletePreference()`.
+
+If a run is still active, add a new user requirement without starting another run. The event supplies the Session ID even for a newly created Session:
+
+```ts
+let steered = false;
+
+const running = runtime.runAgent({
+  message: 'Analyze weekly paid revenue and explain abnormal changes.',
+  mode: 'read',
+  onEvent: (event) => {
+    if (!steered && event.type === 'exploring') {
+      steered = runtime.steerAgentSession(event.sessionId, 'Exclude internal test tenants.');
+    }
+  },
+});
+
+const steeredRun = await running;
+```
+
+`steerAgentSession()` returns `false` if that Session does not currently have an active run.
+
+Use the public management facade for application screens and APIs:
+
+```ts
+const sessions = await runtime.listAgentSessions({
+  userId: 'user-42',
+  query: 'revenue',
+  archived: false,
+  limit: 20,
+  offset: 0,
+});
+
+const view = await runtime.getAgentSession(run.result.session.id);
+const deleted = await runtime.deleteAgentSession('obsolete-session-id');
+```
+
+Session list items expose `conversationMessageCount`, which counts user/assistant messages only. `getAgentSession()` returns `AgentSessionView`: user/assistant messages, public plan evidence, artifacts, active Skill catalog entries, token usage, and basic Project data. It deliberately omits tool messages and calls, knowledge hashes and tree IDs, Skill instructions, and other integration-only state. `runtime.sessions.load()` remains the trusted low-level API for loading the complete Session.
+
+SchemaNaut keeps the original Session transcript. Near the model context limit it can mask old tool outputs and create a semantic checkpoint for the model's working context. Trigger the same mechanism manually:
 
 ```ts
 const compacted = await runtime.compactAgentSession({
-  sessionId: first.result.session.id,
-  focus: 'Keep exact SQL, exact result values, user decisions, and unfinished tasks.',
+  sessionId: run.result.session.id,
+  focus: 'Preserve exact SQL, confirmed definitions, decisions, and unfinished tasks.',
 });
 
-const checkpoints = await runtime.agentContextCheckpoints(
-  first.result.session.id,
-  20,
-);
+const checkpoints = await runtime.agentContextCheckpoints(run.result.session.id, 20);
 ```
 
-The runtime also compacts automatically when the active prompt approaches the selected model's physical context window. If model summarization fails, a deterministic fallback preserves continuity.
-
-The session store is available as `runtime.sessions`:
+Common Session Store methods:
 
 ```ts
-const recent = await runtime.sessions.list({ userId: 'user-42', limit: 20 });
-const session = await runtime.sessions.load(first.result.session.id);
-const exported = await runtime.sessions.export(first.result.session.id, 'json');
-const forked = await runtime.sessions.fork({
-  id: first.result.session.id,
-  fromMessageIndex: first.result.session.messages.length - 1,
-  title: 'Alternative analysis',
+const recent = await runtime.sessions.list({
+  userId: 'user-42',
+  archived: false,
+  query: 'revenue',
+  limit: 20,
+});
+const session = await runtime.sessions.load(run.result.session.id);
+const markdown = await runtime.sessions.export(run.result.session.id, 'markdown');
+const fork = await runtime.sessions.fork({
+  id: run.result.session.id,
+  fromMessageIndex: run.result.session.messages.length - 1,
+  title: 'Alternative definition',
 });
 ```
 
-It also supports update, archive, delete, user preferences, and checkpoint queries. See the API reference for the method list.
+Session persistence redacts recognized secret material. Do not deliberately place credentials in messages.
 
-## 8. Deterministic SQL generation and execution
+## 10. Result previews and result handles
 
-`generate()` uses retrieved Schema context but does not execute the result.
+Database aggregation, filtering, joins, window functions, and anomaly calculations should stay in PostgreSQL. `sql_execute` returns only:
+
+- column metadata;
+- a bounded row preview;
+- counts and truncation flags;
+- elapsed time and transaction information;
+- a `resultHandleId`.
+
+Rows fetched for the current execution remain behind an in-process, Session-isolated handle. The built-in `result_read` tool can page those stored rows. An embedding application can also read them:
+
+```ts
+const execution = run.result.toolExecutions.find(
+  (item) => item.toolName === 'sql_execute' && item.status === 'success',
+);
+
+if (execution) {
+  const preview = JSON.parse(execution.resultPreview) as {
+    resultHandleId: string;
+  };
+
+  const page = runtime.results.read({
+    id: preview.resultHandleId,
+    sessionId: run.result.session.id,
+    limit: 100,
+  });
+
+  console.log(page.rows, page.nextCursor);
+}
+```
+
+`runtime.results.read()` accepts at most 100 rows per page. `hasMoreInDatabase: true` means the SQL produced more rows than the execution limit; those unfetched rows are not silently materialized in the handle. Retrieve them with a database query/export flow or explicitly paginated SQL. Handles cannot be read by another Session and expire after one hour by default. They are currently in-memory; applications that need durable exports should copy stored pages to their own storage or file workflow before shutdown.
+
+## 11. Skills
+
+SchemaNaut uses standard Markdown Skill bundles:
+
+```text
+.schemanaut/skills/order-revenue/
+└── SKILL.md
+```
+
+```markdown
+---
+name: order-revenue
+description: Calculate paid order revenue using the project's confirmed business definition.
+license: Apache-2.0
+metadata:
+  owner: data-team
+---
+
+# Order revenue
+
+Use paid_at as the payment time. Exclude test tenants. Let PostgreSQL perform all aggregation.
+```
+
+The parent directory and frontmatter `name` must match and use lowercase letters, numbers, and single hyphens.
+
+Skill precedence is:
+
+```text
+session > project > user > system
+```
+
+Locations and inputs:
+
+- system: bundled with SchemaNaut;
+- user: `~/.schemanaut/skills/<name>/SKILL.md` by default;
+- project: `<project>/.schemanaut/skills/<name>/SKILL.md`;
+- Session: in-memory overlays persisted with one Session in its SQLite record.
+
+The Runtime constructor's `sessionSkills` value is a default template copied into every newly created Session. `runAgent({ sessionSkills })` overrides that template for one new Session. A restored Session always keeps its persisted overlay; supplying `sessionSkills` together with `session` or `sessionId` is rejected instead of silently replacing it.
+
+Only `name`, `description`, and `scope` are included in the initial model catalog. The Markdown body is loaded when the Agent activates the Skill. Invoke one explicitly with `/order-revenue task text` or `/project:order-revenue task text`.
+
+```ts
+const runtime = new DatabaseAgentRuntime({
+  // Default for new Sessions only.
+  sessionSkills: [
+    {
+      content: `---
+name: temporary-rule
+description: Apply the temporary reporting rule for this Session.
+---
+
+Use UTC boundaries for this task.`,
+    },
+  ],
+});
+
+const run = await runtime.runAgent({
+  message: '/temporary-rule build the report',
+  sessionSkills: [
+    {
+      content: `---
+name: temporary-rule
+description: Apply a different rule only in this new Session.
+---
+
+Use the tenant's local calendar day.`,
+    },
+  ],
+});
+const sharedSkills = await runtime.listAgentSkills();
+const effectiveSessionSkills = await runtime.listAgentSkills({
+  sessionId: run.result.session.id,
+});
+const refreshed = await runtime.refreshSkills();
+console.table(sharedSkills);
+console.table(effectiveSessionSkills);
+console.log(refreshed.changed, refreshed.revision);
+```
+
+`listAgentSkills()` returns only the shared system/user/Project catalog and therefore cannot leak a Session overlay. Pass an explicit, same-Project `sessionId` to return that Session's effective model-safe catalog. `refreshSkills()` reloads only the shared directories; Session overlays remain immutable Session snapshots. `runtime.skills` is the shared registry and exposes `list()`, `get()`, `inspect()`, `load()`, `search()`, `invoke()`, `issues()`, and `conflicts()` for trusted host diagnostics.
+
+In v1, Session overlay import is an SDK capability through constructor options or a new `runAgent()` call. The REST and CLI management surfaces list and refresh Skills but do not import or replace Session overlays.
+
+## 12. MCP
+
+SchemaNaut's MCP client is built on the official Model Context Protocol SDK. It supports:
+
+- stdio;
+- Streamable HTTP;
+- legacy SSE compatibility;
+- tools, resources, resource templates, and prompts;
+- pagination and list-change notifications;
+- cancellation, timeouts, result-size limits, health state, and cleanup.
+
+Configure project servers in `.schemanaut/mcp.json`:
+
+```json
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "catalog",
+      "name": "Internal catalog",
+      "source": "user",
+      "transport": "streamable-http",
+      "url": "https://mcp.example.com/mcp",
+      "enabled": true,
+      "autoStart": true,
+      "headers": {
+        "Authorization": { "ref": "mcp/catalog/authorization" }
+      }
+    }
+  ]
+}
+```
+
+Sensitive environment variables and headers must be references, not plaintext. Resolve them in the host:
+
+```ts
+const runtime = new DatabaseAgentRuntime({
+  projectDirectory: '/srv/acme-data',
+  mcpSecretResolver: async (ref) => {
+    return await secretStore.get(ref);
+  },
+});
+```
+
+`autoStartMcp` defaults to `false`. Configuration discovery never starts a process or opens a remote connection by itself. Start reviewed servers explicitly, call `startConfiguredMcpServers()`, or set `autoStartMcp: true` only in a trusted host. You can manage them through the public Runtime facade:
+
+```ts
+const server = await runtime.upsertMcpServer({
+  id: 'local-tools',
+  name: 'Local tools',
+  transport: 'stdio',
+  command: 'node',
+  args: ['./mcp-server.mjs'],
+  enabled: true,
+  autoStart: false,
+});
+
+const started = await runtime.startMcpServer(server.id);
+console.log(started.tools);
+console.table(await runtime.listMcpServers());
+await runtime.stopMcpServer(server.id);
+await runtime.removeMcpServer(server.id);
+```
+
+`listMcpServers()` returns lifecycle/health summaries and intentionally omits commands, environment variables, headers, and Secret references. `upsertMcpServer()` accepts stdio, Streamable HTTP, or SSE configuration. `startConfiguredMcpServers()` starts enabled servers marked `autoStart`. The lower-level `runtime.mcpConfig` and `runtime.mcp` properties remain available to trusted hosts that need resource, prompt, health, or configuration details.
+
+When dynamic discovery is enabled—the default—the Agent starts with discovery tools and activates matching MCP tools only when needed. This avoids placing every tool Schema in every prompt.
+
+## 13. Deterministic generate-then-execute
+
+Use `generate()` when the application, not the Agent, should control the execution boundary:
 
 ```ts
 const generated = await runtime.generate({
-  question: 'Top ten active customers by paid revenue this month',
-  maxContextChars: 12_000,
+  question: 'Find the ten customers with the highest paid revenue this month.',
 });
 
-console.log({
-  sql: generated.sql,
-  explanation: generated.explanation,
-  assumptions: generated.assumptions,
-  evidence: generated.evidence,
-  safety: generated.safety,
-});
-```
+console.log(generated.sql);
+console.log(generated.safety);
+console.log(generated.evidence);
 
-Only a run with status `awaiting_execution` can be passed to `executeGenerated()`:
-
-```ts
 if (generated.status === 'awaiting_execution') {
   const executed = await runtime.executeGenerated(generated.runId, {
-    limit: 200,
+    limit: 100,
   });
   console.table(executed.execution.rows);
 }
 ```
 
-This shortcut deliberately accepts only one read-only statement. Use `runAgent()` with the appropriate mode for edits or DDL.
+This path only executes a single read-only statement. Use `runAgent()` with the appropriate mode for row changes or DDL.
 
-## 9. Direct LLM APIs
+## 14. Direct model and lower-level database APIs
 
-### Chat
+The same Runtime exposes:
 
-```ts
-const reply = await runtime.llmChat(
-  {
-    messages: [{ role: 'user', content: 'Explain this query plan.' }],
-  },
-  {
-    taskType: 'query-plan-explanation',
-    userId: 'user-42',
-    timeoutMs: 30_000,
-    maxRetries: 1,
-    cache: { enabled: true, ttlMs: 60_000 },
-  },
-);
+- `llmChat()`, `llmStream()`, and `submitLlmBatch()`;
+- `llmModels()`, `discoverLlmModels()`, and `llmMetrics()`;
+- `runtime.database` for connection profiles, resources, query jobs, paged results, cancellation, and transactions;
+- `runtime.resources` for the unified resource graph and state snapshots.
+
+These are integration primitives. Their presence does not mean v1 includes a governance/operations Agent.
+
+See the [API Reference](api-reference.md) for signatures and limits.
+
+## 15. Local REST API
+
+Start the service:
+
+```bash
+npx schemanaut serve --host 127.0.0.1 --port 3721
 ```
 
-### Stream
+Configure model and database:
 
-```ts
-for await (const event of runtime.llmStream({
-  messages: [{ role: 'user', content: 'Analyze the lock graph.' }],
-})) {
-  if (event.type === 'text-delta') process.stdout.write(event.text);
-}
+```bash
+curl -X POST http://127.0.0.1:3721/v1/setup \
+  -H "content-type: application/json" \
+  -d '{
+    "llm": {
+      "protocol": "openai-compatible",
+      "baseUrl": "https://your-endpoint/v1",
+      "apiKey": "...",
+      "model": "your-model"
+    },
+    "database": {
+      "host": "127.0.0.1",
+      "port": 5432,
+      "database": "app",
+      "username": "app_reader",
+      "password": "..."
+    }
+  }'
+
+curl -X POST http://127.0.0.1:3721/v1/schema/index \
+  -H "content-type: application/json" \
+  -d '{ "maxTables": 500 }'
+
+curl -X POST http://127.0.0.1:3721/v1/agent/run \
+  -H "content-type: application/json" \
+  -d '{
+    "userId": "user-42",
+    "mode": "read",
+    "message": "Show paid revenue by day for the last seven days."
+  }'
 ```
 
-### Asynchronous batch
+`POST /v1/agent/run` returns `AiSqlAgentRunView`, not the SDK's full `AiSqlAgentRun`. Its Session contains only user-facing messages and state; tool messages/calls, retrieval internals, Skill instructions, and evaluation data are not exposed.
 
-```ts
-const job = runtime.submitLlmBatch(
-  [
-    { messages: [{ role: 'user', content: 'Summarize query A' }] },
-    { messages: [{ role: 'user', content: 'Summarize query B' }] },
-  ],
-  { concurrency: 2 },
-);
+For live progress, use the semantic SSE endpoint:
 
-const current = runtime.getLlmJob(job.id);
-runtime.cancelLlmJob(job.id);
+```bash
+curl -N -X POST http://127.0.0.1:3721/v1/agent/run/stream \
+  -H "content-type: application/json" \
+  -d '{
+    "userId": "user-42",
+    "mode": "read",
+    "message": "Show paid revenue by day for the last seven days."
+  }'
 ```
 
-Use `llmModels()`, `discoverLlmModels()`, and `llmMetrics()` for the model catalog and call metrics.
+Each progress frame uses `event: <AgentUserEvent.type>` and a JSON `data:` payload. Typical event names include `plan-updated`, `sql-prepared`, `sql-executed`, `correcting`, `approval-required`, and `completed`. A successful stream ends with `event: result` whose data is `AiSqlAgentRunView`; failure ends with `event: error` and `{ "error": { "code", "message", "retryable" } }`. Disconnecting aborts the active run.
 
-## 10. Unified database runtime
+Agent management endpoints:
 
-`runtime.database` is the connector-neutral API for databases, warehouses, and clusters. The current package registers the PostgreSQL TCP connector.
+| Area      | Endpoints                                                                                                                                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sessions  | `GET /v1/agent/sessions`, `GET/DELETE /v1/agent/sessions/:id`, `POST /v1/agent/sessions/:id/steer`, `POST /v1/agent/sessions/:id/compact`, `GET /v1/agent/sessions/:id/context-checkpoints` |
+| Skills    | `GET /v1/agent/skills`, `POST /v1/agent/skills/refresh`                                                                                                                                     |
+| Approvals | `GET /v1/agent/approvals`, `POST /v1/agent/approvals/:id/resolve` with `{ approved, resolvedBy?, reason? }`                                                                                 |
+| MCP       | `GET/POST /v1/agent/mcp`, `POST /v1/agent/mcp/:id/start`, `POST /v1/agent/mcp/:id/stop`, `DELETE /v1/agent/mcp/:id`                                                                         |
+
+When the stream emits `approval-required`, a UI can list the pending request and resolve it while the stream remains open. This works with the Runtime's default broker; a server wired to a custom `approvalProvider` owns approval delivery itself.
+
+The service is intentionally loopback-only. It validates the HTTP `Host`, requires browser origins to be same-origin, and requires JSON content types for body-bearing mutation requests. Process-based stdio MCP management is disabled through REST unless the trusted host explicitly enables `allowProcessMcpManagement`; remote HTTP/SSE MCP remains available subject to normal MCP validation. SchemaNaut deliberately provides no user-account, registration, or login system; the embedding host application or gateway owns identity authentication and API access control. SchemaNaut also does not provide a persistent secret vault.
+
+An embedding application can start and close the same server through the public server subpath:
 
 ```ts
-const now = new Date().toISOString();
+import { DatabaseAgentRuntime } from '@nwlworkshop/schemanaut';
+import { startDatabaseAgentServer } from '@nwlworkshop/schemanaut/server';
 
-runtime.database.createProfile({
-  id: 'analytics-readonly',
-  name: 'Analytics PostgreSQL',
-  connectorId: 'postgres-native',
-  engine: 'postgres',
-  endpoints: [{
-    transport: 'tcp',
-    host: process.env.DB_HOST ?? '127.0.0.1',
-    port: Number(process.env.DB_PORT ?? 5432),
-    database: process.env.DB_NAME!,
-  }],
-  principal: process.env.DB_USER!,
-  purpose: 'read-only',
-  readOnly: true,
-  createdAt: now,
-  updatedAt: now,
+const runtime = new DatabaseAgentRuntime({
+  tenantId: 'acme',
+  projectDirectory: '/srv/acme-data',
 });
 
-await runtime.database.connect('analytics-readonly', {
-  username: process.env.DB_USER!,
-  password: process.env.DB_PASSWORD,
+const started = await startDatabaseAgentServer({
+  runtime,
+  host: '127.0.0.1',
+  port: 3721,
+  // Keep false unless this is a trusted local host that intentionally
+  // permits REST clients to launch stdio MCP child processes.
+  allowProcessMcpManagement: false,
 });
 
-await runtime.database.discoverAll('analytics-readonly');
-
-const job = await runtime.database.submit({
-  profileId: 'analytics-readonly',
-  sql: 'select current_database() as database_name',
-  executionMode: 'sync',
-  timeoutMs: 5_000,
-  rowLimit: 100,
-});
-
-if (job.result) {
-  const page = await runtime.database.readResult(job.result.id, {
-    limit: 100,
-  });
-  console.table(page.rows);
-}
-```
-
-The same runtime exposes capability resolution, health, query cancellation, sticky transactions and savepoints, observations, atomic operations, audit events, metrics, and resource snapshots.
-
-## 11. Resources and state
-
-`runtime.resources` and `runtime.database.resources` are the same registry.
-
-```ts
-const tables = runtime.resources.query({
-  kinds: ['table'],
-  engine: 'postgres',
-  limit: 100,
-});
-
-for (const table of tables.items) {
-  const state = runtime.resources.state(table.id);
-  const relations = runtime.resources.relationsFor(table.id);
-  console.log(table.canonicalName, state, relations);
-}
-```
-
-The registry supports resources, relations, observations, graph traversal, derived facts, lifecycle events, snapshots, restore, and controlled identity binding.
-
-## 12. Cancellation and errors
-
-All long-running high-level Agent, generation, and compaction calls accept an `AbortSignal`.
-
-```ts
-const controller = new AbortController();
-const pending = runtime.runAgent({
-  message: 'Analyze all query patterns.',
-  mode: 'read',
-  signal: controller.signal,
-});
-
-controller.abort();
-await pending;
-```
-
-Catch `DatabaseAgentError` for the high-level runtime:
-
-```ts
-import { DatabaseAgentError } from '@nwlworkshop/schemanaut';
+console.log(started.url);
 
 try {
-  await runtime.generate({ question: '' });
-} catch (error) {
-  if (error instanceof DatabaseAgentError) {
-    console.error(error.code, error.retryable, error.message, error.detail);
-  }
+  // The local REST service is available here.
+} finally {
+  await started.close();
 }
 ```
 
-Database-runtime failures use `DatabaseAccessRuntimeError`; provider failures use `LlmProviderError`.
+`startDatabaseAgentServer()` rejects non-loopback hosts. `started.close()` stops accepting requests, cancels active request work, and waits for Runtime cleanup. Set `allowProcessMcpManagement: true` only in a trusted local embedding host: a configured stdio MCP command runs with that host process's operating-system permissions. It is not a switch for an untrusted browser, remote client, or shared gateway.
 
-## 13. Secret and deployment rules
+## 16. Interactive CLI
 
-- Read credentials from environment variables or your secret manager.
-- Do not serialize credentials into connection profiles, resources, session messages, audit events, or logs.
-- Keep the current local server on loopback. It is not a hardened multi-tenant gateway.
-- Pair Agent modes with least-privilege database accounts.
-- Inspect `toolExecutions`, database audit events, and metrics in applications that execute changes.
-- Call `close()` before process shutdown to release database and SQLite handles.
+```bash
+npx schemanaut init ./acme-data
+npx schemanaut skills -C ./acme-data
+npx schemanaut sessions -C ./acme-data
+npx schemanaut chat -C ./acme-data
+```
 
-## 14. Next references
+`chat` reads:
 
-- [Complete SDK API Reference](api-reference.md)
-- [REST API overview](../../README.md#public-surfaces)
-- [AI SQL design](../ai-sql/README.md)
-- [Database access engineering design](../foundation/02-database-access.md)
-- [Public contracts](../foundation/04-public-types-and-contracts.md)
+```text
+SCHEMANAUT_LLM_BASE_URL
+SCHEMANAUT_LLM_API_KEY          # optional for local Ollama
+SCHEMANAUT_LLM_MODEL
+SCHEMANAUT_DATABASE_URL
+SCHEMANAUT_MAX_SCHEMA_TABLES    # optional, default 500
+SCHEMANAUT_STATE_DATABASE_PATH  # optional
+```
+
+The PostgreSQL URL accepts `sslmode=disable|require|verify-ca|verify-full`. `require` encrypts without certificate verification, `verify-ca` validates the certificate chain, and `verify-full` additionally validates the hostname. PostgreSQL `prefer` fallback is intentionally rejected because the Node runtime cannot guarantee its downgrade semantics.
+
+Inside chat:
+
+```text
+/mode read|edit|full
+/new
+/resume <session-id>
+/sessions
+/skills
+/<skill> [task]
+/compact [focus]
+/mcp [list|start <id>|stop <id>]
+/exit
+```
+
+Ordinary input during an active run steers the current task. `Ctrl+C` cancels the run while preserving Session state.
+
+## 17. Cancellation, errors, and secrets
+
+Pass an `AbortSignal` to `runAgent()`, `generate()`, `compactAgentSession()`, direct model calls, and supported lower-level operations.
+
+SDK errors use `DatabaseAgentError` with:
+
+```ts
+{
+  code: string;
+  message: string;
+  retryable: boolean;
+  detail?: string;
+}
+```
+
+Rules for a host application:
+
+- keep model keys and database passwords outside Project files, Skills, Session messages, SQL, logs, and source control;
+- resolve MCP secret references through an external secret store;
+- use a least-privilege database account;
+- use either the default approval broker or a custom `approvalProvider` wherever users or organizational policy must approve actions;
+- treat `full` mode as host command-execution authority, not only database DDL authority;
+- leave `enableShellTool` and REST `allowProcessMcpManagement` disabled unless the deployment explicitly needs and trusts them;
+- treat user-provided Skills, MCP servers, and project instructions as executable configuration that requires trust review.
+
+## 18. Further reading
+
+- [SDK API Reference](api-reference.md)
+- [Agent and Extension Runtime](../agent/README.md)
+- [AI SQL Engineering Documentation](../ai-sql/README.md)
+- [Product Functional Design](../product-functional-overview.md)
+- [Security Policy](../../SECURITY.md)

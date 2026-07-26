@@ -25,10 +25,14 @@ export class PermissionManager {
     return (await this.checkDetailed(request)).decision;
   }
 
-  async checkDetailed(request: PermissionRequest): Promise<PermissionCheckResult> {
+  async checkDetailed(
+    request: PermissionRequest,
+    onApprovalRequired?: (request: PermissionRequest) => void | Promise<void>,
+  ): Promise<PermissionCheckResult> {
     const automatic = decideAutomaticPermission(request.mode, request.tool);
     if (automatic !== 'ask') return { decision: automatic, source: 'automatic' };
     if (!this.approvalProvider) return { decision: 'ask', source: 'missing-approval-provider' };
+    await onApprovalRequired?.(request);
     const approval = normalizeApprovalProviderResult(await this.approvalProvider(request));
     return {
       decision: approval.approved ? 'allow' : 'deny',
@@ -60,24 +64,17 @@ export function decideAutomaticPermission(
     requiredPermission?: AgentAccessMode;
   },
 ): ToolPermissionDecision {
-  if (mode === 'read' || mode === 'edit' || mode === 'full') {
-    const required = tool.requiredPermission ?? inferRequiredPermission(tool);
-    if (accessRank(mode) >= accessRank(required)) return 'allow';
-    return 'ask';
-  }
-  if (mode === 'readonly' && !tool.readonly) return 'deny';
-  if (mode === 'readonly' && tool.readonly) return 'allow';
-  if (tool.dangerLevel === 'critical') return mode === 'full-auto' ? 'ask' : 'deny';
-  if (tool.dangerLevel === 'safe') return 'allow';
-  if (mode === 'full-auto') return 'allow';
-  if (mode === 'auto' && tool.dangerLevel === 'medium') return 'ask';
+  const required = requiredPermissionForTool(tool);
+  if (accessRank(mode) >= accessRank(required)) return 'allow';
   return 'ask';
 }
 
-function inferRequiredPermission(tool: {
+export function requiredPermissionForTool(tool: {
   dangerLevel: 'safe' | 'medium' | 'high' | 'critical';
   readonly?: boolean;
+  requiredPermission?: AgentAccessMode;
 }): AgentAccessMode {
+  if (tool.requiredPermission !== undefined) return tool.requiredPermission;
   if (tool.readonly || tool.dangerLevel === 'safe') return 'read';
   if (tool.dangerLevel === 'medium') return 'edit';
   return 'full';
@@ -86,5 +83,6 @@ function inferRequiredPermission(tool: {
 function accessRank(mode: AgentAccessMode): number {
   if (mode === 'read') return 0;
   if (mode === 'edit') return 1;
-  return 2;
+  if (mode === 'full') return 2;
+  throw new Error(`Unsupported Agent access mode: ${String(mode)}.`);
 }

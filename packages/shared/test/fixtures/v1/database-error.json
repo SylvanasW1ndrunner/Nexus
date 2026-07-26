@@ -1,5 +1,5 @@
 {
-  "contract": "dbagent.database.error",
+  "contract": "schemanaut.database.error",
   "version": "1.0",
   "payload": {
     "code": "QUERY_TIMEOUT",

@@ -53,7 +53,9 @@ describe('classifyPostgresRuntimeError', () => {
   });
 
   it('keeps SQL and catalog errors as query failures', () => {
-    expect(classifyPostgresRuntimeError(pgError('42601', 'syntax error at or near "fromm"'))).toMatchObject({
+    expect(
+      classifyPostgresRuntimeError(pgError('42601', 'syntax error at or near "fromm"')),
+    ).toMatchObject({
       code: 'QUERY_FAILED',
       detail: 'syntax error at or near "fromm"',
       retryable: false,
@@ -61,9 +63,22 @@ describe('classifyPostgresRuntimeError', () => {
   });
 
   it('classifies user-cancelled PostgreSQL queries separately from failures', () => {
-    expect(classifyPostgresRuntimeError(pgError('57014', 'canceling statement due to user request'))).toMatchObject({
+    expect(
+      classifyPostgresRuntimeError(pgError('57014', 'canceling statement due to user request')),
+    ).toMatchObject({
       code: 'QUERY_CANCELLED',
       detail: 'canceling statement due to user request',
+      retryable: false,
+    });
+  });
+
+  it('classifies PostgreSQL read-only transaction violations', () => {
+    expect(
+      classifyPostgresRuntimeError(
+        pgError('25006', 'cannot execute INSERT in a read-only transaction'),
+      ),
+    ).toMatchObject({
+      code: 'READ_ONLY_VIOLATION',
       retryable: false,
     });
   });

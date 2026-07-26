@@ -1,13 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  ResourceConflictError,
-  ResourceRegistry,
-} from '../src/index.js';
-import {
-  testRelation,
-  testResource,
-  testSource,
-} from './test-helpers.js';
+import { ResourceConflictError, ResourceRegistry } from '../src/index.js';
+import { testObservation, testRelation, testResource, testSource } from './test-helpers.js';
 
 describe('resource graph, lifecycle and scope isolation', () => {
   it('rejects direct and batched contains cycles without partial writes', () => {
@@ -20,19 +13,14 @@ describe('resource graph, lifecycle and scope isolation', () => {
     registry.upsertRelation(testRelation(schema, table));
 
     expect(
-      captureResourceFailure(() =>
-        registry.upsertRelation(testRelation(table, database)),
-      ).code,
+      captureResourceFailure(() => registry.upsertRelation(testRelation(table, database))).code,
     ).toBe('RELATION_CYCLE');
 
     const view = testResource('db.public.orders_view', 'view');
     expect(() =>
       registry.applyDiscoveryPage({
         resources: [view],
-        relations: [
-          testRelation(table, view),
-          testRelation(view, database),
-        ],
+        relations: [testRelation(table, view), testRelation(view, database)],
         complete: true,
       }),
     ).toThrowError(ResourceConflictError);
@@ -41,17 +29,11 @@ describe('resource graph, lifecycle and scope isolation', () => {
 
   it('traverses cyclic dependency graphs once and enforces result limits', () => {
     const registry = new ResourceRegistry();
-    const resources = Array.from({ length: 6 }, (_, index) =>
-      testResource(`table-${index}`),
-    );
+    const resources = Array.from({ length: 6 }, (_, index) => testResource(`table-${index}`));
     resources.forEach((resource) => registry.upsertResource(resource));
     for (let index = 0; index < resources.length; index += 1) {
       registry.upsertRelation(
-        testRelation(
-          resources[index]!,
-          resources[(index + 1) % resources.length]!,
-          'depends_on',
-        ),
+        testRelation(resources[index]!, resources[(index + 1) % resources.length]!, 'depends_on'),
       );
     }
 
@@ -98,9 +80,9 @@ describe('resource graph, lifecycle and scope isolation', () => {
     registry.upsertResource(teamB);
     registry.upsertRelation(testRelation(teamA, teamB, 'depends_on'));
 
-    expect(
-      registry.query({ scope: { tenantId: 'team-a' } }).items.map((item) => item.id),
-    ).toEqual([teamA.id]);
+    expect(registry.query({ scope: { tenantId: 'team-a' } }).items.map((item) => item.id)).toEqual([
+      teamA.id,
+    ]);
     const graph = registry.traverse({
       startResourceIds: [teamA.id],
       direction: 'both',
@@ -110,6 +92,90 @@ describe('resource graph, lifecycle and scope isolation', () => {
     });
     expect(graph.nodes.map((item) => item.resource.id)).toEqual([teamA.id]);
     expect(graph.relations).toEqual([]);
+  });
+
+  it('keeps direct resource, state, observation and event reads inside an explicit scoped view', () => {
+    const registry = new ResourceRegistry({
+      now: () => '2026-07-23T00:05:00.000Z',
+    });
+    const teamA = testResource('team-a.table', 'table', {
+      scope: {
+        tenantId: 'team-a',
+        projectId: 'analytics',
+        environment: 'production',
+      },
+    });
+    const teamB = testResource('team-b.table', 'table', {
+      scope: {
+        tenantId: 'team-b',
+        projectId: 'analytics',
+        environment: 'production',
+      },
+    });
+    registry.upsertResource(teamA);
+    registry.upsertResource(teamB);
+    registry.addObservation(testObservation(teamA.id, 'team-a-health'));
+    registry.addObservation(testObservation(teamB.id, 'team-b-health'));
+
+    const resources = registry.scoped({
+      tenantId: 'team-a',
+      projectId: 'analytics',
+      environment: 'production',
+    });
+
+    expect(resources.getResource(teamA.id)?.id).toBe(teamA.id);
+    expect(resources.getResource(teamB.id)).toBeUndefined();
+    expect(resources.state(teamA.id)?.resourceId).toBe(teamA.id);
+    expect(resources.state(teamB.id)).toBeUndefined();
+    expect(
+      resources
+        .observationsFor(teamA.id, {
+          includeExpired: true,
+          at: '2026-07-23T00:05:00.000Z',
+        })
+        .map((item) => item.id),
+    ).toEqual(['team-a-health']);
+    expect(
+      resources.observationsFor(teamB.id, {
+        includeExpired: true,
+        at: '2026-07-23T00:05:00.000Z',
+      }),
+    ).toEqual([]);
+    expect(resources.events({ limit: 100 }).items.length).toBeGreaterThan(0);
+    expect(
+      resources
+        .events({ limit: 100 })
+        .items.some(
+          (event) => event.resourceId === teamB.id || event.relatedResourceId === teamB.id,
+        ),
+    ).toBe(false);
+    expect(resources.events({ resourceId: teamB.id, limit: 100 }).items).toEqual([]);
+  });
+
+  it('rejects reuse of a resource ID across scopes without merging tenant data', () => {
+    const registry = new ResourceRegistry();
+    const tenantA = testResource('orders', 'table', {
+      id: 'shared-resource-id',
+      scope: { tenantId: 'tenant-a', projectId: 'analytics' },
+      attributes: { owner: 'tenant-a' },
+    });
+    const tenantB = testResource('orders', 'table', {
+      id: 'shared-resource-id',
+      scope: { tenantId: 'tenant-b', projectId: 'analytics' },
+      attributes: { tenantMarker: 'tenant-b-only' },
+    });
+    registry.upsertResource(tenantA);
+
+    expect(captureResourceFailure(() => registry.upsertResource(tenantB)).message).toContain(
+      'scope',
+    );
+    expect(registry.scoped(tenantA.scope!).getResource(tenantA.id)).toMatchObject({
+      attributes: { owner: 'tenant-a' },
+    });
+    expect(registry.scoped(tenantA.scope!).getResource(tenantA.id)?.attributes).not.toHaveProperty(
+      'tenantMarker',
+    );
+    expect(registry.scoped(tenantB.scope!).getResource(tenantB.id)).toBeUndefined();
   });
 
   it('hides relations to deleted resources and restores them explicitly', () => {
@@ -139,9 +205,7 @@ describe('resource graph, lifecycle and scope isolation', () => {
 
   it('uses identity cursors that remain stable when an earlier ID is inserted', () => {
     const registry = new ResourceRegistry();
-    const items = ['b', 'c', 'd'].map((id) =>
-      testResource(id, 'table', { id: `resource-${id}` }),
-    );
+    const items = ['b', 'c', 'd'].map((id) => testResource(id, 'table', { id: `resource-${id}` }));
     items.forEach((item) => registry.upsertResource(item));
     const first = registry.query({ limit: 2 });
     registry.upsertResource(testResource('a', 'table', { id: 'resource-a' }));
@@ -150,9 +214,7 @@ describe('resource graph, lifecycle and scope isolation', () => {
     expect(first.items.map((item) => item.id)).toEqual(['resource-b', 'resource-c']);
     expect(second.items.map((item) => item.id)).toEqual(['resource-d']);
     expect(
-      captureResourceFailure(() =>
-        registry.query({ cursor: 'not-a-canonical-cursor' }),
-      ).code,
+      captureResourceFailure(() => registry.query({ cursor: 'not-a-canonical-cursor' })).code,
     ).toBe('INVALID_CURSOR');
   });
 });

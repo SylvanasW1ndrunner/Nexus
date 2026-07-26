@@ -26,6 +26,7 @@ import type {
   ResultHandle,
   SavedConnection,
 } from '@dbagent/shared';
+import { stringifyPublicJson } from '@dbagent/shared';
 import { CapabilityResolver, DATABASE_CAPABILITIES } from './capability-resolver.js';
 import type {
   ConnectorContext,
@@ -175,7 +176,9 @@ export class PostgresConnector implements DatabaseConnector {
     if (!connected) return;
     const result = await this.#driver.disconnect(connected.connection.id);
     if (!result.ok) {
-      throw new PostgresConnectorError(toDatabaseError(result.error, 'connect', context.profile.id));
+      throw new PostgresConnectorError(
+        toDatabaseError(result.error, 'connect', context.profile.id),
+      );
     }
     this.#connections.delete(context.profile.id);
   }
@@ -222,62 +225,64 @@ export class PostgresConnector implements DatabaseConnector {
   capabilities(context: ConnectorContext): Promise<CapabilityProfile> {
     const connected = this.#connections.get(context.profile.id);
     const base = this.#baseCapabilities(context.profile);
-    return Promise.resolve(this.#capabilityResolver.resolve({
-      connectorId: this.manifest.id,
-      engine: this.manifest.engine,
-      ...(connected ? { engineVersion: connected.serverInfo.engineVersion } : {}),
-      connectionProfileId: context.profile.id,
-      layers: [
-        {
-          source: `${this.manifest.id}:manifest`,
-          capabilities: stripRuntimeCapabilityFields(base.capabilities),
-        },
-        {
-          source: `${this.manifest.id}:profile`,
-          capabilities: {
-            [DATABASE_CAPABILITIES.SQL_WRITE]: capabilityInput(
-              DATABASE_CAPABILITIES.SQL_WRITE,
-              context.profile.readOnly ? 'unsupported' : 'conditional',
-              context.profile.readOnly
-                ? 'Connection profile is read-only'
-                : 'PostgreSQL supports writes when the current role and safety policy allow them',
-            ),
-            [DATABASE_CAPABILITIES.SQL_DDL]: capabilityInput(
-              DATABASE_CAPABILITIES.SQL_DDL,
-              context.profile.readOnly ? 'unsupported' : 'conditional',
-              context.profile.readOnly
-                ? 'Connection profile is read-only'
-                : 'DDL requires role permission, explicit confirmation and safety approval',
-            ),
-            [DATABASE_CAPABILITIES.OPERATE_TERMINATE_SESSION]: capabilityInput(
-              DATABASE_CAPABILITIES.OPERATE_TERMINATE_SESSION,
-              context.profile.purpose === 'admin' ? 'conditional' : 'unsupported',
-              context.profile.purpose === 'admin'
-                ? 'Requires PostgreSQL role permission and operation approval'
-                : 'An admin-purpose profile is required',
-              context.profile.purpose === 'admin'
-                ? [{ name: 'approved', value: true, message: 'Operation approval is required' }]
-                : undefined,
-            ),
-            [DATABASE_CAPABILITIES.OPERATE_VACUUM]: capabilityInput(
-              DATABASE_CAPABILITIES.OPERATE_VACUUM,
-              context.profile.purpose === 'admin' && !context.profile.readOnly
-                ? 'conditional'
-                : 'unsupported',
-              'Requires an admin, writable profile and PostgreSQL table permission',
-              context.profile.purpose === 'admin' && !context.profile.readOnly
-                ? [{ name: 'approved', value: true, message: 'Operation approval is required' }]
-                : undefined,
-            ),
+    return Promise.resolve(
+      this.#capabilityResolver.resolve({
+        connectorId: this.manifest.id,
+        engine: this.manifest.engine,
+        ...(connected ? { engineVersion: connected.serverInfo.engineVersion } : {}),
+        connectionProfileId: context.profile.id,
+        layers: [
+          {
+            source: `${this.manifest.id}:manifest`,
+            capabilities: stripRuntimeCapabilityFields(base.capabilities),
           },
+          {
+            source: `${this.manifest.id}:profile`,
+            capabilities: {
+              [DATABASE_CAPABILITIES.SQL_WRITE]: capabilityInput(
+                DATABASE_CAPABILITIES.SQL_WRITE,
+                context.profile.readOnly ? 'unsupported' : 'conditional',
+                context.profile.readOnly
+                  ? 'Connection profile is read-only'
+                  : 'PostgreSQL supports writes when the current role and safety policy allow them',
+              ),
+              [DATABASE_CAPABILITIES.SQL_DDL]: capabilityInput(
+                DATABASE_CAPABILITIES.SQL_DDL,
+                context.profile.readOnly ? 'unsupported' : 'conditional',
+                context.profile.readOnly
+                  ? 'Connection profile is read-only'
+                  : 'DDL requires role permission, explicit confirmation and safety approval',
+              ),
+              [DATABASE_CAPABILITIES.OPERATE_TERMINATE_SESSION]: capabilityInput(
+                DATABASE_CAPABILITIES.OPERATE_TERMINATE_SESSION,
+                context.profile.purpose === 'admin' ? 'conditional' : 'unsupported',
+                context.profile.purpose === 'admin'
+                  ? 'Requires PostgreSQL role permission and operation approval'
+                  : 'An admin-purpose profile is required',
+                context.profile.purpose === 'admin'
+                  ? [{ name: 'approved', value: true, message: 'Operation approval is required' }]
+                  : undefined,
+              ),
+              [DATABASE_CAPABILITIES.OPERATE_VACUUM]: capabilityInput(
+                DATABASE_CAPABILITIES.OPERATE_VACUUM,
+                context.profile.purpose === 'admin' && !context.profile.readOnly
+                  ? 'conditional'
+                  : 'unsupported',
+                'Requires an admin, writable profile and PostgreSQL table permission',
+                context.profile.purpose === 'admin' && !context.profile.readOnly
+                  ? [{ name: 'approved', value: true, message: 'Operation approval is required' }]
+                  : undefined,
+              ),
+            },
+          },
+        ],
+        context: {
+          connected: connected !== undefined,
+          purpose: context.profile.purpose,
+          readOnly: context.profile.readOnly,
         },
-      ],
-      context: {
-        connected: connected !== undefined,
-        purpose: context.profile.purpose,
-        readOnly: context.profile.readOnly,
-      },
-    }));
+      }),
+    );
   }
 
   async discover(
@@ -322,19 +327,10 @@ export class PostgresConnector implements DatabaseConnector {
           outcome: 'unchanged',
         });
       }
-      relations.push(
-        createRelation('contains', parent.id, resource.id, source, observedAt),
-      );
+      relations.push(createRelation('contains', parent.id, resource.id, source, observedAt));
       if (entry.kind === 'constraint') {
         relations.push(
-          ...this.#foreignKeyRelations(
-            connected,
-            entry,
-            resource,
-            parent.id,
-            source,
-            observedAt,
-          ),
+          ...this.#foreignKeyRelations(connected, entry, resource, parent.id, source, observedAt),
         );
       }
     }
@@ -402,7 +398,9 @@ export class PostgresConnector implements DatabaseConnector {
         connected.connection,
       );
       if (!cancelled.ok) {
-        throw new PostgresConnectorError(toDatabaseError(cancelled.error, 'cancel', context.profile.id, jobId));
+        throw new PostgresConnectorError(
+          toDatabaseError(cancelled.error, 'cancel', context.profile.id, jobId),
+        );
       }
     }
     return structuredClone(internal.job);
@@ -416,7 +414,11 @@ export class PostgresConnector implements DatabaseConnector {
     const jobId = this.#resultJobs.get(handleId);
     const internal = jobId ? this.#jobs.get(jobId) : undefined;
     if (!internal?.job.result || !internal.result) {
-      throw connectorNotFound('RESULT_NOT_FOUND', `Result handle was not found: ${handleId}`, 'result');
+      throw connectorNotFound(
+        'RESULT_NOT_FOUND',
+        `Result handle was not found: ${handleId}`,
+        'result',
+      );
     }
     if (
       internal.job.result.expiresAt &&
@@ -438,7 +440,7 @@ export class PostgresConnector implements DatabaseConnector {
       rows: rows.map(cloneDatabaseRow),
       rowOffset: offset,
       complete,
-      byteCount: Buffer.byteLength(JSON.stringify(rows)),
+      byteCount: Buffer.byteLength(stringifyPublicJson(rows)),
       ...(!complete ? { nextCursor: encodeOffset(nextOffset) } : {}),
     });
   }
@@ -528,7 +530,9 @@ export class PostgresConnector implements DatabaseConnector {
     const connected = this.#requireConnection(context.profile.id);
     const snapshot = await this.#driver.runtimeSnapshot(connected.connection.id);
     if (!snapshot.ok) {
-      throw new PostgresConnectorError(toDatabaseError(snapshot.error, 'observe', context.profile.id));
+      throw new PostgresConnectorError(
+        toDatabaseError(snapshot.error, 'observe', context.profile.id),
+      );
     }
     const databaseNativeId = connected.serverInfo.database;
     const databaseResource =
@@ -596,8 +600,7 @@ export class PostgresConnector implements DatabaseConnector {
       createResourceObservation({
         resourceId: databaseResource,
         category: 'replication',
-        status:
-          (snapshot.data.maximumReplayLagSeconds ?? 0) > 30 ? 'degraded' : 'healthy',
+        status: (snapshot.data.maximumReplayLagSeconds ?? 0) > 30 ? 'degraded' : 'healthy',
         metrics: {
           clients: snapshot.data.replicationClients,
           maximumReplayLagSeconds: snapshot.data.maximumReplayLagSeconds ?? 0,
@@ -751,19 +754,46 @@ export class PostgresConnector implements DatabaseConnector {
     const nodeNative = `${platformNative}/node/${connected.serverInfo.serverAddress ?? endpoint.host}:${connected.serverInfo.serverPort ?? endpoint.port}`;
     const databaseNative = connected.serverInfo.database;
     const resources: ResourceDescriptor[] = [
-      this.#makeResource(profile, connected, 'platform', platformNative, platformNative, 'PostgreSQL', source, {
-        host: endpoint.host,
-        port: endpoint.port,
-      }),
-      this.#makeResource(profile, connected, 'cluster', clusterNative, clusterNative, profile.name, source, {
-        engineVersion: connected.serverInfo.engineVersion,
-        inRecovery: connected.serverInfo.inRecovery,
-      }),
-      this.#makeResource(profile, connected, 'node', nodeNative, nodeNative, endpoint.host, source, {
-        host: connected.serverInfo.serverAddress ?? endpoint.host,
-        port: connected.serverInfo.serverPort ?? endpoint.port,
-        role: connected.serverInfo.inRecovery ? 'replica' : 'primary',
-      }),
+      this.#makeResource(
+        profile,
+        connected,
+        'platform',
+        platformNative,
+        platformNative,
+        'PostgreSQL',
+        source,
+        {
+          host: endpoint.host,
+          port: endpoint.port,
+        },
+      ),
+      this.#makeResource(
+        profile,
+        connected,
+        'cluster',
+        clusterNative,
+        clusterNative,
+        profile.name,
+        source,
+        {
+          engineVersion: connected.serverInfo.engineVersion,
+          inRecovery: connected.serverInfo.inRecovery,
+        },
+      ),
+      this.#makeResource(
+        profile,
+        connected,
+        'node',
+        nodeNative,
+        nodeNative,
+        endpoint.host,
+        source,
+        {
+          host: connected.serverInfo.serverAddress ?? endpoint.host,
+          port: connected.serverInfo.serverPort ?? endpoint.port,
+          role: connected.serverInfo.inRecovery ? 'replica' : 'primary',
+        },
+      ),
       this.#makeResource(
         profile,
         connected,
@@ -836,13 +866,7 @@ export class PostgresConnector implements DatabaseConnector {
       const targetResourceId = targetColumn?.id ?? referencedTable.id;
       if (sourceColumn.id !== targetResourceId) {
         relations.push(
-          createRelation(
-            'references',
-            sourceColumn.id,
-            targetResourceId,
-            source,
-            observedAt,
-          ),
+          createRelation('references', sourceColumn.id, targetResourceId, source, observedAt),
         );
       }
     }
@@ -869,6 +893,7 @@ export class PostgresConnector implements DatabaseConnector {
       displayName,
       engine: 'postgres',
       engineVersion: connected.serverInfo.engineVersion,
+      ...(profile.scope === undefined ? {} : { scope: structuredClone(profile.scope) }),
       attributes,
       version: 1,
       firstSeenAt: source.observedAt,
@@ -879,10 +904,20 @@ export class PostgresConnector implements DatabaseConnector {
 
   #resourceId(profile: ConnectionProfile, kind: string, nativeId: string): string {
     const endpoint = profile.endpoints[0];
-    const namespace =
+    const endpointNamespace =
       endpoint?.transport === 'tcp'
         ? `postgres://${endpoint.host}:${endpoint.port}`
         : `postgres:${profile.id}`;
+    const namespace =
+      profile.scope === undefined
+        ? endpointNamespace
+        : `${stringifyPublicJson({
+            tenantId: profile.scope.tenantId ?? null,
+            organizationId: profile.scope.organizationId ?? null,
+            projectId: profile.scope.projectId ?? null,
+            environment: profile.scope.environment ?? null,
+            region: profile.scope.region ?? null,
+          })}\0${endpointNamespace}`;
     return createStableResourceId({ sourceNamespace: namespace, kind, nativeId });
   }
 
@@ -929,9 +964,15 @@ export class PostgresConnector implements DatabaseConnector {
       ...(submission.confirmed !== undefined ? { confirmed: submission.confirmed } : {}),
       ...(submission.transactionMode ? { transactionMode: submission.transactionMode } : {}),
     };
+    const enforceReadOnly = submission.authorization?.permissionMode === 'read';
+    const executionConnection = enforceReadOnly
+      ? { ...connected.connection, readOnly: true }
+      : connected.connection;
     const result = submission.transactionId
-      ? await this.#driver.executeInTransaction(submission.transactionId, request, observer)
-      : await this.#driver.execute(request, connected.connection, observer);
+      ? await this.#driver.executeInTransaction(submission.transactionId, request, observer, {
+          enforceReadOnly,
+        })
+      : await this.#driver.execute(request, executionConnection, observer);
     const completedAt = new Date().toISOString();
     if (!result.ok) {
       const cancelled = result.error.code === 'QUERY_CANCELLED' || internal.cancelRequested;
@@ -956,7 +997,7 @@ export class PostgresConnector implements DatabaseConnector {
       format: 'rows',
       columns: result.data.columns,
       rowCount: result.data.returnedRowCount ?? result.data.rows.length,
-      byteCount: Buffer.byteLength(JSON.stringify(result.data.rows)),
+      byteCount: Buffer.byteLength(stringifyPublicJson(result.data.rows)),
       expiresAt: new Date(Date.now() + RESULT_TTL_MS).toISOString(),
       ...(result.data.hasMore !== undefined ? { hasMore: result.data.hasMore } : {}),
       ...(result.data.truncated !== undefined ? { truncated: result.data.truncated } : {}),
@@ -986,7 +1027,12 @@ export class PostgresConnector implements DatabaseConnector {
 
   #requireJob(jobId: string): InternalQueryJob {
     const job = this.#jobs.get(jobId);
-    if (!job) throw connectorNotFound('QUERY_JOB_NOT_FOUND', `Query job was not found: ${jobId}`, 'execute');
+    if (!job)
+      throw connectorNotFound(
+        'QUERY_JOB_NOT_FOUND',
+        `Query job was not found: ${jobId}`,
+        'execute',
+      );
     return job;
   }
 }
@@ -1034,15 +1080,27 @@ function createPostgresManifest(): ConnectorManifest {
     ].map((key) => [key, descriptor(key, 'supported')]),
   );
   for (const [key, reason] of [
-    [DATABASE_CAPABILITIES.SQL_WRITE, 'Depends on profile mode, role permission and safety approval'],
+    [
+      DATABASE_CAPABILITIES.SQL_WRITE,
+      'Depends on profile mode, role permission and safety approval',
+    ],
     [DATABASE_CAPABILITIES.SQL_DDL, 'Depends on profile mode, role permission and safety approval'],
-    [DATABASE_CAPABILITIES.OPERATE_TERMINATE_SESSION, 'Requires an admin profile and PostgreSQL permission'],
-    [DATABASE_CAPABILITIES.OPERATE_VACUUM, 'Requires an admin writable profile and PostgreSQL permission'],
+    [
+      DATABASE_CAPABILITIES.OPERATE_TERMINATE_SESSION,
+      'Requires an admin profile and PostgreSQL permission',
+    ],
+    [
+      DATABASE_CAPABILITIES.OPERATE_VACUUM,
+      'Requires an admin writable profile and PostgreSQL permission',
+    ],
   ] as const) {
     capabilities[key] = descriptor(key, 'conditional', reason);
   }
   for (const [key, reason] of [
-    [DATABASE_CAPABILITIES.DRY_RUN, 'Use rollback transaction preview instead of a vendor dry-run API'],
+    [
+      DATABASE_CAPABILITIES.DRY_RUN,
+      'Use rollback transaction preview instead of a vendor dry-run API',
+    ],
     [DATABASE_CAPABILITIES.METADATA_INCREMENTAL, 'This connector currently uses paged snapshots'],
     [DATABASE_CAPABILITIES.RESULT_ARROW, 'Row batches are implemented; Arrow is not implemented'],
     [DATABASE_CAPABILITIES.RESULT_DOWNLOAD, 'Managed result downloads are not implemented'],
@@ -1077,7 +1135,7 @@ function createPostgresManifest(): ConnectorManifest {
       {
         key: 'cancel-query',
         title: 'Cancel query',
-        description: 'Cancel a DBAgent PostgreSQL query job.',
+        description: 'Cancel a SchemaNaut PostgreSQL query job.',
         risk: 'write',
         idempotent: true,
         requiredCapability: DATABASE_CAPABILITIES.OPERATE_CANCEL_QUERY,
@@ -1146,10 +1204,7 @@ function capabilityInput(
 
 function stripRuntimeCapabilityFields(
   capabilities: Record<string, CapabilityDescriptor>,
-): Record<
-  string,
-  Omit<CapabilityDescriptor, 'source' | 'observedAt'> & { observedAt?: string }
-> {
+): Record<string, Omit<CapabilityDescriptor, 'source' | 'observedAt'> & { observedAt?: string }> {
   return Object.fromEntries(
     Object.entries(capabilities).map(([key, item]) => {
       const { source, observedAt, ...rest } = item;
@@ -1213,7 +1268,8 @@ function toDatabaseError(
     ...(jobId ? { jobId } : {}),
     retryable: error.retryable ?? false,
     outcome:
-      stage === 'execute' && !['VALIDATION_ERROR', 'READ_ONLY_VIOLATION', 'CONFIRMATION_REQUIRED'].includes(error.code)
+      stage === 'execute' &&
+      !['VALIDATION_ERROR', 'READ_ONLY_VIOLATION', 'CONFIRMATION_REQUIRED'].includes(error.code)
         ? 'unknown'
         : 'unchanged',
   };
@@ -1263,7 +1319,11 @@ function isTerminal(state: QueryJob['state']): boolean {
 function readString(input: Record<string, PortableValue> | undefined, key: string): string {
   const value = input?.[key];
   if (typeof value !== 'string' || value.length === 0) {
-    throw connectorNotFound('OPERATION_INPUT_INVALID', `${key} must be a non-empty string.`, 'operate');
+    throw connectorNotFound(
+      'OPERATION_INPUT_INVALID',
+      `${key} must be a non-empty string.`,
+      'operate',
+    );
   }
   return value;
 }

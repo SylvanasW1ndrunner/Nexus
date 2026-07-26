@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import type { AgentToolDefinition, AgentToolHandler, ToolDangerLevel, ToolRegistry } from '@dbagent/core-agent';
+import type {
+  AgentToolDefinition,
+  AgentToolHandler,
+  ToolDangerLevel,
+  ToolRegistry,
+} from '@dbagent/core-agent';
 import {
   invokeMcpToolWithTimeout,
   type McpHealthManager,
@@ -8,18 +13,21 @@ import {
 
 export type McpToolSource = 'user-mcp';
 
-export type McpToolAnnotations = {
+export type McpToolAnnotations = Record<string, unknown> & {
   readOnlyHint?: boolean;
   destructiveHint?: boolean;
   idempotentHint?: boolean;
   openWorldHint?: boolean;
 };
 
-export type McpToolSpec = {
+export type McpToolSpec = Record<string, unknown> & {
   name: string;
+  title?: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
   annotations?: McpToolAnnotations;
+  _meta?: Record<string, unknown>;
 };
 
 export type McpToolCallRequest = {
@@ -60,8 +68,7 @@ export function registerMcpTools(options: McpToolAdapterOptions): RegisteredMcpT
   const { registry, serverId, source, tools, callTool, health, timeoutMs, signal } = options;
   const seen = new Set<string>();
   const registered: RegisteredMcpTool[] = [];
-
-  for (const tool of tools) {
+  const prepared = tools.map((tool) => {
     const definition = adaptMcpToolDefinition({ serverId, source, tool, usedNames: seen });
     const handler = createMcpToolHandler({
       serverId,
@@ -71,16 +78,41 @@ export function registerMcpTools(options: McpToolAdapterOptions): RegisteredMcpT
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
       ...(signal === undefined ? {} : { signal }),
     });
-    registry.register(definition, handler);
-    registered.push({
-      name: definition.name,
-      originalName: tool.name,
-      source,
-      sourceId: serverId,
-    });
+    return { tool, definition, handler };
+  });
+
+  try {
+    for (const { tool, definition, handler } of prepared) {
+      registry.register(definition, handler);
+      registered.push({
+        name: definition.name,
+        originalName: tool.name,
+        source,
+        sourceId: serverId,
+      });
+    }
+  } catch (error) {
+    for (const tool of registered) registry.unregister(tool.name);
+    throw error;
   }
 
   return registered;
+}
+
+export function normalizeMcpToolSpec(input: unknown): McpToolSpec {
+  if (!isRecord(input) || typeof input.name !== 'string' || !input.name.trim()) {
+    throw new Error('Invalid MCP tool spec.');
+  }
+  if (input.inputSchema !== undefined && !isRecord(input.inputSchema)) {
+    throw new Error(`Invalid MCP input schema for tool ${input.name}.`);
+  }
+  if (input.outputSchema !== undefined && !isRecord(input.outputSchema)) {
+    throw new Error(`Invalid MCP output schema for tool ${input.name}.`);
+  }
+  if (input.annotations !== undefined && !isRecord(input.annotations)) {
+    throw new Error(`Invalid MCP annotations for tool ${input.name}.`);
+  }
+  return JSON.parse(JSON.stringify(input)) as McpToolSpec;
 }
 
 export function adaptMcpToolDefinition(input: {
@@ -97,10 +129,13 @@ export function adaptMcpToolDefinition(input: {
 
   return {
     name,
-    description: input.tool.description?.trim() || `MCP tool ${originalName} from ${input.serverId}.`,
+    description:
+      input.tool.description?.trim() || `MCP tool ${originalName} from ${input.serverId}.`,
     inputSchema: normalizeInputSchema(input.tool.inputSchema),
     dangerLevel: inferred.dangerLevel,
     readonly: inferred.readonly,
+    requiredPermission:
+      inferred.dangerLevel === 'high' || inferred.dangerLevel === 'critical' ? 'full' : 'edit',
     source: input.source,
     sourceId: input.serverId,
     originalName,
@@ -115,9 +150,12 @@ export function inferMcpToolRisk(
   const text = `${tool.name} ${tool.description ?? ''}`.toLowerCase().replace(/[_-]+/g, ' ');
 
   if (tool.annotations?.destructiveHint) return { dangerLevel: 'high', readonly: false };
-  if (tool.annotations?.readOnlyHint) return { dangerLevel: 'safe', readonly: true };
 
-  if (/\b(drop|truncate|delete|remove|destroy|wipe|purge|revoke|grant|alter|create|insert|update|write)\b/.test(text)) {
+  if (
+    /\b(drop|truncate|delete|remove|destroy|wipe|purge|revoke|grant|alter|create|insert|update|write)\b/.test(
+      text,
+    )
+  ) {
     return { dangerLevel: 'high', readonly: false };
   }
 
@@ -125,10 +163,8 @@ export function inferMcpToolRisk(
     return { dangerLevel: 'high', readonly: false };
   }
 
-  if (/\b(list|get|read|search|find|describe|inspect|fetch|query|select|show)\b/.test(text)) {
-    return { dangerLevel: 'safe', readonly: true };
-  }
-
+  // MCP annotations are assertions from a remote, potentially untrusted server. A
+  // readOnlyHint or a read-like name must never lower the local permission floor.
   return { dangerLevel: 'medium', readonly: false };
 }
 
@@ -163,14 +199,19 @@ function createMcpToolHandler(input: {
         }),
       {
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-        ...((context.signal ?? input.signal) === undefined ? {} : { signal: context.signal ?? input.signal }),
+        ...((context.signal ?? input.signal) === undefined
+          ? {}
+          : { signal: context.signal ?? input.signal }),
       },
     );
   };
 }
 
-function normalizeInputSchema(schema: Record<string, unknown> | undefined): Record<string, unknown> {
-  if (!schema || typeof schema !== 'object' || schema.type !== 'object') return { ...UNKNOWN_SCHEMA };
+function normalizeInputSchema(
+  schema: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!schema || typeof schema !== 'object' || schema.type !== 'object')
+    return { ...UNKNOWN_SCHEMA };
   return JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
 }
 
@@ -199,4 +240,8 @@ function uniqueToolName(base: string, usedNames?: Set<string>): string {
   }
 
   throw new Error(`Too many MCP tools share the same normalized name: ${base}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

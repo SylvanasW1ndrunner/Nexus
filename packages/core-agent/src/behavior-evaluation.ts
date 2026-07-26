@@ -8,7 +8,6 @@ import type {
   AgentBehaviorToolExpectation,
   AgentRunResult,
 } from './types.js';
-import { sanitizeAgentOutputValue } from './output-safety.js';
 import { redactPersistedAgentValue } from './redaction.js';
 
 export function evaluateAgentBehavior(input: {
@@ -41,9 +40,6 @@ function evaluateCase(
     status: execution.status,
     ...(execution.argumentPreview === undefined ? {} : { argumentPreview: execution.argumentPreview }),
     resultPreview: execution.resultPreview,
-    ...(execution.redacted === undefined ? {} : { redacted: execution.redacted }),
-    ...(execution.blocked === undefined ? {} : { blocked: execution.blocked }),
-    ...(execution.redactionReasons === undefined ? {} : { redactionReasons: execution.redactionReasons }),
   }));
 
   if (testCase.expectedStatus !== undefined && result.status !== testCase.expectedStatus) {
@@ -133,10 +129,6 @@ function evaluateToolExpectation(
 
   if (expectation.status !== undefined && !matches.some((execution) => execution.status === expectation.status)) {
     failures.push(`Expected tool ${expectation.toolName} to have status ${expectation.status}.`);
-  }
-
-  if (expectation.blocked !== undefined && !matches.some((execution) => execution.blocked === expectation.blocked)) {
-    failures.push(`Expected tool ${expectation.toolName} to have blocked=${expectation.blocked}.`);
   }
 
   const argumentsText = matches.map((execution) => execution.argumentPreview ?? '').join('\n');
@@ -246,9 +238,7 @@ export function buildAgentBehaviorEvaluationReport(
 function redactReportInput(
   input: AgentBehaviorEvaluationReportInput,
 ): AgentBehaviorEvaluationReportInput {
-  return sanitizeAgentOutputValue(
-    redactPersistedAgentValue(input) as AgentBehaviorEvaluationReportInput,
-  ).value;
+  return redactPersistedAgentValue(input) as AgentBehaviorEvaluationReportInput;
 }
 
 function buildManifest(

@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBAgent NL2SQL and Knowledge"
-  short_description: "Build Schema knowledge and NL2SQL"
-  default_prompt: "Use $dbagent-nl2sql-knowledge-development to improve DBAgent Schema context or NL2SQL."
