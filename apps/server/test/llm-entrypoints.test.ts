@@ -4,9 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseAgentRuntime } from '../../../sdk/src/index.js';
-import { startDatabaseAgentServer } from '../../../../apps/server/src/server.js';
-import type { LlmChatStreamEvent, LlmProvider } from '../../src/index.js';
+import type { LlmChatStreamEvent, LlmProvider } from '@dbagent/core-llm';
+import { DatabaseAgentRuntime } from '@dbagent/sdk';
+import { startDatabaseAgentServer } from '../src/server.js';
 
 const servers: Server[] = [];
 const runtimes: DatabaseAgentRuntime[] = [];

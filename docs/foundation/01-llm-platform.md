@@ -242,7 +242,7 @@ sequenceDiagram
 | 稳定性             | 并发、队列、速率、取消和熔断                  | [`reliability.ts`](../../packages/core-llm/src/reliability.ts)                                                                                                             | [`reliability-budget.test.ts`](../../packages/core-llm/test/reliability-budget.test.ts)                 |
 | 预算               | 预留、范围配额、实际结算和拒绝                | [`budget.ts`](../../packages/core-llm/src/budget.ts)                                                                                                                       | [`reliability-budget.test.ts`](../../packages/core-llm/test/reliability-budget.test.ts)                 |
 | 响应缓存           | 租户隔离、TTL、命名空间和 LRU                 | [`response-cache.ts`](../../packages/core-llm/src/response-cache.ts)                                                                                                       | [`llm-gateway.test.ts`](../../packages/core-llm/test/llm-gateway.test.ts)                               |
-| 异步任务           | 批量并发、进度、终态和取消                    | [`async-jobs.ts`](../../packages/core-llm/src/async-jobs.ts)                                                                                                               | [`llm-entrypoints.test.ts`](../../packages/core-llm/test/entrypoints/llm-entrypoints.test.ts)           |
+| 异步任务           | 批量并发、进度、终态和取消                    | [`async-jobs.ts`](../../packages/core-llm/src/async-jobs.ts)                                                                                                               | [`llm-entrypoints.test.ts`](../../apps/server/test/llm-entrypoints.test.ts)                              |
 | 观测               | 脱敏事件、指标和分模型统计                    | [`telemetry.ts`](../../packages/core-llm/src/telemetry.ts)                                                                                                                 | [`llm-security.test.ts`](../../packages/core-llm/test/security/llm-security.test.ts)                    |
 | Agent Runtime 门面 | Agent 模型调用统一经过 Gateway                | [`llm-router.ts`](../../packages/core-llm/src/llm-router.ts)                                                                                                               | [`llm-router.test.ts`](../../packages/core-llm/test/llm-router.test.ts)                                 |
 | SDK 入口           | 模型配置、元数据发现、对话、流、任务和指标    | [`runtime.ts`](../../packages/sdk/src/runtime.ts)                                                                                                                          | [`runtime.test.ts`](../../packages/sdk/test/runtime.test.ts)                                            |
@@ -366,7 +366,7 @@ pnpm test
 
 - Provider 合同：[`provider-contract-suite.ts`](../../packages/core-llm/test/contracts/provider-contract-suite.ts)
 - Provider 模型目录与元数据：[`provider-adapters.test.ts`](../../packages/core-llm/test/provider-adapters.test.ts)
-- 产品入口：[`llm-entrypoints.test.ts`](../../packages/core-llm/test/entrypoints/llm-entrypoints.test.ts)
+- 产品入口：[`llm-entrypoints.test.ts`](../../apps/server/test/llm-entrypoints.test.ts)
 - 故障注入：[`llm-fault-injection.test.ts`](../../packages/core-llm/test/fault-injection/llm-fault-injection.test.ts)
 - 安全边界：[`llm-security.test.ts`](../../packages/core-llm/test/security/llm-security.test.ts)
 - 性能基准：[`run-llm-platform-benchmark.mjs`](../../scripts/run-llm-platform-benchmark.mjs)

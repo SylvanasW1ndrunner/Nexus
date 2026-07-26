@@ -47,7 +47,7 @@ describe('PostgresDriver TLS modes', () => {
   });
 });
 
-function connection(ssl: DatabaseConnectionConfig['ssl']): DatabaseConnectionConfig {
+function connection(ssl: NonNullable<DatabaseConnectionConfig['ssl']>): DatabaseConnectionConfig {
   return {
     id: `tls-${String(ssl)}`,
     name: 'TLS test',

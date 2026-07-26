@@ -1347,11 +1347,19 @@ order by total_amount desc`,
     expect(result.result.toolExecutions).toEqual([
       expect.objectContaining({ toolName: 'subagent_spawn', status: 'success' }),
     ]);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      if (provider.toolPayloads.some((payload) => payload.includes('SUBAGENT_SESSION_TOKEN')))
-        break;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-    }
+    const parentSessionId = result.result.session.id;
+    await vi.waitFor(
+      () => {
+        expect(runtime.sessions.listSubagents(parentSessionId)).toEqual([
+          expect.objectContaining({
+            parentSessionId,
+            status: 'completed',
+            summary: 'SUBAGENT_SESSION_TOKEN',
+          }),
+        ]);
+      },
+      { interval: 10, timeout: 5_000 },
+    );
     expect(provider.toolPayloads.join('\n---\n')).toContain('SUBAGENT_SESSION_TOKEN');
     const storedSessions = await runtime.sessions.list({ limit: 10 });
     const childSummary = storedSessions.find(({ title }) => title.startsWith('Child must load'));
@@ -1359,7 +1367,6 @@ order by total_amount desc`,
     const childSession = await runtime.sessions.load(childSummary!.id);
     expect(childSession?.sessionSkills?.[0]?.content).toContain('SUBAGENT_SESSION_TOKEN');
     expect(childSession?.activeSkills?.[0]?.instructions).toContain('SUBAGENT_SESSION_TOKEN');
-    const parentSessionId = result.result.session.id;
     expect(runtime.sessions.listSubagents(parentSessionId)).toEqual([
       expect.objectContaining({
         parentSessionId,

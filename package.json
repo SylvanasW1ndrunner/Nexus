@@ -20,7 +20,7 @@
     "test:server": "vitest run packages/sdk apps/server --pool=forks",
     "test:llm-platform": "vitest run packages/core-llm packages/sdk apps/server --pool=forks",
     "test:llm-platform:contracts": "vitest run packages/core-llm/test/contracts --pool=forks",
-    "test:llm-platform:entrypoints": "vitest run packages/core-llm/test/entrypoints --pool=forks",
+    "test:llm-platform:entrypoints": "vitest run apps/server/test/llm-entrypoints.test.ts --pool=forks",
     "test:llm-platform:faults": "vitest run packages/core-llm/test/fault-injection --pool=forks",
     "test:llm-platform:security": "vitest run packages/core-llm/test/security --pool=forks",
     "test:llm-platform:performance": "pnpm build:server && node scripts/run-llm-platform-benchmark.mjs",

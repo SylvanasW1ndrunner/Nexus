@@ -236,6 +236,14 @@ test('isolated-package PostgreSQL acceptance is explicit and limited to a test d
   );
 });
 
+test('Turbo builds each package and its dependencies before running package tests', async () => {
+  const turbo = JSON.parse(await readFile(join(repositoryRoot, 'turbo.json'), 'utf8'));
+  const testDependencies = turbo?.tasks?.test?.dependsOn;
+  assert.ok(Array.isArray(testDependencies));
+  assert.ok(testDependencies.includes('build'));
+  assert.ok(testDependencies.includes('^build'));
+});
+
 test('CI uses least privilege, Node 24-compatible immutable action pins and Windows release evidence', async () => {
   const workflow = await readFile(join(repositoryRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
   assert.match(workflow, /^permissions:\s*\n\s+contents:\s+read\s*$/m);
@@ -262,6 +270,14 @@ test('CI uses least privilege, Node 24-compatible immutable action pins and Wind
   assert.match(workflow, /pnpm (?:run )?lint/);
   assert.match(workflow, /pnpm (?:run )?test/);
   assert.match(workflow, /pnpm test:npm-package:functional/);
+  assert.match(
+    workflow,
+    /^env:\s*\n\s+SCHEMANAUT_PACKAGE_VERIFY_INSTALL_MODE:\s*prefer-offline\s*$/m,
+  );
   assert.match(workflow, /SCHEMANAUT_PACKAGE_VERIFY_POSTGRES:\s*['"]?1['"]?/);
   assert.match(workflow, /SCHEMANAUT_PACKAGE_VERIFY_PG_DATABASE:\s*dbagent_core_db_test/);
+  assert.match(
+    workflow,
+    /name:\s*postgres-acceptance-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/,
+  );
 });

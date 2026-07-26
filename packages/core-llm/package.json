@@ -12,7 +12,6 @@
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests",
     "test:contracts": "vitest run test/contracts --pool=forks",
-    "test:entrypoints": "vitest run test/entrypoints --pool=forks",
     "test:faults": "vitest run test/fault-injection --pool=forks",
     "test:security": "vitest run test/security --pool=forks"
   },
