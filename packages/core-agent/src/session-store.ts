@@ -14,6 +14,8 @@ import type {
   AgentMessage,
   AgentMode,
   AgentProjectReference,
+  AgentRunRecord,
+  AgentRunStore,
   AgentSession,
   AgentSubagentRecord,
   AgentSubagentStore,
@@ -147,7 +149,7 @@ type SubagentRow = {
   updated_at: string;
 };
 
-export class AgentSessionStore implements AgentSessionWriter, AgentSubagentStore {
+export class AgentSessionStore implements AgentSessionWriter, AgentSubagentStore, AgentRunStore {
   private readonly projectScope: AgentSessionProjectScope;
 
   constructor(
@@ -168,7 +170,9 @@ export class AgentSessionStore implements AgentSessionWriter, AgentSubagentStore
 
   async save(input: SaveAgentSessionInput): Promise<AgentSessionSummary> {
     const now = input.now ?? new Date().toISOString();
-    const session = redactPersistedAgentValue(input.session) as AgentSession;
+    const session = redactPersistedAgentValue(
+      sanitizePersistedSqlToolResults(input.session),
+    ) as AgentSession;
     assertSessionMatchesStoreScope(session, this.projectScope);
     return this.withDatabase((database) => {
       const existing = database
@@ -491,6 +495,138 @@ export class AgentSessionStore implements AgentSessionWriter, AgentSubagentStore
     );
   }
 
+  async saveRun(record: AgentRunRecord): Promise<void> {
+    const persisted = redactPersistedAgentValue(record) as AgentRunRecord;
+    return this.withDatabase((database) => {
+      const existing = database
+        .prepare('SELECT project_key FROM agent_runs WHERE run_id = ?')
+        .get(persisted.runId) as { project_key: string } | undefined;
+      if (existing && existing.project_key !== this.projectScope.projectKey) {
+        throw new Error('Agent run id is already owned by another Project.');
+      }
+      const write = database
+        .prepare(
+          `
+          INSERT INTO agent_runs (
+            run_id, project_key, session_id, status, phase, iteration,
+            created_at, updated_at, payload_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(run_id) DO UPDATE SET
+            session_id = excluded.session_id,
+            status = excluded.status,
+            phase = excluded.phase,
+            iteration = excluded.iteration,
+            updated_at = excluded.updated_at,
+            payload_json = excluded.payload_json
+          WHERE agent_runs.project_key = excluded.project_key
+        `,
+        )
+        .run(
+          persisted.runId,
+          this.projectScope.projectKey,
+          persisted.sessionId,
+          persisted.status,
+          persisted.phase,
+          persisted.iteration,
+          persisted.createdAt,
+          persisted.updatedAt,
+          JSON.stringify(persisted),
+        );
+      if (Number(write.changes) === 0) {
+        throw new Error('Agent run id is already owned by another Project.');
+      }
+      pruneAgentRuns(database, this.projectScope.projectKey, persisted.updatedAt);
+    });
+  }
+
+  async getRun(runId: string): Promise<AgentRunRecord | undefined> {
+    const normalizedRunId = requireText(runId, 'runId');
+    return this.withDatabase((database) => {
+      const row = database
+        .prepare('SELECT payload_json FROM agent_runs WHERE run_id = ? AND project_key = ?')
+        .get(normalizedRunId, this.projectScope.projectKey) as
+        | { payload_json: string }
+        | undefined;
+      return row ? (JSON.parse(row.payload_json) as AgentRunRecord) : undefined;
+    });
+  }
+
+  async listRuns(sessionId?: string, limit = 100): Promise<AgentRunRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new Error('Agent run limit must be an integer from 1 to 1000.');
+    }
+    const normalizedSessionId =
+      sessionId === undefined ? undefined : requireText(sessionId, 'sessionId');
+    return this.withDatabase((database) => {
+      const rows =
+        normalizedSessionId === undefined
+          ? (database
+              .prepare(
+                `
+                SELECT payload_json
+                FROM agent_runs
+                WHERE project_key = ?
+                ORDER BY updated_at DESC, run_id ASC
+                LIMIT ?
+              `,
+              )
+              .all(this.projectScope.projectKey, limit) as unknown as Array<{
+              payload_json: string;
+            }>)
+          : (database
+              .prepare(
+                `
+                SELECT payload_json
+                FROM agent_runs
+                WHERE project_key = ? AND session_id = ?
+                ORDER BY updated_at DESC, run_id ASC
+                LIMIT ?
+              `,
+              )
+              .all(this.projectScope.projectKey, normalizedSessionId, limit) as unknown as Array<{
+              payload_json: string;
+            }>);
+      return rows.map((row) => JSON.parse(row.payload_json) as AgentRunRecord);
+    });
+  }
+
+  async recoverInterrupted(now = new Date().toISOString()): Promise<number> {
+    return this.withDatabase((database) => {
+      const rows = database
+        .prepare(
+          `
+          SELECT run_id, payload_json
+          FROM agent_runs
+          WHERE project_key = ? AND status = 'running'
+        `,
+        )
+        .all(this.projectScope.projectKey) as unknown as Array<{
+        run_id: string;
+        payload_json: string;
+      }>;
+      const update = database.prepare(
+        `
+        UPDATE agent_runs
+        SET status = 'interrupted', phase = 'verify', updated_at = ?, payload_json = ?
+        WHERE run_id = ? AND project_key = ?
+      `,
+      );
+      for (const row of rows) {
+        const record = JSON.parse(row.payload_json) as AgentRunRecord;
+        const recovered: AgentRunRecord = {
+          ...record,
+          status: 'interrupted',
+          phase: 'verify',
+          updatedAt: now,
+          errorMessage:
+            record.errorMessage ?? 'Runtime stopped before the Agent run reached a terminal state.',
+        };
+        update.run(now, JSON.stringify(recovered), row.run_id, this.projectScope.projectKey);
+      }
+      return rows.length;
+    });
+  }
+
   saveSubagent(record: AgentSubagentRecord): void {
     const persisted = redactPersistedAgentValue(record) as AgentSubagentRecord;
     assertSubagentRecord(persisted);
@@ -744,6 +880,21 @@ function initializeDatabase(database: NodeDatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_agent_subagents_project_parent_created
       ON agent_subagents(project_key, parent_session_id, created_at ASC);
 
+    CREATE TABLE IF NOT EXISTS agent_runs (
+      run_id TEXT PRIMARY KEY,
+      project_key TEXT NOT NULL DEFAULT 'legacy:unscoped',
+      session_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      iteration INTEGER NOT NULL CHECK (iteration >= 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      payload_json TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_project_session_updated
+      ON agent_runs(project_key, session_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS agent_user_preferences (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -772,6 +923,7 @@ function initializeDatabase(database: NodeDatabaseSync): void {
       ON agent_sessions(project_key, user_id, archived, updated_at DESC);
   `);
   migrateLegacySessionPayloads(database);
+  migrateLegacySqlToolResults(database);
 }
 
 function migrateLegacySessionTable(database: NodeDatabaseSync): void {
@@ -994,10 +1146,85 @@ function parseSession(payload: string, normalizedMessages: AgentMessage[] = []):
       : Array.isArray(currentSession.messages)
         ? currentSession.messages
         : [];
-  return redactPersistedAgentValue({
-    ...currentSession,
-    messages,
-  }) as AgentSession;
+  return redactPersistedAgentValue(
+    sanitizePersistedSqlToolResults({
+      ...currentSession,
+      messages,
+    }),
+  ) as AgentSession;
+}
+
+function sanitizePersistedSqlToolResults(session: AgentSession): AgentSession {
+  return {
+    ...session,
+    messages: session.messages.map((message) => {
+      if (
+        message.role !== 'tool' ||
+        (message.toolName !== 'sql_execute' && message.toolName !== 'result_read')
+      ) {
+        return message;
+      }
+      return {
+        ...message,
+        content: summarizePersistedSqlToolContent(message.content),
+      };
+    }),
+  };
+}
+
+function summarizePersistedSqlToolContent(content: string): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(content);
+  } catch {
+    return JSON.stringify({
+      status: 'legacy_result_removed',
+      resultAvailable: false,
+    });
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return JSON.stringify({
+      status: 'legacy_result_removed',
+      resultAvailable: false,
+    });
+  }
+  const source = value as Record<string, unknown>;
+  const summarySource =
+    source.type === 'schemanaut.agent-tool-result.v1' &&
+    source.durableSummary &&
+    typeof source.durableSummary === 'object' &&
+    !Array.isArray(source.durableSummary)
+      ? (source.durableSummary as Record<string, unknown>)
+      : source;
+  const allowed = [
+    'columns',
+    'rowCount',
+    'returnedRowCount',
+    'storedRowCount',
+    'totalStoredRows',
+    'hasMore',
+    'hasMoreInDatabase',
+    'truncated',
+    'truncatedByDriver',
+    'previewTruncated',
+    'valuesTruncated',
+    'elapsedMs',
+    'transaction',
+    'messages',
+    'status',
+    'resultAvailable',
+  ] as const;
+  const summary: Record<string, unknown> = {};
+  for (const key of allowed) {
+    if (Object.hasOwn(summarySource, key)) {
+      summary[key] = structuredClone(summarySource[key]);
+    }
+  }
+  if (Object.keys(summary).length === 0) {
+    summary.status = 'legacy_result_removed';
+    summary.resultAvailable = false;
+  }
+  return JSON.stringify(summary);
 }
 
 function extractPreferenceCandidates(
@@ -1370,6 +1597,88 @@ function migrateLegacySessionPayloads(database: NodeDatabaseSync): void {
     database.exec('ROLLBACK');
     throw error;
   }
+}
+
+function migrateLegacySqlToolResults(database: NodeDatabaseSync): void {
+  const migrationKey = 'sql-tool-result-summary-v1';
+  const alreadyApplied = database
+    .prepare('SELECT 1 AS applied FROM agent_store_migrations WHERE migration_key = ?')
+    .get(migrationKey) as { applied: number } | undefined;
+  if (alreadyApplied) return;
+
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const rows = database
+      .prepare(
+        `
+        SELECT session_id, message_index, content
+        FROM agent_session_messages
+        WHERE role = 'tool' AND tool_name IN ('sql_execute', 'result_read')
+      `,
+      )
+      .all() as unknown as Array<{
+      session_id: string;
+      message_index: number;
+      content: string;
+    }>;
+    const update = database.prepare(
+      `
+      UPDATE agent_session_messages
+      SET content = ?
+      WHERE session_id = ? AND message_index = ?
+    `,
+    );
+    for (const row of rows) {
+      update.run(
+        summarizePersistedSqlToolContent(row.content),
+        row.session_id,
+        row.message_index,
+      );
+    }
+    database
+      .prepare('INSERT INTO agent_store_migrations (migration_key, applied_at) VALUES (?, ?)')
+      .run(migrationKey, new Date().toISOString());
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function pruneAgentRuns(
+  database: NodeDatabaseSync,
+  projectKey: string,
+  now: string,
+): void {
+  const retentionCutoff = new Date(
+    Date.parse(now) - 30 * 24 * 60 * 60 * 1_000,
+  ).toISOString();
+  database
+    .prepare('DELETE FROM agent_runs WHERE project_key = ? AND updated_at < ?')
+    .run(projectKey, retentionCutoff);
+  const count = Number(
+    (
+      database
+        .prepare('SELECT COUNT(*) AS count FROM agent_runs WHERE project_key = ?')
+        .get(projectKey) as { count: number }
+    ).count,
+  );
+  const excess = count - 1_000;
+  if (excess <= 0) return;
+  database
+    .prepare(
+      `
+      DELETE FROM agent_runs
+      WHERE run_id IN (
+        SELECT run_id
+        FROM agent_runs
+        WHERE project_key = ?
+        ORDER BY updated_at ASC, run_id ASC
+        LIMIT ?
+      )
+    `,
+    )
+    .run(projectKey, excess);
 }
 
 function sessionWithoutContextCheckpoint(session: AgentSession): AgentSession {

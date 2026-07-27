@@ -352,5 +352,6 @@ function runResult(overrides: Partial<AgentRunResult>): AgentRunResult {
     iterations: 1,
     toolExecutions: [],
     ...overrides,
+    runId: overrides.runId ?? 'run-eval',
   };
 }

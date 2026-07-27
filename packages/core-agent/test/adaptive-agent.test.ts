@@ -69,8 +69,11 @@ describe('adaptive Agent orchestration', () => {
     expect(result.status).toBe('done');
     expect(result.iterations).toBe(4);
     expect(result.finalText).toBe('订单总数是 42。');
-    expect(result.completion).toEqual({
+    expect(result.completion).toMatchObject({
       verified: true,
+      deliveryReady: true,
+      finalResponseReady: true,
+      phase: 'done',
       unresolvedTaskIds: [],
     });
     expect(result.events?.map((event) => event.type)).toContain('correcting');

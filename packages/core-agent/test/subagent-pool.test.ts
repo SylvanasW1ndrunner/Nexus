@@ -261,6 +261,7 @@ function runResult(
   sessionId = `child-${status}`,
 ): AgentRunResult {
   return {
+    runId: `run-${sessionId}`,
     status,
     session: createAgentSession({
       id: sessionId,

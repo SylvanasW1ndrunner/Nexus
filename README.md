@@ -33,7 +33,7 @@ It is built for embedding and automation. The primary surfaces are a TypeScript 
 | Progressive Skills     | Standard Markdown `SKILL.md` bundles at system, user, project, and Session scope; only the catalog is shown until a Skill is activated            |
 | Standard MCP client    | Official MCP SDK with stdio, Streamable HTTP, and SSE compatibility, dynamic tool discovery, lifecycle, cancellation, and secret references       |
 | Project tools          | Project-scoped files, optional host web tools, bounded shell execution in `full` mode, and same-capability child Agents with independent context  |
-| Bounded model results  | The database performs aggregation and filtering; the model sees a small preview while fetched rows remain behind a Session-isolated result handle |
+| Separated query results | The database performs aggregation and filtering; SDK/API callers receive at most 1,000 rows separately while the model sees at most two transient samples |
 | Integration surfaces   | TypeScript SDK, local REST API, interactive CLI, and lightweight local WebUI                                                                      |
 
 AI database governance and operations are a later product stage. v1 does **not** ship a governance/operations Agent or claim autonomous DBA remediation.
@@ -49,9 +49,11 @@ flowchart LR
     Discover --> Extensions["Built-in Tools + MCP"]
     Agent --> Policy["read / edit / full"]
     Policy --> PostgreSQL["PostgreSQL executes SQL"]
-    PostgreSQL --> Preview["Small preview + result handle"]
+    PostgreSQL --> Results["Bounded query result (max 1,000 rows)"]
+    Results --> Preview["Transient model sample (max 2 rows)"]
     Preview --> Agent
-    Agent --> Output["Answer + SQL + useful events + artifacts"]
+    Results --> Output["Separate result payload"]
+    Agent --> Output["Verified answer + SQL + useful events + artifacts"]
 ```
 
 Internal knowledge hashes, node IDs, ranking scores, and evaluation traces do not enter the normal model or user output.
@@ -163,6 +165,7 @@ try {
   });
 
   console.log(run.result.finalText);
+  console.table(run.queryResults[0]?.rows ?? []);
   console.log(run.result.session.id);
 
   const continued = await runtime.runAgent({
@@ -181,7 +184,7 @@ Save `run.result.session.id` if the conversation must continue after the process
 
 `runAgent()` is the trusted SDK integration surface and returns the complete run, including tool execution records. Application-facing Session views are available through `listAgentSessions()` and `getAgentSession()`; they omit tool messages, internal retrieval identifiers, Skill instructions, and evaluation details.
 
-See the [SDK Guide](docs/sdk/README.md) for Projects, Skills, MCP, result handles, cancellation, direct model calls, and the lower-level database runtime.
+Query rows are returned through `run.queryResults`, not written into the conversation, Session history, or user preferences. See the [SDK Guide](docs/sdk/README.md) for Projects, Skills, MCP, bounded query results, cancellation, direct model calls, and the lower-level database runtime.
 
 ## Permission modes
 
@@ -231,7 +234,7 @@ Open <http://127.0.0.1:3721>. The main AI SQL flow is:
 2. `POST /v1/schema/index`
 3. `POST /v1/agent/run` for one JSON result, or `POST /v1/agent/run/stream` for semantic SSE events
 
-Both Agent endpoints return a de-internalized `AiSqlAgentRunView` intended for users rather than the SDK's complete integration record. Public management endpoints cover Session list/get/delete/steer, Skill list/refresh, pending approval resolution, and MCP configuration/lifecycle. The API also exposes deterministic generate-then-execute endpoints, Session compaction, context checkpoints, model calls, database query jobs, results, resources, and metrics. See the [API Reference](docs/sdk/api-reference.md).
+Both Agent endpoints return a de-internalized `AiSqlAgentRunView` intended for users rather than the SDK's complete integration record. Database rows live in its separate, ephemeral `queryResults` payload and are never embedded in Session messages. Public management endpoints cover Session list/get/delete/steer, Skill list/refresh, pending approval resolution, and MCP configuration/lifecycle. The API also exposes deterministic generate/execute/re-execute endpoints, Session compaction, context checkpoints, model calls, database query jobs, results, resources, and metrics. See the [API Reference](docs/sdk/api-reference.md).
 
 ## Development
 
@@ -262,7 +265,7 @@ See the [test pipeline](docs/test-pipeline.md) for the three complex PostgreSQL 
 - Project guidance and Skills are the public v1 path for business rules; a stable CRUD API for resource-bound business knowledge is not exposed yet.
 - The CLI accepts an OpenAI-compatible endpoint; native Anthropic Messages is available through the SDK and REST setup API.
 - The WebUI is a lightweight local setup and evaluation surface, not an IDE.
-- Result handles are currently in-process and expire after one hour by default.
+- Interactive Agent results are capped at 1,000 rows and live only in the current response/in-process cache; restored Sessions contain no database rows. Re-run the SQL or use an explicit database export for later access.
 - The default Runtime supports MCP secret references, but does not configure MCP OAuth or provide a credential vault.
 - `shell_run` is not registered unless the host explicitly sets `enableShellTool: true`. It requires `full` mode, uses a Project-scoped working directory and a reduced environment, but still inherits the host process's OS permissions; it is not an operating-system sandbox.
 - MCP servers are configured but not started automatically by default. Start reviewed servers explicitly, or opt into `autoStartMcp` only in a trusted host.

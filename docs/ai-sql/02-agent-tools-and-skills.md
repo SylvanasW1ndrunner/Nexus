@@ -33,7 +33,6 @@ Agent 使用单一自适应循环。ReAct 是每轮行动和观察的基础思�
 | `knowledge_search` | 精确、全文、向量和图融合检索                     | 读       |
 | `sql_execute`      | 统一执行 SELECT、DML 和 DDL；权限由 SQL 动态分类 | 动态     |
 | `sql_explain`      | 获取查询计划，不执行写入                         | 读       |
-| `result_read`      | 在确有需要时读取大型结果的有界页面或范围         | 读       |
 
 当前连接由运行环境提供，模型不需要在每次调用中重复猜测 `connectionId`。工具输出默认紧凑，并支持 limit、cursor、range 和截断标记。
 

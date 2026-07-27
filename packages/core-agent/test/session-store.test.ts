@@ -192,6 +192,60 @@ describe('AgentSessionStore', () => {
     await expect(store.save({ session })).rejects.toThrow('append-only');
   });
 
+  it('persists SQL tool results as metadata-only summaries and never user preferences', async () => {
+    const store = new AgentSessionStore(await sessionPath());
+    const session = testSession('session_sql_summary', 'SQL result boundary');
+    session.userId = 'user-alice';
+    session.messages.push(
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          {
+            id: 'sql-call-1',
+            name: 'sql_execute',
+            arguments: { sql: 'SELECT phone FROM customers' },
+          },
+        ],
+        createdAt: '2026-07-27T00:00:02.000Z',
+      },
+      {
+        role: 'tool',
+        toolCallId: 'sql-call-1',
+        toolName: 'sql_execute',
+        content: JSON.stringify({
+          resultHandleId: 'private-result-1',
+          columns: [{ name: 'phone', dataType: 'text' }],
+          rows: [{ phone: '13800138000' }],
+          returnedRowCount: 1,
+          storedRowCount: 1,
+          elapsedMs: 4,
+        }),
+        createdAt: '2026-07-27T00:00:03.000Z',
+      },
+    );
+
+    await store.save({ session });
+
+    const restored = await store.load(session.id);
+    const toolMessage = restored?.messages.find((message) => message.role === 'tool');
+    expect(toolMessage?.content).toContain('"returnedRowCount":1');
+    expect(toolMessage?.content).not.toContain('rows');
+    expect(toolMessage?.content).not.toContain('13800138000');
+    expect(toolMessage?.content).not.toContain('resultHandleId');
+    await expect(store.listPreferences('user-alice')).resolves.toEqual([]);
+
+    session.messages.push({
+      role: 'user',
+      content: 'Continue with the same query.',
+      createdAt: '2026-07-27T00:00:04.000Z',
+    });
+    await expect(store.save({ session })).resolves.toMatchObject({
+      id: session.id,
+      messageCount: 5,
+    });
+  });
+
   it('persists every context checkpoint while keeping only the active one on the session', async () => {
     const store = new AgentSessionStore(await sessionPath());
     const session = testSession('session_checkpoints', '压缩检查点');

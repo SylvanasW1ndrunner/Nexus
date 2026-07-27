@@ -29,7 +29,7 @@ CLI examples use `npx schemanaut` so they resolve the command from this local in
 
 These concepts have different lifecycles:
 
-- `DatabaseAgentRuntime` owns model providers, the active database connection, knowledge index, tools, Skills, MCP clients, result handles, and Session access.
+- `DatabaseAgentRuntime` owns model providers, the active database connection, knowledge index, tools, Skills, MCP clients, bounded interactive results, and Session access.
 - A Project is a selected directory containing reusable instructions and extensions. Pass it as `projectDirectory`.
 - A Session is one isolated, durable conversation. Its messages, task plan, artifacts, active tools and Skills, token usage, and context checkpoints are stored together.
 
@@ -323,7 +323,7 @@ const continued = await runtime.runAgent({
 });
 ```
 
-Pass `session` or `sessionId`, never both. Transcripts, plans, artifacts, and result handles are isolated between Sessions. Session IDs are also Project-scoped: even `runtime.sessions`, the low-level management facade, cannot read or mutate a Session owned by another Project. When `userId` is present, explicit preference statements may be distilled into the user preference layer and reused by other Sessions for that same user; manage them with `runtime.sessions.listPreferences()`, `upsertPreference()`, and `deletePreference()`.
+Pass `session` or `sessionId`, never both. Transcripts, plans, and artifacts are isolated between Sessions. Query rows are not Session state at all: they are returned separately for the current run and disappear across restart. Session IDs are Project-scoped, so even `runtime.sessions`, the low-level management facade, cannot read or mutate a Session owned by another Project. When `userId` is present, explicit statements from the user may be distilled into the preference layer and reused by other Sessions for that same user; Tool output and database samples are never preference sources. Manage preferences with `runtime.sessions.listPreferences()`, `upsertPreference()`, and `deletePreference()`.
 
 If a run is still active, add a new user requirement without starting another run. The event supplies the Session ID even for a newly created Session:
 
@@ -393,39 +393,21 @@ const fork = await runtime.sessions.fork({
 
 Session persistence redacts recognized secret material. Do not deliberately place credentials in messages.
 
-## 10. Result previews and result handles
+## 10. Separate, bounded query results
 
-Database aggregation, filtering, joins, window functions, and anomaly calculations should stay in PostgreSQL. `sql_execute` returns only:
-
-- column metadata;
-- a bounded row preview;
-- counts and truncation flags;
-- elapsed time and transaction information;
-- a `resultHandleId`.
-
-Rows fetched for the current execution remain behind an in-process, Session-isolated handle. The built-in `result_read` tool can page those stored rows. An embedding application can also read them:
+Database aggregation, filtering, joins, window functions, and anomaly calculations should stay in PostgreSQL. `runAgent()` returns database data beside the Agent result:
 
 ```ts
-const execution = run.result.toolExecutions.find(
-  (item) => item.toolName === 'sql_execute' && item.status === 'success',
-);
-
-if (execution) {
-  const preview = JSON.parse(execution.resultPreview) as {
-    resultHandleId: string;
-  };
-
-  const page = runtime.results.read({
-    id: preview.resultHandleId,
-    sessionId: run.result.session.id,
-    limit: 100,
-  });
-
-  console.log(page.rows, page.nextCursor);
+for (const result of run.queryResults) {
+  console.log(result.columns);
+  console.table(result.rows); // at most 1,000 rows
+  console.log({ returned: result.returnedRowCount, hasMore: result.hasMore });
 }
 ```
 
-`runtime.results.read()` accepts at most 100 rows per page. `hasMoreInDatabase: true` means the SQL produced more rows than the execution limit; those unfetched rows are not silently materialized in the handle. Retrieve them with a database query/export flow or explicitly paginated SQL. Handles cannot be read by another Session and expire after one hour by default. They are currently in-memory; applications that need durable exports should copy stored pages to their own storage or file workflow before shutdown.
+The SDK/API/CLI payload contains at most 1,000 rows per execution. The Agent receives at most two rows in a transient model-only observation. Neither payload is written to conversation messages, durable Session history, Agent run history, or user preferences. `hasMore: true` means the database produced more rows than the interactive limit.
+
+The in-process cache contains only that bounded interactive payload and expires automatically. A restored Session therefore has no historical rows. Re-execute the SQL when an interactive result is needed again. For a complete export, use the lower-level database query/export path or ask the Agent to create an export artifact; stream the database result directly to the destination rather than routing it through the conversation.
 
 ## 11. Skills
 
@@ -600,6 +582,8 @@ if (generated.status === 'awaiting_execution') {
 }
 ```
 
+Generated SQL run metadata survives a Runtime restart in the Project-scoped SQLite state database, but result rows do not. `executionResultAvailable` is `true` only on the immediate execution response. A restored completed run reports `executionResultAvailable: false`; reconnect the same database and call `reexecuteGenerated(runId, { limit })` to obtain a new bounded result.
+
 This path only executes a single read-only statement. Use `runAgent()` with the appropriate mode for row changes or DDL.
 
 ## 14. Direct model and lower-level database APIs
@@ -736,6 +720,8 @@ SCHEMANAUT_DATABASE_URL
 SCHEMANAUT_MAX_SCHEMA_TABLES    # optional, default 500
 SCHEMANAUT_STATE_DATABASE_PATH  # optional
 ```
+
+The CLI first loads `<project>/.env` and then reads these names. Existing process environment values take precedence. Invalid lines report only the line number and error category, never the source value. Copying the repository `.env.example` therefore produces the exact CLI contract.
 
 The PostgreSQL URL accepts `sslmode=disable|require|verify-ca|verify-full`. `require` encrypts without certificate verification, `verify-ca` validates the certificate chain, and `verify-full` additionally validates the hostname. PostgreSQL `prefer` fallback is intentionally rejected because the Node runtime cannot guarantee its downgrade semantics.
 

@@ -12,6 +12,15 @@ import {
   verifyReleaseChecksum,
   verifyReleaseMetadata,
 } from '../lib/release-gates.mjs';
+import { resolvePublicRuntimeDependencies } from '../lib/public-dependencies.mjs';
+import {
+  assertPublicApiManifest,
+  createPublicApiManifest,
+} from '../lib/public-api.mjs';
+import {
+  assertSupplyChainDocuments,
+  createSupplyChainDocuments,
+} from '../lib/supply-chain.mjs';
 
 const repositoryRoot = resolve(import.meta.dirname, '..', '..');
 
@@ -242,6 +251,101 @@ test('Turbo builds each package and its dependencies before running package test
   assert.ok(Array.isArray(testDependencies));
   assert.ok(testDependencies.includes('build'));
   assert.ok(testDependencies.includes('^build'));
+});
+
+test('every TypeScript workspace typechecks its test sources', async () => {
+  const workspaces = [
+    'packages/shared',
+    'packages/core-usage',
+    'packages/core-llm',
+    'packages/core-resource',
+    'packages/core-db',
+    'packages/core-rag',
+    'packages/core-skills',
+    'packages/core-agent',
+    'packages/core-tools',
+    'packages/sdk',
+    'apps/server',
+  ];
+  for (const workspace of workspaces) {
+    const manifest = JSON.parse(
+      await readFile(join(repositoryRoot, ...workspace.split('/'), 'package.json'), 'utf8'),
+    );
+    assert.match(
+      manifest.scripts?.typecheck ?? '',
+      /test\/tsconfig\.json/,
+      `${workspace} must typecheck its test sources`,
+    );
+    const testConfig = JSON.parse(
+      await readFile(
+        join(repositoryRoot, ...workspace.split('/'), 'test', 'tsconfig.json'),
+        'utf8',
+      ),
+    );
+    assert.equal(testConfig.compilerOptions?.noEmit, true);
+    assert.ok(testConfig.include?.some((pattern) => pattern.includes('./**/*.ts')));
+  }
+});
+
+test('public runtime dependency versions are generated from workspace manifests', async () => {
+  assert.deepEqual(resolvePublicRuntimeDependencies(repositoryRoot), {
+    '@modelcontextprotocol/sdk': '^1.29.0',
+    ajv: '8.20.0',
+    'node-sql-parser': '^5.4.0',
+    pg: '^8.13.1',
+    yaml: '^2.8.1',
+  });
+  const packager = await readFile(join(repositoryRoot, 'scripts', 'package-npm.mjs'), 'utf8');
+  assert.match(packager, /resolvePublicRuntimeDependencies\(repositoryRoot\)/);
+  assert.doesNotMatch(packager, /['"]pg['"]\s*:\s*['"]\^8\.13\.1/);
+});
+
+test('public TypeScript declarations match the intentional API baseline', async () => {
+  const expected = JSON.parse(
+    await readFile(join(repositoryRoot, 'scripts', 'baselines', 'public-api.json'), 'utf8'),
+  );
+  const actual = createPublicApiManifest(repositoryRoot);
+  assert.doesNotThrow(() => assertPublicApiManifest(actual, expected));
+  assert.throws(
+    () =>
+      assertPublicApiManifest(
+        {
+          ...actual,
+          files: actual.files.slice(1),
+        },
+        expected,
+      ),
+    /Public TypeScript API differs/,
+  );
+});
+
+test('release supply-chain metadata covers dependencies and labels offline audit state honestly', () => {
+  const packageManifest = {
+    name: '@nwlworkshop/schemanaut',
+    version: '0.1.0',
+    dependencies: resolvePublicRuntimeDependencies(repositoryRoot),
+  };
+  const documents = createSupplyChainDocuments({
+    repositoryRoot,
+    packageManifest,
+  });
+  assert.doesNotThrow(() =>
+    assertSupplyChainDocuments({
+      packageManifest,
+      ...documents,
+    }),
+  );
+  assert.equal(documents.vulnerabilities.status, 'not-scanned-offline');
+  assert.match(documents.vulnerabilities.disclaimer, /not a claim.*zero vulnerabilities/i);
+  assert.throws(
+    () =>
+      assertSupplyChainDocuments({
+        packageManifest,
+        ...documents,
+        sbom: { ...documents.sbom, components: [] },
+      }),
+    /does not cover/,
+  );
 });
 
 test('CI uses least privilege, Node 24-compatible immutable action pins and Windows release evidence', async () => {

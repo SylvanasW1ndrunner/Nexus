@@ -19,6 +19,8 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyPublicPackageManifest, verifyReleaseMetadata } from './lib/release-gates.mjs';
+import { resolvePublicRuntimeDependencies } from './lib/public-dependencies.mjs';
+import { createSupplyChainDocuments, SUPPLY_CHAIN_FILES } from './lib/supply-chain.mjs';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, '..');
@@ -111,15 +113,10 @@ try {
       'LICENSE',
       'NOTICE',
       'THIRD_PARTY_NOTICES.md',
+      ...Object.values(SUPPLY_CHAIN_FILES),
     ],
     engines: { node: nodeEngine },
-    dependencies: {
-      '@modelcontextprotocol/sdk': '^1.29.0',
-      ajv: '8.20.0',
-      'node-sql-parser': '^5.4.0',
-      pg: '^8.13.1',
-      yaml: '^2.8.1',
-    },
+    dependencies: resolvePublicRuntimeDependencies(repositoryRoot),
     keywords: [
       'ai',
       'agent',
@@ -154,6 +151,7 @@ try {
     `${JSON.stringify(packageManifest, null, 2)}\n`,
     'utf8',
   );
+  writeSupplyChainMetadata(stagingDirectory, packageManifest);
   rewritePackageMarkdownLinks(stagingDirectory);
   pack(stagingDirectory, artifactPath);
   const packagePayload = captureArchivePayload(artifactPath);
@@ -206,6 +204,20 @@ function copyPublicFiles(targetRoot) {
     copyMarkdownDirectory(
       join(repositoryRoot, ...relativePath.split('/')),
       join(publicDocsTarget, name),
+    );
+  }
+}
+
+function writeSupplyChainMetadata(targetRoot, packageManifest) {
+  const documents = createSupplyChainDocuments({
+    repositoryRoot,
+    packageManifest,
+  });
+  for (const [key, fileName] of Object.entries(SUPPLY_CHAIN_FILES)) {
+    writeFileSync(
+      join(targetRoot, fileName),
+      `${JSON.stringify(documents[key], null, 2)}\n`,
+      'utf8',
     );
   }
 }
@@ -419,6 +431,13 @@ function captureSourceInputs() {
     'scripts/package-npm.mjs',
     'scripts/verify-npm-package.mjs',
     'scripts/lib/release-gates.mjs',
+    'scripts/lib/public-dependencies.mjs',
+    'scripts/lib/public-api.mjs',
+    'scripts/lib/supply-chain.mjs',
+    'scripts/generate-public-api-baseline.mjs',
+    'scripts/verify-public-api.mjs',
+    'scripts/generate-sbom.mjs',
+    'scripts/baselines/public-api.json',
     'CHANGELOG.md',
     ...publicRootFiles,
     ...publicDocFiles,

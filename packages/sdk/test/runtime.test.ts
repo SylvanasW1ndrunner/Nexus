@@ -11,10 +11,16 @@ import {
   LlmGateway,
   type LlmChatRequest,
   type LlmChatResponse,
+  type LlmChatStreamEvent,
   type LlmProvider,
   type LlmProviderAvailability,
 } from '@dbagent/core-llm';
-import { agentProjectReference, createAgentProjectContext } from '@dbagent/core-agent';
+import {
+  agentProjectReference,
+  createAgentProjectContext,
+  type AgentRunRecord,
+  type AgentRunStore,
+} from '@dbagent/core-agent';
 import {
   ok,
   type ConnectionProfile,
@@ -178,7 +184,7 @@ order by total_amount desc`,
     });
   });
 
-  it('clears schema and pending runs when disconnecting', async () => {
+  it('clears schema but preserves reviewed runs when disconnecting', async () => {
     const runtime = createRuntime(
       new FakeDatabaseDriver(),
       new FakeProvider('{"sql":"select 1","explanation":"探活","assumptions":[]}'),
@@ -190,7 +196,79 @@ order by total_amount desc`,
     await runtime.disconnect();
 
     expect(runtime.schemaStatus().stage).toBe('not_connected');
-    expect(runtime.getRun(run.runId)).toBeUndefined();
+    expect(runtime.getRun(run.runId)).toMatchObject({
+      runId: run.runId,
+      connectionId: 'connection-1',
+      status: 'awaiting_execution',
+    });
+  });
+
+  it('restores reviewed SQL runs after restart and binds execution to the original connection', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'schemanaut-sdk-sql-run-restart-'));
+    tempDirs.push(directory);
+    const options = {
+      driver: new FakeDatabaseDriver(),
+      provider: new FakeProvider(
+        '{"sql":"select count(*) from public.orders","explanation":"count","assumptions":[]}',
+      ),
+      model: 'test-model',
+      projectDirectory: directory,
+      sessionDatabasePath: join(directory, 'agent.db'),
+      createRunId: () => 'durable-run',
+    };
+    const runtimeA = new DatabaseAgentRuntime(options);
+    await runtimeA.connect({ ...connectionInput(), id: 'connection-a' });
+    await runtimeA.indexSchema();
+    const generated = await runtimeA.generate({ question: 'Count orders' });
+    await runtimeA.close();
+
+    const runtimeB = new DatabaseAgentRuntime({
+      ...options,
+      driver: new FakeDatabaseDriver(),
+    });
+    expect(runtimeB.getRun(generated.runId)).toMatchObject({
+      status: 'awaiting_execution',
+      connectionId: 'connection-a',
+    });
+    await runtimeB.connect({ ...connectionInput(), id: 'connection-b' });
+    await expect(runtimeB.executeGenerated(generated.runId)).rejects.toMatchObject({
+      code: 'RUN_NOT_EXECUTABLE',
+    });
+    await runtimeB.disconnect();
+    await runtimeB.connect({ ...connectionInput(), id: 'connection-a' });
+    await expect(runtimeB.executeGenerated(generated.runId)).resolves.toMatchObject({
+      status: 'completed',
+      connectionId: 'connection-a',
+      executionResultAvailable: true,
+    });
+    await runtimeB.close();
+
+    const runtimeC = new DatabaseAgentRuntime({
+      ...options,
+      driver: new FakeDatabaseDriver(),
+    });
+    expect(runtimeC.getRun(generated.runId)).toMatchObject({
+      status: 'completed',
+      executionResultAvailable: false,
+      execution: { rows: [], returnedRowCount: 1 },
+    });
+    await runtimeC.connect({ ...connectionInput(), id: 'connection-b' });
+    await expect(runtimeC.reexecuteGenerated(generated.runId)).rejects.toMatchObject({
+      code: 'RUN_NOT_EXECUTABLE',
+    });
+    expect(runtimeC.getRun(generated.runId)).toMatchObject({
+      status: 'completed',
+      connectionId: 'connection-a',
+      executionResultAvailable: false,
+    });
+    await runtimeC.disconnect();
+    await runtimeC.connect({ ...connectionInput(), id: 'connection-a' });
+    await expect(runtimeC.reexecuteGenerated(generated.runId)).resolves.toMatchObject({
+      status: 'completed',
+      executionResultAvailable: true,
+      execution: { rows: [{ city: 'Shanghai', total_amount: 188 }] },
+    });
+    await runtimeC.close();
   });
 
   it('restores an explicitly persisted Schema RAG snapshot after a runtime restart', async () => {
@@ -421,7 +499,7 @@ order by total_amount desc`,
 
     await expect(iterator.next()).resolves.toMatchObject({
       done: false,
-      value: { type: 'text-delta', delta: 'working' },
+      value: { type: 'text-delta', text: 'working' },
     });
     await runtime.close();
 
@@ -530,7 +608,7 @@ order by total_amount desc`,
               handleId: 'injected-result',
               rows: [{ value: 1 }],
               rowOffset: 0,
-              hasMore: false,
+              complete: true,
             };
           },
         }) as AsyncIterable<ResultBatch>,
@@ -644,8 +722,8 @@ order by total_amount desc`,
     expect(executed.execution.rows).toEqual([{ value: 1 }]);
     expect(createProfile).toHaveBeenCalledTimes(1);
     const createdProfile = createProfile.mock.calls[0]?.[0];
-    expect(createdProfile?.scope.tenantId).toBe('tenant-injected');
-    expect(createdProfile?.scope.projectId).toMatch(/^project:/);
+    expect(createdProfile?.scope?.tenantId).toBe('tenant-injected');
+    expect(createdProfile?.scope?.projectId).toMatch(/^project:/);
     expect(connect).toHaveBeenCalledWith('connection-1', {
       username: 'postgres',
       password: 'postgres',
@@ -737,6 +815,7 @@ order by total_amount desc`,
 
   it('runs the main multi-step AI SQL Agent with knowledge lookup, complex SQL, execution, and persisted session evidence', async () => {
     const driver = new FakeDatabaseDriver();
+    driver.resultRowCount = 1_500;
     const provider = new ScriptedAgentProvider([
       {
         text: '',
@@ -803,6 +882,15 @@ order by total_amount desc`,
     });
 
     expect(output.activatedSkills).toContain('query-and-answer');
+    expect(output.result.runId).toEqual(expect.any(String));
+    expect(output.queryResults).toHaveLength(1);
+    expect(output.queryResults[0]).toMatchObject({
+      connectionId: 'connection-1',
+      returnedRowCount: 1_000,
+      hasMore: true,
+      truncated: true,
+    });
+    expect(output.queryResults[0]?.rows).toHaveLength(1_000);
     expect(output.result).toMatchObject({
       status: 'done',
       finalText: '上海前三笔订单合计金额为 188。',
@@ -821,13 +909,46 @@ order by total_amount desc`,
     expect(typeof output.result.session.knowledgeSnapshot?.indexVersion).toBe('string');
     expect(driver.executedSql[0]).toContain('row_number() OVER');
     expect(provider.requests).toHaveLength(3);
-    await expect(runtime.sessions.load(output.result.session.id)).resolves.toMatchObject({
+    await expect(runtime.getAgentRun(output.result.runId)).resolves.toMatchObject({
+      runId: output.result.runId,
+      sessionId: output.result.session.id,
+      status: 'done',
+      phase: 'done',
+      completion: {
+        verified: true,
+        deliveryReady: true,
+      },
+    });
+    const modelToolMessage = provider.requests[2]?.messages.find(
+      (message) => message.role === 'tool' && message.toolCallId === 'tool-query',
+    );
+    const modelToolPayload = JSON.parse(modelToolMessage?.content ?? '{}') as {
+      rows?: unknown[];
+    };
+    expect(modelToolPayload.rows).toHaveLength(2);
+    const persisted = await runtime.sessions.load(output.result.session.id);
+    expect(persisted).toMatchObject({
       id: output.result.session.id,
       userId: 'user-alice',
       knowledgeSnapshot: {
         catalogRootHash: output.result.session.knowledgeSnapshot?.catalogRootHash,
       },
     });
+    const persistedToolMessage = persisted?.messages.find(
+      (message) => message.role === 'tool' && message.toolCallId === 'tool-query',
+    );
+    expect(persistedToolMessage?.content).not.toContain('"rows"');
+    expect(persistedToolMessage?.content).not.toContain('resultHandleId');
+    await runtime.close();
+    const restoredRuntime = new DatabaseAgentRuntime({
+      driver: new FakeDatabaseDriver(),
+      sessionDatabasePath: join(directory, 'agent.db'),
+    });
+    await expect(restoredRuntime.getAgentRun(output.result.runId)).resolves.toMatchObject({
+      status: 'done',
+      sessionId: output.result.session.id,
+    });
+    await restoredRuntime.close();
   });
 
   it('manually compacts a persisted Agent session and exposes its checkpoint history', async () => {
@@ -903,6 +1024,61 @@ order by total_amount desc`,
       purpose: 'context-compaction',
       trigger: 'manual',
     });
+  });
+
+  it('reads public Agent run history from the configured durable run store', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dbagent-sdk-custom-run-store-'));
+    tempDirs.push(directory);
+    const record: AgentRunRecord = {
+      runId: 'custom-run-1',
+      sessionId: 'custom-session-1',
+      status: 'done',
+      phase: 'done',
+      iteration: 2,
+      finalText: '查询已完成，结果已单独返回。',
+      toolExecutions: [
+        {
+          toolName: 'sql_execute',
+          status: 'success',
+          completionEvidence: { kind: 'database-result', deliveryReady: true },
+        },
+      ],
+      completion: {
+        verified: true,
+        deliveryReady: true,
+        finalResponseReady: true,
+        phase: 'done',
+        unresolvedTaskIds: [],
+        missing: [],
+        evidenceKinds: ['database-result'],
+      },
+      createdAt: '2026-07-27T00:00:00.000Z',
+      updatedAt: '2026-07-27T00:00:01.000Z',
+    };
+    let recoveryCalls = 0;
+    const runStore: AgentRunStore = {
+      saveRun: () => Promise.resolve(),
+      getRun: (runId) => Promise.resolve(runId === record.runId ? structuredClone(record) : undefined),
+      listRuns: (sessionId) =>
+        Promise.resolve(
+          sessionId === undefined || sessionId === record.sessionId
+            ? [structuredClone(record)]
+            : [],
+        ),
+      recoverInterrupted: () => {
+        recoveryCalls += 1;
+        return Promise.resolve(0);
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      sessionDatabasePath: join(directory, 'state.db'),
+      agentDependencies: { runStore },
+    });
+
+    await expect(runtime.getAgentRun(record.runId)).resolves.toEqual(record);
+    await expect(runtime.listAgentRuns(record.sessionId, 10)).resolves.toEqual([record]);
+    expect(recoveryCalls).toBe(1);
+    await runtime.close();
   });
 
   it('keeps all Session management and resume paths inside the current Project', async () => {
@@ -1583,7 +1759,7 @@ class SlowAbortAwareStreamProvider implements LlmProvider {
   async *stream(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent> {
     this.signal = request.signal;
     try {
-      yield { type: 'text-delta', delta: 'working' };
+      yield { type: 'text-delta', text: 'working' };
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(resolve, 5_000);
         request.signal?.addEventListener(
@@ -1773,6 +1949,7 @@ class FakeDatabaseDriver implements IDatabaseDriver {
   executedSql: string[] = [];
   disconnectCount = 0;
   throwOnExecute?: Error;
+  resultRowCount = 1;
   private connection: SavedConnection | undefined;
 
   test(): Promise<Result<{ latencyMs: number }>> {
@@ -1813,9 +1990,12 @@ class FakeDatabaseDriver implements IDatabaseDriver {
           { name: 'city', dataType: 'text' },
           { name: 'total_amount', dataType: 'numeric' },
         ],
-        rows: [{ city: 'Shanghai', total_amount: 188 }],
-        rowCount: 1,
-        returnedRowCount: 1,
+        rows: Array.from({ length: this.resultRowCount }, (_, index) => ({
+          city: index % 2 === 0 ? 'Shanghai' : 'Beijing',
+          total_amount: 188 + index,
+        })),
+        rowCount: this.resultRowCount,
+        returnedRowCount: this.resultRowCount,
         elapsedMs: 4,
         safety: {
           statementKind: 'SELECT',

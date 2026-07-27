@@ -291,6 +291,83 @@ describe('OpenAICompatibleProvider', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('retries transient failures by default and carries Retry-After diagnostics', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'busy' } }), {
+          status: 503,
+          headers: {
+            'content-type': 'application/json',
+            'retry-after': '0',
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          choices: [{ message: { content: 'recovered' } }],
+        }),
+      );
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      retryDelayBaseMs: 1,
+      retryJitterRatio: 0,
+      fetch: fetchMock,
+    });
+
+    await expect(
+      provider.chat({
+        model: 'test',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    ).resolves.toMatchObject({ text: 'recovered' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['first-event', 10, 100, 100, []],
+    ['first-output', 100, 15, 100, [sse({ usage: { total_tokens: 1 } })]],
+    [
+      'total',
+      100,
+      100,
+      20,
+      [sse({ choices: [{ delta: { content: 'started' } }] })],
+    ],
+  ] as const)(
+    'reports the %s stream timeout phase',
+    async (phase, firstEventMs, firstOutputMs, totalMs, initialChunks) => {
+      const fetchMock = vi.fn<TestFetch>(() =>
+        Promise.resolve(stallingStreamResponse([...initialChunks])),
+      );
+      const provider = new OpenAICompatibleProvider({
+        id: 'test',
+        name: 'Test Provider',
+        apiKey: 'test-key',
+        baseUrl: 'https://example.test/v1',
+        maxRetries: 0,
+        streamTimeouts: { firstEventMs, firstOutputMs, totalMs },
+        fetch: fetchMock,
+      });
+
+      await expect(
+        collect(
+          provider.stream({
+            model: 'test',
+            messages: [{ role: 'user', content: 'ping' }],
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: 'LLM_TIMEOUT',
+        detail: { phase },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('does not retry user-aborted chat requests or report them as timeouts', async () => {
     const abortController = new AbortController();
     abortController.abort();
@@ -416,6 +493,18 @@ function streamResponse(chunks: string[]): Response {
         const encoder = new TextEncoder();
         for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
         controller.close();
+      },
+    }),
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+}
+
+function stallingStreamResponse(initialChunks: string[]): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const chunk of initialChunks) controller.enqueue(encoder.encode(chunk));
       },
     }),
     { status: 200, headers: { 'content-type': 'text/event-stream' } },

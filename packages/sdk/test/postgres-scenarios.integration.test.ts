@@ -18,9 +18,45 @@ const runLiveModel = process.env.DBAGENT_RUN_SDK_LIVE === '1';
 const tempDirectories: string[] = [];
 const scenarioRunLogs: ScenarioRunLog[] = [];
 const liveScenarioRunLogs: ScenarioRunLog[] = [];
+const EXPECTED_FUNCTIONAL_RUN_COUNT = 9;
+const LIVE_SCENARIOS = [
+  {
+    scenario: 'ecommerce-live',
+    message:
+      '请从 commerce 订单、支付和退款中，按月份和渠道统计 2026 年 1 月到 3 月的已结算净收入（已结算支付减成功退款），必须执行 SQL 并返回数据库结果。',
+    expectedValues: ['2026-03', '150.00'],
+  },
+  {
+    scenario: 'traffic-cleaning-live',
+    message:
+      'traffic_lab.raw_kafka_events 只有 JSONB value。请自行确认结构，在 PostgreSQL 中完成字段提取、按 event_id 保留 ingested_at 最新一条、过滤 event_id/visitor_id/event_time/latency_ms 缺失或格式错误的脏数据。高延迟和每分钟流量必须使用 traffic_lab.anomaly_thresholds 的配置值，不得自行设阈值；事件类型必须连接 traffic_lab.event_type_dictionary，并且只保留字典中 active=true 的事件。返回有效事件总数、高延迟事件总数、超过每分钟流量阈值的分钟数，并执行最终 SQL。',
+    expectedValues: ['20011', '1', '201'],
+  },
+  {
+    scenario: 'big-science-live',
+    message:
+      '请查询 science 的分区观测数据，按实验返回样本数、观测数、净信号（signal-background）的样本均值均值，并验证两个实验各有 12000 条观测。必须执行 SQL。',
+    expectedValues: ['EXP-PHOTON-001', 'EXP-GENOME-002', '12000'],
+  },
+] as const;
+const SELECTED_LIVE_SCENARIOS = process.env.DBAGENT_LIVE_SCENARIO?.trim()
+  ? LIVE_SCENARIOS.filter(
+      (liveCase) => liveCase.scenario === process.env.DBAGENT_LIVE_SCENARIO?.trim(),
+    )
+  : LIVE_SCENARIOS;
+if (
+  runLiveModel &&
+  process.env.DBAGENT_LIVE_SCENARIO?.trim() &&
+  SELECTED_LIVE_SCENARIOS.length === 0
+) {
+  throw new Error(
+    `Unknown DBAGENT_LIVE_SCENARIO: ${process.env.DBAGENT_LIVE_SCENARIO.trim()}`,
+  );
+}
 const functionalReportPath = fileURLToPath(
   new URL('../../../reports/postgres-scenarios/functional.json', import.meta.url),
 );
+const liveScenarioReportDirectory = join(dirname(functionalReportPath), 'live-cases');
 
 afterEach(async () => {
   await Promise.all(
@@ -40,9 +76,11 @@ afterAll(async () => {
           runId: process.env.DBAGENT_TEST_RUN_ID ?? 'standalone',
           database: 'PostgreSQL',
           deterministicModel: true,
-          expectedRunCount: 11,
+          expectedRunCount: EXPECTED_FUNCTIONAL_RUN_COUNT,
           actualRunCount: scenarioRunLogs.length,
-          passed: scenarioRunLogs.length === 11,
+          passed:
+            scenarioRunLogs.length === EXPECTED_FUNCTIONAL_RUN_COUNT &&
+            scenarioRunLogs.every((run) => run.passed),
           runs: scenarioRunLogs,
         },
         null,
@@ -63,9 +101,11 @@ afterAll(async () => {
           provider: 'SiliconFlow OpenAI-compatible',
           model:
             process.env.TEST_SILICONFLOW_MODEL ?? process.env.DBAGENT_LLM_MODEL ?? 'Qwen/Qwen3-32B',
-          expectedRunCount: 3,
+          expectedRunCount: SELECTED_LIVE_SCENARIOS.length,
           actualRunCount: liveScenarioRunLogs.length,
-          passed: liveScenarioRunLogs.length === 3,
+          passed:
+            liveScenarioRunLogs.length === SELECTED_LIVE_SCENARIOS.length &&
+            liveScenarioRunLogs.every((run) => run.passed),
           runs: liveScenarioRunLogs,
         },
         null,
@@ -154,7 +194,7 @@ describe.skipIf(!runPostgresTests)(
           'sql_explain',
           'sql_execute',
         ]);
-        const financeResult = finance.result.toolExecutions[2]!.resultPreview;
+        const financeResult = queryResultJson(finance, -1);
         for (const expected of [
           '2026-01',
           '2026-02',
@@ -200,7 +240,7 @@ describe.skipIf(!runPostgresTests)(
           message: '查询上海仓机械键盘当前预留库存。',
           mode: 'read',
         });
-        expect(verify.result.toolExecutions[0]!.resultPreview).toContain('"reserved_qty":3');
+        expect(queryResultJson(verify, -1)).toContain('"reserved_qty":3');
 
         const deniedDdl = await runtime.runAgent({
           userId: 'acceptance-user',
@@ -307,12 +347,12 @@ describe.skipIf(!runPostgresTests)(
         });
         expect(output.result.toolExecutions[1]!.resultPreview).toContain('value');
 
-        const sample = output.result.toolExecutions[2]!.resultPreview;
+        const sample = queryResultJson(output, 0);
         expect(sample).toContain('"event_id":"e-001"');
         expect(sample).toContain('"latency_ms":120');
         expect(sample.length).toBeLessThan(6_000);
 
-        const result = output.result.toolExecutions[3]!.resultPreview;
+        const result = queryResultJson(output, -1);
         for (const expected of [
           '2026-03-01T10:00:00',
           '2026-03-01T10:01:00',
@@ -375,12 +415,12 @@ describe.skipIf(!runPostgresTests)(
           'sql_explain',
           'sql_execute',
         ]);
-        const partitions = output.result.toolExecutions[1]!.resultPreview;
+        const partitions = queryResultJson(output, 0);
         expect(partitions).toContain('science.observations_2026_01');
         expect(partitions).toContain('science.observations_2026_02');
         expect(partitions.match(/"observation_count":"12000"/g)).toHaveLength(2);
 
-        const statistics = output.result.toolExecutions[3]!.resultPreview;
+        const statistics = queryResultJson(output, -1);
         expect(statistics).toContain('EXP-PHOTON-001');
         expect(statistics).toContain('EXP-GENOME-002');
         expect(statistics.match(/"sample_count":"6"/g)).toHaveLength(2);
@@ -394,7 +434,7 @@ describe.skipIf(!runPostgresTests)(
       }
     }, 120_000);
 
-    it('keeps a 24000-row scientific result outside model context and isolates its handle by session', async () => {
+    it('keeps a 24000-row scientific result outside Agent history and returns a bounded SDK payload', async () => {
       let resultSequence = 0;
       const resultStore = new AiSqlResultStore({
         createId: () => `science-result-${++resultSequence}`,
@@ -405,19 +445,9 @@ describe.skipIf(!runPostgresTests)(
           maxRows: 2_000,
           previewRows: 3,
         }),
-        finalAnswer('大结果已经保存在结果句柄中。'),
-        toolCall('read-science-page', 'result_read', {
-          resultHandleId: 'science-result-1',
-          limit: 100,
-        }),
-        finalAnswer('已读取当前会话中的前 100 行。'),
-        toolCall('cross-session-read', 'result_read', {
-          resultHandleId: 'science-result-1',
-          limit: 100,
-        }),
-        finalAnswer('该结果属于另一个会话，无法读取。'),
+        finalAnswer('大结果查询已完成，最多 1000 行的交互结果已单独返回。'),
       ]);
-      const runtime = await connectedRuntime(provider, 'science-result-handle', {
+      const runtime = await connectedRuntime(provider, 'science-bounded-result', {
         resultStore,
       });
 
@@ -434,54 +464,35 @@ describe.skipIf(!runPostgresTests)(
           toolName: 'sql_execute',
           status: 'success',
         });
-        expect(execution.resultPreview).toContain('"resultHandleId":"science-result-1"');
-        expect(execution.resultPreview).toContain('"storedRowCount":2000');
+        expect(execution.resultPreview).not.toContain('resultHandleId');
+        expect(execution.resultPreview).not.toContain('"rows"');
+        expect(execution.resultPreview).toContain('"storedRowCount":1000');
         expect(execution.resultPreview).toContain('"previewTruncated":true');
         expect(execution.resultPreview).toContain('"hasMoreInDatabase":true');
         expect(execution.resultPreview.length).toBeLessThan(4_000);
-        expect(execution.resultPreview).toContain('"observation_id":"1"');
-        expect(execution.resultPreview).not.toContain('"observation_id":"4"');
-
-        const sameSession = await runtime.runAgent({
-          userId: 'acceptance-user',
-          sessionId: created.result.session.id,
-          message: '读取刚才结果句柄的前 100 行。',
-          mode: 'read',
+        expect(created.queryResults).toHaveLength(1);
+        expect(created.queryResults[0]).toMatchObject({
+          executionId: 'science-result-1',
+          returnedRowCount: 1_000,
+          hasMore: true,
+          truncated: true,
         });
-        expect(sameSession.result.toolExecutions[0]).toMatchObject({
-          toolName: 'result_read',
-          status: 'success',
-        });
-        const firstPage = JSON.parse(sameSession.result.toolExecutions[0]!.resultPreview) as {
-          returnedRowCount: number;
-          nextCursor?: string;
-        };
-        expect(firstPage.returnedRowCount).toBeGreaterThan(0);
-        expect(firstPage.returnedRowCount).toBeLessThanOrEqual(100);
-        expect(firstPage.nextCursor).toBe(String(firstPage.returnedRowCount));
-
-        const otherSession = await runtime.runAgent({
-          userId: 'another-user',
-          message: '读取 science-result-1 的前 100 行。',
-          mode: 'read',
-        });
-        expect(otherSession.result.toolExecutions[0]).toMatchObject({
-          toolName: 'result_read',
-          status: 'failed',
-        });
-        expect(otherSession.result.toolExecutions[0]!.resultPreview).toContain(
-          'belongs to another session',
-        );
+        expect(created.queryResults[0]?.rows).toHaveLength(1_000);
 
         const firstToolResult =
           provider.requests[1]?.messages.find(
             (message) => message.role === 'tool' && message.toolCallId === execution.toolCallId,
           )?.content ?? '';
         expect(firstToolResult.length).toBeLessThan(4_000);
-        expect(firstToolResult).not.toContain('"observation_id":"4"');
-        recordRun('big-science', 'large-result-handle', created);
-        recordRun('big-science', 'same-session-result-read', sameSession);
-        recordRun('big-science', 'cross-session-result-denied', otherSession);
+        expect((JSON.parse(firstToolResult) as { rows: unknown[] }).rows).toHaveLength(2);
+        const persisted = await runtime.sessions.load(created.result.session.id);
+        const durableToolMessage = persisted?.messages.find(
+          (message) =>
+            message.role === 'tool' && message.toolCallId === execution.toolCallId,
+        );
+        expect(durableToolMessage?.content).not.toContain('"rows"');
+        expect(durableToolMessage?.content).not.toContain('resultHandleId');
+        recordRun('big-science', 'large-bounded-result', created);
       } finally {
         await runtime.close();
       }
@@ -492,104 +503,100 @@ describe.skipIf(!runPostgresTests)(
 describe.skipIf(!runPostgresTests || !runLiveModel)(
   'DatabaseAgentRuntime live model complex PostgreSQL scenarios',
   () => {
-    it('solves ecommerce, traffic cleaning, and big-science tasks through the real Agent pipeline', async () => {
-      const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
-      if (!apiKey) {
-        throw new Error('需要 TEST_SILICONFLOW_API_KEY 或 DBAGENT_LLM_API_KEY。');
-      }
-      const model =
-        process.env.TEST_SILICONFLOW_MODEL ?? process.env.DBAGENT_LLM_MODEL ?? 'Qwen/Qwen3-32B';
-      const runtime = await connectedRuntime(
-        new OpenAICompatibleProvider({
-          id: 'scenario-live',
-          name: 'Scenario live provider',
-          apiKey,
-          baseUrl: process.env.DBAGENT_LLM_BASE_URL ?? 'https://api.siliconflow.cn/v1',
-          timeoutMs: 120_000,
-          maxRetries: 1,
-        }),
-        'scenario-live',
-        { model },
-      );
+    it('rejects an unknown live scenario selector', () => {
+      if (!process.env.DBAGENT_LIVE_SCENARIO?.trim()) return;
+      expect(
+        SELECTED_LIVE_SCENARIOS.length,
+        `未知 DBAGENT_LIVE_SCENARIO：${process.env.DBAGENT_LIVE_SCENARIO}`,
+      ).toBe(1);
+    });
 
-      try {
-        await runtime.indexSchema();
-        const cases = [
-          {
-            scenario: 'ecommerce-live',
-            message:
-              '请从 commerce 订单、支付和退款中，按月份和渠道统计 2026 年 1 月到 3 月的已结算净收入（已结算支付减成功退款），必须执行 SQL 并返回数据库结果。',
-            expectedValues: ['2026-03'],
-          },
-          {
-            scenario: 'traffic-cleaning-live',
-            message:
-              'traffic_lab.raw_kafka_events 只有 JSONB value。请自行确认结构，在 PostgreSQL 中完成字段提取、按 event_id 保留 ingested_at 最新一条、过滤 event_id/visitor_id/event_time/latency_ms 缺失或格式错误的脏数据。高延迟和每分钟流量必须使用 traffic_lab.anomaly_thresholds 的配置值，不得自行设阈值；事件类型必须连接 traffic_lab.event_type_dictionary，并且只保留字典中 active=true 的事件。返回有效事件总数、高延迟事件总数、超过每分钟流量阈值的分钟数，并执行最终 SQL。',
-            expectedValues: ['20011', '1', '201'],
-          },
-          {
-            scenario: 'big-science-live',
-            message:
-              '请查询 science 的分区观测数据，按实验返回样本数、观测数、净信号（signal-background）的样本均值均值，并验证两个实验各有 12000 条观测。必须执行 SQL。',
-            expectedValues: ['EXP-PHOTON-001', 'EXP-GENOME-002', '12000'],
-          },
-        ] as const;
-
-        const selectedCases = process.env.DBAGENT_LIVE_SCENARIO?.trim()
-          ? cases.filter(
-              (liveCase) => liveCase.scenario === process.env.DBAGENT_LIVE_SCENARIO?.trim(),
-            )
-          : cases;
-        if (selectedCases.length === 0) {
-          throw new Error(`未知 DBAGENT_LIVE_SCENARIO：${process.env.DBAGENT_LIVE_SCENARIO}`);
+    it.each(SELECTED_LIVE_SCENARIOS)(
+      'solves $scenario independently through the real Agent pipeline',
+      async (liveCase) => {
+        const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
+        if (!apiKey) {
+          throw new Error('需要 TEST_SILICONFLOW_API_KEY 或 DBAGENT_LLM_API_KEY。');
         }
+        const model =
+          process.env.TEST_SILICONFLOW_MODEL ?? process.env.DBAGENT_LLM_MODEL ?? 'Qwen/Qwen3-32B';
+        const runtime = await connectedRuntime(
+          new OpenAICompatibleProvider({
+            id: 'scenario-live',
+            name: 'Scenario live provider',
+            apiKey,
+            baseUrl: process.env.DBAGENT_LLM_BASE_URL ?? 'https://api.siliconflow.cn/v1',
+            timeoutMs: 120_000,
+            maxRetries: 1,
+          }),
+          'scenario-live',
+          { model },
+        );
 
-        for (const liveCase of selectedCases) {
-          const output = await runtime.runAgent({
+        let output: Awaited<ReturnType<DatabaseAgentRuntime['runAgent']>> | undefined;
+        let scenarioLog: ScenarioRunLog | undefined;
+        try {
+          await runtime.indexSchema();
+          output = await runtime.runAgent({
             userId: 'live-scenario-user',
             message: liveCase.message,
             mode: 'read',
             maxIterations: 16,
             maxToolExecutionMs: 120_000,
           });
-          recordRun(liveCase.scenario, 'real-model-agent', output, liveScenarioRunLogs);
-          expect(
-            output.result.status,
-            JSON.stringify({
-              scenario: liveCase.scenario,
-              finalText: output.result.finalText,
-              tools: output.result.toolExecutions.map((tool) => ({
-                name: tool.toolName,
-                status: tool.status,
-                result: tool.resultPreview,
-              })),
-            }),
-          ).toBe('done');
-          const successfulSql = output.result.toolExecutions
-            .filter((tool) => tool.toolName === 'sql_execute' && tool.status === 'success')
-            .map((tool) => tool.resultPreview)
-            .join('\n');
-          expect(successfulSql.length).toBeGreaterThan(0);
-          const observedValues = output.result.toolExecutions
-            .filter((tool) => tool.toolName === 'sql_execute' && tool.status === 'success')
-            .flatMap((tool) => resultPreviewValues(tool.resultPreview));
+          expect(output.result.status).toBe('done');
+          expect(output.result.completion).toMatchObject({
+            verified: true,
+            deliveryReady: true,
+            finalResponseReady: true,
+            phase: 'done',
+          });
+          expect(isProcessOnlyFinalText(output.result.finalText)).toBe(false);
+          const finalResult = output.queryResults.at(-1);
+          expect(finalResult, `${liveCase.scenario} 没有最终 SQL 结果`).toBeDefined();
+          expect(finalResult?.sql?.trim().length).toBeGreaterThan(0);
+          const observedValues = flattenResultValues(finalResult?.rows ?? []);
           for (const expected of liveCase.expectedValues) {
-            expect(observedValues, `${liveCase.scenario} 缺少数据库结果值 ${expected}`).toContain(
-              expected,
-            );
+            expect(
+              observedValues.some((value) => value.includes(expected)),
+              `${liveCase.scenario} 最终 SQL 结果缺少 ${expected}`,
+            ).toBe(true);
           }
+          scenarioLog = recordRun(
+            liveCase.scenario,
+            'real-model-agent',
+            output,
+            liveScenarioRunLogs,
+          );
+        } catch (error) {
+          if (output) {
+            scenarioLog = recordRun(
+              liveCase.scenario,
+              'real-model-agent',
+              output,
+              liveScenarioRunLogs,
+              false,
+              error,
+            );
+          } else {
+            scenarioLog = recordFailedRun(liveCase.scenario, 'real-model-agent', error);
+          }
+          throw error;
+        } finally {
+          if (scenarioLog) await writeLiveScenarioReport(scenarioLog);
+          await runtime.close();
         }
-      } finally {
-        await runtime.close();
-      }
-    }, 1_500_000);
+      },
+      600_000,
+    );
   },
 );
 
 type ScenarioRunLog = {
   scenario: string;
   step: string;
-  sessionId: string;
+  passed: boolean;
+  sessionId?: string;
   status: string;
   iterations: number;
   tools: Array<{
@@ -601,6 +608,14 @@ type ScenarioRunLog = {
     resultPreview: string;
   }>;
   finalText: string;
+  error?: string;
+  completion?: Awaited<ReturnType<DatabaseAgentRuntime['runAgent']>>['result']['completion'];
+  finalQuery?: {
+    sql?: string;
+    returnedRowCount: number;
+    hasMore: boolean;
+    rows: unknown[];
+  };
   tokenUsage: {
     promptTokens: number;
     completionTokens: number;
@@ -608,18 +623,14 @@ type ScenarioRunLog = {
   };
 };
 
-function resultPreviewValues(preview: string): string[] {
-  try {
-    const parsed = JSON.parse(preview) as { rows?: Array<Record<string, unknown>> };
-    return (parsed.rows ?? []).flatMap((row) => flattenResultValues(row));
-  } catch {
-    return [];
-  }
-}
-
 function flattenResultValues(value: unknown): string[] {
   if (Array.isArray(value)) return value.flatMap(flattenResultValues);
+  if (value instanceof Date) return [value.toISOString()];
   if (value && typeof value === 'object') {
+    const tagged = value as { $type?: unknown; value?: unknown };
+    if (tagged.$type === 'datetime' && typeof tagged.value === 'string') {
+      return [tagged.value];
+    }
     return Object.values(value).flatMap(flattenResultValues);
   }
   if (typeof value === 'string') return [value];
@@ -628,15 +639,29 @@ function flattenResultValues(value: unknown): string[] {
   return [];
 }
 
+function queryResultJson(
+  run: Awaited<ReturnType<DatabaseAgentRuntime['runAgent']>>,
+  index: number,
+): string {
+  const normalizedIndex = index < 0 ? run.queryResults.length + index : index;
+  const result = run.queryResults[normalizedIndex];
+  if (!result) throw new Error(`Missing query result at index ${index}.`);
+  return JSON.stringify(result.rows);
+}
+
 function recordRun(
   scenario: string,
   step: string,
   run: Awaited<ReturnType<DatabaseAgentRuntime['runAgent']>>,
   target: ScenarioRunLog[] = scenarioRunLogs,
-): void {
-  target.push({
+  passed = true,
+  error?: unknown,
+): ScenarioRunLog {
+  const finalQuery = run.queryResults.at(-1);
+  const log: ScenarioRunLog = {
     scenario,
     step,
+    passed,
     sessionId: run.result.session.id,
     status: run.result.status,
     iterations: run.result.iterations,
@@ -659,8 +684,82 @@ function recordRun(
           : `${tool.resultPreview.slice(0, 1_485)}...[truncated]`,
     })),
     finalText: run.result.finalText,
+    ...(run.result.completion === undefined
+      ? {}
+      : { completion: structuredClone(run.result.completion) }),
+    ...(error === undefined
+      ? {}
+      : { error: describeUnknownError(error) }),
+    ...(finalQuery === undefined
+      ? {}
+      : {
+          finalQuery: {
+            ...(finalQuery.sql === undefined ? {} : { sql: finalQuery.sql }),
+            returnedRowCount: finalQuery.returnedRowCount,
+            hasMore: finalQuery.hasMore,
+            rows: structuredClone(finalQuery.rows.slice(0, 20)),
+          },
+        }),
     tokenUsage: { ...run.result.session.tokenUsage },
-  });
+  };
+  target.push(log);
+  return log;
+}
+
+function describeUnknownError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error) ?? 'Unknown error';
+  } catch {
+    return 'Unknown error';
+  }
+}
+
+function recordFailedRun(scenario: string, step: string, error: unknown): ScenarioRunLog {
+  const log: ScenarioRunLog = {
+    scenario,
+    step,
+    passed: false,
+    status: 'failed_before_agent_result',
+    iterations: 0,
+    tools: [],
+    finalText: '',
+    error: describeUnknownError(error),
+    tokenUsage: {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    },
+  };
+  liveScenarioRunLogs.push(log);
+  return log;
+}
+
+async function writeLiveScenarioReport(log: ScenarioRunLog): Promise<void> {
+  await mkdir(liveScenarioReportDirectory, { recursive: true });
+  await writeFile(
+    join(liveScenarioReportDirectory, `${log.scenario}.json`),
+    `${JSON.stringify(
+      {
+        generatedAt: new Date().toISOString(),
+        runId: process.env.DBAGENT_TEST_RUN_ID ?? 'standalone',
+        provider: 'SiliconFlow OpenAI-compatible',
+        model:
+          process.env.TEST_SILICONFLOW_MODEL ?? process.env.DBAGENT_LLM_MODEL ?? 'Qwen/Qwen3-32B',
+        run: log,
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+}
+
+function isProcessOnlyFinalText(text: string): boolean {
+  return /(?:let me|i(?:'ll| will)|让我|我来|接下来|下一步|正在).{0,60}(?:verify|check|验证|检查|继续|确认)/i.test(
+    text,
+  );
 }
 
 async function connectedRuntime(

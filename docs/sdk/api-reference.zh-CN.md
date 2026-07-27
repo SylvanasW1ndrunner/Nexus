@@ -41,7 +41,7 @@ const runtime = new DatabaseAgentRuntime(options);
 | `agentDependencies`    | `AgentRunDependencies`                         | 注入 Agent 持久化、审计和检查点依赖                             |
 | `sessionStore`         | `AgentSessionStore`                            | 注入 Store；Runtime 会在其上创建 Project 绑定视图               |
 | `sessionDatabasePath`  | `string`                                       | 默认是 `defaultAgentStateDatabasePath()` 返回的系统用户数据路径 |
-| `resultStore`          | `AiSqlResultStore`                             | 注入进程内 Agent 结果句柄 Store                                 |
+| `resultStore`          | `AiSqlResultStore`                             | 注入有界、临时的交互结果缓存                                    |
 | `projectDirectory`     | `string`                                       | `process.cwd()`，选定的 Project 根目录                          |
 | `userSkillsDirectory`  | `string`                                       | `~/.schemanaut/skills`                                          |
 | `sessionSkills`        | `SkillOverlay[]`                               | 复制给新建 Session 的默认模板                                   |
@@ -60,7 +60,7 @@ const runtime = new DatabaseAgentRuntime(options);
 | `sessions`  | `AgentSessionStore`     | 持久 Session、偏好、导出和上下文检查点                         |
 | `tools`     | `ToolRegistry`          | 内置和动态注册的 Agent Tools                                   |
 | `skills`    | `SkillRegistry`         | System、User、Project 公共 Skills；Session 视图由 Runtime 管理 |
-| `results`   | `AiSqlResultStore`      | Session 隔离、自动过期的 Agent 结果句柄                        |
+| `results`   | `AiSqlResultStore`      | 可信宿主访问有界、自动过期的交互结果缓存                       |
 | `mcpConfig` | `McpConfigStore`        | 管理 Project 的 `.schemanaut/mcp.json`                         |
 | `mcp`       | `McpRuntimeManager`     | MCP 生命周期、健康、Tools、Resources 与 Prompts                |
 
@@ -223,6 +223,7 @@ type RunAiSqlAgentInput = {
 
 type AiSqlAgentRun = {
   activatedSkills: string[];
+  queryResults: InteractiveQueryResult[];
   result: AgentRunResult;
 };
 ```
@@ -233,6 +234,7 @@ type AiSqlAgentRun = {
 
 ```ts
 type AgentRunResult = {
+  runId: string;
   status: 'done' | 'aborted' | 'max_iterations_reached';
   session: AgentSession;
   finalText: string;
@@ -243,6 +245,11 @@ type AgentRunResult = {
   completion?: {
     verified: boolean;
     unresolvedTaskIds: string[];
+    deliveryReady: boolean;
+    finalResponseReady: boolean;
+    phase: 'verify' | 'finalize' | 'done';
+    missing: string[];
+    evidenceKinds: string[];
   };
   contextCompression?: AgentContextCompressionReport[];
 };
@@ -273,7 +280,9 @@ type AgentSessionView = {
 
 type AiSqlAgentRunView = {
   activatedSkills: string[];
+  queryResults: InteractiveQueryResult[];
   result: {
+    runId: string;
     status: AgentRunStatus;
     session: AgentSessionView;
     finalText: string;
@@ -283,12 +292,21 @@ type AiSqlAgentRunView = {
     completion?: {
       verified: boolean;
       unresolvedTaskIds: string[];
+      deliveryReady: boolean;
+      finalResponseReady: boolean;
+      phase: 'verify' | 'finalize' | 'done';
+      missing: string[];
+      evidenceKinds: string[];
     };
   };
 };
 ```
 
-`AgentSessionView` 不包含 Tool 消息/调用、知识 Hash 与树索引、已加载 Skill 正文、上下文压缩内部信息和评测细节。公开任务计划中的证据只保留类型、摘要与创建时间。
+`queryResults` 为每次 SQL 执行单独返回最多 1,000 行，不属于 `result.session`。模型只会看到最多两行的临时样例。查询行不会写入 Session 消息、持久 Agent Run 记录或用户偏好。
+
+`AgentSessionView` 不包含 Tool 消息/调用、查询行、知识 Hash 与树索引、已加载 Skill 正文、上下文压缩内部信息和评测细节。公开任务计划中的证据只保留类型、摘要与创建时间。
+
+`getAgentRun(runId)` 与 `listAgentRuns(sessionId?, limit?)` 返回 Project 隔离、只含元数据的 Agent Run 记录。进程重启会把未结束的 `running` 记录恢复为 `interrupted`；这些记录从不包含数据库行。
 
 不存在让用户选择的策略字段；实际激活的 Skill 名称通过 `activatedSkills` 返回。
 
@@ -577,7 +595,7 @@ Tool 定义包含危险等级、来源、只读元数据，以及静态或根据
 
 | Tools                                                                             | 所需模式                                  |
 | --------------------------------------------------------------------------------- | ----------------------------------------- |
-| `resource_list`、`resource_get`、`knowledge_search`、`sql_explain`、`result_read` | `read`                                    |
+| `resource_list`、`resource_get`、`knowledge_search`、`sql_explain`                | `read`                                    |
 | `sql_execute`                                                                     | 根据 SQL 计算：`read`、`edit` 或 `full`   |
 | `task_plan_create`、`task_update`、`task_list`、`tool_search`、`tool_describe`    | `read`                                    |
 | `skill_search`、`skill_load`、`skill_resource_read`                               | `read`                                    |
@@ -594,15 +612,16 @@ Workspace 文件工具强制 Project 路径边界。启用后的 `shell_run` 会
 
 ## `runtime.results`
 
-| 方法                                       | 作用                                  |
-| ------------------------------------------ | ------------------------------------- |
-| `put({ sessionId, connectionId, result })` | 保存执行结果并返回句柄                |
-| `read({ id, sessionId, cursor?, limit? })` | 读取有界分页，默认 20 行，最多 100 行 |
-| `remove(id)`                               | 删除一个句柄                          |
-| `clearSession(sessionId)`                  | 删除该 Session 的所有句柄             |
-| `prune()`                                  | 删除过期句柄                          |
+| 方法                                       | 作用                                         |
+| ------------------------------------------ | -------------------------------------------- |
+| `put({ sessionId, connectionId, result })` | 只保存有界交互结果                           |
+| `read({ id, sessionId, cursor?, limit? })` | 读取缓存行，默认 20 行，最多 1,000 行        |
+| `listSession(sessionId)`                   | 列出一个 Session 当前进程内的结果            |
+| `remove(id)`                               | 删除一个缓存结果                             |
+| `clearSession(sessionId)`                  | 删除该 Session 的全部缓存结果                |
+| `prune()`                                  | 删除过期缓存结果                             |
 
-默认 TTL 为一小时。句柄不存在、过期或属于其他 Session 时读取失败。默认 Store 位于内存中。
+这是可信宿主的兼容接口，不是 Agent Tool。Agent 不存在 `result_read` Tool，也不会收到缓存 ID。缓存最多只包含 1,000 行交互载荷，默认一小时过期，恢复 Session 时不会恢复。常规集成应直接使用 `AiSqlAgentRun.queryResults`。
 
 ## 确定性 SQL 生成与执行
 
@@ -624,9 +643,13 @@ type GenerateSqlInput = {
 
 重新检查并执行 `awaiting_execution` Run。`options.limit` 默认为 `defaultRowLimit`，范围 1–1,000。
 
+### `reexecuteGenerated(runId, options?): Promise<ExecutedSqlRun>`
+
+重新检查并执行状态为 `completed`、`failed`、`aborted` 或 `outcome_unknown` 的持久 Run。必须激活同一数据库连接身份。恢复的 Run 出现 `executionResultAvailable: false` 时使用该方法。
+
 ### `getRun(runId): SqlRunSnapshot | undefined`
 
-返回进程内快照。确定性 Run 快照不会跨 Runtime 重启持久化。
+返回 Project 隔离的 SQLite 快照。Run 元数据可跨 Runtime 重启，结果行不会持久化。`executionResultAvailable` 只在 `executeGenerated()` 或 `reexecuteGenerated()` 的即时响应中为 `true`。遗留的 `executing` 记录恢复为 `outcome_unknown`，不会被自动重放。
 
 ## 模型直调 API
 
@@ -701,6 +724,8 @@ await started.close();
 | `GET /v1/schema/status`                                  | 当前 `SchemaIndexSnapshot`                                                                               |
 | `POST /v1/agent/run`                                     | `{ message, userId?, mode?, sessionId?, maxIterations?, maxToolExecutionMs? }`，返回 `AiSqlAgentRunView` |
 | `POST /v1/agent/run/stream`                              | 相同请求体；返回语义化 Server-Sent Events，最后发送投影后的 `result`                                     |
+| `GET /v1/agent/runs?sessionId=&limit=`                   | 返回持久、只含元数据的 Agent Run 记录                                                                      |
+| `GET /v1/agent/runs/:id`                                 | 返回单个持久 Agent Run 记录；不存在时为 `404`                                                             |
 | `POST /v1/agent/sessions/:id/compact`                    | `{ focus? }`，手动上下文压缩                                                                             |
 | `GET /v1/agent/sessions/:id/context-checkpoints?limit=N` | 上下文检查点历史                                                                                         |
 
@@ -751,7 +776,8 @@ REST 默认禁止管理进程型 stdio MCP。可信本地宿主必须在创建 S
 | ------------------------- | -------------------------------- |
 | `POST /v1/query/generate` | `{ question, maxContextChars? }` |
 | `POST /v1/query/execute`  | `{ runId, limit? }`              |
-| `GET /v1/runs/:id`        | 读取进程内 Run 快照              |
+| `POST /v1/query/reexecute` | `{ runId, limit? }`             |
+| `GET /v1/runs/:id`        | 读取持久 Run 快照                |
 
 ### 模型与数据库基础接口
 

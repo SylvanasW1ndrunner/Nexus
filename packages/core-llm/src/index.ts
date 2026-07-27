@@ -5,6 +5,7 @@ export * from './llm-gateway.js';
 export * from './llm-router.js';
 export * from './model-registry.js';
 export * from './openai-compatible-provider.js';
+export * from './retry-policy.js';
 export * from './prompt-runtime.js';
 export * from './provider-presets.js';
 export * from './reliability.js';

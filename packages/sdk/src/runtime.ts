@@ -13,8 +13,11 @@ import {
   createAgentProjectContext,
   defaultAgentStateDatabasePath,
   defaultAgentUserSkillsDirectory,
+  isFinalResponseReady,
   type AgentContextCheckpoint,
   type AgentProjectContext,
+  type AgentRunRecord,
+  type AgentRunStore,
   type AgentSession,
 } from '@dbagent/core-agent';
 import {
@@ -60,6 +63,7 @@ import {
   McpToolRegistrationManager,
   type AiSqlQueryExecutionInput,
   type AiSqlResultStore,
+  type StoredAiSqlResult,
   type McpServerConfig,
   type McpServerHealthState,
   type McpServerInput,
@@ -78,6 +82,7 @@ import {
 } from '@dbagent/shared';
 import { DatabaseAgentError, asDatabaseAgentError } from './errors.js';
 import { parseGeneratedSqlResponse } from './parse-generation.js';
+import { SqlRunStore } from './sql-run-store.js';
 import type {
   ConnectionTestResult,
   CompactAiSqlAgentSessionInput,
@@ -89,6 +94,7 @@ import type {
   GeneratedSqlEvidence,
   GeneratedSqlRun,
   IndexSchemaOptions,
+  InteractiveQueryResult,
   LlmRuntimeCallOptions,
   LlmRuntimeChatRequest,
   PostgresConnectionInput,
@@ -150,6 +156,8 @@ export class DatabaseAgentRuntime {
   private readonly activeLlmOperations = new Set<Promise<unknown>>();
   private readonly activeLlmControllers = new Set<AbortController>();
   private readonly activeLlmStreamClosers = new Set<() => Promise<void>>();
+  private readonly agentRunRecovery: Promise<number>;
+  private readonly agentRunStore: AgentRunStore;
   private readonly llmJobOwnerId = randomUUID();
   private closing = false;
   readonly tools: ToolRegistry;
@@ -168,7 +176,10 @@ export class DatabaseAgentRuntime {
   readonly resources: ResourceRegistry;
   private readonly tenantId: string;
   private readonly resourceScope: ResourceScope;
-  private readonly runs = new Map<string, SqlRunSnapshot>();
+  private readonly sqlRuns: SqlRunStore;
+  private readonly ownsSqlRunStore: boolean;
+  private sqlRunStoreClosed = false;
+  private closedSqlRunCount = 0;
   private providerId?: string;
   private model?: string;
   private connection: SavedConnection | undefined;
@@ -290,6 +301,15 @@ export class DatabaseAgentRuntime {
     );
     this.tools = new ToolRegistry();
     this.project = createAgentProjectContext(resolve(options.projectDirectory ?? process.cwd()));
+    const stateDatabasePath = options.sessionDatabasePath ?? defaultAgentStateDatabasePath();
+    this.ownsSqlRunStore = options.sqlRunStore === undefined;
+    this.sqlRuns =
+      options.sqlRunStore ??
+      new SqlRunStore({
+        filePath: stateDatabasePath,
+        projectKey: agentProjectStorageIdentity(agentProjectReference(this.project)).projectKey,
+        now: this.now,
+      });
     this.resourceScope = {
       tenantId: this.tenantId,
       projectId: agentProjectStorageIdentity(agentProjectReference(this.project)).projectKey,
@@ -328,8 +348,10 @@ export class DatabaseAgentRuntime {
     this.dynamicToolDiscovery = options.dynamicToolDiscovery ?? true;
     this.sessions = (
       options.sessionStore ??
-      new AgentSessionStore(options.sessionDatabasePath ?? defaultAgentStateDatabasePath())
+      new AgentSessionStore(stateDatabasePath)
     ).forProject(agentProjectReference(this.project));
+    const agentRunStore = options.agentDependencies?.runStore ?? this.sessions;
+    this.agentRunStore = agentRunStore;
     registerAgentRuntimeTools(this.tools);
     registerSkillTools(this.tools, (session) => this.skillRegistryForSession(session));
     registerWorkspaceTools(this.tools, {
@@ -374,8 +396,11 @@ export class DatabaseAgentRuntime {
       {
         ...(options.agentDependencies ?? {}),
         sessionStore: this.sessions,
+        runStore: agentRunStore,
+        createRunId: options.agentDependencies?.createRunId ?? this.createRunId,
       },
     );
+    this.agentRunRecovery = this.reactAgent.waitForRunRecovery();
     this.subagents = new AgentSubagentPool((runOptions) => this.reactAgent.run(runOptions), {
       store: this.sessions,
     });
@@ -528,7 +553,6 @@ export class DatabaseAgentRuntime {
     this.indexTruncated = false;
     this.lastIndexMaxTables = DEFAULT_MAX_SCHEMA_TABLES;
     this.schemaFreshnessPromise = undefined;
-    this.runs.clear();
   }
 
   async close(): Promise<void> {
@@ -576,7 +600,11 @@ export class DatabaseAgentRuntime {
       failures.push(error);
     }
     this.results.clear();
-    this.runs.clear();
+    if (this.ownsSqlRunStore && !this.sqlRunStoreClosed) {
+      this.closedSqlRunCount = this.sqlRuns.count();
+      this.sqlRuns.close();
+      this.sqlRunStoreClosed = true;
+    }
     if (failures.length > 0) {
       throw new AggregateError(failures, 'SchemaNaut runtime did not close cleanly.');
     }
@@ -661,7 +689,7 @@ export class DatabaseAgentRuntime {
       connected: Boolean(this.connection),
       ...(this.connection === undefined ? {} : { connection: cloneConnection(this.connection) }),
       schema: this.schemaStatus(),
-      runCount: this.runs.size,
+      runCount: this.sqlRunStoreClosed ? this.closedSqlRunCount : this.sqlRuns.count(),
       llm: {
         modelCount: this.llmGateway.registry.listModels().length,
         metrics: this.llmGateway.metricsSnapshot(),
@@ -724,6 +752,11 @@ export class DatabaseAgentRuntime {
       );
     }
     if (initialSession) this.assertSessionProject(initialSession);
+    const existingResultIds = new Set(
+      initialSession === undefined
+        ? []
+        : this.results.listSession(initialSession.id).map((item) => item.id),
+    );
     const sessionSkills =
       initialSession?.sessionSkills ?? input.sessionSkills ?? this.defaultSessionSkills;
     const effectiveSkills = this.skills.createSessionView(sessionSkills);
@@ -779,6 +812,10 @@ export class DatabaseAgentRuntime {
     const result = await runPromise;
     return {
       activatedSkills: (result.session.activeSkills ?? []).map((skill) => skill.name),
+      queryResults: this.results
+        .listSession(result.session.id)
+        .filter((item) => !existingResultIds.has(item.id))
+        .map(toInteractiveQueryResult),
       result,
     };
   }
@@ -808,6 +845,19 @@ export class DatabaseAgentRuntime {
   async getAgentSession(sessionId: string): Promise<AgentSessionView | undefined> {
     const session = await this.sessions.load(requireText(sessionId, 'sessionId', 300));
     return session === undefined ? undefined : toAgentSessionView(session);
+  }
+
+  async getAgentRun(runId: string): Promise<AgentRunRecord | undefined> {
+    await this.agentRunRecovery;
+    return await this.agentRunStore.getRun(requireText(runId, 'runId', 300));
+  }
+
+  async listAgentRuns(sessionId?: string, limit?: number): Promise<AgentRunRecord[]> {
+    await this.agentRunRecovery;
+    return await this.agentRunStore.listRuns(
+      sessionId === undefined ? undefined : requireText(sessionId, 'sessionId', 300),
+      limit,
+    );
   }
 
   async deleteAgentSession(sessionId: string): Promise<boolean> {
@@ -1000,6 +1050,8 @@ export class DatabaseAgentRuntime {
     const timestamp = this.now();
     const run: GeneratedSqlRun = {
       runId: this.createRunId(),
+      connectionId: connection.id,
+      executionResultAvailable: false,
       status: executable ? 'awaiting_execution' : 'blocked',
       question,
       sql: parsed.sql,
@@ -1018,7 +1070,7 @@ export class DatabaseAgentRuntime {
       updatedAt: timestamp,
       ...(response.usage === undefined ? {} : { usage: { ...response.usage } }),
     };
-    this.runs.set(run.runId, cloneRun(run));
+    this.sqlRuns.put(run);
     return cloneRun(run) as GeneratedSqlRun;
   }
 
@@ -1027,7 +1079,7 @@ export class DatabaseAgentRuntime {
     options: ExecuteGeneratedOptions = {},
   ): Promise<ExecutedSqlRun> {
     const normalizedRunId = requireText(runId, 'runId', 300);
-    const run = this.runs.get(normalizedRunId);
+    const run = this.sqlRuns.get(normalizedRunId);
     if (!run) throw new DatabaseAgentError('RUN_NOT_FOUND', '未找到指定运行记录。', false);
     if (run.status !== 'awaiting_execution') {
       throw new DatabaseAgentError(
@@ -1037,6 +1089,13 @@ export class DatabaseAgentRuntime {
       );
     }
     const connection = this.requireConnection();
+    if (run.connectionId !== connection.id) {
+      throw new DatabaseAgentError(
+        'RUN_NOT_EXECUTABLE',
+        'The SQL run belongs to a different database connection. Generate it again for the active connection.',
+        false,
+      );
+    }
     const safety = analyzeSqlSafety(run.sql, { readOnly: true });
     if (!isExecutableSafety(safety)) {
       const blocked = updateRun(run, {
@@ -1044,12 +1103,12 @@ export class DatabaseAgentRuntime {
         safety,
         updatedAt: this.now(),
       });
-      this.runs.set(run.runId, blocked);
+      this.sqlRuns.put(blocked);
       throw new DatabaseAgentError('SQL_BLOCKED', safetyMessage(safety), false);
     }
 
     const executing = updateRun(run, { status: 'executing', safety, updatedAt: this.now() });
-    this.runs.set(run.runId, executing);
+    this.sqlRuns.put(executing);
     const limit = normalizeInteger(
       options.limit ?? this.defaultRowLimit,
       'limit',
@@ -1071,8 +1130,7 @@ export class DatabaseAgentRuntime {
         normalized.retryable,
         normalized.detail,
       );
-      this.runs.set(
-        run.runId,
+      this.sqlRuns.put(
         updateRun(executing, {
           status: 'failed',
           updatedAt: this.now(),
@@ -1088,16 +1146,51 @@ export class DatabaseAgentRuntime {
     const completed: ExecutedSqlRun = {
       ...completedBase,
       status: 'completed',
+      executionResultAvailable: true,
       safety,
       execution: result,
       updatedAt: this.now(),
     };
-    this.runs.set(run.runId, cloneRun(completed));
+    this.sqlRuns.put(completed);
     return cloneRun(completed) as ExecutedSqlRun;
   }
 
+  async reexecuteGenerated(
+    runId: string,
+    options: ExecuteGeneratedOptions = {},
+  ): Promise<ExecutedSqlRun> {
+    const normalizedRunId = requireText(runId, 'runId', 300);
+    const run = this.sqlRuns.get(normalizedRunId);
+    if (!run) throw new DatabaseAgentError('RUN_NOT_FOUND', '未找到指定运行记录。', false);
+    if (!['completed', 'failed', 'aborted', 'outcome_unknown'].includes(run.status)) {
+      throw new DatabaseAgentError(
+        'RUN_NOT_EXECUTABLE',
+        `SQL run cannot be re-executed from status ${run.status}.`,
+        false,
+      );
+    }
+    const connection = this.requireConnection();
+    if (run.connectionId !== connection.id) {
+      throw new DatabaseAgentError(
+        'RUN_NOT_EXECUTABLE',
+        'The SQL run belongs to a different database connection. Reconnect that database before re-executing it.',
+        false,
+      );
+    }
+    const { execution: _execution, error: _error, ...base } = run;
+    void _execution;
+    void _error;
+    this.sqlRuns.put({
+      ...base,
+      status: 'awaiting_execution',
+      executionResultAvailable: false,
+      updatedAt: this.now(),
+    });
+    return await this.executeGenerated(normalizedRunId, options);
+  }
+
   getRun(runId: string): SqlRunSnapshot | undefined {
-    const run = this.runs.get(runId);
+    const run = this.sqlRuns.get(runId);
     return run ? cloneRun(run) : undefined;
   }
 
@@ -1534,8 +1627,16 @@ export class DatabaseAgentRuntime {
 
 export function toAgentSessionView(session: AgentSession): AgentSessionView {
   const messages: AgentSessionView['messages'] = [];
+  let pendingAssistant: AgentSessionView['messages'][number] | undefined;
+  const flushAssistant = () => {
+    if (pendingAssistant && isFinalResponseReady(pendingAssistant.content)) {
+      messages.push(pendingAssistant);
+    }
+    pendingAssistant = undefined;
+  };
   for (const message of session.messages) {
     if (message.role === 'user') {
+      flushAssistant();
       messages.push({
         role: 'user',
         content: message.content,
@@ -1544,13 +1645,14 @@ export function toAgentSessionView(session: AgentSession): AgentSessionView {
       continue;
     }
     if (message.role === 'assistant' && message.content.trim()) {
-      messages.push({
+      pendingAssistant = {
         role: 'assistant',
         content: message.content,
         createdAt: message.createdAt,
-      });
+      };
     }
   }
+  flushAssistant();
   return {
     id: session.id,
     title: session.title,
@@ -1595,7 +1697,9 @@ export function toAgentSessionView(session: AgentSession): AgentSessionView {
 export function toAiSqlAgentRunView(run: AiSqlAgentRun): AiSqlAgentRunView {
   return {
     activatedSkills: [...run.activatedSkills],
+    queryResults: run.queryResults.map((result) => structuredClone(result)),
     result: {
+      runId: run.result.runId,
       status: run.result.status,
       session: toAgentSessionView(run.result.session),
       finalText: run.result.finalText,
@@ -1616,9 +1720,31 @@ export function toAiSqlAgentRunView(run: AiSqlAgentRun): AiSqlAgentRunView {
             completion: {
               verified: run.result.completion.verified,
               unresolvedTaskIds: [...run.result.completion.unresolvedTaskIds],
+              deliveryReady: run.result.completion.deliveryReady,
+              finalResponseReady: run.result.completion.finalResponseReady,
+              phase: run.result.completion.phase,
+              missing: [...run.result.completion.missing],
+              evidenceKinds: [...run.result.completion.evidenceKinds],
             },
           }),
     },
+  };
+}
+
+function toInteractiveQueryResult(stored: StoredAiSqlResult): InteractiveQueryResult {
+  const result = stored.result;
+  return {
+    executionId: stored.id,
+    connectionId: stored.connectionId,
+    ...(stored.sql === undefined ? {} : { sql: stored.sql }),
+    columns: structuredClone(result.columns),
+    rows: structuredClone(result.rows),
+    rowCount: result.rowCount,
+    returnedRowCount: result.returnedRowCount ?? result.rows.length,
+    hasMore: result.hasMore === true,
+    truncated: result.truncated === true,
+    elapsedMs: result.elapsedMs,
+    messages: structuredClone(result.messages ?? []),
   };
 }
 

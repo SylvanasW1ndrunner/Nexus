@@ -33,7 +33,7 @@ SchemaNaut 把一段自然语言需求变成数据库任务：检索相关 Schem
 | 渐进式 Skills     | 系统、用户、Project、Session 四级标准 Markdown `SKILL.md`；未激活前只把目录信息提供给模型           |
 | 标准 MCP Client   | 基于官方 MCP SDK，支持 stdio、Streamable HTTP、SSE 兼容、动态工具发现、生命周期、取消和 Secret 引用 |
 | Project Tools     | Project 范围文件、可选宿主网络工具、`full` 模式下的有界 Shell，以及上下文独立、能力相同的子 Agent   |
-| 有界模型结果      | 聚合和筛选交给数据库；模型只看到小型预览，本次已取回的行保存在 Session 隔离的结果句柄后             |
+| 查询结果分离      | 聚合和筛选交给数据库；SDK/API 单独返回最多 1,000 行，模型仅看到最多两行且只在本次运行临时可见       |
 | 使用入口          | TypeScript SDK、本地 REST API、交互式 CLI 与轻量本地 WebUI                                          |
 
 AI 数据库治理与运维属于后续产品阶段。v1 **不包含**治理运维 Agent，也不宣称能够自主完成 DBA 修复。
@@ -49,9 +49,11 @@ flowchart LR
     Discover --> Extensions["内置 Tools + MCP"]
     Agent --> Policy["read / edit / full"]
     Policy --> PostgreSQL["PostgreSQL 执行 SQL"]
-    PostgreSQL --> Preview["小型预览 + 结果句柄"]
+    PostgreSQL --> Results["有界查询结果（最多 1,000 行）"]
+    Results --> Preview["模型临时样例（最多 2 行）"]
     Preview --> Agent
-    Agent --> Output["回答 + SQL + 有用事件 + 产物"]
+    Results --> Output["独立结果载荷"]
+    Agent --> Output["已验证回答 + SQL + 有用事件 + 产物"]
 ```
 
 知识库内部 Hash、节点 ID、排序分数和评测轨迹不会进入常规模型输入或用户输出。
@@ -162,6 +164,7 @@ try {
   });
 
   console.log(run.result.finalText);
+  console.table(run.queryResults[0]?.rows ?? []);
   console.log(run.result.session.id);
 
   const continued = await runtime.runAgent({
@@ -180,7 +183,7 @@ try {
 
 `runAgent()` 是可信 SDK 集成入口，会返回包含 Tool 执行记录在内的完整 Run。面向应用展示 Session 时使用 `listAgentSessions()` 和 `getAgentSession()`；其结果不会包含 Tool 消息、内部检索标识、Skill 指令和评测细节。
 
-Project、Skills、MCP、结果句柄、取消、模型直调与底层数据库 Runtime 见 [SDK 指南](docs/sdk/README.zh-CN.md)。
+查询行通过 `run.queryResults` 单独返回，不写入对话、Session 历史或用户偏好。Project、Skills、MCP、有界查询结果、取消、模型直调与底层数据库 Runtime 见 [SDK 指南](docs/sdk/README.zh-CN.md)。
 
 ## 三级权限
 
@@ -230,7 +233,7 @@ npx schemanaut serve --host 127.0.0.1 --port 3721
 2. `POST /v1/schema/index`
 3. 使用 `POST /v1/agent/run` 获取一次性 JSON，或使用 `POST /v1/agent/run/stream` 接收语义化 SSE 事件
 
-两个 Agent 接口最终都返回面向用户、已去除内部细节的 `AiSqlAgentRunView`，而不是 SDK 的完整集成记录。公开管理接口覆盖 Session 列表/读取/删除/追加要求、Skill 列表/刷新、待处理许可，以及 MCP 配置和生命周期。API 还提供“先生成、再执行”、Session 压缩、上下文检查点、模型调用、数据库 Query Job、结果、资源和指标。详见 [API 参考](docs/sdk/api-reference.zh-CN.md)。
+两个 Agent 接口最终都返回面向用户、已去除内部细节的 `AiSqlAgentRunView`，而不是 SDK 的完整集成记录。数据库行位于独立、临时的 `queryResults` 载荷中，不会嵌入 Session 消息。公开管理接口覆盖 Session 列表/读取/删除/追加要求、Skill 列表/刷新、待处理许可，以及 MCP 配置和生命周期。API 还提供“生成/执行/重新执行”、Session 压缩、上下文检查点、模型调用、数据库 Query Job、结果、资源和指标。详见 [API 参考](docs/sdk/api-reference.zh-CN.md)。
 
 ## 开发
 
@@ -261,7 +264,7 @@ pnpm test:performance:live
 - Project 约定和 Skills 是 v1 公开的业务规则入口；资源绑定业务知识的稳定 CRUD API 尚未开放。
 - CLI 接收 OpenAI-compatible Endpoint；SDK 与 REST Setup API 也支持 Anthropic Messages 原生协议。
 - WebUI 是轻量本地配置和试用界面，不是 IDE。
-- 结果句柄当前保存在进程内，默认一小时后过期。
+- Agent 交互结果最多返回 1,000 行，只存在于当前响应与进程内缓存；恢复 Session 不恢复数据库行，需要时重新执行 SQL 或使用显式数据库导出。
 - 默认 Runtime 支持 MCP Secret 引用，但不配置 MCP OAuth，也不提供凭据保险库。
 - 只有宿主显式设置 `enableShellTool: true` 时才会注册 `shell_run`。它需要 `full` 模式，使用 Project 范围内的工作目录和精简环境变量，但仍继承宿主进程的操作系统权限，并不是操作系统沙箱。
 - MCP Server 默认只加载配置，不自动启动。应显式启动已审核的 Server；只有可信宿主才应开启 `autoStartMcp`。

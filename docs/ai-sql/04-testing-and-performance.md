@@ -63,7 +63,7 @@ Fixture 位于 [`scripts/dev-db/init.sql`](../../scripts/dev-db/init.sql)。
 - Tool allowlist 无法通过模型伪造调用绕过。
 - SQL 重复错误时先换路；合理路径耗尽后说明准确原因和所需输入。
 - Session 保存工具轨迹和知识版本引用。
-- Session 间消息、计划、结果句柄、批准和 Session Skill 完全隔离。
+- Session 间消息、计划、批准和 Session Skill 完全隔离；数据库行不写入任何 Session。
 - 达到模型窗口阈值时先缩短旧 Tool 输出，再生成累积语义检查点。
 - 多次压缩保留上一检查点、当前任务、用户偏好、最近完整消息和精确数据库事实。
 - 自动与手动压缩使用同一管线，手动 `focus` 会进入压缩请求。
@@ -72,7 +72,7 @@ Fixture 位于 [`scripts/dev-db/init.sql`](../../scripts/dev-db/init.sql)。
 - 压缩模型失败时使用确定性恢复摘要并产生降级记录。
 - 模型工作视图不包含知识 Hash、节点 ID、树索引和检查点元数据。
 - 聚合由数据库执行，Agent 不接收聚合前的整表行。
-- 大结果只返回元数据和句柄，小聚合按大小进入模型。
+- SDK/API 交互结果最多 1,000 行，模型临时样例最多两行，持久记录不含行值或缓存 ID。
 - 用户事件不包含 Tool Call ID、检索分数、内部动作签名和评测字段。
 - 子 Agent 继承能力但使用独立上下文，并只向主 Agent 返回摘要、证据和产物引用。
 - Project Skill 跨 Session 生效，Session Skill 不泄漏到其他 Session。
@@ -93,7 +93,7 @@ Fixture 位于 [`scripts/dev-db/init.sql`](../../scripts/dev-db/init.sql)。
 9. 在 `read` 模式下拦截写入并完成单次审批路径。
 10. 错误字段名触发一次结构重读和修正。
 11. 流量清洗 SQL 在数据库内完成 JSON 提取、去重、类型转换和异常聚合。
-12. 大科学场景完成多级 Join、窗口/统计函数与大结果句柄验证。
+12. 大科学场景完成多级 Join、窗口/统计函数，以及“交互结果 1,000 行/模型样例两行/Session 零行值”的边界验证。
 
 真实模型测试显式开启并消耗 Provider Token，不把 12 个语法点拆成脆弱的逐题基准。它通过公共 Agent 管线完成三项复合任务：电商支付/退款净收入、Kafka JSON 清洗与异常检测、分区大科学统计；每项都必须产生真实 PostgreSQL 执行证据。运行日志写入 `reports/postgres-scenarios/live.json`。
 
@@ -107,7 +107,7 @@ Fixture 位于 [`scripts/dev-db/init.sql`](../../scripts/dev-db/init.sql)。
 | 直接子节点浏览            | 单父节点 10,000 子节点 |          P95 ≤ 20 ms |
 | 本地精确/BM25 检索        |        10,000 检索文档 |         P95 ≤ 100 ms |
 | 图扩展                    |    2 跳、最多 200 节点 |          P95 ≤ 50 ms |
-| 100 个结果分页读取        |             已缓存结果 |          P95 ≤ 10 ms |
+| 1,000 行交互结果投影      |             已缓存结果 |          P95 ≤ 10 ms |
 | 构建压缩后的模型工作视图  | 10,000 条 Session 消息 |          P95 ≤ 50 ms |
 | 自动压缩规划              | 10,000 条 Session 消息 |         P95 ≤ 100 ms |
 | SQLite 追加并恢复 Session | 10,000 条 Session 消息 |         P95 ≤ 500 ms |

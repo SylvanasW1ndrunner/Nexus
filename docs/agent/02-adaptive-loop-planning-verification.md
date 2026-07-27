@@ -13,7 +13,8 @@
 → 发现并加载相关能力
 → 探索和执行
 → 记录必要观察与证据
-→ 验证完成标准
+→ Verify：验证计划、最后一次相关执行与交付证据
+→ Finalize：形成真正面向用户的终态答复
 → 完成 / 换路 / 请求用户补充
 ```
 
@@ -56,14 +57,17 @@
 - 文件任务的目标文件确实存在。
 - 用户请求的数据回答由数据库返回的必要结果支持。
 - 任务引用的数据库、Tool 和产物证据确实存在于当前 Session，而不是模型虚构的 ID。
+- 最后一次承担交付的 SQL 必须成功；更早的成功结果不能掩盖最后一次失败。
+- 最终答复不能仍是“让我继续检查/验证”等过程语句；查询行由独立结果载荷交付，答复只需说明终态和必要摘要。
 
-验证失败时继续循环；所有合理路径耗尽时给出可行动的说明。
+验证失败时继续循环；Finalize 首次仍输出过程语句时会得到一次明确纠正。若数据库结果已经独立交付但模型仍未形成终态文本，运行时使用确定性的最小交付说明；没有交付证据时不能标记完成。所有合理路径耗尽时给出可行动的说明。
 
 ## 6. 工程与验收
 
 工程入口：
 
 - 自适应循环：`packages/core-agent/src/react-agent.ts`
+- 完成验证：`packages/core-agent/src/completion-verifier.ts`
 - 任务计划：`packages/core-agent/src/task-plan.ts`
 - 工具失败分类：`packages/core-agent/src/tool-failure-classifier.ts`
 - Checkpoint：`packages/core-agent/src/checkpoint-store.ts`

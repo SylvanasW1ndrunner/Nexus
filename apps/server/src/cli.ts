@@ -5,6 +5,7 @@ import {
   listCliSkills,
   startInteractiveCli,
 } from './interactive-cli.js';
+import { loadProjectEnv } from './project-env.js';
 import { DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT, startDatabaseAgentServer } from './server.js';
 
 await runCli(process.argv.slice(2));
@@ -15,6 +16,7 @@ async function runCli(args: string[]): Promise<void> {
     printHelp();
     return;
   }
+  await loadProjectEnv(parsed.projectDirectory);
   if (parsed.command === 'init') {
     const root = await initializeCliProject(parsed.projectDirectory);
     process.stdout.write(`SchemaNaut 项目已初始化：${root}\n`);

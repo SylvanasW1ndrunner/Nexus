@@ -17,6 +17,11 @@ import {
 } from './types.js';
 import { redactKnownSecrets, sanitizeKnownSecretError } from './known-secret-sanitizer.js';
 import {
+  RETRYABLE_LLM_HTTP_STATUSES,
+  retryAfterMilliseconds,
+  retryDelayFromError,
+} from './retry-policy.js';
+import {
   addStreamBytes,
   assertToolCallCapacity,
   readLimitedResponseText,
@@ -31,7 +36,14 @@ type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 type StreamResponse = {
   body: ReadableStream<Uint8Array>;
+  abort: () => void;
   cleanup: () => void;
+};
+
+export type LlmStreamTimeoutOptions = {
+  firstEventMs?: number;
+  firstOutputMs?: number;
+  totalMs?: number;
 };
 
 export type OpenAICompatibleProviderConfig = {
@@ -44,6 +56,10 @@ export type OpenAICompatibleProviderConfig = {
   timeoutMs?: number;
   maxRetries?: number;
   retryDelayBaseMs?: number;
+  retryMaxDelayMs?: number;
+  retryJitterRatio?: number;
+  random?: () => number;
+  streamTimeouts?: LlmStreamTimeoutOptions;
   embeddingsPath?: string;
   rerankPath?: string;
   modelsPath?: string;
@@ -158,6 +174,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryDelayBaseMs: number;
+  private readonly retryMaxDelayMs: number;
+  private readonly retryJitterRatio: number;
+  private readonly random: () => number;
+  private readonly streamTimeouts: Required<LlmStreamTimeoutOptions>;
   private readonly embeddingsPath: string;
   private readonly rerankPath: string;
   private readonly modelsPath: string;
@@ -178,8 +198,16 @@ export class OpenAICompatibleProvider implements LlmProvider {
     this.apiKey = config.apiKey?.trim() ?? '';
     this.baseUrl = normalizeBaseUrl(config.baseUrl);
     this.timeoutMs = config.timeoutMs ?? 60_000;
-    this.maxRetries = config.maxRetries ?? 0;
+    this.maxRetries = config.maxRetries ?? 2;
     this.retryDelayBaseMs = config.retryDelayBaseMs ?? 100;
+    this.retryMaxDelayMs = config.retryMaxDelayMs ?? 5_000;
+    this.retryJitterRatio = config.retryJitterRatio ?? 0.2;
+    this.random = config.random ?? Math.random;
+    this.streamTimeouts = {
+      firstEventMs: config.streamTimeouts?.firstEventMs ?? this.timeoutMs,
+      firstOutputMs: config.streamTimeouts?.firstOutputMs ?? this.timeoutMs,
+      totalMs: config.streamTimeouts?.totalMs ?? this.timeoutMs,
+    };
     this.embeddingsPath = normalizePath(config.embeddingsPath ?? '/embeddings');
     this.rerankPath = normalizePath(config.rerankPath ?? '/rerank');
     this.modelsPath = normalizePath(config.modelsPath ?? '/models');
@@ -322,12 +350,28 @@ export class OpenAICompatibleProvider implements LlmProvider {
     const state = createStreamState();
     let textBytes = 0;
     let toolArgumentsBytes = 0;
+    const streamStartedAt = Date.now();
+    let receivedEvent = false;
+    let receivedOutput = false;
+    const events = readLimitedSseData(
+      stream.body,
+      this.streamLimits.maxSseFrameBytes,
+    )[Symbol.asyncIterator]();
 
     try {
-      for await (const event of readLimitedSseData(
-        stream.body,
-        this.streamLimits.maxSseFrameBytes,
-      )) {
+      while (true) {
+        const next = await nextStreamEvent({
+          iterator: events,
+          streamStartedAt,
+          receivedEvent,
+          receivedOutput,
+          timeouts: this.streamTimeouts,
+          abort: stream.abort,
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+        });
+        if (next.done) break;
+        const event = next.value;
+        receivedEvent = true;
         if (event === '[DONE]') {
           const response = streamStateToResponse(state);
           yield finishEvent(response, state.finishReason);
@@ -355,12 +399,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
           if (choice.finish_reason) state.finishReason = choice.finish_reason;
           const text = choice.delta?.content ?? '';
           if (text) {
+            receivedOutput = true;
             textBytes = addStreamBytes(textBytes, text, this.streamLimits.maxTextBytes, 'text');
             state.text += text;
             yield { type: 'text-delta', text };
           }
 
           for (const delta of choice.delta?.tool_calls ?? []) {
+            receivedOutput = true;
             const index = delta.index ?? 0;
             if (!state.toolCalls.has(index)) {
               assertToolCallCapacity(state.toolCalls.size, this.streamLimits.maxToolCalls);
@@ -393,6 +439,13 @@ export class OpenAICompatibleProvider implements LlmProvider {
     } catch (error) {
       if (error instanceof LlmProviderError)
         throw sanitizeKnownSecretError(error, this.knownSecrets);
+      if (isAbortError(error) && request.signal?.aborted) {
+        throw new LlmProviderError(
+          'LLM_ABORTED',
+          'LLM stream request was aborted by the user.',
+          false,
+        );
+      }
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
         redactKnownSecrets(
@@ -445,7 +498,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       } catch (error) {
         lastError = error;
         if (!isRetryable(error) || attempt === maxRetries) throw error;
-        await sleep(this.retryDelayBaseMs * 2 ** attempt, signal);
+        await sleep(this.retryDelay(error, attempt), signal);
       }
     }
 
@@ -479,7 +532,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       const json = parseJson(text);
 
       if (!response.ok) {
-        throw httpError(response.status, json);
+        throw httpError(response.status, json, response.headers);
       }
       if (!json || typeof json !== 'object') {
         throw new LlmProviderError(
@@ -529,7 +582,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       } catch (error) {
         lastError = error;
         if (!isRetryable(error) || attempt === maxRetries) throw error;
-        await sleep(this.retryDelayBaseMs * 2 ** attempt, signal);
+        await sleep(this.retryDelay(error, attempt), signal);
       }
     }
     throw lastError;
@@ -552,7 +605,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         signal: controller.signal,
       });
       const body = parseJson(await readLimitedResponseText(response, this.maxResponseBytes));
-      if (!response.ok) throw httpError(response.status, body);
+      if (!response.ok) throw httpError(response.status, body, response.headers);
       if (!body || typeof body !== 'object')
         throw new LlmProviderError(
           'LLM_BAD_RESPONSE',
@@ -594,6 +647,16 @@ export class OpenAICompatibleProvider implements LlmProvider {
     };
   }
 
+  private retryDelay(error: unknown, attempt: number): number {
+    return retryDelayFromError(error, {
+      attempt,
+      baseDelayMs: this.retryDelayBaseMs,
+      maxDelayMs: this.retryMaxDelayMs,
+      jitterRatio: this.retryJitterRatio,
+      random: this.random,
+    });
+  }
+
   private async requestStream(
     path: string,
     payload: Record<string, unknown>,
@@ -606,7 +669,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       } catch (error) {
         lastError = error;
         if (!isRetryable(error) || attempt === this.maxRetries) throw error;
-        await sleep(this.retryDelayBaseMs * 2 ** attempt, signal);
+        await sleep(this.retryDelay(error, attempt), signal);
       }
     }
     throw lastError;
@@ -641,7 +704,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
       if (!response.ok) {
         const text = await readLimitedResponseText(response, this.maxResponseBytes);
-        throw httpError(response.status, parseJson(text));
+        throw httpError(response.status, parseJson(text), response.headers);
       }
       if (!response.body) {
         throw new LlmProviderError(
@@ -650,7 +713,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
           true,
         );
       }
-      return { body: response.body, cleanup };
+      clearTimeout(timeout);
+      return {
+        body: response.body,
+        abort: () => controller.abort(),
+        cleanup,
+      };
     } catch (error) {
       cleanup();
       if (isAbortError(error)) {
@@ -686,6 +754,9 @@ export function createSiliconFlowProvider(config: {
   timeoutMs?: number;
   maxRetries?: number;
   retryDelayBaseMs?: number;
+  retryMaxDelayMs?: number;
+  retryJitterRatio?: number;
+  streamTimeouts?: LlmStreamTimeoutOptions;
   fetch?: FetchLike;
 }): OpenAICompatibleProvider {
   return new OpenAICompatibleProvider({
@@ -696,6 +767,11 @@ export function createSiliconFlowProvider(config: {
     ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
     ...(config.maxRetries === undefined ? {} : { maxRetries: config.maxRetries }),
     ...(config.retryDelayBaseMs === undefined ? {} : { retryDelayBaseMs: config.retryDelayBaseMs }),
+    ...(config.retryMaxDelayMs === undefined ? {} : { retryMaxDelayMs: config.retryMaxDelayMs }),
+    ...(config.retryJitterRatio === undefined
+      ? {}
+      : { retryJitterRatio: config.retryJitterRatio }),
+    ...(config.streamTimeouts === undefined ? {} : { streamTimeouts: config.streamTimeouts }),
     ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
   });
 }
@@ -922,13 +998,16 @@ function parseJson(text: string): unknown {
   }
 }
 
-function httpError(status: number, body: unknown): LlmProviderError {
+function httpError(status: number, body: unknown, headers?: Headers): LlmProviderError {
   const message = extractErrorMessage(body) ?? `LLM provider returned HTTP ${status}.`;
   if (status === 401 || status === 403)
     return new LlmProviderError('LLM_AUTH_FAILED', message, false, status);
+  const retryAfterMs = retryAfterMilliseconds(headers?.get('retry-after'));
+  const detail = retryAfterMs === undefined ? undefined : { retryAfterMs };
   if (status === 408 || status === 429)
-    return new LlmProviderError('LLM_RATE_LIMITED', message, true, status);
-  if (status >= 500) return new LlmProviderError('LLM_PROVIDER_ERROR', message, true, status);
+    return new LlmProviderError('LLM_RATE_LIMITED', message, true, status, detail);
+  if (RETRYABLE_LLM_HTTP_STATUSES.has(status))
+    return new LlmProviderError('LLM_PROVIDER_ERROR', message, true, status, detail);
   return new LlmProviderError('LLM_PROVIDER_ERROR', message, false, status);
 }
 
@@ -969,6 +1048,93 @@ function isAbortError(error: unknown): boolean {
 
 function isRetryable(error: unknown): boolean {
   return error instanceof LlmProviderError && error.retryable;
+}
+
+async function nextStreamEvent(input: {
+  iterator: AsyncIterator<string>;
+  streamStartedAt: number;
+  receivedEvent: boolean;
+  receivedOutput: boolean;
+  timeouts: Required<LlmStreamTimeoutOptions>;
+  abort: () => void;
+  signal?: AbortSignal;
+}): Promise<IteratorResult<string>> {
+  if (input.signal?.aborted) {
+    input.abort();
+    throw new LlmProviderError(
+      'LLM_ABORTED',
+      'LLM stream request was aborted by the user.',
+      false,
+    );
+  }
+  const deadlines: Array<{
+    phase: 'first-event' | 'first-output' | 'total';
+    at: number;
+  }> = [
+    ...(!input.receivedEvent
+      ? [
+          {
+            phase: 'first-event' as const,
+            at: input.streamStartedAt + input.timeouts.firstEventMs,
+          },
+        ]
+      : []),
+    ...(!input.receivedOutput
+      ? [
+          {
+            phase: 'first-output' as const,
+            at: input.streamStartedAt + input.timeouts.firstOutputMs,
+          },
+        ]
+      : []),
+    { phase: 'total', at: input.streamStartedAt + input.timeouts.totalMs },
+  ];
+  deadlines.sort((left, right) => left.at - right.at);
+  const deadline = deadlines[0]!;
+  const remainingMs = Math.max(0, deadline.at - Date.now());
+
+  return await new Promise<IteratorResult<string>>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      input.signal?.removeEventListener('abort', onAbort);
+    };
+    const failTimeout = () => {
+      cleanup();
+      input.abort();
+      reject(
+        new LlmProviderError(
+          'LLM_TIMEOUT',
+          `LLM stream timed out during ${deadline.phase}.`,
+          true,
+          undefined,
+          { phase: deadline.phase },
+        ),
+      );
+    };
+    const timeout = setTimeout(failTimeout, remainingMs);
+    const onAbort = () => {
+      cleanup();
+      input.abort();
+      reject(
+        new LlmProviderError(
+          'LLM_ABORTED',
+          'LLM stream request was aborted by the user.',
+          false,
+        ),
+      );
+    };
+    input.signal?.addEventListener('abort', onAbort, { once: true });
+    void input.iterator.next().then(
+      (result) => {
+        cleanup();
+        resolve(result);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error instanceof Error ? error : new Error('LLM stream iterator failed.'));
+      },
+    );
+  });
 }
 
 async function sleep(ms: number, signal?: AbortSignal): Promise<void> {

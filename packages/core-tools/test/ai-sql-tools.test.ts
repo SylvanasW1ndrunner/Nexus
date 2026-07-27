@@ -28,7 +28,49 @@ import {
 } from '../src/index.js';
 
 describe('AI SQL built-in tools', () => {
-  it('registers the six-tool surface and returns only task-relevant database content', async () => {
+  it('separates a bounded interactive result from the two-row Agent projection', async () => {
+    const harness = createHarness({ selectRowCount: 1_500 });
+    const output = (await harness.registry.get('sql_execute')!.handler(
+      {
+        sql: 'SELECT id, payload FROM public.orders ORDER BY id',
+        maxRows: 5_000,
+        previewRows: 20,
+      },
+      context('session-bounded-result'),
+    )) as {
+      modelProjection: {
+        rows: unknown[];
+        returnedRowCount: number;
+        hasMoreInDatabase: boolean;
+      };
+      durableSummary: Record<string, unknown>;
+      completionEvidence: {
+        kind: string;
+        deliveryReady: boolean;
+      };
+    };
+
+    expect(harness.registry.get('result_read')).toBeUndefined();
+    expect(harness.requests[0]?.limit).toBe(1_000);
+    expect(output.modelProjection.rows).toHaveLength(2);
+    expect(output.modelProjection.returnedRowCount).toBe(1_000);
+    expect(output.modelProjection.hasMoreInDatabase).toBe(true);
+    expect(output.durableSummary).not.toHaveProperty('rows');
+    expect(output.durableSummary).not.toHaveProperty('resultHandleId');
+    expect(output.completionEvidence).toEqual({
+      kind: 'database-result',
+      deliveryReady: true,
+    });
+    expect(
+      harness.resultStore.read({
+        id: 'result-1',
+        sessionId: 'session-bounded-result',
+        limit: 1_000,
+      }).rows,
+    ).toHaveLength(1_000);
+  });
+
+  it('registers the five-tool Agent surface and returns only task-relevant database content', async () => {
     const harness = createHarness();
     expect(harness.registry.list().map((tool) => tool.name)).toEqual([
       'resource_list',
@@ -36,7 +78,6 @@ describe('AI SQL built-in tools', () => {
       'knowledge_search',
       'sql_execute',
       'sql_explain',
-      'result_read',
     ]);
     expect(
       harness.registry
@@ -45,7 +86,6 @@ describe('AI SQL built-in tools', () => {
     ).toBe(false);
     expect(harness.registry.get('sql_execute')?.source).toBe('database');
     expect(harness.registry.get('sql_explain')?.source).toBe('database');
-    expect(harness.registry.get('result_read')?.source).toBe('database');
 
     const root = (await harness.registry
       .get('resource_list')!
@@ -126,15 +166,15 @@ describe('AI SQL built-in tools', () => {
         previewRows: 5,
       },
       context('session-a'),
-    )) as SqlExecutionToolOutput;
-    expect(output.resultHandleId).toBe('result-1');
-    expect(output.storedRowCount).toBe(250);
-    expect(output.previewTruncated).toBe(true);
-    expect(Array.isArray(output.rows)).toBe(true);
-    expect(output).not.toHaveProperty('parsed');
-    expect(output).not.toHaveProperty('transaction');
+    )) as SqlExecutionToolEnvelope;
+    expect(output.modelProjection.storedRowCount).toBe(250);
+    expect(output.modelProjection.previewTruncated).toBe(true);
+    expect(Array.isArray(output.modelProjection.rows)).toBe(true);
+    expect(output.modelProjection).not.toHaveProperty('parsed');
+    expect(output.durableSummary).not.toHaveProperty('rows');
+    expect(output.durableSummary).not.toHaveProperty('resultHandleId');
     expect(() => stringifyPublicJson(output)).not.toThrow();
-    expect(output.rows).toHaveLength(5);
+    expect(output.modelProjection.rows).toHaveLength(2);
     expect(harness.requests[0]).toMatchObject({
       connectionId: 'conn_1',
       limit: 500,
@@ -339,44 +379,40 @@ describe('AI SQL built-in tools', () => {
     ).rejects.toThrow('PostgreSQL query failed. column "event_time" does not exist');
   });
 
-  it('pages large results and prevents handles leaking across sessions', async () => {
+  it('keeps bounded result paging outside the Agent tool surface and isolates Sessions', async () => {
     const harness = createHarness();
     const execute = harness.registry.get('sql_execute')!;
-    const resultRead = harness.registry.get('result_read')!;
-    const output = (await execute.handler(
+    await execute.handler(
       { sql: 'SELECT * FROM public.orders', previewRows: 3 },
       context('session-a'),
-    )) as { resultHandleId: string };
-
-    const firstPage = await resultRead.handler(
-      { resultHandleId: output.resultHandleId, limit: 100 },
-      context('session-a'),
     );
+
+    const firstPage = harness.resultStore.read({
+      id: 'result-1',
+      sessionId: 'session-a',
+      limit: 100,
+    });
     expect(firstPage).toMatchObject({
       offset: 0,
       returnedRowCount: 100,
       totalStoredRows: 250,
       nextCursor: '100',
     });
-    const lastPage = await resultRead.handler(
-      {
-        resultHandleId: output.resultHandleId,
-        cursor: '200',
-        limit: 100,
-      },
-      context('session-a'),
-    );
+    const lastPage = harness.resultStore.read({
+      id: 'result-1',
+      sessionId: 'session-a',
+      cursor: '200',
+      limit: 100,
+    });
     expect(lastPage).toMatchObject({
       offset: 200,
       returnedRowCount: 50,
     });
     expect(lastPage).not.toHaveProperty('nextCursor');
 
-    await expect(
-      Promise.resolve().then(() =>
-        resultRead.handler({ resultHandleId: output.resultHandleId }, context('session-b')),
-      ),
-    ).rejects.toThrow('belongs to another session');
+    expect(() =>
+      harness.resultStore.read({ id: 'result-1', sessionId: 'session-b' }),
+    ).toThrow('belongs to another session');
   });
 
   it('refreshes schema only after committed DDL and validates EXPLAIN as a read-only tool', async () => {
@@ -428,21 +464,18 @@ describe('AI SQL built-in tools', () => {
       .handler(
         { sql: 'ALTER TABLE public.orders ADD COLUMN source_system text' },
         context('session-ddl-warning'),
-      )) as {
-      resultHandleId: string;
-      messages: Array<{ level: string; message: string }>;
-    };
+      )) as SqlExecutionToolEnvelope;
 
     expect(harness.requests).toHaveLength(1);
     expect(harness.onSchemaChanged).toHaveBeenCalledOnce();
-    expect(output.resultHandleId).toBe('result-1');
-    expect(output.messages).toHaveLength(1);
-    expect(output.messages[0]?.level).toBe('warning');
-    expect(output.messages[0]?.message).toContain('SQL 已成功执行');
-    expect(output.messages[0]?.message).toContain('不要重新执行该 DDL');
+    expect(output.durableSummary).not.toHaveProperty('resultHandleId');
+    expect(output.modelProjection.messages).toHaveLength(1);
+    expect(output.modelProjection.messages[0]?.level).toBe('warning');
+    expect(output.modelProjection.messages[0]?.message).toContain('SQL 已成功执行');
+    expect(output.modelProjection.messages[0]?.message).toContain('不要重新执行该 DDL');
     expect(() =>
       harness.resultStore.read({
-        id: output.resultHandleId,
+        id: 'result-1',
         sessionId: 'session-ddl-warning',
       }),
     ).not.toThrow();
@@ -519,6 +552,25 @@ describe('AI SQL built-in tools', () => {
     expect(store.clearSession('session-a')).toBe(1);
     expect(store.read({ id: third.id, sessionId: 'session-b' }).returnedRowCount).toBe(2);
     expect(store.clear()).toBe(1);
+  });
+
+  it('marks a single oversized value as truncated instead of silently shortening it', () => {
+    const store = new AiSqlResultStore({
+      maxResultChars: 1_024,
+      createId: () => 'single-oversized',
+    });
+    const item = store.put({
+      sessionId: 'session-a',
+      connectionId: 'conn_1',
+      result: {
+        ...queryResult(1),
+        rows: [{ payload: 'x'.repeat(20_000) }],
+      },
+    });
+
+    expect(item.result.rows).toHaveLength(1);
+    expect(item.result.truncated).toBe(true);
+    expect(store.read({ id: item.id, sessionId: 'session-a' }).truncated).toBe(true);
   });
 
   it('stores and pages Portable database values without serialization failures', () => {
@@ -680,6 +732,7 @@ function createHarness(
     failSql?: string;
     queryExecutor?: AiSqlQueryExecutor;
     connection?: SavedConnection;
+    selectRowCount?: number;
   } = {},
 ) {
   const registry = new ToolRegistry();
@@ -690,7 +743,7 @@ function createHarness(
     indexedAt: '2026-07-24T00:00:00.000Z',
   });
   const requests: QueryRequest[] = [];
-  const driver = fakeDriver(requests, options.failSql);
+  const driver = fakeDriver(requests, options.failSql, options.selectRowCount);
   const resultStore = new AiSqlResultStore({
     createId: (() => {
       let id = 0;
@@ -720,7 +773,11 @@ function createHarness(
   };
 }
 
-function fakeDriver(requests: QueryRequest[], failSql?: string): IDatabaseDriver {
+function fakeDriver(
+  requests: QueryRequest[],
+  failSql?: string,
+  selectRowCount = 250,
+): IDatabaseDriver {
   return {
     capabilities: {
       engine: 'postgres',
@@ -768,7 +825,7 @@ function fakeDriver(requests: QueryRequest[], failSql?: string): IDatabaseDriver
       const kind = request.sql.trim().split(/\s+/)[0]!.toUpperCase();
       return Promise.resolve(
         ok({
-          ...queryResult(kind === 'SELECT' ? 250 : 0),
+          ...queryResult(kind === 'SELECT' ? selectRowCount : 0),
           queryId: `query-${requests.length}`,
           safety: safety(kind),
           ...(kind === 'ALTER'
@@ -813,11 +870,14 @@ type KnowledgeSearchOutput = {
   }>;
 };
 
-type SqlExecutionToolOutput = {
-  resultHandleId: string;
-  rows: unknown[];
-  storedRowCount: number;
-  previewTruncated: boolean;
+type SqlExecutionToolEnvelope = {
+  modelProjection: {
+    rows: unknown[];
+    storedRowCount: number;
+    previewTruncated: boolean;
+    messages: Array<{ level: string; message: string }>;
+  };
+  durableSummary: Record<string, unknown>;
 };
 
 function queryResult(rowCount: number): QueryExecutionResult {

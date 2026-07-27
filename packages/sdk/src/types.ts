@@ -46,6 +46,7 @@ import type {
 import type { UsageTracker } from '@dbagent/core-usage';
 import type { QueryExecutionResult, QuerySafetyReport, SavedConnection } from '@dbagent/shared';
 import type { DatabaseAgentErrorCode } from './errors.js';
+import type { SqlRunStore } from './sql-run-store.js';
 
 export type DatabaseAgentRuntimeOptions = {
   provider?: LlmProvider;
@@ -75,6 +76,7 @@ export type DatabaseAgentRuntimeOptions = {
   agentDependencies?: AgentRunDependencies;
   sessionStore?: AgentSessionStore;
   sessionDatabasePath?: string;
+  sqlRunStore?: SqlRunStore;
   resultStore?: AiSqlResultStore;
   projectDirectory?: string;
   userSkillsDirectory?: string;
@@ -161,8 +163,27 @@ export type CompactAiSqlAgentSessionInput = {
 
 export type CompactAiSqlAgentSessionResult = AgentContextCompactionResult;
 
+export type InteractiveQueryResult = {
+  executionId: string;
+  connectionId: string;
+  sql?: string;
+  columns: QueryExecutionResult['columns'];
+  rows: QueryExecutionResult['rows'];
+  rowCount: number;
+  returnedRowCount: number;
+  hasMore: boolean;
+  truncated: boolean;
+  elapsedMs: number;
+  messages: NonNullable<QueryExecutionResult['messages']>;
+};
+
 export type AiSqlAgentRun = {
   activatedSkills: string[];
+  /**
+   * Ephemeral, bounded database payloads for SDK/API/CLI result panes.
+   * These rows are not part of Agent history and are not restored with a Session.
+   */
+  queryResults: InteractiveQueryResult[];
   result: AgentRunResult;
 };
 
@@ -192,7 +213,9 @@ export type AgentSessionView = {
 
 export type AiSqlAgentRunView = {
   activatedSkills: string[];
+  queryResults: InteractiveQueryResult[];
   result: {
+    runId: string;
     status: AgentRunStatus;
     session: AgentSessionView;
     finalText: string;
@@ -202,6 +225,11 @@ export type AiSqlAgentRunView = {
     completion?: {
       verified: boolean;
       unresolvedTaskIds: string[];
+      deliveryReady: boolean;
+      finalResponseReady: boolean;
+      phase: 'verify' | 'finalize' | 'done';
+      missing: string[];
+      evidenceKinds: string[];
     };
   };
 };
@@ -269,7 +297,8 @@ export type SqlRunStatus =
   | 'executing'
   | 'completed'
   | 'failed'
-  | 'aborted';
+  | 'aborted'
+  | 'outcome_unknown';
 
 export type SqlRunError = {
   code: DatabaseAgentErrorCode;
@@ -279,6 +308,9 @@ export type SqlRunError = {
 
 export type SqlRunSnapshot = {
   runId: string;
+  connectionId: string;
+  /** True only on the immediate execution response; persisted run history never retains rows. */
+  executionResultAvailable: boolean;
   status: SqlRunStatus;
   question: string;
   sql: string;
@@ -301,6 +333,7 @@ export type GeneratedSqlRun = SqlRunSnapshot & {
 
 export type ExecutedSqlRun = SqlRunSnapshot & {
   status: 'completed';
+  executionResultAvailable: true;
   execution: QueryExecutionResult;
   error?: never;
 };

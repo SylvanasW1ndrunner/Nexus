@@ -30,6 +30,8 @@
     "test:public-contracts": "vitest run packages/shared --pool=forks",
     "test:public-contracts:compatibility": "vitest run packages/shared/test/contract-compatibility.test.ts --pool=forks",
     "test:public-contracts:performance": "pnpm build:server && node scripts/run-public-contracts-benchmark.mjs",
+    "test:public-api": "pnpm build:server && node scripts/verify-public-api.mjs",
+    "public-api:baseline": "pnpm build:server && node scripts/generate-public-api-baseline.mjs",
     "test:resource-state": "vitest run packages/core-resource --pool=forks",
     "test:resource-state:performance": "pnpm build:server && node --expose-gc scripts/run-resource-state-benchmark.mjs",
     "test:ai-sql": "vitest run packages/core-rag packages/core-agent packages/core-skills packages/core-tools packages/sdk --pool=forks",

@@ -404,6 +404,7 @@ function session() {
 
 function runResult(task: string): AgentRunResult {
   return {
+    runId: 'run-extension-child',
     status: 'done',
     session: createAgentSession({
       id: 'child-session',

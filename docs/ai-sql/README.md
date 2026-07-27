@@ -30,10 +30,12 @@ flowchart LR
     Permission -->|当前权限足够| Execute["数据库执行"]
     Permission -->|超出当前权限| Approval["弹出单次许可请求"]
     Approval --> Execute
-    Execute --> Store["完整结果存储 / 用户结果集"]
-    Store --> Feedback["最小必要结果或数据库错误"]
+    Execute --> Result["独立交互结果（最多 1,000 行）"]
+    Result --> Feedback["临时模型样例（最多 2 行）或数据库错误"]
     Feedback --> Agent
-    Agent --> Trace["用户可见运行轨迹与最终结果"]
+    Agent --> Verify["完成验证与最终交付"]
+    Verify --> Trace["用户可见运行轨迹与最终回答"]
+    Result --> Trace
 ```
 
 Schema 新鲜度检查、权限分类、审批、事务、超时和 DDL 后刷新由运行时完成，不作为模型工具，也不依赖 Skill 提醒。
@@ -58,7 +60,7 @@ AI SQL 核心不依赖 IDE、工作区或复杂前端。
 | 相关字段召回率                                    |        ≥ 95% |
 | 未经许可执行超出当前权限的 SQL                    |            0 |
 | 每次运行的任务、工具、SQL、权限和产物内部可追踪率 |         100% |
-| 大结果原始行进入模型上下文                        |            0 |
+| 单次执行超过两行的结果进入模型上下文              |            0 |
 | Session 间消息、计划和结果交叉读取                |            0 |
 | 10,000 个知识节点本地精确/全文检索 P95            |     ≤ 100 ms |
 | 单分支 Merkle 差异定位 P95                        |      ≤ 20 ms |
@@ -80,9 +82,12 @@ Token 用量和金额只做观测与计费，不作为默认上下文压缩条�
 | 混合检索                 | [`packages/core-rag/src/hybrid-schema-retriever.ts`](../../packages/core-rag/src/hybrid-schema-retriever.ts) |
 | RAG 运行时               | [`packages/core-rag/src/schema-rag-engine.ts`](../../packages/core-rag/src/schema-rag-engine.ts)             |
 | Agent 运行循环           | [`packages/core-agent/src/react-agent.ts`](../../packages/core-agent/src/react-agent.ts)                     |
+| 完成验证与最终交付       | [`packages/core-agent/src/completion-verifier.ts`](../../packages/core-agent/src/completion-verifier.ts)     |
+| Tool 结果三层投影        | [`packages/core-agent/src/tool-result.ts`](../../packages/core-agent/src/tool-result.ts)                     |
 | 上下文压缩与模型工作视图 | [`packages/core-agent/src/context-manager.ts`](../../packages/core-agent/src/context-manager.ts)             |
 | Session 与压缩检查点存储 | [`packages/core-agent/src/session-store.ts`](../../packages/core-agent/src/session-store.ts)                 |
 | AI SQL 内置工具          | [`packages/core-tools/src/ai-sql-tools.ts`](../../packages/core-tools/src/ai-sql-tools.ts)                   |
 | 内置通用 Skills          | [`packages/core-skills/skills`](../../packages/core-skills/skills)                                           |
 | SQL 解析与权限分类       | [`packages/core-db/src/sql-parser.ts`](../../packages/core-db/src/sql-parser.ts)                             |
 | SDK 主入口               | [`packages/sdk/src/runtime.ts`](../../packages/sdk/src/runtime.ts)                                           |
+| SQL Run 持久化           | [`packages/sdk/src/sql-run-store.ts`](../../packages/sdk/src/sql-run-store.ts)                               |

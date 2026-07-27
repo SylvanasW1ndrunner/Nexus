@@ -10,6 +10,8 @@ import {
 } from '../packages/core-llm/dist/index.js';
 import {
   appendMessage,
+  agentProjectReference,
+  createAgentProjectContext,
   createAgentSession,
   createMessage,
 } from '../packages/core-agent/dist/index.js';
@@ -77,9 +79,12 @@ const provider = new RecordingProvider(innerProvider);
 const runtime = new DatabaseAgentRuntime({
   provider,
   model,
+  projectDirectory: temporaryDirectory,
   sessionDatabasePath: join(temporaryDirectory, 'agent.db'),
 });
-const session = createLiveSession();
+const session = createLiveSession(
+  agentProjectReference(createAgentProjectContext(temporaryDirectory)),
+);
 const originalMessages = structuredClone(session.messages);
 const startedAt = performance.now();
 
@@ -218,13 +223,14 @@ try {
   await rm(temporaryDirectory, { recursive: true, force: true });
 }
 
-function createLiveSession() {
+function createLiveSession(project) {
   const now = () => '2026-07-24T00:00:00.000Z';
   const output = createAgentSession({
     id: 'context-live-session',
     title: '真实模型上下文压缩',
     mode: 'read',
     userId: 'live-context-user',
+    project,
     now,
   });
   appendMessage(

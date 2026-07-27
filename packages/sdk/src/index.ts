@@ -3,6 +3,7 @@ export type {
   AgentContextCheckpoint,
   AgentContextCompactionResult,
   AgentMode,
+  AgentRunRecord,
   AgentSession,
   AgentUserEvent,
   AgentProjectContext,
@@ -18,6 +19,7 @@ export {
 export * from './errors.js';
 export * from './parse-generation.js';
 export * from './runtime.js';
+export * from './sql-run-store.js';
 export * from './types.js';
 export {
   CapabilityResolver,

@@ -39,6 +39,7 @@ import {
   type ConnectionProfile,
   type AgentContextCheckpoint,
   type AgentApprovalRequest,
+  type AgentRunRecord,
   type AgentSessionListInput,
   type AgentSessionListItem,
   type AgentSessionView,
@@ -110,8 +111,11 @@ export type DatabaseAgentRuntimePort = {
   status(): RuntimeStatus;
   generate(input: GenerateSqlInput): Promise<GeneratedSqlRun>;
   executeGenerated(runId: string, options?: ExecuteGeneratedOptions): Promise<ExecutedSqlRun>;
+  reexecuteGenerated(runId: string, options?: ExecuteGeneratedOptions): Promise<ExecutedSqlRun>;
   getRun(runId: string): SqlRunSnapshot | undefined;
   runAgent?(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun>;
+  getAgentRun?(runId: string): Promise<AgentRunRecord | undefined>;
+  listAgentRuns?(sessionId?: string, limit?: number): Promise<AgentRunRecord[]>;
   steerAgentSession?(sessionId: string, message: string): boolean;
   listAgentSessions?(input?: AgentSessionListInput): Promise<AgentSessionListItem[]>;
   getAgentSession?(sessionId: string): Promise<AgentSessionView | undefined>;
@@ -974,6 +978,41 @@ async function handleRequest(
       }
       return;
     }
+    if (method === 'GET' && url.pathname === '/v1/agent/runs') {
+      if (!runtime.listAgentRuns) {
+        throw new DatabaseAgentError(
+          'NOT_CONFIGURED',
+          '当前 Runtime 未启用 Agent Run 管理。',
+          true,
+        );
+      }
+      const sessionId = url.searchParams.get('sessionId')?.trim() || undefined;
+      const limitText = url.searchParams.get('limit');
+      const limit =
+        limitText === null ? undefined : parsePositiveUrlInteger(limitText, 'limit');
+      if (limit !== undefined && limit > 1_000) {
+        throw new DatabaseAgentError('INVALID_INPUT', 'limit 不能超过 1000。', false);
+      }
+      sendJson(response, 200, await runtime.listAgentRuns(sessionId, limit));
+      return;
+    }
+    const agentRunMatch =
+      method === 'GET' ? url.pathname.match(/^\/v1\/agent\/runs\/([^/]+)$/) : null;
+    if (agentRunMatch?.[1]) {
+      if (!runtime.getAgentRun) {
+        throw new DatabaseAgentError(
+          'NOT_CONFIGURED',
+          '当前 Runtime 未启用 Agent Run 管理。',
+          true,
+        );
+      }
+      const run = await runtime.getAgentRun(decodeURIComponent(agentRunMatch[1]));
+      if (!run) {
+        throw new DatabaseAgentError('RUN_NOT_FOUND', '未找到指定 Agent Run。', false);
+      }
+      sendJson(response, 200, run);
+      return;
+    }
     if (method === 'GET' && url.pathname === '/v1/agent/sessions') {
       if (!runtime.listAgentSessions) {
         throw new DatabaseAgentError('NOT_CONFIGURED', '当前 Runtime 未启用 Session 管理。', true);
@@ -1197,6 +1236,17 @@ async function handleRequest(
       const runId = requireString(body, 'runId');
       const limit = optionalInteger(body, 'limit');
       const result = await runtime.executeGenerated(runId, limit === undefined ? {} : { limit });
+      sendJson(response, 200, result);
+      return;
+    }
+    if (method === 'POST' && url.pathname === '/v1/query/reexecute') {
+      const body = requireRecord(await readJson(request), 'request');
+      const runId = requireString(body, 'runId');
+      const limit = optionalInteger(body, 'limit');
+      const result = await runtime.reexecuteGenerated(
+        runId,
+        limit === undefined ? {} : { limit },
+      );
       sendJson(response, 200, result);
       return;
     }

@@ -326,6 +326,7 @@ describe('Agent user events and subagents', () => {
 
 function runResult(status: AgentRunResult['status'], finalText: string): AgentRunResult {
   return {
+    runId: `run-${status}`,
     status,
     session: createAgentSession({
       id: `child-${status}`,

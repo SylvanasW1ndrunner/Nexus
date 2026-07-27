@@ -134,10 +134,11 @@
 
 **子模块设计**
 
-- 支持超时、主动取消、受限重试、指数退避和备用模型。
+- 对 408、429、502、503、504 支持受限重试，遵守 `Retry-After`，使用带抖动和上限的指数退避；其他 4xx 不重试。
 - 按 Provider 控制并发、排队长度、排队超时、请求速率和 Token 速率。
 - 熔断器支持关闭、打开、半开探测和恢复。
-- 流式响应一旦产生可见输出，不再静默切换模型拼接结果。
+- 流式调用分别限制首事件、首个可见文本和总完成时间，并在错误中标明超时阶段。
+- 流式响应一旦产生可见输出，不再静默重试或切换模型拼接结果；取消与超时会中止底层 HTTP 请求。
 - 失败与取消请求的已消耗用量仍进入统计。
 
 **达到的效果**
@@ -240,6 +241,7 @@ sequenceDiagram
 | Prompt 与上下文    | 模板、指纹、Token 估算、裁剪和不可信内容隔离  | [`prompt-runtime.ts`](../../packages/core-llm/src/prompt-runtime.ts)                                                                                                       | [`prompt-structured.test.ts`](../../packages/core-llm/test/prompt-structured.test.ts)                   |
 | 结构化校验         | JSON Schema 与 Tool Call 参数校验             | [`structured-output.ts`](../../packages/core-llm/src/structured-output.ts)                                                                                                 | [`prompt-structured.test.ts`](../../packages/core-llm/test/prompt-structured.test.ts)                   |
 | 稳定性             | 并发、队列、速率、取消和熔断                  | [`reliability.ts`](../../packages/core-llm/src/reliability.ts)                                                                                                             | [`reliability-budget.test.ts`](../../packages/core-llm/test/reliability-budget.test.ts)                 |
+| Provider 重试策略  | 状态分类、Retry-After、指数退避与流阶段超时   | [`retry-policy.ts`](../../packages/core-llm/src/retry-policy.ts)                                                                                                           | [`retry-policy.test.ts`](../../packages/core-llm/test/retry-policy.test.ts)                             |
 | 预算               | 预留、范围配额、实际结算和拒绝                | [`budget.ts`](../../packages/core-llm/src/budget.ts)                                                                                                                       | [`reliability-budget.test.ts`](../../packages/core-llm/test/reliability-budget.test.ts)                 |
 | 响应缓存           | 租户隔离、TTL、命名空间和 LRU                 | [`response-cache.ts`](../../packages/core-llm/src/response-cache.ts)                                                                                                       | [`llm-gateway.test.ts`](../../packages/core-llm/test/llm-gateway.test.ts)                               |
 | 异步任务           | 批量并发、进度、终态和取消                    | [`async-jobs.ts`](../../packages/core-llm/src/async-jobs.ts)                                                                                                               | [`llm-entrypoints.test.ts`](../../apps/server/test/llm-entrypoints.test.ts)                              |

@@ -103,6 +103,7 @@ function runResult(overrides: Partial<AgentRunResult>): AgentRunResult {
       },
     ],
     ...overrides,
+    runId: overrides.runId ?? 'run-eval-report-store',
   };
 }
 

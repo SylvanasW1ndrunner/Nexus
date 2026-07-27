@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentAccessMode, AgentToolContext, ToolRegistry } from '@dbagent/core-agent';
+import {
+  createAgentToolResultEnvelope,
+  type AgentAccessMode,
+  type AgentToolContext,
+  type ToolRegistry,
+} from '@dbagent/core-agent';
 import {
   DatabaseAccessRuntimeError,
   parseSql,
@@ -23,14 +28,14 @@ import {
 } from './agent-knowledge-projection.js';
 import { optionalPositiveInteger, optionalString, requireString } from './validation.js';
 
-const DEFAULT_PREVIEW_ROWS = 8;
-const DEFAULT_EXECUTION_ROWS = 2_000;
+const DEFAULT_PREVIEW_ROWS = 2;
+const DEFAULT_EXECUTION_ROWS = 1_000;
 const DEFAULT_RESULT_TTL_MS = 60 * 60 * 1_000;
 const DEFAULT_MAX_STORED_RESULTS = 100;
 const DEFAULT_MAX_STORED_RESULT_CHARS = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_STORED_RESULT_BYTES = 64 * 1024 * 1024;
 const MAX_MODEL_RESULT_CHARS = 10_000;
-const MAX_RESULT_READ_ROWS = 100;
+const MAX_RESULT_READ_ROWS = 1_000;
 const DDL_KINDS = new Set(['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'COMMENT', 'RENAME']);
 
 export type ActiveDatabaseConnection = {
@@ -74,6 +79,7 @@ export type StoredAiSqlResult = {
   id: string;
   sessionId: string;
   connectionId: string;
+  sql?: string;
   result: QueryExecutionResult;
   createdAt: string;
   expiresAt: string;
@@ -117,6 +123,7 @@ export class AiSqlResultStore {
   put(input: {
     sessionId: string;
     connectionId: string;
+    sql?: string;
     result: QueryExecutionResult;
   }): StoredAiSqlResult {
     this.prune();
@@ -125,6 +132,7 @@ export class AiSqlResultStore {
       id: this.#createId(),
       sessionId: input.sessionId,
       connectionId: input.connectionId,
+      ...(input.sql === undefined ? {} : { sql: input.sql }),
       result: capStoredQueryResult(input.result, this.#maxResultChars),
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + this.#ttlMs).toISOString(),
@@ -170,24 +178,25 @@ export class AiSqlResultStore {
     }
     const offset = parseCursor(input.cursor);
     const limit = Math.min(normalizePositiveInteger(input.limit, 20), MAX_RESULT_READ_ROWS);
-    const bounded = boundedModelRows(
-      item.result.rows.slice(offset, offset + limit),
-      limit,
-      MAX_MODEL_RESULT_CHARS,
-    );
-    const rows = bounded.rows;
+    const rows = structuredClone(item.result.rows.slice(offset, offset + limit));
     const nextOffset = offset + rows.length;
     return {
       id: item.id,
       columns: modelVisibleColumns(item.result.columns),
-      rows: structuredClone(rows),
+      rows,
       offset,
       returnedRowCount: rows.length,
       totalStoredRows: item.result.rows.length,
       ...(nextOffset < item.result.rows.length ? { nextCursor: String(nextOffset) } : {}),
       truncated: item.result.truncated === true || item.result.hasMore === true,
-      ...(bounded.valuesTruncated ? { valuesTruncated: true } : {}),
     };
+  }
+
+  listSession(sessionId: string): StoredAiSqlResult[] {
+    this.prune();
+    return [...this.#results.values()]
+      .filter((item) => item.sessionId === sessionId)
+      .map((item) => structuredClone(item));
   }
 
   remove(id: string): boolean {
@@ -230,8 +239,12 @@ export class AiSqlResultStore {
 function capStoredQueryResult(
   result: QueryExecutionResult,
   maxBytes: number,
+  maxRows = DEFAULT_EXECUTION_ROWS,
 ): QueryExecutionResult {
-  const { rows: sourceRows, resultSets: sourceResultSets, ...metadata } = result;
+  const { rows: allRows, resultSets: sourceResultSets, ...metadata } = result;
+  const sourceRows = allRows.slice(0, maxRows);
+  const rowLimitReached = allRows.length > sourceRows.length;
+  let valueTruncationReached = false;
   const clonedMetadata = structuredClone(metadata);
   const cappedResultSets = (sourceResultSets ?? []).map((resultSet) => {
     const { rows, ...resultSetMetadata } = resultSet;
@@ -252,8 +265,11 @@ function capStoredQueryResult(
       ...clonedMetadata,
       rows,
       returnedRowCount: rows.length,
+      hasMore: result.hasMore === true || rowLimitReached,
       truncated:
         result.truncated === true ||
+        rowLimitReached ||
+        valueTruncationReached ||
         rows.length < sourceRows.length ||
         nestedResultsTruncated,
       ...(sourceResultSets === undefined
@@ -294,6 +310,7 @@ function capStoredQueryResult(
   if (rows.length === 0 && sourceRows.length > 0) {
     const truncatedRow = truncateModelRow(sourceRows[0]!, rowBudget);
     rows.push(truncatedRow);
+    valueTruncationReached = true;
     output = buildResult(rows);
     if (portableJsonBytes(output) > maxBytes) {
       rows.pop();
@@ -419,8 +436,8 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
       inputSchema: objectSchema(
         {
           sql: { type: 'string' },
-          maxRows: { type: 'integer', minimum: 1, maximum: 10000 },
-          previewRows: { type: 'integer', minimum: 1, maximum: 20 },
+          maxRows: { type: 'integer', minimum: 1, maximum: DEFAULT_EXECUTION_ROWS },
+          previewRows: { type: 'integer', minimum: 1, maximum: DEFAULT_PREVIEW_ROWS },
           timeoutMs: { type: 'integer', minimum: 1 },
         },
         ['sql'],
@@ -437,10 +454,14 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
       const active = await requireActiveConnection(dependencies.getActiveConnection);
       const sql = requireString(args, 'sql');
       const parsed = parseSql(sql, { dialect: 'postgresql' });
-      const maxRows = optionalPositiveInteger(args, 'maxRows', DEFAULT_EXECUTION_ROWS);
+      const maxRows = Math.min(
+        optionalPositiveInteger(args, 'maxRows', DEFAULT_EXECUTION_ROWS) ??
+          DEFAULT_EXECUTION_ROWS,
+        DEFAULT_EXECUTION_ROWS,
+      );
       const previewRows = Math.min(
         optionalPositiveInteger(args, 'previewRows', DEFAULT_PREVIEW_ROWS) ?? DEFAULT_PREVIEW_ROWS,
-        20,
+        DEFAULT_PREVIEW_ROWS,
       );
       const timeoutMs = optionalPositiveInteger(args, 'timeoutMs');
       const authorization = queryAuthorization(context, 'sql_execute', parsed.requiredPermission);
@@ -460,6 +481,7 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
       const stored = resultStore.put({
         sessionId: context.session.id,
         connectionId: active.connectionId,
+        sql,
         result,
       });
       let schemaRefreshWarning: string | undefined;
@@ -480,7 +502,19 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
             'SQL 已成功执行，但 Schema 知识目录刷新失败。不要重新执行该 DDL；请手动刷新 Schema 后再检索新结构。';
         }
       }
-      return executionPreview(result, stored.id, previewRows, schemaRefreshWarning);
+      const modelProjection = executionPreview(
+        stored.result,
+        previewRows,
+        schemaRefreshWarning,
+      );
+      return createAgentToolResultEnvelope({
+        modelProjection,
+        durableSummary: executionSummary(modelProjection),
+        completionEvidence: {
+          kind: parsed.requiredPermission === 'read' ? 'database-result' : 'database-write',
+          deliveryReady: true,
+        },
+      });
     },
   );
 
@@ -530,39 +564,6 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
         plan: result.rows[0] ?? null,
         elapsedMs: result.elapsedMs,
       };
-    },
-  );
-
-  registry.register(
-    {
-      name: 'result_read',
-      description:
-        'Read another page from a result handle returned by sql_execute. Handles are isolated to the current Agent session.',
-      inputSchema: objectSchema(
-        {
-          resultHandleId: { type: 'string' },
-          cursor: { type: 'string' },
-          limit: { type: 'integer', minimum: 1, maximum: 100 },
-        },
-        ['resultHandleId'],
-      ),
-      dangerLevel: 'safe',
-      readonly: true,
-      requiredPermission: 'read',
-      source: 'database',
-    },
-    (args, context) => {
-      const cursor = optionalString(args, 'cursor');
-      const limit = Math.min(
-        optionalPositiveInteger(args, 'limit', 20) ?? 20,
-        MAX_RESULT_READ_ROWS,
-      );
-      return resultStore.read({
-        id: requireString(args, 'resultHandleId'),
-        sessionId: context.session.id,
-        ...(cursor === undefined ? {} : { cursor }),
-        limit,
-      });
     },
   );
 
@@ -654,13 +655,11 @@ function accessRank(mode: AgentAccessMode): number {
 
 function executionPreview(
   result: QueryExecutionResult,
-  resultHandleId: string,
   previewRows = DEFAULT_PREVIEW_ROWS,
   schemaRefreshWarning?: string,
 ): Record<string, unknown> {
   const bounded = boundedModelRows(result.rows, previewRows, MAX_MODEL_RESULT_CHARS);
   return {
-    resultHandleId,
     columns: modelVisibleColumns(result.columns),
     rows: bounded.rows,
     rowCount: result.rowCount,
@@ -679,6 +678,12 @@ function executionPreview(
         : [{ level: 'warning', message: schemaRefreshWarning }]),
     ],
   };
+}
+
+function executionSummary(preview: Record<string, unknown>): Record<string, unknown> {
+  const { rows: _rows, ...summary } = preview;
+  void _rows;
+  return summary;
 }
 
 function boundedModelRows(

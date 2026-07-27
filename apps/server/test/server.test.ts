@@ -5,6 +5,7 @@ import type {
   CapabilityDescriptor,
   AgentContextCheckpoint,
   AgentApprovalRequest,
+  AgentRunRecord,
   AgentSessionListInput,
   AgentSessionListItem,
   AgentSessionView,
@@ -120,6 +121,15 @@ describe('SchemaNaut local server', () => {
     const run = await getJson(started.url, '/v1/runs/run-1');
     expect(run).toMatchObject({ status: 'completed' });
 
+    const reexecuted = await postJson(started.url, '/v1/query/reexecute', {
+      runId: 'run-1',
+    });
+    expect(reexecuted).toMatchObject({
+      status: 'completed',
+      executionResultAvailable: true,
+      execution: { rowCount: 1, rows: [{ city: 'Shanghai', total: 188 }] },
+    });
+
     const agent = await postJson(started.url, '/v1/agent/run', {
       message: '继续分析订单',
       mode: 'read',
@@ -128,6 +138,7 @@ describe('SchemaNaut local server', () => {
     expect(agent).toMatchObject({
       activatedSkills: ['query-and-answer'],
       result: {
+        runId: 'agent-run-1',
         status: 'done',
         session: { id: 'api-session' },
       },
@@ -139,6 +150,26 @@ describe('SchemaNaut local server', () => {
       message: '继续分析订单',
       mode: 'read',
       sessionId: 'api-session',
+    });
+
+    const agentRuns = await getJson(
+      started.url,
+      '/v1/agent/runs?sessionId=api-session&limit=10',
+    );
+    expect(agentRuns).toMatchObject([
+      {
+        runId: 'agent-run-1',
+        sessionId: 'api-session',
+        status: 'done',
+        phase: 'done',
+      },
+    ]);
+    const agentRun = await getJson(started.url, '/v1/agent/runs/agent-run-1');
+    expect(agentRun).toMatchObject({
+      runId: 'agent-run-1',
+      sessionId: 'api-session',
+      status: 'done',
+      completion: { verified: true, phase: 'done' },
     });
 
     const compacted = await postJson(started.url, '/v1/agent/sessions/api-session/compact', {
@@ -210,7 +241,7 @@ describe('SchemaNaut local server', () => {
       activeSkills: [{ name: 'query-and-answer', scope: 'system' }],
     });
     expect(JSON.stringify(session)).not.toMatch(
-      /role":"tool|toolCalls|activeTools|knowledgeSnapshot|private-root-hash|instructions/,
+      /role":"tool|toolCalls|activeTools|knowledgeSnapshot|private-root-hash|instructions|让我继续验证/,
     );
 
     const steered = await postJson(
@@ -344,10 +375,10 @@ describe('SchemaNaut local server', () => {
     const runStarted = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    runtime.runAgent = async (input) => {
+    runtime.runAgent = async (input): Promise<AiSqlAgentRun> => {
       observedSignal = input.signal;
       markStarted?.();
-      await new Promise<never>((_, reject) => {
+      return await new Promise<AiSqlAgentRun>((_, reject) => {
         input.signal?.addEventListener(
           'abort',
           () => reject(new DatabaseAgentError('ABORTED', 'shutdown', false)),
@@ -396,10 +427,10 @@ describe('SchemaNaut local server', () => {
     const runStarted = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    runtime.runAgent = async (input) => {
+    runtime.runAgent = async (input): Promise<AiSqlAgentRun> => {
       observedSignal = input.signal;
       markStarted?.();
-      await new Promise<never>((_, reject) => {
+      return await new Promise<AiSqlAgentRun>((_, reject) => {
         input.signal?.addEventListener(
           'abort',
           () => reject(new DatabaseAgentError('ABORTED', 'shutdown', false)),
@@ -1506,14 +1537,36 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
     });
     return {
       activatedSkills: ['query-and-answer'],
+      queryResults: [],
       result: {
+        runId: 'agent-run-1',
         status: 'done',
         session: fakeAgentSession(),
         finalText: '已继续分析。',
         iterations: 1,
         toolExecutions: [],
+        completion: {
+          verified: true,
+          deliveryReady: true,
+          finalResponseReady: true,
+          phase: 'done',
+          unresolvedTaskIds: [],
+          missing: [],
+          evidenceKinds: [],
+        },
       },
     };
+  }
+
+  getAgentRun(runId: string): Promise<AgentRunRecord | undefined> {
+    return Promise.resolve(runId === 'agent-run-1' ? fakeAgentRunRecord() : undefined);
+  }
+
+  listAgentRuns(sessionId?: string, limit?: number): Promise<AgentRunRecord[]> {
+    void limit;
+    return Promise.resolve(
+      sessionId === undefined || sessionId === 'api-session' ? [fakeAgentRunRecord()] : [],
+    );
   }
 
   steerAgentSession(sessionId: string, message: string): boolean {
@@ -1702,6 +1755,8 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
     if (this.generateError) return Promise.reject(this.generateError);
     const run: GeneratedSqlRun = {
       runId: 'run-1',
+      connectionId: 'connection-1',
+      executionResultAvailable: false,
       status: 'awaiting_execution',
       question: '每个城市的订单金额是多少？',
       sql: 'select city, sum(amount) as total from orders group by city',
@@ -1726,6 +1781,8 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
     const generated = this.runs.get(runId)!;
     const executed: ExecutedSqlRun = {
       runId: generated.runId,
+      connectionId: generated.connectionId,
+      executionResultAvailable: true,
       status: 'completed',
       question: generated.question,
       sql: generated.sql,
@@ -1752,9 +1809,42 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
     return Promise.resolve(executed);
   }
 
+  reexecuteGenerated(runId: string): Promise<ExecutedSqlRun> {
+    return this.executeGenerated(runId);
+  }
+
   getRun(runId: string): SqlRunSnapshot | undefined {
     return this.runs.get(runId);
   }
+}
+
+function fakeAgentRunRecord(): AgentRunRecord {
+  return {
+    runId: 'agent-run-1',
+    sessionId: 'api-session',
+    status: 'done',
+    phase: 'done',
+    iteration: 1,
+    finalText: '已继续分析。',
+    toolExecutions: [
+      {
+        toolName: 'sql_execute',
+        status: 'success',
+        completionEvidence: { kind: 'database-result', deliveryReady: true },
+      },
+    ],
+    completion: {
+      verified: true,
+      deliveryReady: true,
+      finalResponseReady: true,
+      phase: 'done',
+      unresolvedTaskIds: [],
+      missing: [],
+      evidenceKinds: ['database-result'],
+    },
+    createdAt: '2026-07-24T00:00:00.000Z',
+    updatedAt: '2026-07-24T00:00:01.000Z',
+  };
 }
 
 function fakeAgentSession(
@@ -1788,6 +1878,11 @@ function fakeAgentSession(
         toolName: 'sql_execute',
         content: '{"internalNodeId":"node-1","rows":[{"id":1}]}',
         createdAt: '2026-07-24T00:00:00.750Z',
+      },
+      {
+        role: 'assistant',
+        content: '让我继续验证查询结果。',
+        createdAt: '2026-07-24T00:00:00.900Z',
       },
       {
         role: 'assistant',

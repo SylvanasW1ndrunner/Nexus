@@ -41,7 +41,7 @@ const runtime = new DatabaseAgentRuntime(options);
 | `agentDependencies`    | `AgentRunDependencies`                         | Inject Agent persistence/audit/checkpoint dependencies                |
 | `sessionStore`         | `AgentSessionStore`                            | Inject a store; Runtime creates a Project-bound view over it           |
 | `sessionDatabasePath`  | `string`                                       | OS user-data path from `defaultAgentStateDatabasePath()`              |
-| `resultStore`          | `AiSqlResultStore`                             | Inject the in-process Agent result-handle store                       |
+| `resultStore`          | `AiSqlResultStore`                             | Inject the bounded, ephemeral interactive-result cache                |
 | `projectDirectory`     | `string`                                       | `process.cwd()`; selected Project root                                |
 | `userSkillsDirectory`  | `string`                                       | `~/.schemanaut/skills`                                                |
 | `sessionSkills`        | `SkillOverlay[]`                               | Default template copied into newly created Sessions                   |
@@ -60,7 +60,7 @@ const runtime = new DatabaseAgentRuntime(options);
 | `sessions`  | `AgentSessionStore`     | Durable Session history, preferences, exports, and context checkpoints          |
 | `tools`     | `ToolRegistry`          | Built-in and dynamically registered Agent tools                                 |
 | `skills`    | `SkillRegistry`         | Shared system, user, and Project Skills; Session views are Runtime-managed      |
-| `results`   | `AiSqlResultStore`      | Session-isolated, expiring Agent result handles                                 |
+| `results`   | `AiSqlResultStore`      | Trusted-host access to the bounded, expiring interactive-result cache           |
 | `mcpConfig` | `McpConfigStore`        | Project `.schemanaut/mcp.json` management                                       |
 | `mcp`       | `McpRuntimeManager`     | MCP lifecycle, health, tools, resources, and prompts                            |
 
@@ -223,6 +223,7 @@ type RunAiSqlAgentInput = {
 
 type AiSqlAgentRun = {
   activatedSkills: string[];
+  queryResults: InteractiveQueryResult[];
   result: AgentRunResult;
 };
 ```
@@ -233,6 +234,7 @@ type AiSqlAgentRun = {
 
 ```ts
 type AgentRunResult = {
+  runId: string;
   status: 'done' | 'aborted' | 'max_iterations_reached';
   session: AgentSession;
   finalText: string;
@@ -243,6 +245,11 @@ type AgentRunResult = {
   completion?: {
     verified: boolean;
     unresolvedTaskIds: string[];
+    deliveryReady: boolean;
+    finalResponseReady: boolean;
+    phase: 'verify' | 'finalize' | 'done';
+    missing: string[];
+    evidenceKinds: string[];
   };
   contextCompression?: AgentContextCompressionReport[];
 };
@@ -273,7 +280,9 @@ type AgentSessionView = {
 
 type AiSqlAgentRunView = {
   activatedSkills: string[];
+  queryResults: InteractiveQueryResult[];
   result: {
+    runId: string;
     status: AgentRunStatus;
     session: AgentSessionView;
     finalText: string;
@@ -283,12 +292,21 @@ type AiSqlAgentRunView = {
     completion?: {
       verified: boolean;
       unresolvedTaskIds: string[];
+      deliveryReady: boolean;
+      finalResponseReady: boolean;
+      phase: 'verify' | 'finalize' | 'done';
+      missing: string[];
+      evidenceKinds: string[];
     };
   };
 };
 ```
 
-`AgentSessionView` omits tool messages/calls, knowledge hashes and tree identifiers, loaded Skill instructions, context-compression internals, and evaluation details. Public task-plan evidence contains only its kind, summary, and creation time.
+`queryResults` contains at most 1,000 rows per SQL execution and is separate from `result.session`. The model receives at most two transient sample rows. Query rows are not written to Session messages, durable Agent run records, or user preferences.
+
+`AgentSessionView` omits tool messages/calls, query rows, knowledge hashes and tree identifiers, loaded Skill instructions, context-compression internals, and evaluation details. Public task-plan evidence contains only its kind, summary, and creation time.
+
+`getAgentRun(runId)` and `listAgentRuns(sessionId?, limit?)` expose Project-scoped, metadata-only Agent run records. A process restart converts an unfinished `running` record to `interrupted`; these records never contain database rows.
 
 There is no user-selectable strategy field. Active Skill names are returned through `activatedSkills`.
 
@@ -577,7 +595,7 @@ Built-in names and required modes:
 
 | Tools                                                                             | Required mode                                      |
 | --------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `resource_list`, `resource_get`, `knowledge_search`, `sql_explain`, `result_read` | `read`                                             |
+| `resource_list`, `resource_get`, `knowledge_search`, `sql_explain`                | `read`                                             |
 | `sql_execute`                                                                     | Calculated from SQL: `read`, `edit`, or `full`     |
 | `task_plan_create`, `task_update`, `task_list`, `tool_search`, `tool_describe`    | `read`                                             |
 | `skill_search`, `skill_load`, `skill_resource_read`                               | `read`                                             |
@@ -594,15 +612,16 @@ The host-provided `webAdapter` is responsible for destination policy, credential
 
 ## `runtime.results`
 
-| Method                                     | Purpose                                            |
-| ------------------------------------------ | -------------------------------------------------- |
-| `put({ sessionId, connectionId, result })` | Stores an execution result and returns a handle    |
-| `read({ id, sessionId, cursor?, limit? })` | Reads a bounded page; default 20, maximum 100 rows |
-| `remove(id)`                               | Removes one handle                                 |
-| `clearSession(sessionId)`                  | Removes all handles for a Session                  |
-| `prune()`                                  | Removes expired handles                            |
+| Method                                     | Purpose                                               |
+| ------------------------------------------ | ----------------------------------------------------- |
+| `put({ sessionId, connectionId, result })` | Stores only a bounded interactive result              |
+| `read({ id, sessionId, cursor?, limit? })` | Reads cached rows; default 20, maximum 1,000 rows      |
+| `listSession(sessionId)`                   | Lists current in-process results for one Session      |
+| `remove(id)`                               | Removes one cached result                             |
+| `clearSession(sessionId)`                  | Removes all cached results for a Session              |
+| `prune()`                                  | Removes expired cached results                        |
 
-Default TTL is one hour. Reads fail when the handle is missing, expired, or belongs to another Session. The default store is in-memory.
+This is a trusted-host compatibility surface, not an Agent Tool. The Agent has no `result_read` Tool and receives no cache ID. The cache contains at most the 1,000-row interactive payload, defaults to one hour, and is not restored with a Session. Use `AiSqlAgentRun.queryResults` for normal integration.
 
 ## Deterministic SQL generation and execution
 
@@ -624,9 +643,13 @@ Status is `awaiting_execution` only when the generated SQL passes the read-only 
 
 Executes an `awaiting_execution` run after rechecking it. `options.limit` defaults to `defaultRowLimit` and is limited to 1–1,000.
 
+### `reexecuteGenerated(runId, options?): Promise<ExecutedSqlRun>`
+
+Rechecks and re-executes a durable run whose status is `completed`, `failed`, `aborted`, or `outcome_unknown`. It requires the same database connection identity to be active. Use it when a restored run has `executionResultAvailable: false`.
+
 ### `getRun(runId): SqlRunSnapshot | undefined`
 
-Returns an in-process snapshot. Deterministic run snapshots are not durable across Runtime restarts.
+Returns the Project-scoped SQLite snapshot. Run metadata survives Runtime restart, but result rows do not. `executionResultAvailable` is `true` only on the immediate `executeGenerated()` or `reexecuteGenerated()` response. A stale `executing` record is recovered as `outcome_unknown` and is never replayed automatically.
 
 ## Direct model APIs
 
@@ -701,6 +724,8 @@ await started.close();
 | `GET /v1/schema/status`                                  | Current `SchemaIndexSnapshot`                                                                               |
 | `POST /v1/agent/run`                                     | `{ message, userId?, mode?, sessionId?, maxIterations?, maxToolExecutionMs? }`; returns `AiSqlAgentRunView` |
 | `POST /v1/agent/run/stream`                              | Same body; semantic Server-Sent Events followed by a projected `result`                                     |
+| `GET /v1/agent/runs?sessionId=&limit=`                   | Durable metadata-only Agent run records                                                                      |
+| `GET /v1/agent/runs/:id`                                 | One durable Agent run record; `404` when absent                                                              |
 | `POST /v1/agent/sessions/:id/compact`                    | `{ focus? }`; manual context compaction                                                                     |
 | `GET /v1/agent/sessions/:id/context-checkpoints?limit=N` | Context checkpoint history                                                                                  |
 
@@ -751,7 +776,8 @@ REST process management for stdio MCP is disabled by default. A trusted local ho
 | ------------------------- | -------------------------------- |
 | `POST /v1/query/generate` | `{ question, maxContextChars? }` |
 | `POST /v1/query/execute`  | `{ runId, limit? }`              |
-| `GET /v1/runs/:id`        | Reads an in-process run snapshot |
+| `POST /v1/query/reexecute` | `{ runId, limit? }`             |
+| `GET /v1/runs/:id`        | Reads the durable run snapshot   |
 
 ### Model and database infrastructure
 

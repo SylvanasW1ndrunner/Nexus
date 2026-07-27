@@ -7,7 +7,7 @@
 测试分为四层：
 
 1. 确定性单元与组件测试：合同、权限、Session、计划、上下文压缩、Skills、MCP、工具和错误恢复。
-2. 真实 PostgreSQL 功能测试：Driver、Connector、SDK、Agent、权限、Schema 刷新和结果句柄。
+2. 真实 PostgreSQL 功能测试：Driver、Connector、SDK、Agent、权限、Schema 刷新和独立结果载荷。
 3. 业务场景与性能测试：电商、流量清洗与异常检测、大科学数据。
 4. 发行验收：npm 包安装、SDK、REST、CLI、WebUI、内置 Skills、文档链接和密钥扫描。
 
@@ -26,6 +26,7 @@ flowchart LR
 
 | 阶段        | 命令                                                                                                                                                              | 通过条件                                                                         |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 类型        | `pnpm typecheck`                                                                                                                                                  | 所有生产源码和各包测试源码均通过 TypeScript 检查                                 |
 | 构建        | `pnpm build:server`                                                                                                                                               | 所有公共包和 Server 编译成功                                                     |
 | 全仓功能    | `pnpm test`                                                                                                                                                       | 非外部依赖测试全部通过                                                           |
 | PostgreSQL  | `pnpm test:postgres`                                                                                                                                              | Driver、Connector、SDK 和三类场景全部通过                                        |
@@ -72,7 +73,7 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 
 - 实验、样本、仪器、分区观测表、高精度数值、数组和 JSON 元数据。
 - 分区确认、窗口、样本级统计和实验级聚合。
-- 大结果只把少量预览送入模型；句柄分页读取本次有界执行已存储的 2,000 行，并通过 `hasMoreInDatabase` 明确提示仍有数据库行未取回。
+- 大结果由 SDK/API 独立接收最多 1,000 行并通过 `hasMore` 标识后续数据库行；模型只看到最多两行临时样例，Session 与偏好中不保留行值。
 
 场景功能测试位于 [`postgres-scenarios.integration.test.ts`](../packages/sdk/test/postgres-scenarios.integration.test.ts)，场景性能入口位于 [`postgres-scenario-performance.mjs`](../scripts/tests/postgres-scenario-performance.mjs)。
 
@@ -84,13 +85,14 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 - `read` 模式在数据库事务层阻止 SELECT 包装的 `VOLATILE` 写入函数；`edit/full` 的对应路径正常执行。
 - SQL、EXPLAIN 和 SDK Query Job 的取消会传播到 PostgreSQL；DDL 已提交但 Schema 刷新失败时只返回警告，不重放语句。
 - 聚合统计由数据库完成；模型上下文中不存在完整大结果。
-- Result Handle 只能由创建它的 Session 读取。
+- SQL 交互结果每次最多 1,000 行，模型临时样例最多两行；持久 Session、Agent Run 和用户偏好中均无查询行或缓存 ID。
 - REST Session 视图不包含 Tool 消息、Tool Call、Skill 正文、知识哈希、节点 ID 或检索分数。
 - MCP 使用官方 SDK 完成能力协商、分页、通知、取消、超时、进程退出和远程传输测试。
 - MCP 还覆盖风险提示不降权、Secret/URL 校验、启动竞态、允许工具过滤，以及 REST 默认禁止进程型 stdio 管理。
 - CLI 覆盖项目初始化、Session、Skills、MCP、权限切换、任务追加、手动压缩和取消。
 - Agent 覆盖计划依赖与证据校验、并发 Session 串行化、转向时取消旧许可，以及文本化 Tool Call 的恢复门禁。
-- 场景用例要把配置表、字典表、过滤和有效性口径写清楚，并通过最终数据库结果验收；不使用隐藏假设或简单字符串包含判断。
+- 每个真实模型场景独立执行并独立记录成功或失败；筛选单场景时只验收被选场景，某一场景失败不会阻止其他场景运行。
+- 场景用例要把配置表、字典表、过滤和有效性口径写清楚；只验证承担最终交付的 SQL 结构化结果以及真正进入终态的最终答复，不扫描任意历史成功 SQL，也不使用隐藏假设或简单字符串包含判断。
 
 ### 4.1 真实模型失败归因
 
@@ -105,26 +107,23 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 
 ## 5. 性能验收标准
 
-性能脚本先预热，再记录独立样本的 `p50 / p95 / max`；任一场景 `p95` 超过阈值即失败。
+性能脚本对直接 `pg.Client.query()` 和 `DatabaseAccessRuntime + PostgresConnector` 两条路径分别预热至少 10 秒，再交替记录至少 40 对原始样本以及 `p50 / p95 / max`。数据库查询本身的绝对耗时只作为环境事实；产品门禁只判断 SchemaNaut 路径相对直接 pg 的额外 P95。
 
 默认本地阈值：
 
-| 场景                              | 默认 p95 阈值 |
-| --------------------------------- | ------------: |
-| 电商财务聚合                      |        250 ms |
-| 20,017 条流量 JSON 清洗与异常检测 |        750 ms |
-| 大科学聚合统计                    |        500 ms |
-| 2,000 行结果页                    |      1,000 ms |
+| 门禁                                      | 默认阈值 |
+| ----------------------------------------- | -------: |
+| SchemaNaut P95 − 直接 pg P95（每个场景） |  ≤ 50 ms |
 
-阈值可通过 `DBAGENT_SCENARIO_*_P95_MS` 环境变量适配 CI 机器，但不得通过放宽阈值掩盖回归。报告同时记录数据规模、PostgreSQL 版本、Node.js、操作系统和 CPU，避免脱离环境比较。
+阈值可通过 `DBAGENT_SCENARIO_PLATFORM_OVERHEAD_P95_MS` 配置，但不得通过放宽阈值掩盖回归。报告保存两条路径和成对差值的全部原始样本、数据规模、PostgreSQL 版本、Node.js、操作系统和 CPU，避免把 PostgreSQL 的 CPU 密集查询误报为产品回归。
 
 ## 6. 测试证据
 
 真实场景运行后生成：
 
-- `reports/postgres-scenarios/functional.json`：11 段 Agent 运行日志，包含工具顺序、状态、耗时、有限结果预览、终态和 Token 用量。
-- `reports/postgres-scenarios/live.json`：最近一次显式真实模型测试，记录电商、流量清洗和大科学三类 Agent 运行的工具证据与 Token 用量；普通确定性回归会保留它，只有下一次真实模型测试才重建。
-- `reports/postgres-scenarios/performance.json`：四类 SQL 的样本数、数据规模、p50、p95、最大值、阈值和结论。
+- `reports/postgres-scenarios/functional.json`：9 段 Agent 运行日志，包含工具顺序、状态、耗时、独立有界结果、终态和 Token 用量。
+- `reports/postgres-scenarios/live.json`：最近一次显式真实模型测试的汇总；`reports/postgres-scenarios/live-cases/<scenario>.json` 为每个场景独立写入成功/失败证据，普通确定性回归不会覆盖真实模型证据。
+- `reports/postgres-scenarios/performance.json`：四类 SQL 的直接 pg、SchemaNaut、成对额外耗时原始样本，及各自 p50、p95、最大值和门禁结论。
 - `reports/postgres-scenarios/manifest.json`：本次运行 ID、Git 状态、Fixture 哈希和本次生成的报告哈希；只有整条链路成功后才原子生成。使用 `--live-llm` 时还会校验并纳入同一运行的 `live.json`。
 - [`ai-sql/performance.json`](../reports/ai-sql/performance.json)：AI SQL 与检索性能。
 - [`ai-sql/context-compaction-performance.json`](../reports/ai-sql/context-compaction-performance.json)：长会话压缩性能和信息保留。
@@ -144,7 +143,7 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 
 ### 工程师视角
 
-- 公共类型、SDK、REST、CLI 和文档字段一致。
+- 公共类型、SDK、REST、CLI 和文档字段一致；生产源码与测试源码都进入 TypeScript 门禁。
 - 测试失败能够定位到合同、组件、数据库场景或性能阈值。
 - 测试数据可重复创建，清理范围严格限定在专用测试库。
 - npm 临时安装不依赖 Monorepo 路径，不携带 `.env`、密钥、内部缓存或旧产品代码。
@@ -162,8 +161,12 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 
 `pnpm test:npm-package:functional` accepts a local archive only when its single
 `SHA256SUMS.txt` entry matches in constant time, root/server/README/CHANGELOG
-versions agree, the expanded secret scan is clean, and an isolated consumer can
-exercise the SDK, REST server, CLI, Skills, and declarations.
+versions agree, the expanded secret scan is clean, the public TypeScript API
+matches its reviewed baseline, and an isolated consumer can exercise the SDK,
+REST server, CLI, Skills, and declarations. The archive also contains a
+CycloneDX SBOM, license inventory, vulnerability-scan status, and provenance;
+an offline `not-scanned-offline` status is explicit and is never presented as
+“zero vulnerabilities.”
 
 Set `SCHEMANAUT_PACKAGE_VERIFY_POSTGRES=1` only after preparing a dedicated
 database whose name ends in `_test`. The optional acceptance uses the installed

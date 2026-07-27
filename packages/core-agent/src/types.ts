@@ -55,7 +55,20 @@ export type AgentKnowledgeSnapshotReference = {
 
 export type AgentRunStatus = 'done' | 'aborted' | 'max_iterations_reached';
 
+export type AgentCompletionPhase = 'verify' | 'finalize' | 'done';
+
+export type AgentCompletionVerification = {
+  verified: boolean;
+  deliveryReady: boolean;
+  finalResponseReady: boolean;
+  phase: AgentCompletionPhase;
+  unresolvedTaskIds: string[];
+  missing: string[];
+  evidenceKinds: AgentToolCompletionEvidence['kind'][];
+};
+
 export type AgentRunResult = {
+  runId: string;
   status: AgentRunStatus;
   session: AgentSession;
   finalText: string;
@@ -63,11 +76,41 @@ export type AgentRunResult = {
   toolExecutions: AgentToolExecutionRecord[];
   events?: AgentUserEvent[];
   artifacts?: AgentArtifactReference[];
-  completion?: {
-    verified: boolean;
-    unresolvedTaskIds: string[];
-  };
+  completion?: AgentCompletionVerification;
   contextCompression?: AgentContextCompressionReport[];
+};
+
+export type AgentRunRecordStatus =
+  | 'running'
+  | 'done'
+  | 'aborted'
+  | 'failed'
+  | 'interrupted'
+  | 'max_iterations_reached';
+
+export type AgentRunRecord = {
+  runId: string;
+  sessionId: string;
+  status: AgentRunRecordStatus;
+  phase: 'act' | AgentCompletionPhase;
+  iteration: number;
+  finalText: string;
+  toolExecutions: Array<{
+    toolName: string;
+    status: AgentToolExecutionRecord['status'];
+    completionEvidence?: AgentToolCompletionEvidence;
+  }>;
+  completion?: AgentCompletionVerification;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentRunStore = {
+  saveRun(record: AgentRunRecord): Promise<void>;
+  getRun(runId: string): Promise<AgentRunRecord | undefined>;
+  listRuns(sessionId?: string, limit?: number): Promise<AgentRunRecord[]>;
+  recoverInterrupted(now?: string): Promise<number>;
 };
 
 export type AgentRunOptions = {
@@ -189,6 +232,18 @@ export type RegisteredAgentTool = AgentToolDefinition & {
   handler: AgentToolHandler;
 };
 
+export type AgentToolCompletionEvidence = {
+  kind: 'database-result' | 'database-write' | 'artifact';
+  deliveryReady: boolean;
+};
+
+export type AgentToolResultEnvelope = {
+  type: 'schemanaut.agent-tool-result.v1';
+  modelProjection: unknown;
+  durableSummary: unknown;
+  completionEvidence?: AgentToolCompletionEvidence;
+};
+
 export type AgentToolExecutionRecord = {
   toolCallId: string;
   toolName: string;
@@ -199,6 +254,7 @@ export type AgentToolExecutionRecord = {
   failureKind?: AgentToolFailureKind;
   retryable?: boolean;
   approval?: AgentToolApprovalRecord;
+  completionEvidence?: AgentToolCompletionEvidence;
 };
 
 export type AgentToolApprovalRecord = {
@@ -244,8 +300,10 @@ export type ApprovalProvider = (
 export type AgentRunDependencies = {
   now?: () => string;
   createSessionId?: () => string;
+  createRunId?: () => string;
   checkpointStore?: AgentCheckpointWriter;
   sessionStore?: AgentSessionWriter;
+  runStore?: AgentRunStore;
   streamStore?: AgentStreamStore;
   auditLog?: AgentAuditLogWriter;
   runCoordinator?: AgentRunCoordinator;

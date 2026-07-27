@@ -24,6 +24,11 @@ import {
   verifyReleaseChecksum,
   verifyReleaseMetadata,
 } from './lib/release-gates.mjs';
+import {
+  assertPublicRuntimeDependencies,
+  resolvePublicRuntimeDependencies,
+} from './lib/public-dependencies.mjs';
+import { assertSupplyChainDocuments, SUPPLY_CHAIN_FILES } from './lib/supply-chain.mjs';
 
 const repositoryRoot = resolve(import.meta.dirname, '..');
 const minimumUnflaggedNodeEngine = '>=22.13.0';
@@ -95,6 +100,7 @@ export async function verifyNpmPackage() {
     });
     const nodeEngine = verifyManifest(unpackedPackageRoot);
     verifyPublicFiles(unpackedPackageRoot, nodeEngine);
+    verifySupplyChainMetadata(unpackedPackageRoot);
     verifyMarkdownLinks(unpackedPackageRoot);
     assertInternalImportsArePortable(join(unpackedPackageRoot, 'dist'));
     assertExpectedRuntimeModulesExist(unpackedPackageRoot);
@@ -195,6 +201,13 @@ function captureSourceInputs(root) {
     'scripts/package-npm.mjs',
     'scripts/verify-npm-package.mjs',
     'scripts/lib/release-gates.mjs',
+    'scripts/lib/public-dependencies.mjs',
+    'scripts/lib/public-api.mjs',
+    'scripts/lib/supply-chain.mjs',
+    'scripts/generate-public-api-baseline.mjs',
+    'scripts/verify-public-api.mjs',
+    'scripts/generate-sbom.mjs',
+    'scripts/baselines/public-api.json',
     'CHANGELOG.md',
     ...publicRootFiles,
     ...publicDocFiles,
@@ -441,11 +454,10 @@ function verifyManifest(packageRoot) {
     );
   }
   verifyPublicPackageManifest(manifest);
-  for (const dependency of ['@modelcontextprotocol/sdk', 'ajv', 'node-sql-parser', 'pg', 'yaml']) {
-    if (typeof manifest.dependencies?.[dependency] !== 'string') {
-      throw new Error(`Runtime dependency is missing from package.json: ${dependency}`);
-    }
-  }
+  assertPublicRuntimeDependencies(
+    manifest.dependencies,
+    resolvePublicRuntimeDependencies(repositoryRoot),
+  );
   return manifest.engines.node;
 }
 
@@ -477,6 +489,25 @@ function verifyPublicFiles(packageRoot, nodeEngine) {
     throw new Error('Chinese README does not contain SchemaNaut branding and language navigation.');
   }
   verifyNodeEngineDocumentation(packageRoot, nodeEngine);
+}
+
+function verifySupplyChainMetadata(packageRoot) {
+  const packageManifest = JSON.parse(
+    readFileSync(join(packageRoot, 'package.json'), 'utf8'),
+  );
+  const documents = Object.fromEntries(
+    Object.entries(SUPPLY_CHAIN_FILES).map(([key, fileName]) => {
+      const path = join(packageRoot, fileName);
+      if (!existsSync(path)) throw new Error(`Supply-chain metadata is missing: ${fileName}`);
+      return [key, JSON.parse(readFileSync(path, 'utf8'))];
+    }),
+  );
+  assertSupplyChainDocuments({
+    packageManifest,
+    sbom: documents.sbom,
+    licenses: documents.licenses,
+    vulnerabilities: documents.vulnerabilities,
+  });
 }
 
 function verifyNodeEngineDocumentation(packageRoot, nodeEngine) {

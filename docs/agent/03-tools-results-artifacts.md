@@ -35,19 +35,19 @@ Tool Registry 只提供统一描述、权限、Schema、执行函数和来源元
 自然语言
 → Agent 生成 SQL
 → 数据库完成过滤 / 聚合 / Join / Window / 异常检测
-→ 完整结果进入结果存储或用户界面
-→ 最小必要投影进入 Agent
+→ 最多 1,000 行作为独立交互载荷返回 SDK/API/CLI
+→ 最多两行的临时必要投影进入 Agent
 ```
 
 结果投影规则：
 
-- 单值、小型聚合和 Top-N 小结果可以直接返回。
-- 数据形态探索只返回有限样例、枚举或 JSON 结构。
-- 大结果返回列、行数、耗时、截断状态和 Session 隔离的结果句柄。
-- Agent 需要更多证据时，按列、页或范围继续读取。
+- SDK/API/CLI 每次执行最多接收 1,000 行及列、行数、耗时和截断状态。
+- Agent 无论结果大小都最多看到两行临时样例；数据形态探索仍应尽量由 SQL 缩小范围。
+- Agent 需要更多证据时，生成新的聚合、过滤或分页 SQL。
 - 数据库错误必须返回，以便修正 SQL。
-- 完整业务结果不写入长期模型上下文。
-- 进程内 Result Store 同时限制过期时间、条目数和单结果字符数；关闭 Runtime 或删除 Session 时清理对应句柄。
+- 查询行不写入对话、Session、Agent Run 历史或用户偏好。
+- 进程内结果缓存只保存已经有界的交互载荷，同时限制过期时间、条目数和总字节数；关闭 Runtime 或删除 Session 时清理。
+- 完整导出必须由显式数据库 Query/导出链路直接流向目标，不经过对话。
 
 第一版不默认把数据库结果搬到 Python、Pandas 或模型中再次统计。
 
@@ -59,7 +59,7 @@ SDK 使用通用产物引用报告路径、媒体类型、大小和来源，不�
 
 ## 6. 用户返回边界
 
-Tool 可以返回模型完成下一步所需的句柄和语义字段，但用户轨迹不显示内部 Tool Call ID、动作签名、检索分数、知识 Hash 或结果存储 ID。
+Tool 的内部结果信封分别产生模型临时投影、持久摘要和完成证据。用户轨迹只显示有用的 SQL、批准、结果状态和产物，不显示 Tool Call ID、动作签名、检索分数、知识 Hash 或缓存 ID。
 
 工程入口：
 
@@ -68,3 +68,5 @@ Tool 可以返回模型完成下一步所需的句柄和语义字段，但用户
 - 工作区工具：`packages/core-tools/src/workspace-tools.ts`
 - AI SQL 工具：`packages/core-tools/src/ai-sql-tools.ts`
 - 结果存储：`packages/core-tools/src/ai-sql-tools.ts`
+- 结果投影信封：`packages/core-agent/src/tool-result.ts`
+- 完成验证：`packages/core-agent/src/completion-verifier.ts`

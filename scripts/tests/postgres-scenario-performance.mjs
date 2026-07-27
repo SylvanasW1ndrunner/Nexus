@@ -3,25 +3,82 @@ import { cpus, platform, release } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import {
+  ConnectorRegistry,
+  DatabaseAccessRuntime,
+  PostgresConnector,
+} from '../../packages/core-db/dist/index.js';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(join(root, 'packages', 'core-db', 'package.json'));
 const { Client } = require('pg');
 const reportPath = join(root, 'reports', 'postgres-scenarios', 'performance.json');
-const iterations = positiveInteger(process.env.DBAGENT_SCENARIO_PERF_ITERATIONS, 20);
-const warmupIterations = positiveInteger(process.env.DBAGENT_SCENARIO_PERF_WARMUPS, 3);
-
-const client = new Client({
+const iterations = Math.max(
+  40,
+  positiveInteger(process.env.DBAGENT_SCENARIO_PERF_ITERATIONS, 40),
+);
+const warmupDurationMs = Math.max(
+  10_000,
+  positiveInteger(process.env.DBAGENT_SCENARIO_PERF_WARMUP_MS, 10_000),
+);
+const overheadThresholdMs = positiveNumber(
+  process.env.DBAGENT_SCENARIO_PLATFORM_OVERHEAD_P95_MS,
+  50,
+);
+const databaseConfig = {
   host: process.env.DBAGENT_TEST_PG_HOST ?? '127.0.0.1',
   port: Number(process.env.DBAGENT_TEST_PG_PORT ?? '5432'),
   database: process.env.DBAGENT_TEST_PG_DATABASE ?? 'dbagent_core_db_test',
   user: process.env.DBAGENT_TEST_PG_USER ?? 'postgres',
   password: process.env.DBAGENT_TEST_PG_PASSWORD ?? 'postgres',
+};
+
+const client = new Client({
+  ...databaseConfig,
   statement_timeout: positiveInteger(process.env.DBAGENT_SCENARIO_STATEMENT_TIMEOUT_MS, 15_000),
+});
+const connectors = new ConnectorRegistry();
+connectors.register(new PostgresConnector());
+const runtime = new DatabaseAccessRuntime({
+  connectors,
+  maxAuditEvents: iterations * 16,
+});
+const profileId = `postgres-scenario-performance-${process.pid}`;
+const timestamp = new Date().toISOString();
+runtime.createProfile({
+  id: profileId,
+  name: 'PostgreSQL scenario performance',
+  connectorId: 'postgres-native',
+  engine: 'postgres',
+  endpoints: [
+    {
+      transport: 'tcp',
+      host: databaseConfig.host,
+      port: databaseConfig.port,
+      database: databaseConfig.database,
+    },
+  ],
+  principal: databaseConfig.user,
+  purpose: 'query',
+  readOnly: true,
+  network: {
+    connectTimeoutMs: 5_000,
+    statementTimeoutMs: positiveInteger(
+      process.env.DBAGENT_SCENARIO_STATEMENT_TIMEOUT_MS,
+      15_000,
+    ),
+  },
+  pool: { min: 1, max: 2 },
+  createdAt: timestamp,
+  updatedAt: timestamp,
 });
 
 async function main() {
   await client.connect();
+  await runtime.connect(profileId, {
+    username: databaseConfig.user,
+    password: databaseConfig.password,
+  });
   try {
     const postgresVersion = (
       await client.query("select current_setting('server_version') as server_version")
@@ -45,7 +102,6 @@ async function main() {
       await benchmarkScenario({
         name: 'ecommerce-finance',
         sql: ECOMMERCE_QUERY,
-        thresholdMs: positiveNumber(process.env.DBAGENT_SCENARIO_ECOMMERCE_P95_MS, 250),
         validate(result) {
           assert(result.rowCount === 12, '电商聚合必须返回 12 个 本地月份×渠道 分组');
           const total = result.rows.reduce((sum, row) => sum + Number(row.net_revenue), 0);
@@ -57,7 +113,6 @@ async function main() {
       await benchmarkScenario({
         name: 'traffic-cleaning-anomaly',
         sql: TRAFFIC_QUERY,
-        thresholdMs: positiveNumber(process.env.DBAGENT_SCENARIO_TRAFFIC_P95_MS, 750),
         validate(result) {
           assert(result.rowCount === 203, '流量清洗必须返回 203 个分钟桶');
           const eventCount = result.rows.reduce((sum, row) => sum + Number(row.event_count), 0);
@@ -73,7 +128,6 @@ async function main() {
       await benchmarkScenario({
         name: 'big-science-statistics',
         sql: SCIENCE_QUERY,
-        thresholdMs: positiveNumber(process.env.DBAGENT_SCENARIO_SCIENCE_P95_MS, 500),
         validate(result) {
           assert(result.rowCount === 2, '大科学统计必须返回 2 个实验');
           const observations = result.rows.reduce(
@@ -88,7 +142,6 @@ async function main() {
       await benchmarkScenario({
         name: 'big-science-result-page',
         sql: SCIENCE_RESULT_PAGE_QUERY,
-        thresholdMs: positiveNumber(process.env.DBAGENT_SCENARIO_RESULT_PAGE_P95_MS, 1_000),
         validate(result) {
           assert(result.rowCount === 2_000, '大结果页必须返回 2000 行');
         },
@@ -105,9 +158,11 @@ async function main() {
         postgres: postgresVersion,
       },
       configuration: {
-        warmupIterations,
+        warmupDurationMs,
         measuredIterations: iterations,
-        thresholdsOverridableByEnvironment: true,
+        comparedPaths: ['pg.Client.query', 'DatabaseAccessRuntime + PostgresConnector'],
+        gate: 'SchemaNaut P95 minus direct pg P95',
+        platformOverheadP95ThresholdMs: overheadThresholdMs,
       },
       scale,
       scenarios,
@@ -122,44 +177,115 @@ async function main() {
         passed: report.passed,
         scenarios: scenarios.map((scenario) => ({
           name: scenario.name,
-          p50Ms: scenario.p50Ms,
-          p95Ms: scenario.p95Ms,
-          maxMs: scenario.maxMs,
-          thresholdMs: scenario.thresholdMs,
+          directPgP95Ms: scenario.directPg.p95Ms,
+          schemanautP95Ms: scenario.schemanaut.p95Ms,
+          platformOverheadP95Ms: scenario.platformOverheadP95Ms,
+          thresholdMs: scenario.platformOverheadP95ThresholdMs,
           passed: scenario.passed,
         })),
       })}`,
     );
     if (!report.passed) process.exitCode = 1;
   } finally {
+    await runtime.disconnect(profileId).catch(() => undefined);
     await client.end();
   }
 }
 
-async function benchmarkScenario({ name, sql, thresholdMs, validate }) {
-  for (let index = 0; index < warmupIterations; index += 1) {
-    validate(await client.query(sql));
+async function benchmarkScenario({ name, sql, validate }) {
+  const warmupStarted = performance.now();
+  let warmupIterations = 0;
+  while (performance.now() - warmupStarted < warmupDurationMs) {
+    if (warmupIterations % 2 === 0) {
+      validate(await runDirect(sql));
+      validate(await runThroughSchemaNaut(sql));
+    } else {
+      validate(await runThroughSchemaNaut(sql));
+      validate(await runDirect(sql));
+    }
+    warmupIterations += 1;
   }
-  const durations = [];
+
+  const directPgSamplesMs = [];
+  const schemanautSamplesMs = [];
+  const pairedOverheadSamplesMs = [];
   for (let index = 0; index < iterations; index += 1) {
-    const started = performance.now();
-    const result = await client.query(sql);
-    durations.push(performance.now() - started);
-    validate(result);
+    const directFirst = index % 2 === 0;
+    const first = directFirst
+      ? await measure(() => runDirect(sql))
+      : await measure(() => runThroughSchemaNaut(sql));
+    const second = directFirst
+      ? await measure(() => runThroughSchemaNaut(sql))
+      : await measure(() => runDirect(sql));
+    const direct = directFirst ? first : second;
+    const schemanaut = directFirst ? second : first;
+    validate(direct.result);
+    validate(schemanaut.result);
+    directPgSamplesMs.push(round(direct.durationMs));
+    schemanautSamplesMs.push(round(schemanaut.durationMs));
+    pairedOverheadSamplesMs.push(round(schemanaut.durationMs - direct.durationMs));
   }
-  durations.sort((left, right) => left - right);
-  const p50Ms = round(percentile(durations, 0.5));
-  const p95Ms = round(percentile(durations, 0.95));
-  const maxMs = round(durations.at(-1) ?? 0);
+
+  const directPg = summarize(directPgSamplesMs);
+  const schemanaut = summarize(schemanautSamplesMs);
+  const platformOverheadP95Ms = round(schemanaut.p95Ms - directPg.p95Ms);
   return {
     name,
     warmupIterations,
-    measuredIterations: durations.length,
-    p50Ms,
-    p95Ms,
-    maxMs,
-    thresholdMs,
-    passed: p95Ms <= thresholdMs,
+    warmupElapsedMs: round(performance.now() - warmupStarted),
+    measuredIterations: iterations,
+    directPg,
+    schemanaut,
+    platformOverheadP95Ms,
+    pairedOverhead: summarize(pairedOverheadSamplesMs),
+    platformOverheadP95ThresholdMs: overheadThresholdMs,
+    rawSamples: {
+      directPgMs: directPgSamplesMs,
+      schemanautMs: schemanautSamplesMs,
+      pairedOverheadMs: pairedOverheadSamplesMs,
+    },
+    passed: platformOverheadP95Ms <= overheadThresholdMs,
+  };
+}
+
+async function runDirect(sql) {
+  const result = await client.query(sql);
+  return {
+    rowCount: result.rowCount ?? result.rows.length,
+    rows: result.rows,
+  };
+}
+
+async function runThroughSchemaNaut(sql) {
+  const job = await runtime.submit({
+    profileId,
+    sql,
+    executionMode: 'sync',
+    rowLimit: 10_000,
+    authorization: { permissionMode: 'read' },
+  });
+  assert(job.state === 'succeeded' && job.result, `SchemaNaut query failed for ${profileId}`);
+  const batch = await runtime.readResult(job.result.id, { limit: 10_000 });
+  assert(batch.complete, 'SchemaNaut benchmark result did not fit in one 10000-row page');
+  return {
+    rowCount: job.result.rowCount ?? batch.rows.length,
+    rows: batch.rows,
+  };
+}
+
+async function measure(operation) {
+  const started = performance.now();
+  const result = await operation();
+  return { durationMs: performance.now() - started, result };
+}
+
+function summarize(samples) {
+  const sorted = [...samples].sort((left, right) => left - right);
+  return {
+    p50Ms: round(percentile(sorted, 0.5)),
+    p95Ms: round(percentile(sorted, 0.95)),
+    maxMs: round(sorted.at(-1) ?? 0),
+    minMs: round(sorted[0] ?? 0),
   };
 }
 

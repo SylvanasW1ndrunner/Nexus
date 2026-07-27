@@ -36,22 +36,30 @@ import {
   classifyAgentToolExecutionFailure,
   classifyAgentToolFailure,
 } from './tool-failure-classifier.js';
+import {
+  completionCorrectionMessage,
+  verifyAgentCompletion,
+} from './completion-verifier.js';
 import { createSingleToolCallExecutionGrant } from './tool-execution-authorization.js';
+import { isAgentToolResultEnvelope } from './tool-result.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { AgentUserEventProjector, isUserRelevantAgentEvent } from './user-events.js';
 import type {
   AgentSession,
   AgentRunDependencies,
   AgentRunOptions,
+  AgentRunStore,
   AgentRunResult,
   AgentToolContext,
   AgentToolApproval,
   AgentToolApprovalRecord,
+  AgentToolCompletionEvidence,
   AgentToolExecutionRecord,
   AgentToolHandler,
   AgentToolSource,
   AgentContextCompressionReport,
   AgentContextCompactionResult,
+  AgentCompletionVerification,
   AgentManualContextCompactionOptions,
   AgentUserEvent,
   ApprovalProvider,
@@ -74,6 +82,9 @@ export class ReactAgent {
   private readonly streamStore: AgentStreamStore | undefined;
   private readonly auditLog: AgentAuditLogWriter | undefined;
   private readonly runCoordinator: AgentRunCoordinator;
+  private readonly runStore: AgentRunStore | undefined;
+  private readonly createRunId: () => string;
+  private readonly runRecovery: Promise<number> | undefined;
 
   constructor(
     private readonly llmRouter: LlmRouter,
@@ -85,10 +96,13 @@ export class ReactAgent {
     this.permissionManager = new PermissionManager(approvalProvider);
     this.now = dependencies.now ?? (() => new Date().toISOString());
     this.createSessionId = dependencies.createSessionId ?? (() => crypto.randomUUID());
+    this.createRunId = dependencies.createRunId ?? (() => crypto.randomUUID());
     this.checkpointStore = dependencies.checkpointStore;
     this.sessionStore = dependencies.sessionStore;
     this.streamStore = dependencies.streamStore;
     this.auditLog = dependencies.auditLog;
+    this.runStore = dependencies.runStore;
+    this.runRecovery = this.runStore?.recoverInterrupted(this.now());
     this.runCoordinator = dependencies.runCoordinator ?? new AgentRunCoordinator();
   }
 
@@ -98,6 +112,10 @@ export class ReactAgent {
 
   isSessionActive(sessionId: string): boolean {
     return this.runCoordinator.isActive(sessionId);
+  }
+
+  async waitForRunRecovery(): Promise<number> {
+    return await (this.runRecovery ?? Promise.resolve(0));
   }
 
   async runSessionOperation<T>(sessionId: string, operation: () => T | Promise<T>): Promise<T> {
@@ -110,7 +128,10 @@ export class ReactAgent {
   }
 
   async run(options: AgentRunOptions): Promise<AgentRunResult> {
+    await this.runRecovery;
     const runStartedAt = Date.now();
+    const runId = this.createRunId();
+    const runCreatedAt = this.now();
     const session =
       options.initialSession === undefined
         ? createAgentSession({
@@ -195,8 +216,11 @@ export class ReactAgent {
         });
       };
       const toolExecutions: AgentToolExecutionRecord[] = [];
+      const transientToolResults = new Map<string, string>();
       const contextCompression: AgentContextCompressionReport[] = [];
       let finalText = '';
+      let finalizeCorrectionCount = 0;
+      let lastCompletion: AgentCompletionVerification | undefined;
 
       const round = await this.usageTracker.startConversationRound(session.id, usageMode);
       let roundClosed = false;
@@ -241,26 +265,54 @@ export class ReactAgent {
       const resultMetadata = (status: AgentRunResult['status']) => ({
         events: [...userEvents],
         artifacts: structuredClone(session.artifacts ?? []),
-        completion: {
-          verified:
-            status === 'done' &&
-            (session.taskPlan === undefined || isAgentTaskPlanComplete(session.taskPlan)),
-          unresolvedTaskIds: unresolvedAgentTasks(session.taskPlan).map((task) => task.id),
-        },
+        completion:
+          lastCompletion ??
+          ({
+            verified:
+              status === 'done' &&
+              (session.taskPlan === undefined || isAgentTaskPlanComplete(session.taskPlan)),
+            deliveryReady: status === 'done',
+            finalResponseReady: status === 'done' && finalText.trim().length > 0,
+            phase: status === 'done' ? 'done' : 'verify',
+            unresolvedTaskIds: unresolvedAgentTasks(session.taskPlan).map((task) => task.id),
+            missing: status === 'done' ? [] : ['completion was not reached'],
+            evidenceKinds: [],
+          } satisfies AgentCompletionVerification),
       });
       const saveCheckpoint = async (
         iteration: number,
-        status: 'running' | 'done' | 'aborted' | 'failed',
+        status: 'running' | 'done' | 'aborted' | 'failed' | 'max_iterations_reached',
         errorMessage?: string,
       ) => {
         await this.checkpointStore?.save({
           session,
           iteration,
-          status,
+          status: status === 'max_iterations_reached' ? 'failed' : status,
           toolExecutions,
           finalText,
           ...(errorMessage === undefined ? {} : { errorMessage }),
           now: this.now(),
+        });
+        await this.runStore?.saveRun({
+          runId,
+          sessionId: session.id,
+          status,
+          phase: status === 'done' ? 'done' : (lastCompletion?.phase ?? 'act'),
+          iteration,
+          finalText,
+          toolExecutions: toolExecutions.map((execution) => ({
+            toolName: execution.toolName,
+            status: execution.status,
+            ...(execution.completionEvidence === undefined
+              ? {}
+              : { completionEvidence: structuredClone(execution.completionEvidence) }),
+          })),
+          ...(lastCompletion === undefined
+            ? {}
+            : { completion: structuredClone(lastCompletion) }),
+          ...(errorMessage === undefined ? {} : { errorMessage }),
+          createdAt: runCreatedAt,
+          updatedAt: this.now(),
         });
       };
 
@@ -287,6 +339,7 @@ export class ReactAgent {
             await closeRound('aborted');
             await finishRunAudit('aborted', iteration - 1, finalText);
             return {
+              runId,
               status: 'aborted',
               session,
               finalText,
@@ -308,7 +361,11 @@ export class ReactAgent {
           const llmTools = this.toolRegistry.llmTools(visibleNames);
           const visibleToolSet =
             options.dynamicToolDiscovery === true ? new Set(visibleNames ?? []) : undefined;
-          let context = buildAgentContext(session, llmTools, contextOptions);
+          let context = buildAgentContext(
+            sessionWithTransientToolResults(session, transientToolResults),
+            llmTools,
+            contextOptions,
+          );
           const compressionReportCountBefore = contextCompression.length;
           for (
             let compactionAttempt = 0;
@@ -336,6 +393,13 @@ export class ReactAgent {
                 ? 1
                 : (beforeTokens - context.compression.finalTokenEstimate) / beforeTokens;
             if (reduction < MIN_COMPACTION_REDUCTION_RATIO) break;
+          }
+          if (transientToolResults.size > 0) {
+            context = buildAgentContext(
+              sessionWithTransientToolResults(session, transientToolResults),
+              llmTools,
+              contextOptions,
+            );
           }
           if (contextCompression.length === compressionReportCountBefore) {
             contextCompression.push(context.compression);
@@ -430,20 +494,19 @@ export class ReactAgent {
               await this.saveSession(session);
               continue;
             }
-            const unresolved = unresolvedAgentTasks(session.taskPlan);
-            if (unresolved.length > 0) {
+            const verification = verifyAgentCompletion({
+              ...(session.taskPlan === undefined ? {} : { taskPlan: session.taskPlan }),
+              toolExecutions,
+              proposedFinalText: finalText,
+            });
+            lastCompletion = verification;
+            if (!verification.verified) {
               appendMessage(
                 session,
                 createMessage(
                   {
                     role: 'system',
-                    content: [
-                      'Completion verification failed: the task plan still has unresolved work.',
-                      `Unresolved tasks: ${unresolved
-                        .map((task) => `${task.id}: ${task.title}`)
-                        .join('; ')}`,
-                      'Continue working, update the plan, and attach concrete evidence before giving a final answer.',
-                    ].join('\n'),
+                    content: completionCorrectionMessage(verification),
                   },
                   this.now,
                 ),
@@ -455,6 +518,45 @@ export class ReactAgent {
               await this.saveSession(session);
               continue;
             }
+            if (!verification.finalResponseReady) {
+              if (
+                finalizeCorrectionCount >= 1 &&
+                verification.deliveryReady &&
+                verification.evidenceKinds.includes('database-result')
+              ) {
+                finalText = '查询已完成，结果已单独返回。';
+                appendMessage(
+                  session,
+                  createMessage({ role: 'assistant', content: finalText }, this.now),
+                );
+              } else {
+                finalizeCorrectionCount += 1;
+                appendMessage(
+                  session,
+                  createMessage(
+                    {
+                      role: 'system',
+                      content: completionCorrectionMessage(verification),
+                    },
+                    this.now,
+                  ),
+                );
+                await emitUserEvent({
+                  type: 'correcting',
+                  message: '结果已经具备，但答复仍是过程描述，正在收敛为最终交付。',
+                });
+                await this.saveSession(session);
+                continue;
+              }
+            }
+            lastCompletion = {
+              ...verification,
+              verified: true,
+              deliveryReady: true,
+              finalResponseReady: true,
+              phase: 'done',
+              missing: [],
+            };
             await emitUserEvent({
               type: 'completed',
               message: '任务已完成并通过当前验收检查。',
@@ -464,6 +566,7 @@ export class ReactAgent {
             await closeRound('success');
             await finishRunAudit('done', iteration, finalText);
             return {
+              runId,
               status: 'done',
               session,
               finalText,
@@ -474,6 +577,7 @@ export class ReactAgent {
             };
           }
 
+          finalizeCorrectionCount = 0;
           for (const toolCall of response.toolCalls) {
             const startedAt = Date.now();
             const tool = this.toolRegistry.get(toolCall.name);
@@ -746,8 +850,22 @@ export class ReactAgent {
                 context,
                 maxToolExecutionMs,
               );
-              const persistedResult = persistedSuccessfulToolResult(tool.source, result);
+              const envelope = isAgentToolResultEnvelope(result) ? result : undefined;
+              const persistedResult = persistedSuccessfulToolResult(
+                tool.source,
+                envelope?.durableSummary ?? result,
+              );
+              const modelResult = persistedSuccessfulToolResult(
+                tool.source,
+                envelope?.modelProjection ?? result,
+              );
               const preview = serializeToolResult(persistedResult, maxToolResultChars);
+              if (envelope) {
+                transientToolResults.set(
+                  toolCall.id,
+                  serializeToolResult(modelResult, maxToolResultChars),
+                );
+              }
               const record = executionRecord(
                 toolCall.id,
                 tool.name,
@@ -757,6 +875,9 @@ export class ReactAgent {
                 preview,
                 {
                   ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
+                  ...(envelope?.completionEvidence === undefined
+                    ? {}
+                    : { completionEvidence: envelope.completionEvidence }),
                 },
               );
               toolExecutions.push(record);
@@ -811,11 +932,11 @@ export class ReactAgent {
               if (isSqlExecutionTool(tool.name)) {
                 await emitUserEvent({
                   type: 'sql-executed',
-                  message: sqlExecutionProgressMessage(persistedResult),
+                  message: sqlExecutionProgressMessage(modelResult),
                   ...(typeof toolCall.arguments.sql === 'string'
                     ? { sql: toolCall.arguments.sql }
                     : {}),
-                  ...sqlExecutionMetrics(persistedResult),
+                  ...sqlExecutionMetrics(modelResult),
                 });
                 const successfulSqlCount = toolExecutions.filter(
                   (execution) =>
@@ -902,13 +1023,14 @@ export class ReactAgent {
           'Agent reached the maximum iteration limit before completion verification succeeded.';
         await saveCheckpoint(
           iterationOffset + maxIterations,
-          'failed',
+          'max_iterations_reached',
           maxIterationsMessage,
         );
         await this.saveSession(session);
         await closeRound('failed', maxIterationsMessage);
         await finishRunAudit('max_iterations_reached', maxIterations, finalText);
         return {
+          runId,
           status: 'max_iterations_reached',
           session,
           finalText,
@@ -1310,7 +1432,6 @@ const ALWAYS_VISIBLE_TOOL_NAMES = new Set([
   'knowledge_search',
   'sql_execute',
   'sql_explain',
-  'result_read',
 ]);
 
 function visibleToolNames(
@@ -1342,6 +1463,21 @@ function cloneSessionForCompaction(session: AgentSession): AgentSession {
     ...(session.contextCheckpoint === undefined
       ? {}
       : { contextCheckpoint: structuredClone(session.contextCheckpoint) }),
+  };
+}
+
+function sessionWithTransientToolResults(
+  session: AgentSession,
+  transientToolResults: ReadonlyMap<string, string>,
+): AgentSession {
+  if (transientToolResults.size === 0) return session;
+  return {
+    ...session,
+    messages: session.messages.map((message) => {
+      if (message.role !== 'tool') return message;
+      const transient = transientToolResults.get(message.toolCallId);
+      return transient === undefined ? message : { ...message, content: transient };
+    }),
   };
 }
 
@@ -1465,6 +1601,9 @@ function executionRecord(
       ? {}
       : { failureKind: metadata.failure.failureKind, retryable: metadata.failure.retryable }),
     ...(metadata.approval === undefined ? {} : { approval: metadata.approval }),
+    ...(metadata.completionEvidence === undefined
+      ? {}
+      : { completionEvidence: metadata.completionEvidence }),
   };
 }
 
@@ -1474,6 +1613,7 @@ type ExecutionRecordMetadata = {
     retryable: boolean;
   };
   approval?: AgentToolApprovalRecord;
+  completionEvidence?: AgentToolCompletionEvidence;
 };
 
 function approvalRecord(

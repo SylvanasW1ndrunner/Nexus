@@ -21,6 +21,7 @@ import {
   createMessage,
   ReactAgent,
   ToolRegistry,
+  createAgentToolResultEnvelope,
   type AgentToolApproval,
 } from '../src/index.js';
 
@@ -31,6 +32,78 @@ afterEach(async () => {
 });
 
 describe('ReactAgent', () => {
+  it('treats a process-only response as a completion proposal and explicitly finalizes', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'sql_execute',
+        description: 'Execute readonly SQL',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+        source: 'database',
+      },
+      () =>
+        createAgentToolResultEnvelope({
+          modelProjection: { rows: [{ count: 42 }], returnedRowCount: 1 },
+          durableSummary: { returnedRowCount: 1, elapsedMs: 3 },
+          completionEvidence: {
+            kind: 'database-result',
+            deliveryReady: true,
+          },
+        }),
+    );
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'sql-finalize',
+            name: 'sql_execute',
+            arguments: { sql: 'select count(*) as count from orders' },
+          },
+        ],
+      },
+      { text: 'Let me verify the result before I answer.', toolCalls: [] },
+      { text: 'The query completed; the bounded result is returned separately.', toolCalls: [] },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Count the orders.',
+      mode: 'read',
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.iterations).toBe(3);
+    expect(result.finalText).toBe(
+      'The query completed; the bounded result is returned separately.',
+    );
+    expect(result.completion).toMatchObject({
+      verified: true,
+      deliveryReady: true,
+      finalResponseReady: true,
+      phase: 'done',
+      evidenceKinds: ['database-result'],
+    });
+    expect(
+      calls[2]?.messages.some(
+        (message) =>
+          message.role === 'system' &&
+          message.content.includes('previous response described future work'),
+      ),
+    ).toBe(true);
+  });
+
   it('runs a readonly database tool and returns a final business answer', async () => {
     const usage = new UsageTracker(await usagePath());
     const provider = scriptedProvider([
@@ -1975,8 +2048,9 @@ describe('ReactAgent', () => {
     });
 
     expect(result.status).toBe('aborted');
-    expect(result.completion).toEqual({
+    expect(result.completion).toMatchObject({
       verified: false,
+      phase: 'verify',
       unresolvedTaskIds: [],
     });
     expect(calls).toHaveLength(0);
@@ -2020,8 +2094,9 @@ describe('ReactAgent', () => {
     });
 
     expect(result.status).toBe('max_iterations_reached');
-    expect(result.completion).toEqual({
+    expect(result.completion).toMatchObject({
       verified: false,
+      phase: 'verify',
       unresolvedTaskIds: [],
     });
     await expect(checkpointStore.listBySession(result.session.id)).resolves.toMatchObject([

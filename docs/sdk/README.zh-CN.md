@@ -29,7 +29,7 @@ CLI 示例统一使用 `npx schemanaut`，从当前项目的本地安装中解�
 
 三个概念的生命周期不同：
 
-- `DatabaseAgentRuntime` 管理模型 Provider、当前数据库连接、知识索引、Tools、Skills、MCP Client、结果句柄和 Session 入口。
+- `DatabaseAgentRuntime` 管理模型 Provider、当前数据库连接、知识索引、Tools、Skills、MCP Client、有界交互结果和 Session 入口。
 - Project 是选定的目录，保存可复用的项目约定和扩展，通过 `projectDirectory` 指定。
 - Session 是一段隔离、持久的对话；消息、任务计划、产物、已激活 Tools 与 Skills、Token 用量和上下文检查点保存在一起。
 
@@ -323,7 +323,7 @@ const continued = await runtime.runAgent({
 });
 ```
 
-`session` 与 `sessionId` 只能提供一个。不同 Session 的对话、计划、产物和结果句柄相互隔离；Session ID 同样受 Project 边界约束，即使可信宿主使用底层 `runtime.sessions`，也不能读取或修改其他 Project 的 Session。提供 `userId` 后，明确的偏好表达可以被提炼到用户偏好层，并供同一用户的其他 Session 使用；可通过 `runtime.sessions.listPreferences()`、`upsertPreference()` 和 `deletePreference()` 管理。
+`session` 与 `sessionId` 只能提供一个。不同 Session 的对话、计划和产物相互隔离。查询行根本不属于 Session 状态：它们只在当前运行中单独返回，进程重启后即不存在。Session ID 同样受 Project 边界约束，即使可信宿主使用底层 `runtime.sessions`，也不能读取或修改其他 Project 的 Session。提供 `userId` 后，用户明确表达的偏好可以被提炼并供同一用户的其他 Session 使用；Tool 输出和数据库样例永远不是偏好来源。可通过 `runtime.sessions.listPreferences()`、`upsertPreference()` 和 `deletePreference()` 管理。
 
 任务仍在运行时，可追加新的用户要求，而不是启动第二个 Run。即使是新建 Session，事件也会提供 Session ID：
 
@@ -393,39 +393,21 @@ const fork = await runtime.sessions.fork({
 
 Session 持久化会脱敏可识别的 Secret，但仍禁止把凭据主动写进消息。
 
-## 10. 结果预览与结果句柄
+## 10. 独立、有界的查询结果
 
-聚合、筛选、连接、窗口计算和异常检测应留在 PostgreSQL 中。`sql_execute` 只返回：
-
-- 列元数据；
-- 有界的行预览；
-- 行数与截断标记；
-- 耗时与事务信息；
-- `resultHandleId`。
-
-本次执行已经取回的行位于进程内、Session 隔离的结果句柄后。内置 `result_read` Tool 可以分页读取这些已存储行，嵌入应用也可以直接读取：
+聚合、筛选、连接、窗口计算和异常检测应留在 PostgreSQL 中。`runAgent()` 将数据库数据放在 Agent 结果旁边单独返回：
 
 ```ts
-const execution = run.result.toolExecutions.find(
-  (item) => item.toolName === 'sql_execute' && item.status === 'success',
-);
-
-if (execution) {
-  const preview = JSON.parse(execution.resultPreview) as {
-    resultHandleId: string;
-  };
-
-  const page = runtime.results.read({
-    id: preview.resultHandleId,
-    sessionId: run.result.session.id,
-    limit: 100,
-  });
-
-  console.log(page.rows, page.nextCursor);
+for (const result of run.queryResults) {
+  console.log(result.columns);
+  console.table(result.rows); // 最多 1,000 行
+  console.log({ returned: result.returnedRowCount, hasMore: result.hasMore });
 }
 ```
 
-`runtime.results.read()` 每页最多读取 100 行。`hasMoreInDatabase: true` 表示 SQL 产生的行数超过本次执行上限，未取回的行不会被句柄暗中物化；应使用数据库 Query/导出流程或显式分页 SQL 继续读取。句柄不能跨 Session 读取，默认一小时后过期，当前保存在内存中。需要持久导出的应用应在 Runtime 关闭前把已存储分页复制到自己的存储或文件流程。
+SDK/API/CLI 每次执行最多得到 1,000 行。Agent 只会在本次模型调用的临时观察中看到最多两行。两者都不会写入对话消息、持久 Session、Agent Run 历史或用户偏好。`hasMore: true` 表示数据库产生的行数超过交互上限。
+
+进程内缓存也只保存这份有界交互载荷，并会自动过期，因此恢复 Session 不会恢复历史查询行。需要再次查看时重新执行 SQL。需要完整导出时，使用底层数据库 Query/导出链路，或让 Agent 创建导出产物；数据库结果应直接流向目标文件，不能绕经对话。
 
 ## 11. Skills
 
@@ -600,6 +582,8 @@ if (generated.status === 'awaiting_execution') {
 }
 ```
 
+生成 SQL 的 Run 元数据会持久化到 Project 隔离的 SQLite 状态库并跨 Runtime 重启恢复，但结果行不会持久化。`executionResultAvailable` 只在即时执行响应中为 `true`。恢复后的已完成 Run 会返回 `executionResultAvailable: false`；重新连接同一数据库后，调用 `reexecuteGenerated(runId, { limit })` 可取得新的有界结果。
+
 该路径只执行一条只读语句。行数据修改或 DDL 应使用匹配权限模式的 `runAgent()`。
 
 ## 14. 模型直调与底层数据库 API
@@ -736,6 +720,8 @@ SCHEMANAUT_DATABASE_URL
 SCHEMANAUT_MAX_SCHEMA_TABLES    # 可选，默认 500
 SCHEMANAUT_STATE_DATABASE_PATH  # 可选
 ```
+
+CLI 会先加载 `<project>/.env`，再读取这些变量；进程环境中的已有值优先。格式错误只报告行号和错误类别，不回显原文或变量值。因此，复制仓库中的 `.env.example` 即可得到与 CLI 一致的配置合同。
 
 PostgreSQL URL 支持 `sslmode=disable|require|verify-ca|verify-full`。`require` 仅保证加密但不校验证书，`verify-ca` 校验证书链，`verify-full` 还会校验主机名。由于 Node 运行时无法可靠保证 PostgreSQL `prefer` 的降级语义，因此会明确拒绝该模式。
 
