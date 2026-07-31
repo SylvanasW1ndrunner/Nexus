@@ -60,6 +60,8 @@ test('package provenance binds dirty-workspace inputs, payload and archive bytes
     'docs/test-pipeline.md',
     'docs/agent/README.md',
     'docs/ai-sql/README.md',
+    'docs/cli/README.md',
+    'docs/cli/README.zh-CN.md',
     'docs/foundation/README.md',
     'docs/sdk/README.md',
   ]) {

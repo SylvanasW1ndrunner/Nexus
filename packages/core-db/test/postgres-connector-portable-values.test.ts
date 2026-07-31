@@ -159,4 +159,103 @@ describe('PostgresConnector portable result values', () => {
     expect(page.byteCount).toBe(expectedBytes);
     expect(page.rows).toEqual(rows);
   });
+
+  it('bounds retained results, supports explicit release, and purges profile results on disconnect', async () => {
+    const connection: SavedConnection = {
+      id: 'pg_profile-retention',
+      name: 'Retention PostgreSQL',
+      engine: 'postgres',
+      host: '127.0.0.1',
+      port: 5432,
+      database: 'retention',
+      username: 'tester',
+      readOnly: true,
+      status: 'connected',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const serverInfo: PostgresServerInfo = {
+      database: 'retention',
+      currentUser: 'tester',
+      engineVersion: '16.3',
+      engineVersionNumber: 160_003,
+      inRecovery: false,
+    };
+    let sequence = 0;
+    const driver = {
+      connect: () => Promise.resolve(ok(connection)),
+      disconnect: () => Promise.resolve(ok(undefined)),
+      serverInfo: () => Promise.resolve(ok(serverInfo)),
+      execute: () => {
+        sequence += 1;
+        return Promise.resolve(
+          ok({
+            queryId: `query-retention-${sequence}`,
+            columns: [{ name: 'value' }],
+            rows: [{ value: sequence }],
+            rowCount: 1,
+            elapsedMs: 1,
+            safety: {
+              statementKind: 'SELECT',
+              riskLevel: 'safe' as const,
+              requiresConfirmation: false,
+              blocked: false,
+              reasons: [],
+            },
+          }),
+        );
+      },
+    } as unknown as PostgresDriver;
+    const connector = new PostgresConnector(driver, {
+      maxRetainedResults: 2,
+      maxRetainedResultBytes: 1_024,
+    });
+    const profile: ConnectionProfile = {
+      id: 'profile-retention',
+      name: 'Retention PostgreSQL',
+      connectorId: connector.manifest.id,
+      engine: 'postgres',
+      endpoints: [{ transport: 'tcp', host: '127.0.0.1', port: 5432, database: 'retention' }],
+      principal: 'tester',
+      purpose: 'read-only',
+      readOnly: true,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const context = { profile };
+    await connector.connect(context);
+
+    const first = await connector.submit(context, {
+      profileId: profile.id,
+      sql: 'select 1',
+      authorization: { permissionMode: 'read' },
+    });
+    const second = await connector.submit(context, {
+      profileId: profile.id,
+      sql: 'select 2',
+      authorization: { permissionMode: 'read' },
+    });
+    const third = await connector.submit(context, {
+      profileId: profile.id,
+      sql: 'select 3',
+      authorization: { permissionMode: 'read' },
+    });
+
+    await expect(connector.readResult(context, first.result!.id)).rejects.toThrow(
+      /Result handle was not found/,
+    );
+    await expect(connector.readResult(context, second.result!.id)).resolves.toMatchObject({
+      rows: [{ value: 2 }],
+    });
+    await expect(connector.releaseResult(context, second.result!.id)).resolves.toBe(true);
+    await expect(connector.releaseResult(context, second.result!.id)).resolves.toBe(false);
+    await expect(connector.readResult(context, second.result!.id)).rejects.toThrow(
+      /Result handle was not found/,
+    );
+
+    await connector.disconnect(context);
+    await expect(connector.readResult(context, third.result!.id)).rejects.toThrow(
+      /Result handle was not found/,
+    );
+  });
 });

@@ -112,6 +112,42 @@ describe('provider adapters beyond basic connectivity', () => {
     expect(calls.some((call) => call.url.includes('/chat/completions'))).toBe(false);
   });
 
+  it('discovers context and output limits from an OpenAI-compatible model catalog', async () => {
+    const calls: string[] = [];
+    const provider = new OpenAICompatibleProvider({
+      id: 'relay',
+      name: 'Compatible relay',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'test-key',
+      fetch: async (input) => {
+        calls.push(String(input));
+        return jsonResponse({
+          data: [
+            {
+              id: 'vendor/model-large',
+              context_length: 131_072,
+              max_output_tokens: 8_192,
+              capabilities: { tool_calling: true, reasoning: true },
+            },
+          ],
+        });
+      },
+    });
+
+    await expect(provider.listModels()).resolves.toEqual(['vendor/model-large']);
+    await expect(provider.getModelMetadata('vendor/model-large')).resolves.toMatchObject({
+      model: 'vendor/model-large',
+      source: 'provider-api',
+      contextTokens: 131_072,
+      maxOutputTokens: 8_192,
+      capabilities: {
+        toolCalling: 'supported',
+        reasoning: 'supported',
+      },
+    });
+    expect(calls).toEqual(['https://relay.example/v1/models']);
+  });
+
   it('maps the native Anthropic message and tool protocol', async () => {
     let requestBody: Record<string, unknown> | undefined;
     let requestHeaders: Headers | undefined;

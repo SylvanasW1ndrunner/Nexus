@@ -3,7 +3,7 @@ import { ToolRegistry, createAgentSession } from '@dbagent/core-agent';
 import { registerAgentRuntimeTools } from '../src/index.js';
 
 describe('Agent runtime tools', () => {
-  it('maintains a verifiable task plan in the owning Session', async () => {
+  it('keeps planning lightweight and leaves completion evidence to the runtime', async () => {
     const registry = new ToolRegistry();
     registerAgentRuntimeTools(registry);
     const session = createAgentSession({
@@ -13,13 +13,6 @@ describe('Agent runtime tools', () => {
       now: fixedNow,
     });
     const context = { session };
-    session.messages.push({
-      role: 'tool',
-      toolCallId: 'call-query',
-      toolName: 'sql_execute',
-      content: '{"resultHandleId":"result-verified","rows":[{"total":"1726.50"}]}',
-      createdAt: fixedNow(),
-    });
 
     await registry.get('task_plan_create')!.handler(
       {
@@ -28,7 +21,6 @@ describe('Agent runtime tools', () => {
           {
             id: 'query',
             title: 'Run aggregate query',
-            acceptanceCriteria: ['Database result contains total revenue'],
           },
         ],
       },
@@ -38,29 +30,26 @@ describe('Agent runtime tools', () => {
       {
         taskId: 'query',
         status: 'completed',
-        evidence: {
-          kind: 'database-result',
-          summary: 'SUM(net_amount) returned 1726.50',
-          reference: 'result-verified',
-        },
       },
       context,
     );
     const projected = (await registry.get('task_list')!.handler({}, context)) as {
-      tasks: Array<{
-        status: string;
-        evidence: Array<{ summary: string }>;
-      }>;
+      tasks: Array<{ status: string }>;
     };
 
     expect(session.taskPlan?.tasks[0]?.status).toBe('completed');
-    expect(projected.tasks[0]).toMatchObject({
+    expect(projected.tasks[0]).toEqual({
+      id: 'query',
+      title: 'Run aggregate query',
       status: 'completed',
-      evidence: [{ summary: 'SUM(net_amount) returned 1726.50' }],
     });
+    const createSchema = registry.get('task_plan_create')!.inputSchema;
+    const updateSchema = registry.get('task_update')!.inputSchema;
+    expect(JSON.stringify(createSchema)).not.toMatch(/acceptanceCriteria|dependsOn|evidence/);
+    expect(JSON.stringify(updateSchema)).not.toMatch(/acceptanceCriteria|dependsOn|evidence/);
   });
 
-  it('rejects completion evidence that is not backed by Session tools or artifacts', async () => {
+  it('does not ask the model to manufacture or attach runtime evidence', async () => {
     const registry = new ToolRegistry();
     registerAgentRuntimeTools(registry);
     const session = createAgentSession({
@@ -78,21 +67,22 @@ describe('Agent runtime tools', () => {
       context,
     );
 
-    expect(() =>
-      registry.get('task_update')!.handler(
-        {
-          taskId: 'verify',
-          status: 'completed',
-          evidence: {
-            kind: 'database-result',
-            summary: 'Invented success',
-            reference: 'result-does-not-exist',
-          },
+    await registry.get('task_update')!.handler(
+      {
+        taskId: 'verify',
+        status: 'completed',
+        evidence: {
+          kind: 'database-result',
+          summary: 'Invented success',
+          reference: 'result-does-not-exist',
         },
-        context,
-      ),
-    ).toThrow('not present');
-    expect(session.taskPlan?.tasks[0]?.status).toBe('pending');
+      },
+      context,
+    );
+    expect(session.taskPlan?.tasks[0]).toMatchObject({
+      status: 'completed',
+      evidence: [],
+    });
   });
 
   it('discovers tools by capability and activates only matching schemas', async () => {

@@ -73,7 +73,7 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 
 - 实验、样本、仪器、分区观测表、高精度数值、数组和 JSON 元数据。
 - 分区确认、窗口、样本级统计和实验级聚合。
-- 大结果由 SDK/API 独立接收最多 1,000 行并通过 `hasMore` 标识后续数据库行；模型只看到最多两行临时样例，Session 与偏好中不保留行值。
+- 大结果由 SDK/API 独立接收最多 1,000 行并通过 `hasMore` 标识后续数据库行；模型临时投影默认最多 100 行且不超过 64 KiB，Session 与偏好中不保留行值。
 
 场景功能测试位于 [`postgres-scenarios.integration.test.ts`](../packages/sdk/test/postgres-scenarios.integration.test.ts)，场景性能入口位于 [`postgres-scenario-performance.mjs`](../scripts/tests/postgres-scenario-performance.mjs)。
 
@@ -85,7 +85,7 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 - `read` 模式在数据库事务层阻止 SELECT 包装的 `VOLATILE` 写入函数；`edit/full` 的对应路径正常执行。
 - SQL、EXPLAIN 和 SDK Query Job 的取消会传播到 PostgreSQL；DDL 已提交但 Schema 刷新失败时只返回警告，不重放语句。
 - 聚合统计由数据库完成；模型上下文中不存在完整大结果。
-- SQL 交互结果每次最多 1,000 行，模型临时样例最多两行；持久 Session、Agent Run 和用户偏好中均无查询行或缓存 ID。
+- SQL 交互结果每次最多 1,000 行，模型临时投影默认最多 100 行且不超过 64 KiB；持久 Session、Agent Run 和用户偏好中均无查询行或缓存 ID。
 - REST Session 视图不包含 Tool 消息、Tool Call、Skill 正文、知识哈希、节点 ID 或检索分数。
 - MCP 使用官方 SDK 完成能力协商、分页、通知、取消、超时、进程退出和远程传输测试。
 - MCP 还覆盖风险提示不降权、Secret/URL 校验、启动竞态、允许工具过滤，以及 REST 默认禁止进程型 stdio 管理。
@@ -107,7 +107,7 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 
 ## 5. 性能验收标准
 
-性能脚本对直接 `pg.Client.query()` 和 `DatabaseAccessRuntime + PostgresConnector` 两条路径分别预热至少 10 秒，再交替记录至少 40 对原始样本以及 `p50 / p95 / max`。数据库查询本身的绝对耗时只作为环境事实；产品门禁只判断 SchemaNaut 路径相对直接 pg 的额外 P95。
+性能脚本对直接 `pg.Client.query()` 和 `DatabaseAccessRuntime + PostgresConnector` 两条路径分别预热至少 10 秒，再交替记录至少 40 对原始样本以及 `p50 / p95 / max`。每个 SchemaNaut 样本读取后显式释放 Result Handle，避免基准本身把已消费结果保留到后续场景。数据库查询本身的绝对耗时只作为环境事实；产品门禁只判断 SchemaNaut 路径相对直接 pg 的额外 P95。
 
 默认本地阈值：
 
@@ -116,6 +116,8 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 | SchemaNaut P95 − 直接 pg P95（每个场景） |  ≤ 50 ms |
 
 阈值可通过 `DBAGENT_SCENARIO_PLATFORM_OVERHEAD_P95_MS` 配置，但不得通过放宽阈值掩盖回归。报告保存两条路径和成对差值的全部原始样本、数据规模、PostgreSQL 版本、Node.js、操作系统和 CPU，避免把 PostgreSQL 的 CPU 密集查询误报为产品回归。
+
+定位单个场景时可设置 `DBAGENT_SCENARIO_PERF_FILTER`，多个场景用逗号分隔；未知场景名会直接失败，筛选运行不得代替最终四场景总门禁。
 
 ## 6. 测试证据
 

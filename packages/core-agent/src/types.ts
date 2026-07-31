@@ -235,6 +235,15 @@ export type RegisteredAgentTool = AgentToolDefinition & {
 export type AgentToolCompletionEvidence = {
   kind: 'database-result' | 'database-write' | 'artifact';
   deliveryReady: boolean;
+  /** Deterministic runtime evidence; omitted only for legacy/custom tools. */
+  source?: 'runtime';
+  executionId?: string;
+  statementKinds?: string[];
+  requiredPermission?: AgentAccessMode;
+  rowCount?: number;
+  returnedRowCount?: number;
+  schemaRefresh?: 'not-required' | 'refreshed' | 'failed' | 'rolled-back';
+  transactionOutcome?: 'committed' | 'rolled-back' | 'not-started';
 };
 
 export type AgentToolResultEnvelope = {

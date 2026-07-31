@@ -11,7 +11,7 @@
 [![Node.js 22.13+](https://img.shields.io/badge/node-%3E%3D22.13-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](packages/sdk/src/index.ts)
 
-[English](README.md) · [SDK 指南](docs/sdk/README.zh-CN.md) · [API 参考](docs/sdk/api-reference.zh-CN.md) · [参与贡献](CONTRIBUTING.md)
+[English](README.md) · [CLI 指南](docs/cli/README.zh-CN.md) · [SDK 指南](docs/sdk/README.zh-CN.md) · [API 参考](docs/sdk/api-reference.zh-CN.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
@@ -33,7 +33,7 @@ SchemaNaut 把一段自然语言需求变成数据库任务：检索相关 Schem
 | 渐进式 Skills     | 系统、用户、Project、Session 四级标准 Markdown `SKILL.md`；未激活前只把目录信息提供给模型           |
 | 标准 MCP Client   | 基于官方 MCP SDK，支持 stdio、Streamable HTTP、SSE 兼容、动态工具发现、生命周期、取消和 Secret 引用 |
 | Project Tools     | Project 范围文件、可选宿主网络工具、`full` 模式下的有界 Shell，以及上下文独立、能力相同的子 Agent   |
-| 查询结果分离      | 聚合和筛选交给数据库；SDK/API 单独返回最多 1,000 行，模型仅看到最多两行且只在本次运行临时可见       |
+| 查询结果分离      | 聚合和筛选交给数据库；SDK/API 单独返回最多 1,000 行，模型临时投影最多 100 行且不超过 64 KiB       |
 | 使用入口          | TypeScript SDK、本地 REST API、交互式 CLI 与轻量本地 WebUI                                          |
 
 AI 数据库治理与运维属于后续产品阶段。v1 **不包含**治理运维 Agent，也不宣称能够自主完成 DBA 修复。
@@ -50,7 +50,7 @@ flowchart LR
     Agent --> Policy["read / edit / full"]
     Policy --> PostgreSQL["PostgreSQL 执行 SQL"]
     PostgreSQL --> Results["有界查询结果（最多 1,000 行）"]
-    Results --> Preview["模型临时样例（最多 2 行）"]
+    Results --> Preview["模型临时投影（最多 100 行 / 64 KiB）"]
     Preview --> Agent
     Results --> Output["独立结果载荷"]
     Agent --> Output["已验证回答 + SQL + 有用事件 + 产物"]
@@ -113,6 +113,7 @@ npx schemanaut chat -C ./my-data-project
 /skills
 /<skill> [任务]
 /compact [关注点]
+/trace on|off
 /mcp list
 /mcp start <server-id>
 /mcp stop <server-id>
@@ -275,6 +276,7 @@ pnpm test:performance:live
 
 - [SDK 指南](docs/sdk/README.zh-CN.md)
 - [SDK API 参考](docs/sdk/api-reference.zh-CN.md)
+- [CLI 指南](docs/cli/README.zh-CN.md)
 - [产品总体功能设计](docs/product-functional-overview.md)
 - [Agent 与扩展运行时](docs/agent/README.md)
 - [测试链路](docs/test-pipeline.md)

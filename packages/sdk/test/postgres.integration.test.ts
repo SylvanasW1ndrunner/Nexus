@@ -97,10 +97,12 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
       expect(searchPreview).toContain('public.orders');
       expect(searchPreview).toContain('public.users');
       const executionPreview = output.result.toolExecutions[2]!.resultPreview;
-      expect(executionPreview).toContain('Shanghai');
-      expect(executionPreview).toContain('Beijing');
-      expect(executionPreview).toContain('Shenzhen');
-      expect(executionPreview).toContain('1726.50');
+      expect(executionPreview).not.toContain('Shanghai');
+      const executionRows = JSON.stringify(output.queryResults.at(-1)?.rows);
+      expect(executionRows).toContain('Shanghai');
+      expect(executionRows).toContain('Beijing');
+      expect(executionRows).toContain('Shenzhen');
+      expect(executionRows).toContain('1726.50');
       expect(output.result.session.knowledgeSnapshot?.knowledgeSnapshotId).toMatch(/^knowledge:/);
       expect(typeof output.result.session.knowledgeSnapshot?.catalogRootHash).toBe('string');
       expect(typeof output.result.session.knowledgeSnapshot?.retrievalProfileId).toBe('string');
@@ -230,11 +232,13 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
       expect(searchPreview).toContain('采购订单');
       expect(searchPreview).toContain('供应商');
       const executionPreview = output.result.toolExecutions[1]!.resultPreview;
-      expect(executionPreview).toContain('江苏');
-      expect(executionPreview).toContain('广东');
-      expect(executionPreview).toContain('56000.00');
-      expect(executionPreview).toContain('公路');
-      expect(executionPreview).toContain('铁路');
+      expect(executionPreview).not.toContain('江苏');
+      const executionRows = JSON.stringify(output.queryResults.at(-1)?.rows);
+      expect(executionRows).toContain('江苏');
+      expect(executionRows).toContain('广东');
+      expect(executionRows).toContain('56000.00');
+      expect(executionRows).toContain('公路');
+      expect(executionRows).toContain('铁路');
     } finally {
       await runtime.close();
     }
@@ -300,6 +304,136 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
       await runtime.close();
     }
   });
+
+  it('answers a simple schema-list request from Schema RAG without querying PostgreSQL catalogs', async () => {
+    const provider = new ScriptedAgentProvider([
+      toolCall('list-schemas', 'resource_list', {
+        kinds: ['schema'],
+        limit: 100,
+      }),
+      finalAnswer(
+        '当前数据库包含 public、analytics、commerce、science、traffic_lab、供应链和电商运营等 schema。',
+      ),
+    ]);
+    const runtime = await connectedRuntime(provider, 'schema-list-fast-path');
+
+    try {
+      await runtime.indexSchema();
+      const before = runtime.database.metrics();
+      const startedAt = performance.now();
+      const output = await runtime.runAgent({
+        userId: 'integration-user',
+        message: '看一下 dbagent_core_db_test 下面的 schemas 都有哪些。',
+        mode: 'read',
+      });
+      const durationMs = performance.now() - startedAt;
+      const after = runtime.database.metrics();
+
+      expect(output.result.status).toBe('done');
+      expect(output.result.iterations).toBe(2);
+      expect(output.result.toolExecutions).toEqual([
+        expect.objectContaining({
+          toolName: 'resource_list',
+          status: 'success',
+        }),
+      ]);
+      expect(
+        output.result.toolExecutions[0]?.resultPreview,
+        JSON.stringify(output.result.toolExecutions, null, 2),
+      ).toContain('traffic_lab');
+      expect(output.result.toolExecutions[0]?.resultPreview).toContain('供应链');
+      expect(output.queryResults).toHaveLength(0);
+      expect(after.submittedQueries - before.submittedQueries).toBe(0);
+      expect(durationMs).toBeLessThan(5_000);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('creates and verifies a parsed Kafka table', async () => {
+    const suffix = `${process.pid}_${Date.now()}`;
+    const tableName = `proc_kafka_events_create_${suffix}`;
+    const qualifiedTable = `traffic_lab.${tableName}`;
+    const createSql = `
+      CREATE TABLE ${qualifiedTable} AS
+      SELECT
+        value ->> 'event_id' AS event_id,
+        CASE
+          WHEN value ->> 'event_time'
+            ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$'
+          THEN (value ->> 'event_time')::timestamptz
+        END AS event_time,
+        (value ->> 'ingested_at')::timestamptz AS ingested_at,
+        value ->> 'event_type' AS event_type,
+        value ->> 'visitor_id' AS visitor_id,
+        CASE
+          WHEN value ->> 'latency_ms' ~ '^\\d+(?:\\.\\d+)?$'
+          THEN (value ->> 'latency_ms')::numeric
+        END AS latency_ms,
+        value ->> 'page' AS page,
+        value ->> 'source' AS source
+      FROM traffic_lab.raw_kafka_events
+    `;
+    const verifySql = `
+      SELECT
+        count(*)::bigint AS row_count,
+        count(*) FILTER (WHERE event_time IS NULL)::bigint AS invalid_event_time_count,
+        count(*) FILTER (WHERE latency_ms IS NULL)::bigint AS invalid_latency_count
+      FROM ${qualifiedTable}
+    `;
+    const provider = new ScriptedAgentProvider([
+      toolCall('safe-create', 'sql_execute', { sql: createSql }),
+      toolCall('verify-created-table', 'sql_execute', {
+        sql: verifySql,
+        previewRows: 20,
+      }),
+      finalAnswer('新表已经创建并验证，共 20017 行；原有表未被改动。'),
+    ]);
+    const runtime = await connectedRuntime(provider, 'kafka-create-and-verify');
+
+    try {
+      await runtime.indexSchema();
+      const before = runtime.database.metrics();
+      const startedAt = performance.now();
+      const output = await runtime.runAgent({
+        userId: 'integration-user',
+        message:
+          `把 traffic_lab.raw_kafka_events 的 JSON key 解析成一张新表 ${qualifiedTable}。` +
+          '创建后验证新表。',
+        mode: 'full',
+        maxIterations: 8,
+      });
+      const durationMs = performance.now() - startedAt;
+      const after = runtime.database.metrics();
+
+      expect(output.result.status).toBe('done');
+      expect(output.result.iterations).toBe(3);
+      expect(output.result.toolExecutions).toEqual([
+        expect.objectContaining({
+          toolCallId: 'safe-create',
+          status: 'success',
+        }),
+        expect.objectContaining({
+          toolCallId: 'verify-created-table',
+          status: 'success',
+        }),
+      ]);
+      expect(after.submittedQueries - before.submittedQueries).toBe(2);
+      expect(output.queryResults.at(-1)?.rows).toEqual([
+        expect.objectContaining({
+          row_count: '20017',
+          invalid_event_time_count: '1',
+          invalid_latency_count: '1',
+        }),
+      ]);
+      expect(output.result.finalText).toContain('20017');
+      expect(output.result.finalText).toContain('原有表未被改动');
+      expect(durationMs).toBeLessThan(10_000);
+    } finally {
+      await submitRuntimeSql(runtime, `DROP TABLE IF EXISTS ${qualifiedTable}`);
+      await runtime.close();
+    }
+  }, 120_000);
 
   it('applies approved UPDATE and DDL once without leaking authority to the next call or Session state', async () => {
     const suffix = `${process.pid}_${Date.now()}`;
@@ -444,13 +578,14 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
         toolCallId: 'verify-one-time-authorization',
         status: 'success',
       });
-      expect(verification.result.toolExecutions[0]?.resultPreview).toContain('"value":1');
-      expect(verification.result.toolExecutions[0]?.resultPreview).toContain(
-        '"approved_note_exists":true',
-      );
-      expect(verification.result.toolExecutions[0]?.resultPreview).toContain(
-        '"bypass_note_exists":false',
-      );
+      expect(verification.result.toolExecutions[0]?.resultPreview).not.toContain('"value":1');
+      expect(verification.queryResults.at(-1)?.rows).toEqual([
+        expect.objectContaining({
+          value: 1,
+          approved_note_exists: true,
+          bypass_note_exists: false,
+        }),
+      ]);
 
       expect(approvalRequests).toEqual([
         {

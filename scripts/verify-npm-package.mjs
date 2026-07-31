@@ -69,7 +69,13 @@ const publicRootFiles = [
   'THIRD_PARTY_NOTICES.md',
 ];
 const publicDocFiles = ['docs/product-functional-overview.md', 'docs/test-pipeline.md'];
-const publicDocDirectories = ['docs/agent', 'docs/ai-sql', 'docs/foundation', 'docs/sdk'];
+const publicDocDirectories = [
+  'docs/agent',
+  'docs/ai-sql',
+  'docs/cli',
+  'docs/foundation',
+  'docs/sdk',
+];
 let validationRoot;
 
 export async function verifyNpmPackage() {
@@ -468,6 +474,8 @@ function verifyPublicFiles(packageRoot, nodeEngine) {
     'LICENSE',
     'NOTICE',
     'THIRD_PARTY_NOTICES.md',
+    'docs/cli/README.md',
+    'docs/cli/README.zh-CN.md',
     'docs/sdk/README.md',
     'docs/sdk/README.zh-CN.md',
     'docs/sdk/api-reference.md',
@@ -936,7 +944,13 @@ function verifyCliBehavior(consumerRoot) {
   const runLocalCli = (args) =>
     runCaptured(process.execPath, [pnpmCli, 'exec', 'schemanaut', ...args], consumerRoot, env);
   const help = runLocalCli(['--help']);
-  if (!help.stdout.includes('SchemaNaut') || !help.stdout.includes('Usage:')) {
+  if (
+    !help.stdout.includes('SchemaNaut') ||
+    !help.stdout.includes('Usage:') ||
+    !['serve', 'chat', 'init', 'skills', 'sessions'].every((command) =>
+      help.stdout.includes(`schemanaut ${command}`),
+    )
+  ) {
     throw new Error(`Packaged CLI help verification failed: ${help.stderr || help.stdout}`);
   }
   runLocalCli(['init', projectDirectory]);

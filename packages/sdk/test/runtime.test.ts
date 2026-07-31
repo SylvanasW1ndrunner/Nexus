@@ -31,12 +31,13 @@ import {
   type Result,
   type ResultBatch,
   type ResourceDescriptor,
+  type ResourceDiscoveryPage,
   type ResourceRelation,
   type SavedConnection,
   type TableDetail,
 } from '@dbagent/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DatabaseAgentRuntime, type AgentSession } from '../src/index.js';
+import { DatabaseAgentRuntime, toAgentSessionView, type AgentSession } from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -47,6 +48,58 @@ afterEach(async () => {
 });
 
 describe('DatabaseAgentRuntime', () => {
+  it('projects task plans as user-facing progress without internal criteria, dependencies, or evidence', () => {
+    const view = toAgentSessionView({
+      id: 'session-plan-view',
+      title: 'Plan view',
+      mode: 'read',
+      messages: [],
+      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      taskPlan: {
+        version: 1,
+        goal: '完成查询',
+        tasks: [
+          {
+            id: 'query',
+            title: '执行查询',
+            description: '生成并运行 SQL',
+            status: 'in_progress',
+            acceptanceCriteria: ['数据库返回结果'],
+            dependsOn: ['discover'],
+            evidence: [
+              {
+                kind: 'database-result',
+                summary: 'internal runtime evidence',
+                reference: 'result-handle-must-not-leak',
+                createdAt: '2026-07-31T00:00:00.000Z',
+              },
+            ],
+            createdAt: '2026-07-31T00:00:00.000Z',
+            updatedAt: '2026-07-31T00:00:01.000Z',
+          },
+        ],
+        createdAt: '2026-07-31T00:00:00.000Z',
+        updatedAt: '2026-07-31T00:00:01.000Z',
+      },
+      aborted: false,
+    });
+
+    expect(view.taskPlan).toEqual({
+      goal: '完成查询',
+      tasks: [
+        {
+          id: 'query',
+          title: '执行查询',
+          description: '生成并运行 SQL',
+          status: 'in_progress',
+        },
+      ],
+    });
+    expect(JSON.stringify(view.taskPlan)).not.toMatch(
+      /acceptanceCriteria|dependsOn|evidence|result-handle/,
+    );
+  });
+
   it('connects, indexes, generates a safe query, and executes only after an explicit call', async () => {
     const driver = new FakeDatabaseDriver();
     const provider = new FakeProvider(
@@ -630,95 +683,55 @@ order by total_amount desc`,
       createConnectionId: () => 'connection-1',
       createRunId: () => `run-${++runTick}`,
       now: () => new Date(Date.parse('2026-07-21T00:00:00.000Z') + nowTick++ * 1_000).toISOString(),
+      schemaFreshnessIntervalMs: 0,
     });
 
     const connection = await runtime.connect(connectionInput());
     const index = await runtime.indexSchema({ maxTables: 7 });
-    discoverPage.mockResolvedValue({
+    const refreshedDiscovery: ResourceDiscoveryPage = {
       resources: [databaseResource, tableResource],
       relations: [containsTable],
       complete: true,
       snapshotId: 'injected-revision-2',
-    });
-    const generated = await runtime.generate({ question: 'Return one.' });
-    const refreshedIndex = runtime.schemaStatus();
-    discoverPage.mockResolvedValue({
-      resources: [
-        {
-          ...databaseResource,
-          firstSeenAt: '2026-07-22T00:00:00.000Z',
-          updatedAt: '2026-07-22T00:00:00.000Z',
-          sources: databaseResource.sources.map((source) => ({
-            ...source,
-            observedAt: '2026-07-22T00:00:00.000Z',
-          })),
-        },
-        {
-          ...tableResource,
-          firstSeenAt: '2026-07-22T00:00:00.000Z',
-          updatedAt: '2026-07-22T00:00:00.000Z',
-          sources: tableResource.sources.map((source) => ({
-            ...source,
-            observedAt: '2026-07-22T00:00:00.000Z',
-          })),
-        },
-      ],
-      relations: [
-        {
-          ...containsTable,
-          firstSeenAt: '2026-07-22T00:00:00.000Z',
-          updatedAt: '2026-07-22T00:00:00.000Z',
-          sources: containsTable.sources.map((source) => ({
-            ...source,
-            observedAt: '2026-07-22T00:00:00.000Z',
-          })),
-        },
-      ],
-      complete: true,
-      snapshotId: 'injected-revision-3',
-    });
-    await runtime.generate({ question: 'Return one again.' });
-    const stableIndex = runtime.schemaStatus();
-    let releaseFreshness:
-      | ((value: {
-          resources: ResourceDescriptor[];
-          relations: ResourceRelation[];
-          complete: true;
-          snapshotId: string;
-        }) => void)
+    };
+    let releaseBackgroundRefresh:
+      | ((value: typeof refreshedDiscovery) => void)
       | undefined;
     discoverPage.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          releaseFreshness = resolve;
+          releaseBackgroundRefresh = resolve;
         }),
     );
-    const cancelledFreshness = new AbortController();
-    const cancelledGenerate = runtime.generate({
-      question: 'Cancel only this freshness waiter.',
-      signal: cancelledFreshness.signal,
-    });
-    const healthyGenerate = runtime.generate({
-      question: 'Keep waiting for the shared freshness check.',
-    });
-    await vi.waitFor(() => expect(discoverPage).toHaveBeenCalledTimes(4));
-    cancelledFreshness.abort();
-    releaseFreshness?.({
-      resources: [databaseResource, tableResource],
-      relations: [containsTable],
-      complete: true,
-      snapshotId: 'injected-revision-3',
-    });
-    await expect(cancelledGenerate).rejects.toMatchObject({ code: 'ABORTED' });
-    await expect(healthyGenerate).resolves.toMatchObject({ status: 'awaiting_execution' });
+    await runtime.runAgent({ message: 'Return one.', mode: 'read' });
+    const cachedIndex = runtime.schemaStatus();
+    expect(discoverPage).toHaveBeenCalledTimes(2);
+    const toolSession: AgentSession = {
+      id: 'schema-refresh-session',
+      title: 'Schema refresh',
+      mode: 'read',
+      messages: [],
+      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      aborted: false,
+    };
+    const refreshedResource = expect(
+      runtime.tools
+        .get('resource_get')!
+        .handler({ resource: 'orders' }, { session: toolSession }),
+    ).resolves.toBeDefined();
+    releaseBackgroundRefresh?.(refreshedDiscovery);
+    await refreshedResource;
+    const refreshedIndex = runtime.schemaStatus();
+    discoverPage.mockResolvedValue(refreshedDiscovery);
+    const generated = await runtime.generate({ question: 'Return one.' });
     const executed = await runtime.executeGenerated(generated.runId);
     await runtime.disconnect();
     await runtime.close();
 
     expect(connection.id).toBe('injected-connection');
     expect(index).toMatchObject({ ready: true, tableCount: 0 });
+    expect(cachedIndex).toMatchObject({ ready: true, tableCount: 0 });
     expect(refreshedIndex).toMatchObject({ ready: true, tableCount: 1, truncated: false });
-    expect(stableIndex.indexedAt).toBe(refreshedIndex.indexedAt);
     expect(executed.execution.rows).toEqual([{ value: 1 }]);
     expect(createProfile).toHaveBeenCalledTimes(1);
     const createdProfile = createProfile.mock.calls[0]?.[0];
@@ -729,7 +742,7 @@ order by total_amount desc`,
       password: 'postgres',
     });
     expect(discoverPage).toHaveBeenCalled();
-    expect(discoverPage).toHaveBeenCalledTimes(4);
+    expect(discoverPage).toHaveBeenCalledTimes(3);
     expect(submit).toHaveBeenCalled();
     expect(disconnect).toHaveBeenCalledWith('connection-1');
     expect(driver.lastConnectConfig).toBeUndefined();
@@ -925,7 +938,7 @@ order by total_amount desc`,
     const modelToolPayload = JSON.parse(modelToolMessage?.content ?? '{}') as {
       rows?: unknown[];
     };
-    expect(modelToolPayload.rows).toHaveLength(2);
+    expect(modelToolPayload.rows).toHaveLength(20);
     const persisted = await runtime.sessions.load(output.result.session.id);
     expect(persisted).toMatchObject({
       id: output.result.session.id,

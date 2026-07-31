@@ -57,6 +57,7 @@ export type DatabaseAccessRuntimeOptions = {
   credentialResolver?: CredentialResolver;
   auditSink?: DatabaseAuditSink;
   maxAuditEvents?: number;
+  maxTrackedQueries?: number;
   now?: () => Date;
 };
 
@@ -82,6 +83,7 @@ type QueryJobBinding = JobBinding & {
   resourceId?: string;
   authorization?: DatabaseAuditEvent['authorization'];
   started: Date;
+  terminal: boolean;
 };
 
 export class DatabaseAccessRuntime {
@@ -99,6 +101,7 @@ export class DatabaseAccessRuntime {
   readonly #credentialResolver: CredentialResolver | undefined;
   readonly #auditSink: DatabaseAuditSink | undefined;
   readonly #maxAuditEvents: number;
+  readonly #maxTrackedQueries: number;
   readonly #now: () => Date;
   readonly #metric = {
     submittedQueries: 0,
@@ -115,6 +118,11 @@ export class DatabaseAccessRuntime {
     this.#credentialResolver = options.credentialResolver;
     this.#auditSink = options.auditSink;
     this.#maxAuditEvents = options.maxAuditEvents ?? 10_000;
+    this.#maxTrackedQueries = positiveRuntimeLimit(
+      options.maxTrackedQueries,
+      10_000,
+      'maxTrackedQueries',
+    );
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -281,6 +289,7 @@ export class DatabaseAccessRuntime {
     if (!context.session || context.session.status === 'disconnected') return;
     try {
       await this.connectors.get(context.profile.connectorId).disconnect(context);
+      this.#forgetProfileQueries(profileId);
       const disconnected: ConnectionSession = {
         ...context.session,
         status: 'disconnected',
@@ -494,9 +503,11 @@ export class DatabaseAccessRuntime {
         ...(submission.resourceId ? { resourceId: submission.resourceId } : {}),
         authorization: effectiveAuthorization,
         started,
+        terminal: isTerminalJob(job),
       };
       this.#jobs.set(job.id, binding);
       if (job.result) this.#results.set(job.result.id, binding);
+      this.#pruneTrackedQueries();
       this.#metric.submittedQueries += 1;
       this.#metric.platformSubmitTotalMs += performance.now() - platformStarted;
       if (isTerminalJob(job)) {
@@ -524,7 +535,9 @@ export class DatabaseAccessRuntime {
     const { context, binding } = await this.#jobContext(jobId);
     try {
       const job = await this.connectors.get(context.profile.connectorId).getJob(context, jobId);
+      binding.terminal = isTerminalJob(job);
       if (job.result) this.#results.set(job.result.id, binding);
+      this.#pruneTrackedQueries();
       await this.#recordTerminalJobAudit(job, binding);
       return structuredClone(job);
     } catch (error) {
@@ -538,6 +551,8 @@ export class DatabaseAccessRuntime {
     const { context, binding } = await this.#jobContext(jobId);
     try {
       const job = await this.connectors.get(context.profile.connectorId).cancel(context, jobId);
+      binding.terminal = isTerminalJob(job);
+      this.#pruneTrackedQueries();
       this.#metric.cancelledQueries += 1;
       this.#metric.platformCancelTotalMs += performance.now() - platformStarted;
       if (isTerminalJob(job)) {
@@ -575,6 +590,21 @@ export class DatabaseAccessRuntime {
       return cloneResultBatch(
         await this.connectors.get(context.profile.connectorId).readResult(context, handleId, input),
       );
+    } catch (error) {
+      throw this.#normalizeError(error, 'result', binding.profileId);
+    }
+  }
+
+  async releaseResult(handleId: string): Promise<boolean> {
+    const binding = this.#results.get(handleId);
+    if (!binding) return false;
+    const context = await this.#context(binding.profileId, undefined, false, false);
+    const connector = this.connectors.get(context.profile.connectorId);
+    if (!connector.releaseResult) return false;
+    try {
+      const released = await connector.releaseResult(context, handleId);
+      this.#results.delete(handleId);
+      return released;
     } catch (error) {
       throw this.#normalizeError(error, 'result', binding.profileId);
     }
@@ -1104,6 +1134,33 @@ export class DatabaseAccessRuntime {
     });
   }
 
+  #pruneTrackedQueries(): void {
+    if (this.#jobs.size <= this.#maxTrackedQueries) return;
+    for (const [jobId, binding] of this.#jobs) {
+      if (this.#jobs.size <= this.#maxTrackedQueries) break;
+      if (!binding.terminal) continue;
+      this.#jobs.delete(jobId);
+      this.#terminalAuditedJobs.delete(jobId);
+      for (const [handleId, resultBinding] of this.#results) {
+        if (resultBinding === binding) this.#results.delete(handleId);
+      }
+    }
+  }
+
+  #forgetProfileQueries(profileId: ConnectionProfileId): void {
+    for (const [jobId, binding] of this.#jobs) {
+      if (binding.profileId !== profileId) continue;
+      this.#jobs.delete(jobId);
+      this.#terminalAuditedJobs.delete(jobId);
+    }
+    for (const [handleId, binding] of this.#results) {
+      if (binding.profileId === profileId) this.#results.delete(handleId);
+    }
+    for (const [transactionId, binding] of this.#transactions) {
+      if (binding.profileId === profileId) this.#transactions.delete(transactionId);
+    }
+  }
+
   async #recordTerminalJobAudit(
     job: QueryJob,
     binding: QueryJobBinding,
@@ -1410,6 +1467,18 @@ function terminalAuditStatus(job: QueryJob): DatabaseAuditEvent['status'] {
 
 function isTerminalJob(job: QueryJob): boolean {
   return ['succeeded', 'failed', 'cancelled', 'expired'].includes(job.state);
+}
+
+function positiveRuntimeLimit(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer.`);
+  }
+  return value;
 }
 
 function hasOperationAuthorization(request: DatabaseOperationRequest): boolean {

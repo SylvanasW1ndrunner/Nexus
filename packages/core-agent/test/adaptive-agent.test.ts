@@ -9,7 +9,12 @@ import {
   type LlmProvider,
 } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
-import { ReactAgent, ToolRegistry, createAgentTaskPlan, updateAgentTask } from '../src/index.js';
+import {
+  ReactAgent,
+  ToolRegistry,
+  createAgentTaskPlan,
+  createAgentToolResultEnvelope,
+} from '../src/index.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -20,7 +25,7 @@ afterEach(async () => {
 });
 
 describe('adaptive Agent orchestration', () => {
-  it('refuses premature completion until planned acceptance criteria have evidence', async () => {
+  it('uses a lightweight plan while runtime SQL evidence controls completion', async () => {
     const tools = new ToolRegistry();
     tools.register(tool('task_plan_create'), (_args, context) => {
       context.session.taskPlan = createAgentTaskPlan({
@@ -29,7 +34,6 @@ describe('adaptive Agent orchestration', () => {
           {
             id: 'verify',
             title: 'Run and verify the count query',
-            acceptanceCriteria: ['A database result confirms the count'],
           },
         ],
         now: fixedNow(),
@@ -37,23 +41,20 @@ describe('adaptive Agent orchestration', () => {
       });
       return { created: true };
     });
-    tools.register(tool('task_update'), (_args, context) => {
-      context.session.taskPlan = updateAgentTask(context.session.taskPlan!, {
-        taskId: 'verify',
-        status: 'completed',
-        evidence: {
+    tools.register(tool('sql_execute'), () =>
+      createAgentToolResultEnvelope({
+        modelProjection: { rows: [{ count: 42 }], returnedRowCount: 1 },
+        durableSummary: { returnedRowCount: 1 },
+        completionEvidence: {
           kind: 'database-result',
-          summary: 'count(*) returned 42',
+          deliveryReady: true,
         },
-        now: fixedNow(),
-      });
-      return { completed: true };
-    });
+      }),
+    );
     const harness = await agentHarness(
       [
         responseWithTool('plan', 'task_plan_create'),
-        { text: '已经完成。', toolCalls: [] },
-        responseWithTool('complete', 'task_update'),
+        responseWithTool('query', 'sql_execute'),
         { text: '订单总数是 42。', toolCalls: [] },
       ],
       tools,
@@ -67,7 +68,7 @@ describe('adaptive Agent orchestration', () => {
     });
 
     expect(result.status).toBe('done');
-    expect(result.iterations).toBe(4);
+    expect(result.iterations).toBe(3);
     expect(result.finalText).toBe('订单总数是 42。');
     expect(result.completion).toMatchObject({
       verified: true,
@@ -76,13 +77,8 @@ describe('adaptive Agent orchestration', () => {
       phase: 'done',
       unresolvedTaskIds: [],
     });
-    expect(result.events?.map((event) => event.type)).toContain('correcting');
-    expect(
-      harness.requests[2]?.messages.some(
-        (message) =>
-          message.role === 'system' && message.content.includes('Completion verification failed'),
-      ),
-    ).toBe(true);
+    expect(result.session.taskPlan).toBeUndefined();
+    expect(result.events?.map((event) => event.type)).not.toContain('correcting');
   });
 
   it('treats rejected permission as an observation and replans successfully', async () => {

@@ -405,7 +405,7 @@ for (const result of run.queryResults) {
 }
 ```
 
-SDK/API/CLI 每次执行最多得到 1,000 行。Agent 只会在本次模型调用的临时观察中看到最多两行。两者都不会写入对话消息、持久 Session、Agent Run 历史或用户偏好。`hasMore: true` 表示数据库产生的行数超过交互上限。
+SDK/API/CLI 每次执行最多得到 1,000 行。Agent 在本次模型调用中的临时投影默认最多 100 行且不超过 64 KiB；调用方显式要求更小样例时遵循该值。两者都不会写入对话消息、持久 Session、Agent Run 历史或用户偏好。`hasMore: true` 表示数据库产生的行数超过交互上限。
 
 进程内缓存也只保存这份有界交互载荷，并会自动过期，因此恢复 Session 不会恢复历史查询行。需要再次查看时重新执行 SQL。需要完整导出时，使用底层数据库 Query/导出链路，或让 Agent 创建导出产物；数据库结果应直接流向目标文件，不能绕经对话。
 
@@ -735,6 +735,7 @@ Chat 内命令：
 /skills
 /<skill> [任务]
 /compact [关注点]
+/trace on|off
 /mcp [list|start <id>|stop <id>]
 /exit
 ```
@@ -769,6 +770,7 @@ SDK 错误使用 `DatabaseAgentError`：
 ## 18. 继续阅读
 
 - [SDK API 参考](api-reference.zh-CN.md)
+- [CLI 使用指南](../cli/README.zh-CN.md)
 - [Agent 与扩展运行时](../agent/README.md)
 - [AI SQL 工程文档](../ai-sql/README.md)
 - [产品总体功能设计](../product-functional-overview.md)

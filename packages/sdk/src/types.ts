@@ -26,7 +26,7 @@ import type {
   AgentSessionStore,
   AgentSession,
   AgentSessionListFilter,
-  AgentTaskPlan,
+  AgentTaskStatus,
   AgentArtifactReference,
   AgentToolApprovalRequest,
   AgentUserEvent,
@@ -66,6 +66,12 @@ export type DatabaseAgentRuntimeOptions = {
    * resolved from the selected Project root. Omit to keep indexes in memory.
    */
   schemaSnapshotDirectory?: string;
+  /**
+   * Minimum interval between background checks for externally changed Schema.
+   * Existing indexes remain immediately usable; exact retrieval misses can
+   * still force one refresh. Set to 0 to check on every request in tests.
+   */
+  schemaFreshnessIntervalMs?: number;
   retrievalProfile?: SchemaRagRetrievalProfile;
   createRunId?: () => string;
   createConnectionId?: () => string;
@@ -205,10 +211,20 @@ export type AgentSessionView = {
   project?: {
     rootPath: string;
   };
-  taskPlan?: AgentTaskPlan;
+  taskPlan?: AgentTaskPlanView;
   artifacts?: AgentArtifactReference[];
   activeSkills?: SkillCatalogEntry[];
   aborted: boolean;
+};
+
+export type AgentTaskPlanView = {
+  goal: string;
+  tasks: Array<{
+    id: string;
+    title: string;
+    description?: string;
+    status: AgentTaskStatus;
+  }>;
 };
 
 export type AiSqlAgentRunView = {

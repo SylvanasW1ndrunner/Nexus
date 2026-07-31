@@ -272,7 +272,15 @@ type AgentSessionView = {
   }>;
   tokenUsage: LlmUsage;
   project?: { rootPath: string };
-  taskPlan?: AgentTaskPlan;
+  taskPlan?: {
+    goal: string;
+    tasks: Array<{
+      id: string;
+      title: string;
+      description?: string;
+      status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+    }>;
+  };
   artifacts?: AgentArtifactReference[];
   activeSkills?: SkillCatalogEntry[];
   aborted: boolean;
@@ -302,9 +310,9 @@ type AiSqlAgentRunView = {
 };
 ```
 
-`queryResults` contains at most 1,000 rows per SQL execution and is separate from `result.session`. The model receives at most two transient sample rows. Query rows are not written to Session messages, durable Agent run records, or user preferences.
+`queryResults` contains at most 1,000 rows per SQL execution and is separate from `result.session`. The transient model projection defaults to at most 100 rows and 64 KiB, while honoring a smaller caller-requested preview. Query rows are not written to Session messages, durable Agent run records, or user preferences.
 
-`AgentSessionView` omits tool messages/calls, query rows, knowledge hashes and tree identifiers, loaded Skill instructions, context-compression internals, and evaluation details. Public task-plan evidence contains only its kind, summary, and creation time.
+`AgentSessionView` omits tool messages/calls, query rows, knowledge hashes and tree identifiers, loaded Skill instructions, context-compression internals, and evaluation details. Its public task plan contains only the goal, step title/description, and status; acceptance rules, dependencies, and runtime evidence remain internal.
 
 `getAgentRun(runId)` and `listAgentRuns(sessionId?, limit?)` expose Project-scoped, metadata-only Agent run records. A process restart converts an unfinished `running` record to `interrupted`; these records never contain database rows.
 
@@ -672,7 +680,7 @@ The active Runtime model is inserted automatically; callers omit `model` from `l
 - profiles: `createProfile`, `updateProfile`, `deleteProfile`, `getProfile`, `listProfiles`;
 - connections: `testProfile`, `connect`, `reconnect`, `disconnect`, `health`;
 - capabilities/discovery: `capabilities`, `discoverPage`, `discoverAll`;
-- queries: `submit`, `getJob`, `cancel`, `readResult`;
+- queries: `submit`, `getJob`, `cancel`, `readResult`, `releaseResult`;
 - transactions: `beginTransaction`, savepoints, commit, rollback;
 - resources: `queryResources`, `resourceRelations`, `snapshotResources`;
 - lifecycle: `metrics`, `close`.
@@ -680,6 +688,8 @@ The active Runtime model is inserted automatically; callers omit `model` from `l
 `runtime.resources` exposes resource upsert/query, graph relations and traversal, observations/state, events, snapshots, and restore.
 
 These are general infrastructure APIs. They are not a v1 governance/operations Agent.
+
+Result handles returned by `readResult` are temporary. Call `releaseResult(handleId)` after reading or exporting; disconnecting also clears handles for that profile. The PostgreSQL connector applies TTL, entry-count, and total-byte eviction as a fallback, and terminal query tracking in the runtime is bounded.
 
 `ConnectionProfile.scope` optionally binds discovered resources to `tenantId`, `organizationId`, `projectId`, `environment`, and/or `region`. The database runtime propagates that scope to every discovered resource and rejects a connector that returns a conflicting scope. The SchemaNaut shortcut connection automatically binds its profile to the Runtime tenant and selected Project.
 

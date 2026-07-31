@@ -125,6 +125,9 @@ const MAX_CONTEXT_CHARS = 20_000;
 const MAX_QUESTION_CHARS = 4_000;
 const DEFAULT_CONNECTION_TIMEOUT_MS = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
+const DEFAULT_SCHEMA_FRESHNESS_INTERVAL_MS = 30_000;
+const MAX_SCHEMA_FRESHNESS_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const SCHEMA_MISS_REFRESH_DEBOUNCE_MS = 5_000;
 const EXECUTABLE_STATEMENT_KINDS = new Set(['SELECT', 'WITH', 'VALUES']);
 
 export class DatabaseAgentRuntime {
@@ -189,6 +192,9 @@ export class DatabaseAgentRuntime {
   private indexTruncated = false;
   private lastIndexMaxTables = DEFAULT_MAX_SCHEMA_TABLES;
   private schemaFreshnessPromise: Promise<void> | undefined;
+  private readonly schemaFreshnessIntervalMs: number;
+  private lastSchemaFreshnessCheckAt = 0;
+  private lastForcedSchemaRefreshAt = 0;
 
   constructor(options: DatabaseAgentRuntimeOptions = {}) {
     if (options.schemaSnapshotDirectory !== undefined && !options.schemaSnapshotDirectory.trim()) {
@@ -299,6 +305,12 @@ export class DatabaseAgentRuntime {
       1,
       MAX_ROW_LIMIT,
     );
+    this.schemaFreshnessIntervalMs = normalizeInteger(
+      options.schemaFreshnessIntervalMs ?? DEFAULT_SCHEMA_FRESHNESS_INTERVAL_MS,
+      'schemaFreshnessIntervalMs',
+      0,
+      MAX_SCHEMA_FRESHNESS_INTERVAL_MS,
+    );
     this.tools = new ToolRegistry();
     this.project = createAgentProjectContext(resolve(options.projectDirectory ?? process.cwd()));
     const stateDatabasePath = options.sessionDatabasePath ?? defaultAgentStateDatabasePath();
@@ -382,6 +394,17 @@ export class DatabaseAgentRuntime {
           ? { connectionId: this.connection.id, connection: this.connection }
           : undefined,
       ...(options.resultStore === undefined ? {} : { resultStore: options.resultStore }),
+      ensureSchemaFresh: async ({ connectionId, force, signal }) => {
+        const connection = this.requireConnection();
+        if (connection.id !== connectionId) {
+          throw new DatabaseAgentError(
+            'CONNECTION_FAILED',
+            'The active connection changed during Schema refresh.',
+            true,
+          );
+        }
+        await this.ensureSchemaFresh(connection, signal, force);
+      },
       onSchemaChanged: async () => {
         if (this.connection) await this.indexSchema({ maxTables: this.lastIndexMaxTables });
       },
@@ -553,6 +576,8 @@ export class DatabaseAgentRuntime {
     this.indexTruncated = false;
     this.lastIndexMaxTables = DEFAULT_MAX_SCHEMA_TABLES;
     this.schemaFreshnessPromise = undefined;
+    this.lastSchemaFreshnessCheckAt = 0;
+    this.lastForcedSchemaRefreshAt = 0;
   }
 
   async close(): Promise<void> {
@@ -653,6 +678,7 @@ export class DatabaseAgentRuntime {
     });
     this.indexTruncated = listed.data.length > selected.length;
     this.lastIndexMaxTables = maxTables;
+    this.lastSchemaFreshnessCheckAt = Date.now();
     return this.schemaStatus();
   }
 
@@ -726,7 +752,7 @@ export class DatabaseAgentRuntime {
     await this.skills.refresh();
     await this.ensureMcpAutoStarted();
     const connection = this.requireConnection();
-    await this.ensureSchemaFresh(connection, input.signal);
+    this.scheduleSchemaFreshness(connection);
     if (!this.rag.hasIndex(connection.id)) {
       throw new DatabaseAgentError('SCHEMA_NOT_INDEXED', '请先索引当前数据库的知识目录。', true);
     }
@@ -996,7 +1022,7 @@ export class DatabaseAgentRuntime {
   async generate(input: GenerateSqlInput): Promise<GeneratedSqlRun> {
     const { providerId, model } = this.requireModelConfiguration();
     const connection = this.requireConnection();
-    await this.ensureSchemaFresh(connection, input.signal);
+    this.scheduleSchemaFreshness(connection);
     if (!this.rag.hasIndex(connection.id)) {
       throw new DatabaseAgentError('SCHEMA_NOT_INDEXED', '请先索引数据库 Schema。', true);
     }
@@ -1478,6 +1504,7 @@ export class DatabaseAgentRuntime {
   private async ensureSchemaFresh(
     connection: SavedConnection,
     signal?: AbortSignal,
+    force = false,
   ): Promise<void> {
     if (!this.usesDatabaseAccess || !this.legacyProfileId || !this.rag.hasIndex(connection.id)) {
       return;
@@ -1485,10 +1512,21 @@ export class DatabaseAgentRuntime {
     if (signal?.aborted) {
       throw new DatabaseAgentError('ABORTED', 'Schema freshness check was cancelled.', false);
     }
+    const checkedAt = Date.now();
+    if (force && checkedAt - this.lastForcedSchemaRefreshAt < SCHEMA_MISS_REFRESH_DEBOUNCE_MS) {
+      return;
+    }
+    if (!force && checkedAt - this.lastSchemaFreshnessCheckAt < this.schemaFreshnessIntervalMs) {
+      return;
+    }
     let current = this.schemaFreshnessPromise;
     if (!current) {
+      this.lastSchemaFreshnessCheckAt = checkedAt;
+      if (force) this.lastForcedSchemaRefreshAt = checkedAt;
+      const profileId = this.legacyProfileId;
       current = (async () => {
-        const discovery = await discoverCurrentResources(this.database, this.legacyProfileId!);
+        const discovery = await discoverCurrentResources(this.database, profileId);
+        if (this.connection?.id !== connection.id || this.legacyProfileId !== profileId) return;
         const indexedRevision = this.rag.getCatalog(connection.id).sourceRevision;
         if (indexedRevision === discovery.sourceRevision) return;
         await this.indexDiscoveredSchema(connection, discovery, this.lastIndexMaxTables);
@@ -1504,6 +1542,10 @@ export class DatabaseAgentRuntime {
       signal,
       () => new DatabaseAgentError('ABORTED', 'Schema freshness check was cancelled.', false),
     );
+  }
+
+  private scheduleSchemaFreshness(connection: SavedConnection): void {
+    void this.ensureSchemaFresh(connection).catch(() => undefined);
   }
 
   private async indexDiscoveredSchema(
@@ -1548,6 +1590,7 @@ export class DatabaseAgentRuntime {
     });
     this.indexTruncated = tableRoots.length > maxTables;
     this.lastIndexMaxTables = maxTables;
+    this.lastSchemaFreshnessCheckAt = Date.now();
     return this.schemaStatus();
   }
 
@@ -1665,16 +1708,12 @@ export function toAgentSessionView(session: AgentSession): AgentSessionView {
       ? {}
       : {
           taskPlan: {
-            ...session.taskPlan,
+            goal: session.taskPlan.goal,
             tasks: session.taskPlan.tasks.map((task) => ({
-              ...task,
-              acceptanceCriteria: [...task.acceptanceCriteria],
-              dependsOn: [...task.dependsOn],
-              evidence: task.evidence.map((evidence) => ({
-                kind: evidence.kind,
-                summary: evidence.summary,
-                createdAt: evidence.createdAt,
-              })),
+              id: task.id,
+              title: task.title,
+              ...(task.description === undefined ? {} : { description: task.description }),
+              status: task.status,
             })),
           },
         }),

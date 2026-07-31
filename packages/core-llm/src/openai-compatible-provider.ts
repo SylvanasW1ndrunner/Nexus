@@ -148,8 +148,10 @@ type OpenAIRerankResponse = {
   usage?: OpenAIUsage;
 };
 
+type OpenAIModelCatalogEntry = { id?: string } & Record<string, unknown>;
+
 type OpenAIModelsResponse = {
-  data?: Array<{ id?: string }>;
+  data?: OpenAIModelCatalogEntry[];
 };
 
 type OllamaShowResponse = {
@@ -187,6 +189,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private readonly maxResponseBytes: number;
   private readonly streamLimits: LlmStreamLimits;
   private readonly fetchImpl: FetchLike;
+  private readonly modelCatalog = new Map<string, OpenAIModelCatalogEntry>();
 
   constructor(config: OpenAICompatibleProviderConfig) {
     if (!config.apiKey?.trim() && !config.allowUnauthenticated) {
@@ -318,18 +321,26 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   async listModels(signal?: AbortSignal): Promise<string[]> {
     const response = await this.requestGetJson<OpenAIModelsResponse>(this.modelsPath, signal);
-    return (response.data ?? [])
-      .map((item) => item.id)
-      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    const modelIds: string[] = [];
+    for (const item of response.data ?? []) {
+      if (typeof item.id !== 'string' || item.id.length === 0) continue;
+      modelIds.push(item.id);
+      this.modelCatalog.set(item.id, structuredClone(item));
+    }
+    return modelIds;
   }
 
   async getModelMetadata(model: string, signal?: AbortSignal): Promise<LlmModelMetadata> {
     if (this.metadataSource !== 'ollama') {
-      return {
-        model,
-        source: 'provider-declaration',
-        capabilities: { ...this.capabilities },
-      };
+      if (!this.modelCatalog.has(model)) await this.listModels(signal);
+      const entry = this.modelCatalog.get(model);
+      return entry === undefined
+        ? {
+            model,
+            source: 'provider-declaration',
+            capabilities: { ...this.capabilities },
+          }
+        : parseOpenAiCatalogMetadata(model, entry, this.capabilities);
     }
     const response = await this.requestJson<OllamaShowResponse>(
       `${ollamaApiRoot(this.baseUrl)}/api/show`,
@@ -987,6 +998,132 @@ function parseOllamaModelMetadata(
       ? { quantization: response.details.quantization_level }
       : {}),
   };
+}
+
+function parseOpenAiCatalogMetadata(
+  model: string,
+  entry: OpenAIModelCatalogEntry,
+  declared: Partial<LlmProviderCapabilities>,
+): LlmModelMetadata {
+  const contextTokens = findCatalogInteger(entry, [
+    'contextlength',
+    'contextwindow',
+    'contextwindowsize',
+    'maxcontextlength',
+    'maxmodellength',
+    'maxseqlength',
+    'maxsequencelength',
+    'maxinputtokens',
+    'inputtokenlimit',
+    'contexttokens',
+  ]);
+  const maxOutputTokens = findCatalogInteger(entry, [
+    'maxoutputtokens',
+    'outputtokenlimit',
+    'maxcompletiontokens',
+    'maxnewtokens',
+  ]);
+  return {
+    model,
+    source: 'provider-api',
+    capabilities: {
+      ...declared,
+      ...catalogCapabilities(entry),
+    },
+    ...(contextTokens === undefined ? {} : { contextTokens }),
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+  };
+}
+
+function catalogCapabilities(
+  entry: OpenAIModelCatalogEntry,
+): Partial<LlmProviderCapabilities> {
+  const raw = entry.capabilities;
+  const output: Partial<LlmProviderCapabilities> = {};
+  if (Array.isArray(raw)) {
+    const names = new Set(
+      raw.filter((value): value is string => typeof value === 'string').map(normalizedCatalogKey),
+    );
+    if (names.has('tools') || names.has('toolcalling') || names.has('functioncalling')) {
+      output.toolCalling = 'supported';
+    }
+    if (names.has('reasoning') || names.has('thinking')) output.reasoning = 'supported';
+    if (names.has('embedding') || names.has('embeddings')) output.embeddings = 'supported';
+    return output;
+  }
+  if (!isCatalogRecord(raw)) return output;
+  const statuses = new Map(
+    Object.entries(raw).map(([key, value]) => [normalizedCatalogKey(key), capabilityStatus(value)]),
+  );
+  const toolCalling =
+    statuses.get('toolcalling') ?? statuses.get('tools') ?? statuses.get('functioncalling');
+  const reasoning = statuses.get('reasoning') ?? statuses.get('thinking');
+  const embeddings = statuses.get('embeddings') ?? statuses.get('embedding');
+  const structuredOutput =
+    statuses.get('structuredoutput') ?? statuses.get('jsonschema') ?? statuses.get('jsonmode');
+  if (toolCalling !== undefined) output.toolCalling = toolCalling;
+  if (reasoning !== undefined) output.reasoning = reasoning;
+  if (embeddings !== undefined) output.embeddings = embeddings;
+  if (structuredOutput !== undefined) output.structuredOutput = structuredOutput;
+  return output;
+}
+
+function capabilityStatus(value: unknown): 'supported' | 'unsupported' | 'unknown' {
+  if (value === true) return 'supported';
+  if (value === false) return 'unsupported';
+  if (typeof value !== 'string') return 'unknown';
+  const normalized = value.toLocaleLowerCase();
+  if (['supported', 'true', 'yes', 'enabled', 'available'].includes(normalized)) {
+    return 'supported';
+  }
+  if (['unsupported', 'false', 'no', 'disabled', 'unavailable'].includes(normalized)) {
+    return 'unsupported';
+  }
+  return 'unknown';
+}
+
+function findCatalogInteger(
+  entry: OpenAIModelCatalogEntry,
+  candidateKeys: readonly string[],
+): number | undefined {
+  const candidates = new Set(candidateKeys);
+  const queue: Array<{ value: Record<string, unknown>; depth: number }> = [
+    { value: entry, depth: 0 },
+  ];
+  const seen = new Set<object>();
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (seen.has(current.value)) continue;
+    seen.add(current.value);
+    for (const [key, value] of Object.entries(current.value)) {
+      if (candidates.has(normalizedCatalogKey(key))) {
+        const numeric = positiveCatalogInteger(value);
+        if (numeric !== undefined) return numeric;
+      }
+      if (current.depth < 3 && isCatalogRecord(value)) {
+        queue.push({ value, depth: current.depth + 1 });
+      }
+    }
+  }
+  return undefined;
+}
+
+function positiveCatalogInteger(value: unknown): number | undefined {
+  const numeric =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value.trim())
+        ? Number(value)
+        : Number.NaN;
+  return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : undefined;
+}
+
+function normalizedCatalogKey(value: string): string {
+  return value.toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isCatalogRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parseJson(text: string): unknown {

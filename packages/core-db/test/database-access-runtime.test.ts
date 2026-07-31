@@ -236,7 +236,7 @@ function createMockConnector(options: {
           : {
               completedAt: now,
               result: {
-                id: 'result-1',
+                id: `result-${randomUUID()}`,
                 jobId: 'placeholder',
                 format: 'rows',
                 columns: [{ name: 'value', dataType: 'integer' }],
@@ -316,6 +316,10 @@ function createMockConnector(options: {
         complete: next >= rows.length,
         ...(next < rows.length ? { nextCursor: String(next) } : {}),
       });
+    },
+    releaseResult() {
+      calls.push('releaseResult');
+      return Promise.resolve(true);
     },
     ...(options.nativeStream
       ? {
@@ -515,6 +519,11 @@ describe('DatabaseAccessRuntime', () => {
       values.push(...batch.rows.map((row) => Number(row.value)));
     }
     expect(values).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    await expect(runtime.releaseResult(completed.result!.id)).resolves.toBe(true);
+    await expect(runtime.releaseResult(completed.result!.id)).resolves.toBe(false);
+    await expect(runtime.readResult(completed.result!.id)).rejects.toBeInstanceOf(
+      DatabaseAccessRuntimeError,
+    );
 
     const queued = await runtime.submit({
       profileId: 'profile-1',
@@ -544,6 +553,28 @@ describe('DatabaseAccessRuntime', () => {
     );
     await expect(runtime.getJob('missing')).rejects.toBeInstanceOf(DatabaseAccessRuntimeError);
     await expect(runtime.readResult('missing')).rejects.toBeInstanceOf(DatabaseAccessRuntimeError);
+  });
+
+  it('bounds terminal query tracking and forgets profile handles after disconnect', async () => {
+    const mock = createMockConnector();
+    const runtime = runtimeWith(mock.connector, { maxTrackedQueries: 1 });
+    runtime.createProfile(profile());
+    await runtime.connect('profile-1');
+
+    const first = await runtime.submit({ profileId: 'profile-1', sql: 'select first' });
+    const second = await runtime.submit({ profileId: 'profile-1', sql: 'select second' });
+
+    await expect(runtime.getJob(first.id)).rejects.toBeInstanceOf(DatabaseAccessRuntimeError);
+    await expect(runtime.readResult(first.result!.id)).rejects.toBeInstanceOf(
+      DatabaseAccessRuntimeError,
+    );
+    await expect(runtime.getJob(second.id)).resolves.toMatchObject({ id: second.id });
+
+    await runtime.disconnect('profile-1');
+    await expect(runtime.getJob(second.id)).rejects.toBeInstanceOf(DatabaseAccessRuntimeError);
+    await expect(runtime.readResult(second.result!.id)).rejects.toBeInstanceOf(
+      DatabaseAccessRuntimeError,
+    );
   });
 
   it.each([

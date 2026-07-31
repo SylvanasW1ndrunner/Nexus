@@ -199,7 +199,18 @@ function agentResourceReference(
   node: KnowledgeCatalogNode,
 ): string {
   const databaseObject = databaseObjectReference(catalog, node);
-  return databaseObject ?? node.canonicalName ?? node.displayName;
+  if (databaseObject) return databaseObject;
+  const semanticName = node.canonicalName || node.displayName;
+  const normalized = semanticName.trim().toLocaleLowerCase();
+  const collides = Object.values(catalog.nodes).some(
+    (candidate) =>
+      candidate.resourceId !== node.resourceId &&
+      candidate.kind !== 'connection' &&
+      (candidate.canonicalName || candidate.displayName)
+        .trim()
+        .toLocaleLowerCase() === normalized,
+  );
+  return collides ? `${node.kind}:${semanticName}` : semanticName;
 }
 
 function databaseObjectReference(

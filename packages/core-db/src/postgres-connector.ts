@@ -47,7 +47,10 @@ import {
   createStableResourceId,
 } from '@dbagent/core-resource';
 
-const RESULT_TTL_MS = 60 * 60 * 1_000;
+const DEFAULT_RESULT_TTL_MS = 60 * 60 * 1_000;
+const DEFAULT_MAX_RETAINED_RESULTS = 256;
+const DEFAULT_MAX_RETAINED_RESULT_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_RETAINED_JOBS = 1_024;
 const DEFAULT_DISCOVERY_PAGE_SIZE = 500;
 const DEFAULT_RESULT_PAGE_SIZE = 1_000;
 const MAX_RESULT_PAGE_SIZE = 10_000;
@@ -68,6 +71,13 @@ type InternalQueryJob = {
   execution?: Promise<void>;
 };
 
+export type PostgresConnectorOptions = {
+  resultTtlMs?: number;
+  maxRetainedResults?: number;
+  maxRetainedResultBytes?: number;
+  maxRetainedJobs?: number;
+};
+
 export class PostgresConnector implements DatabaseConnector {
   readonly manifest: ConnectorManifest;
   readonly #driver: PostgresDriver;
@@ -75,9 +85,34 @@ export class PostgresConnector implements DatabaseConnector {
   readonly #connections = new Map<string, ConnectedPostgres>();
   readonly #jobs = new Map<string, InternalQueryJob>();
   readonly #resultJobs = new Map<string, string>();
+  readonly #resultTtlMs: number;
+  readonly #maxRetainedResults: number;
+  readonly #maxRetainedResultBytes: number;
+  readonly #maxRetainedJobs: number;
+  #retainedResultBytes = 0;
 
-  constructor(driver = new PostgresDriver()) {
+  constructor(driver = new PostgresDriver(), options: PostgresConnectorOptions = {}) {
     this.#driver = driver;
+    this.#resultTtlMs = positiveRetentionOption(
+      options.resultTtlMs,
+      DEFAULT_RESULT_TTL_MS,
+      'resultTtlMs',
+    );
+    this.#maxRetainedResults = positiveRetentionOption(
+      options.maxRetainedResults,
+      DEFAULT_MAX_RETAINED_RESULTS,
+      'maxRetainedResults',
+    );
+    this.#maxRetainedResultBytes = positiveRetentionOption(
+      options.maxRetainedResultBytes,
+      DEFAULT_MAX_RETAINED_RESULT_BYTES,
+      'maxRetainedResultBytes',
+    );
+    this.#maxRetainedJobs = positiveRetentionOption(
+      options.maxRetainedJobs,
+      DEFAULT_MAX_RETAINED_JOBS,
+      'maxRetainedJobs',
+    );
     this.manifest = createPostgresManifest();
   }
 
@@ -181,6 +216,7 @@ export class PostgresConnector implements DatabaseConnector {
       );
     }
     this.#connections.delete(context.profile.id);
+    this.#purgeProfileQueries(context.profile.id);
   }
 
   async reconnect(context: ConnectorContext): Promise<ConnectionSession> {
@@ -411,38 +447,52 @@ export class PostgresConnector implements DatabaseConnector {
     handleId: string,
     input: { cursor?: string; limit?: number } = {},
   ): Promise<ResultBatch> {
+    return Promise.resolve().then(() => {
+      this.#pruneRetainedResults();
+      const jobId = this.#resultJobs.get(handleId);
+      const internal = jobId ? this.#jobs.get(jobId) : undefined;
+      if (!internal?.job.result || !internal.result) {
+        throw connectorNotFound(
+          'RESULT_NOT_FOUND',
+          `Result handle was not found: ${handleId}`,
+          'result',
+        );
+      }
+      if (
+        internal.job.result.expiresAt &&
+        new Date(internal.job.result.expiresAt).getTime() <= Date.now()
+      ) {
+        internal.job = { ...internal.job, state: 'expired' };
+        throw connectorNotFound('RESULT_EXPIRED', `Result handle expired: ${handleId}`, 'result');
+      }
+      const offset = decodeOffset(input.cursor);
+      const limit = Math.min(
+        Math.max(input.limit ?? DEFAULT_RESULT_PAGE_SIZE, 1),
+        MAX_RESULT_PAGE_SIZE,
+      );
+      const rows = internal.result.rows.slice(offset, offset + limit);
+      const nextOffset = offset + rows.length;
+      const complete = nextOffset >= internal.result.rows.length;
+      return {
+        handleId,
+        rows: rows.map(cloneDatabaseRow),
+        rowOffset: offset,
+        complete,
+        byteCount: Buffer.byteLength(stringifyPublicJson(rows)),
+        ...(!complete ? { nextCursor: encodeOffset(nextOffset) } : {}),
+      };
+    });
+  }
+
+  releaseResult(context: ConnectorContext, handleId: string): Promise<boolean> {
     const jobId = this.#resultJobs.get(handleId);
     const internal = jobId ? this.#jobs.get(jobId) : undefined;
-    if (!internal?.job.result || !internal.result) {
-      throw connectorNotFound(
-        'RESULT_NOT_FOUND',
-        `Result handle was not found: ${handleId}`,
-        'result',
-      );
+    if (!internal || internal.job.profileId !== context.profile.id) {
+      return Promise.resolve(false);
     }
-    if (
-      internal.job.result.expiresAt &&
-      new Date(internal.job.result.expiresAt).getTime() <= Date.now()
-    ) {
-      internal.job = { ...internal.job, state: 'expired' };
-      throw connectorNotFound('RESULT_EXPIRED', `Result handle expired: ${handleId}`, 'result');
-    }
-    const offset = decodeOffset(input.cursor);
-    const limit = Math.min(
-      Math.max(input.limit ?? DEFAULT_RESULT_PAGE_SIZE, 1),
-      MAX_RESULT_PAGE_SIZE,
-    );
-    const rows = internal.result.rows.slice(offset, offset + limit);
-    const nextOffset = offset + rows.length;
-    const complete = nextOffset >= internal.result.rows.length;
-    return Promise.resolve({
-      handleId,
-      rows: rows.map(cloneDatabaseRow),
-      rowOffset: offset,
-      complete,
-      byteCount: Buffer.byteLength(stringifyPublicJson(rows)),
-      ...(!complete ? { nextCursor: encodeOffset(nextOffset) } : {}),
-    });
+    const released = this.#evictResult(handleId);
+    this.#pruneRetainedJobs();
+    return Promise.resolve(released);
   }
 
   async *streamResult(
@@ -991,18 +1041,20 @@ export class PostgresConnector implements DatabaseConnector {
       return;
     }
     internal.result = result.data;
+    const byteCount = Buffer.byteLength(stringifyPublicJson(result.data.rows));
     const handle: ResultHandle = {
       id: randomUUID(),
       jobId: internal.job.id,
       format: 'rows',
       columns: result.data.columns,
       rowCount: result.data.returnedRowCount ?? result.data.rows.length,
-      byteCount: Buffer.byteLength(stringifyPublicJson(result.data.rows)),
-      expiresAt: new Date(Date.now() + RESULT_TTL_MS).toISOString(),
+      byteCount,
+      expiresAt: new Date(Date.now() + this.#resultTtlMs).toISOString(),
       ...(result.data.hasMore !== undefined ? { hasMore: result.data.hasMore } : {}),
       ...(result.data.truncated !== undefined ? { truncated: result.data.truncated } : {}),
     };
     this.#resultJobs.set(handle.id, internal.job.id);
+    this.#retainedResultBytes += byteCount;
     internal.job = {
       ...internal.job,
       state: 'succeeded',
@@ -1011,6 +1063,65 @@ export class PostgresConnector implements DatabaseConnector {
       result: handle,
       safety: result.data.safety,
     };
+    this.#pruneRetainedResults();
+  }
+
+  #pruneRetainedResults(): void {
+    const now = Date.now();
+    for (const [handleId, jobId] of this.#resultJobs) {
+      const internal = this.#jobs.get(jobId);
+      const expiresAt = internal?.job.result?.expiresAt;
+      if (expiresAt && new Date(expiresAt).getTime() <= now) {
+        this.#evictResult(handleId, true);
+      }
+    }
+    while (
+      this.#resultJobs.size > this.#maxRetainedResults ||
+      (this.#retainedResultBytes > this.#maxRetainedResultBytes &&
+        this.#resultJobs.size > 1)
+    ) {
+      const oldest = this.#resultJobs.keys().next().value;
+      if (!oldest) break;
+      this.#evictResult(oldest);
+    }
+    this.#pruneRetainedJobs();
+  }
+
+  #evictResult(handleId: string, expired = false): boolean {
+    const jobId = this.#resultJobs.get(handleId);
+    if (!jobId) return false;
+    const internal = this.#jobs.get(jobId);
+    this.#resultJobs.delete(handleId);
+    if (!internal) return true;
+    const byteCount = internal.job.result?.byteCount ?? 0;
+    this.#retainedResultBytes = Math.max(0, this.#retainedResultBytes - byteCount);
+    delete internal.result;
+    const jobWithoutResult = { ...internal.job };
+    delete jobWithoutResult.result;
+    internal.job = expired
+      ? { ...jobWithoutResult, state: 'expired' }
+      : jobWithoutResult;
+    return true;
+  }
+
+  #pruneRetainedJobs(): void {
+    if (this.#jobs.size <= this.#maxRetainedJobs) return;
+    for (const [jobId, internal] of this.#jobs) {
+      if (this.#jobs.size <= this.#maxRetainedJobs) break;
+      if (!isTerminal(internal.job.state) || internal.result) continue;
+      this.#jobs.delete(jobId);
+    }
+  }
+
+  #purgeProfileQueries(profileId: string): void {
+    for (const [handleId, jobId] of this.#resultJobs) {
+      if (this.#jobs.get(jobId)?.job.profileId === profileId) {
+        this.#evictResult(handleId);
+      }
+    }
+    for (const [jobId, internal] of this.#jobs) {
+      if (internal.job.profileId === profileId) this.#jobs.delete(jobId);
+    }
   }
 
   #requireConnection(profileId: string): ConnectedPostgres {
@@ -1172,6 +1283,18 @@ function createPostgresManifest(): ConnectorManifest {
       },
     ],
   };
+}
+
+function positiveRetentionOption(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer.`);
+  }
+  return value;
 }
 
 function descriptor(

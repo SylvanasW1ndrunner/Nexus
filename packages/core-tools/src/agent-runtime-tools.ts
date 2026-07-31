@@ -1,9 +1,7 @@
 import {
   createAgentTaskPlan,
   updateAgentTask,
-  type AgentTaskEvidence,
   type AgentTaskStatus,
-  type AgentSession,
   type ToolRegistry,
 } from '@dbagent/core-agent';
 import { optionalPositiveInteger, optionalString, requireString } from './validation.js';
@@ -21,7 +19,7 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
     {
       name: 'task_plan_create',
       description:
-        'Create or replace the working task plan for multi-step work. Each item must state how completion will be verified.',
+        'Create or replace a lightweight working plan for multi-step work. Use it only when a visible plan helps execution.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -35,14 +33,6 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
                 id: { type: 'string' },
                 title: { type: 'string' },
                 description: { type: 'string' },
-                acceptanceCriteria: {
-                  type: 'array',
-                  items: { type: 'string' },
-                },
-                dependsOn: {
-                  type: 'array',
-                  items: { type: 'string' },
-                },
               },
               required: ['title'],
               additionalProperties: false,
@@ -64,8 +54,6 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
           ...(id === undefined ? {} : { id }),
           title: requireObjectString(task, 'title'),
           ...(description === undefined ? {} : { description }),
-          acceptanceCriteria: optionalStringArray(task, 'acceptanceCriteria'),
-          dependsOn: optionalStringArray(task, 'dependsOn'),
         };
       });
       context.session.taskPlan = createAgentTaskPlan({
@@ -80,7 +68,7 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
     {
       name: 'task_update',
       description:
-        'Update one task status or attach concise verification evidence. Complete tasks only after their acceptance criteria are satisfied.',
+        'Update one item in the working plan. Runtime tool records, not this plan, determine whether the result is complete.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -91,29 +79,6 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
           },
           title: { type: 'string' },
           description: { type: 'string' },
-          acceptanceCriteria: {
-            type: 'array',
-            items: { type: 'string' },
-          },
-          evidence: {
-            type: 'object',
-            properties: {
-              kind: {
-                type: 'string',
-                enum: [
-                  'tool-result',
-                  'database-result',
-                  'artifact',
-                  'user-confirmation',
-                  'observation',
-                ],
-              },
-              summary: { type: 'string' },
-              reference: { type: 'string' },
-            },
-            required: ['kind', 'summary'],
-            additionalProperties: false,
-          },
         },
         required: ['taskId'],
         additionalProperties: false,
@@ -128,22 +93,12 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
       }
       const status = optionalString(args, 'status');
       assertTaskStatus(status);
-      const evidence = optionalEvidence(args.evidence);
-      if (evidence !== undefined) {
-        assertEvidenceBackedBySession(evidence, context.session);
-      }
       const description = optionalString(args, 'description');
       context.session.taskPlan = updateAgentTask(context.session.taskPlan, {
         taskId: requireString(args, 'taskId'),
         ...(status === undefined ? {} : { status }),
         ...(args.title === undefined ? {} : { title: requireString(args, 'title') }),
         ...(description === undefined ? {} : { description }),
-        ...(args.acceptanceCriteria === undefined
-          ? {}
-          : {
-              acceptanceCriteria: requireStringArray(args, 'acceptanceCriteria'),
-            }),
-        ...(evidence === undefined ? {} : { evidence }),
       });
       return projectTaskPlan(context.session.taskPlan);
     },
@@ -152,8 +107,7 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
   registry.register(
     {
       name: 'task_list',
-      description:
-        'Read the current task goal, progress, completion criteria, and verification evidence.',
+      description: 'Read the current lightweight task goal and progress.',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -269,92 +223,8 @@ function projectTaskPlan(plan: NonNullable<Parameters<typeof updateAgentTask>[0]
       title: task.title,
       ...(task.description === undefined ? {} : { description: task.description }),
       status: task.status,
-      acceptanceCriteria: task.acceptanceCriteria,
-      dependsOn: task.dependsOn,
-      evidence: task.evidence.map((item) => ({
-        kind: item.kind,
-        summary: item.summary,
-        ...(item.reference === undefined ? {} : { reference: item.reference }),
-      })),
     })),
   };
-}
-
-function optionalEvidence(value: unknown): Omit<AgentTaskEvidence, 'createdAt'> | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Tool argument "evidence" must be an object.');
-  }
-  const record = value as Record<string, unknown>;
-  const kind = requireObjectString(record, 'kind');
-  if (
-    !['tool-result', 'database-result', 'artifact', 'user-confirmation', 'observation'].includes(
-      kind,
-    )
-  ) {
-    throw new Error(`Unsupported evidence kind: ${kind}.`);
-  }
-  const reference = optionalObjectString(record, 'reference');
-  return {
-    kind: kind as AgentTaskEvidence['kind'],
-    summary: requireObjectString(record, 'summary'),
-    ...(reference === undefined ? {} : { reference }),
-  };
-}
-
-function assertEvidenceBackedBySession(
-  evidence: Omit<AgentTaskEvidence, 'createdAt'>,
-  session: AgentSession,
-): void {
-  if (evidence.kind === 'observation') return;
-  const reference = evidence.reference?.trim();
-  if (!reference) {
-    throw new Error(`${evidence.kind} evidence requires a reference to existing Session evidence.`);
-  }
-  const candidates = [
-    reference,
-    ...reference
-      .split(/[\s=:;,]+/)
-      .map((value) => value.trim())
-      .filter((value) => value.length >= 8),
-  ];
-  if (evidence.kind === 'artifact') {
-    if (
-      session.artifacts?.some((artifact) =>
-        candidates.some(
-          (candidate) => artifact.id.includes(candidate) || artifact.path.includes(candidate),
-        ),
-      )
-    ) {
-      return;
-    }
-    throw new Error('Artifact evidence reference does not exist in the current Session.');
-  }
-  if (evidence.kind === 'user-confirmation') {
-    if (
-      session.messages.some(
-        (message) =>
-          message.role === 'user' &&
-          candidates.some((candidate) => message.content.includes(candidate)),
-      )
-    ) {
-      return;
-    }
-    throw new Error('User-confirmation evidence is not present in the current Session.');
-  }
-  if (
-    session.messages.some(
-      (message) =>
-        message.role === 'tool' &&
-        candidates.some(
-          (candidate) =>
-            message.toolCallId.includes(candidate) || message.content.includes(candidate),
-        ),
-    )
-  ) {
-    return;
-  }
-  throw new Error(`${evidence.kind} evidence reference is not present in prior tool results.`);
 }
 
 function assertTaskStatus(value: string | undefined): asserts value is AgentTaskStatus | undefined {
@@ -396,20 +266,6 @@ function optionalObjectString(value: Record<string, unknown>, key: string): stri
     throw new Error(`Object field "${key}" must be a string.`);
   }
   return item.trim() || undefined;
-}
-
-function optionalStringArray(value: Record<string, unknown>, key: string): string[] {
-  const item = value[key];
-  if (item === undefined) return [];
-  return requireStringArray(value, key);
-}
-
-function requireStringArray(value: Record<string, unknown>, key: string): string[] {
-  const item = value[key];
-  if (!Array.isArray(item) || item.some((entry) => typeof entry !== 'string' || !entry.trim())) {
-    throw new Error(`Object field "${key}" must be a string array.`);
-  }
-  return item.map((entry) => String(entry).trim());
 }
 
 function tokenize(value: string): string[] {

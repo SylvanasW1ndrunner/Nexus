@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
+import { stripVTControlCharacters } from 'node:util';
 import {
   DatabaseAgentRuntime,
   OpenAICompatibleProvider,
@@ -27,6 +28,67 @@ export function classifyCliApprovalInput(value: string): 'approve' | 'reject' | 
   if (/^(?:y|yes|允许)$/i.test(normalized)) return 'approve';
   if (!normalized || /^(?:n|no|拒绝)$/i.test(normalized)) return 'reject';
   return 'steer';
+}
+
+export class CliTraceRenderer {
+  readonly #output: Writable;
+  #enabled: boolean;
+  #transientLines = 0;
+
+  constructor(output: Writable, options: { enabled?: boolean } = {}) {
+    this.#output = output;
+    this.#enabled = options.enabled ?? true;
+  }
+
+  setEnabled(enabled: boolean): void {
+    this.#enabled = enabled;
+  }
+
+  isEnabled(): boolean {
+    return this.#enabled;
+  }
+
+  start(): void {
+    if (!this.#enabled) return;
+    this.writeTrace(`${paint(this.#output, 'dim', '正在处理…')}\n`);
+  }
+
+  render(event: AgentUserEvent): void {
+    if (!this.#enabled || event.type === 'completed') return;
+    const symbol =
+      event.type === 'approval-required'
+        ? '!'
+        : event.type === 'correcting'
+          ? '↻'
+          : event.type === 'artifact-created'
+            ? '+'
+            : '·';
+    let value = `${paint(this.#output, 'dim', `${symbol} ${event.message}`)}\n`;
+    if (event.type === 'sql-prepared' && event.sql?.trim()) {
+      const sql = event.sql
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => `  ${line}`)
+        .join('\n');
+      value += `${paint(this.#output, 'cyan', '  SQL')}\n${sql}\n`;
+    }
+    this.writeTrace(value);
+  }
+
+  clearBeforeFinal(): void {
+    if (!isTtyOutput(this.#output) || this.#transientLines === 0) return;
+    for (let index = 0; index < this.#transientLines; index += 1) {
+      write(this.#output, '\u001B[1A\u001B[2K\r');
+    }
+    this.#transientLines = 0;
+  }
+
+  private writeTrace(value: string): void {
+    write(this.#output, value);
+    if (isTtyOutput(this.#output)) {
+      this.#transientLines += renderedTerminalLines(value, terminalColumns(this.#output));
+    }
+  }
 }
 
 export async function initializeCliProject(directory = process.cwd()): Promise<string> {
@@ -129,7 +191,10 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
   });
   let indexed: Awaited<ReturnType<DatabaseAgentRuntime['indexSchema']>>;
   try {
-    await runtime.connect(parseCliPostgresUrl(config.databaseUrl));
+    await Promise.all([
+      runtime.connect(parseCliPostgresUrl(config.databaseUrl)),
+      runtime.discoverLlmModels(),
+    ]);
     indexed = await runtime.indexSchema({ maxTables: config.maxTables });
   } catch (error) {
     await runtime.close().catch(() => undefined);
@@ -158,6 +223,7 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
   let activeRun = false;
   let activeRunSessionId: string | undefined;
   let controller: AbortController | undefined;
+  const trace = new CliTraceRenderer(output);
   const steeringBeforeSession: string[] = [];
 
   const showPrompt = () => {
@@ -210,6 +276,7 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
       return;
     }
     void handleLine(line).catch((error: unknown) => {
+      trace.clearBeforeFinal();
       write(
         output,
         `${paint(output, 'red', '错误')}: ${
@@ -301,6 +368,15 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
         showPrompt();
         return;
       }
+      if (command === '/trace') {
+        if (!['on', 'off'].includes(argument)) {
+          throw new Error('/trace 只接受 on 或 off。');
+        }
+        trace.setEnabled(argument === 'on');
+        write(output, `执行轨迹已${trace.isEnabled() ? '开启' : '关闭'}。\n`);
+        showPrompt();
+        return;
+      }
       if (command === '/mcp') {
         const [action = 'list', serverId] = argumentsList;
         if (action === 'start') {
@@ -347,7 +423,7 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
     activeRun = true;
     activeRunSessionId = sessionId;
     controller = new AbortController();
-    write(output, `${paint(output, 'dim', '正在处理…')}\n`);
+    trace.start();
     const run = await runtime.runAgent({
       message: line,
       ...(sessionId === undefined ? {} : { sessionId }),
@@ -359,10 +435,11 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
           const steering = steeringBeforeSession.shift();
           if (steering) runtime.steerAgentSession(event.sessionId, steering);
         }
-        renderEvent(output, event);
+        trace.render(event);
       },
     });
     sessionId = run.result.session.id;
+    trace.clearBeforeFinal();
     write(output, `\n${paint(output, 'green', '回答')}\n${run.result.finalText.trim()}\n`);
     if ((run.result.artifacts ?? []).length > 0) {
       write(
@@ -468,19 +545,6 @@ export function parseCliPostgresUrl(value: string): PostgresConnectionInput {
   };
 }
 
-function renderEvent(output: Writable, event: AgentUserEvent): void {
-  if (event.type === 'completed') return;
-  const symbol =
-    event.type === 'approval-required'
-      ? '!'
-      : event.type === 'correcting'
-        ? '↻'
-        : event.type === 'artifact-created'
-          ? '+'
-          : '·';
-  write(output, `${paint(output, 'dim', `${symbol} ${event.message}`)}\n`);
-}
-
 function cliHelp(): string {
   return [
     '',
@@ -492,6 +556,7 @@ function cliHelp(): string {
     '  /skills               查看可用 Skills',
     '  /<skill> [任务]       显式执行 Skill',
     '  /compact [关注点]     手动压缩上下文',
+    '  /trace on|off         显示或隐藏执行轨迹（默认开启）',
     '  /mcp [list|start|stop] 管理项目 MCP Server',
     '  /exit                 退出',
     '',
@@ -527,4 +592,27 @@ function paint(
 
 function write(output: Writable, value: string): void {
   output.write(value);
+}
+
+function isTtyOutput(output: Writable): boolean {
+  return (output as NodeJS.WriteStream).isTTY === true;
+}
+
+function terminalColumns(output: Writable): number {
+  const columns = (output as NodeJS.WriteStream).columns;
+  return Number.isSafeInteger(columns) && columns > 0 ? columns : 120;
+}
+
+function renderedTerminalLines(value: string, columns: number): number {
+  return stripVTControlCharacters(value)
+    .split('\n')
+    .slice(0, -1)
+    .reduce((total, line) => total + Math.max(1, Math.ceil(displayWidth(line) / columns)), 0);
+}
+
+function displayWidth(value: string): number {
+  return [...value].reduce(
+    (width, character) => width + (/[\u1100-\u115f\u2e80-\u9fff\uac00-\ud7a3]/u.test(character) ? 2 : 1),
+    0,
+  );
 }

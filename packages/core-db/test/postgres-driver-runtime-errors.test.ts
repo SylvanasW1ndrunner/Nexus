@@ -143,6 +143,58 @@ describe('PostgresDriver runtime errors', () => {
     ]);
   });
 
+  it('batches an unparameterized paged read into one PostgreSQL round trip', async () => {
+    const calls: unknown[][] = [];
+    const driver = new PostgresDriver();
+    const pool = {
+      connect() {
+        return Promise.resolve({
+          processID: 1201,
+          query(...args: unknown[]) {
+            calls.push(args);
+            return Promise.resolve([
+              pgResult('BEGIN'),
+              pgResult('DECLARE'),
+              {
+                ...pgResult('FETCH'),
+                rowCount: 2,
+                fields: [{ name: 'value', dataTypeID: 23 }],
+                rows: [{ value: 1 }, { value: 2 }],
+              },
+              pgResult('CLOSE'),
+              pgResult('COMMIT'),
+            ]);
+          },
+          release() {},
+        });
+      },
+    };
+    (driver as unknown as { pools: Map<string, unknown> }).pools.set(connection.id, pool);
+
+    const result = await driver.execute(
+      {
+        connectionId: connection.id,
+        sql: 'select value from generate_series(1, 2) as value order by value',
+        limit: 10,
+      },
+      connection,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        rows: [{ value: 1 }, { value: 2 }],
+      },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      expect.stringMatching(
+        /^BEGIN READ ONLY;\nDECLARE schemanaut_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select value from generate_series\(1, 2\) as value order by value;\nFETCH FORWARD 11 FROM schemanaut_cursor_[a-f0-9]+;\nCLOSE schemanaut_cursor_[a-f0-9]+;\nCOMMIT$/,
+      ),
+      undefined,
+    ]);
+  });
+
   it('applies a positive per-query timeout inside the server-side read transaction', async () => {
     const calls: unknown[][] = [];
     const driver = new PostgresDriver();
@@ -152,13 +204,19 @@ describe('PostgresDriver runtime errors', () => {
           processID: 1201,
           query(...args: unknown[]) {
             calls.push(args);
-            return Promise.resolve({
-              command: 'SELECT',
-              rowCount: 1,
-              oid: 0,
-              fields: [{ name: 'value', dataTypeID: 23 }],
-              rows: [{ value: 1 }],
-            });
+            return Promise.resolve([
+              pgResult('BEGIN'),
+              pgResult('SET'),
+              pgResult('DECLARE'),
+              {
+                ...pgResult('FETCH'),
+                rowCount: 1,
+                fields: [{ name: 'value', dataTypeID: 23 }],
+                rows: [{ value: 1 }],
+              },
+              pgResult('CLOSE'),
+              pgResult('COMMIT'),
+            ]);
           },
           release() {},
         });
@@ -177,20 +235,12 @@ describe('PostgresDriver runtime errors', () => {
 
     expect(result.ok).toBe(true);
     expect(calls).toEqual([
-      ['BEGIN READ ONLY'],
-      ["select set_config('statement_timeout', $1, true)", ['250ms']],
       [
         expect.stringMatching(
-          /^DECLARE schemanaut_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select 1 as value$/,
+          /^BEGIN READ ONLY;\nSET LOCAL statement_timeout = '250ms';\nDECLARE schemanaut_cursor_[a-f0-9]+ NO SCROLL CURSOR FOR select 1 as value;\nFETCH FORWARD 10001 FROM schemanaut_cursor_[a-f0-9]+;\nCLOSE schemanaut_cursor_[a-f0-9]+;\nCOMMIT$/,
         ),
         undefined,
       ],
-      [
-        expect.stringMatching(/^FETCH FORWARD 10001 FROM schemanaut_cursor_[a-f0-9]+$/),
-        undefined,
-      ],
-      [expect.stringMatching(/^CLOSE schemanaut_cursor_[a-f0-9]+$/)],
-      ['COMMIT'],
     ]);
   });
 
@@ -220,13 +270,15 @@ describe('PostgresDriver runtime errors', () => {
         return Promise.resolve({
           processID: 1201,
           query() {
-            return Promise.resolve({
-              command: 'SELECT',
-              rowCount: 1,
-              oid: 0,
-              fields: [{ name: 'value', dataTypeID: 23 }],
-              rows: [{ value: 1 }],
-            });
+            return Promise.resolve(
+              pagedReadResults({
+                command: 'FETCH',
+                rowCount: 1,
+                oid: 0,
+                fields: [{ name: 'value', dataTypeID: 23 }],
+                rows: [{ value: 1 }],
+              }),
+            );
           },
           release() {},
         });
@@ -258,13 +310,15 @@ describe('PostgresDriver runtime errors', () => {
         return Promise.resolve({
           processID: 1201,
           query() {
-            return Promise.resolve({
-              command: 'SELECT',
-              rowCount: 4,
-              oid: 0,
-              fields: [{ name: 'id', dataTypeID: 23 }],
-              rows: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }],
-            });
+            return Promise.resolve(
+              pagedReadResults({
+                command: 'FETCH',
+                rowCount: 4,
+                oid: 0,
+                fields: [{ name: 'id', dataTypeID: 23 }],
+                rows: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }],
+              }),
+            );
           },
           release() {},
         });
@@ -785,4 +839,30 @@ function driverWithQueryError(error: Error & { code: string }): PostgresDriver {
 
 function pgError(code: string, message = code): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+function pgResult(command: string) {
+  return {
+    command,
+    rowCount: null,
+    oid: 0,
+    fields: [],
+    rows: [],
+  };
+}
+
+function pagedReadResults(fetchResult: {
+  command: string;
+  rowCount: number | null;
+  oid: number;
+  fields: Array<{ name: string; dataTypeID: number }>;
+  rows: Array<Record<string, unknown>>;
+}) {
+  return [
+    pgResult('BEGIN'),
+    pgResult('DECLARE'),
+    fetchResult,
+    pgResult('CLOSE'),
+    pgResult('COMMIT'),
+  ];
 }

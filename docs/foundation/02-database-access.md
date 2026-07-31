@@ -296,7 +296,7 @@ flowchart TD
 | `ResourceObservation/Snapshot`    | 状态来源、时间、有效期和版本     | [`resource.ts`](../../packages/shared/src/contracts/resource.ts) | 已完成   |
 | `ConnectionProfile/Endpoint`      | 多形态连接与认证引用             | [`database.ts`](../../packages/shared/src/contracts/database.ts) | 已完成   |
 | `CapabilityProfile`               | 动态能力、限制、原因和来源       | [`database.ts`](../../packages/shared/src/contracts/database.ts) | 已完成   |
-| `DatabaseConnector`               | 连接、发现、执行、状态和动作入口 | [`connector.ts`](../../packages/core-db/src/connector.ts)        | 已完成   |
+| `DatabaseConnector`               | 连接、发现、执行、结果释放、状态和动作入口 | [`connector.ts`](../../packages/core-db/src/connector.ts)        | 已完成   |
 | `ResourceDiscoveryPage/ChangeSet` | 分页与增量资源发现               | [`resource.ts`](../../packages/shared/src/contracts/resource.ts) | 已完成   |
 | `QuerySubmission/QueryJob`        | 同步和异步查询生命周期           | [`database.ts`](../../packages/shared/src/contracts/database.ts) | 已完成   |
 | `ResultBatch/ResultHandle`        | 分页、流式和外部结果             | [`database.ts`](../../packages/shared/src/contracts/database.ts) | 已完成   |
@@ -311,9 +311,9 @@ flowchart TD
 | 资源注册表               | 稳定身份、索引、关系图、来源合并、增量变更、人工绑定和快照                           | [`resource-registry.ts`](../../packages/core-resource/src/resource-registry.ts)                                                                                            | [`packages/core-resource/test`](../../packages/core-resource/test/)                                                                                                              |
 | 能力解析                 | 四态能力、分层覆盖、限制条件与明确拒绝                                               | [`capability-resolver.ts`](../../packages/core-db/src/capability-resolver.ts)                                                                                              | [`capability-resolver.test.ts`](../../packages/core-db/test/capability-resolver.test.ts)                                                                                         |
 | Connector 注册与合同认证 | 注册、查找、Manifest 校验及可复用只读合同验证                                        | [`connector-registry.ts`](../../packages/core-db/src/connector-registry.ts)、[`connector-contract-verifier.ts`](../../packages/core-db/src/connector-contract-verifier.ts) | [`connector-registry.test.ts`](../../packages/core-db/test/connector-registry.test.ts)、[`connector-scenarios.test.ts`](../../packages/core-db/test/connector-scenarios.test.ts) |
-| Database Access Runtime  | 档案、Secret 解析、生命周期、发现、任务、事务、观测、操作、审计和指标                | [`database-access-runtime.ts`](../../packages/core-db/src/database-access-runtime.ts)                                                                                      | [`database-access-runtime.test.ts`](../../packages/core-db/test/database-access-runtime.test.ts)                                                                                 |
-| PostgreSQL Connector     | 多 Endpoint、完整 Catalog、同步/异步任务、分页结果、粘性事务、状态采集和维护动作     | [`postgres-connector.ts`](../../packages/core-db/src/postgres-connector.ts)                                                                                                | [`postgres-connector.integration.test.ts`](../../packages/core-db/test/postgres-connector.integration.test.ts)                                                                   |
-| PostgreSQL Driver        | 连接池、执行、事务、Savepoint、游标、取消、Catalog、状态和故障隔离                   | [`postgres-driver.ts`](../../packages/core-db/src/postgres-driver.ts)                                                                                                      | [`postgres.integration.test.ts`](../../packages/core-db/test/postgres.integration.test.ts)                                                                                       |
+| Database Access Runtime  | 档案、Secret 解析、生命周期、发现、有界任务跟踪、结果释放、事务、观测、操作、审计和指标 | [`database-access-runtime.ts`](../../packages/core-db/src/database-access-runtime.ts)                                                                                      | [`database-access-runtime.test.ts`](../../packages/core-db/test/database-access-runtime.test.ts)                                                                                 |
+| PostgreSQL Connector     | 多 Endpoint、完整 Catalog、同步/异步任务、按 TTL/数量/字节有界的分页结果、粘性事务、状态采集和维护动作 | [`postgres-connector.ts`](../../packages/core-db/src/postgres-connector.ts)                                                                                                | [`postgres-connector.integration.test.ts`](../../packages/core-db/test/postgres-connector.integration.test.ts)、[`postgres-connector-portable-values.test.ts`](../../packages/core-db/test/postgres-connector-portable-values.test.ts) |
+| PostgreSQL Driver        | 连接池、执行、事务、Savepoint、单往返无参数游标批处理、参数化游标、取消、Catalog、状态和故障隔离 | [`postgres-driver.ts`](../../packages/core-db/src/postgres-driver.ts)                                                                                                      | [`postgres.integration.test.ts`](../../packages/core-db/test/postgres.integration.test.ts)、[`postgres-driver-runtime-errors.test.ts`](../../packages/core-db/test/postgres-driver-runtime-errors.test.ts) |
 | SQL 安全                 | 语句、风险、只读和性能预警                                                           | [`sql-safety.ts`](../../packages/core-db/src/sql-safety.ts)                                                                                                                | [`sql-safety.test.ts`](../../packages/core-db/test/sql-safety.test.ts)                                                                                                           |
 | SDK                      | `runtime.database` 统一入口，并兼容原 PostgreSQL AI SQL 流程                         | [`runtime.ts`](../../packages/sdk/src/runtime.ts)                                                                                                                          | [`runtime.test.ts`](../../packages/sdk/test/runtime.test.ts)、[`postgres.integration.test.ts`](../../packages/sdk/test/postgres.integration.test.ts)                             |
 | REST 与 WebUI            | 连接档案、资源、任务、事务、观测、操作、审计及轻量管理页                             | [`server.ts`](../../apps/server/src/server.ts)、[`web-ui.ts`](../../apps/server/src/web-ui.ts)                                                                             | [`server.test.ts`](../../apps/server/test/server.test.ts)                                                                                                                        |
@@ -339,6 +339,7 @@ PostgreSQL 是首个完整参考实现，以下行为必须使用真实数据库
 - 事务、Savepoint、提交、回滚、失败事务恢复和粘性会话。
 - EXPLAIN、执行计划、锁等待、超时、取消和后端状态。
 - 只读写入阻断、DDL、结果限制、游标和大结果流式读取。
+- Result Handle 显式释放、TTL/容量淘汰、断开连接清理和 Runtime 任务跟踪上限。
 - 每次测试使用专用数据库并恢复确定性状态。
 
 真实 PostgreSQL 验收由 [`run-postgres-tests.mjs`](../../scripts/run-postgres-tests.mjs) 重建专用测试库后执行。本次候选的同源门禁结果记录为 Driver 7/7、Connector 5/5、SDK 6 项通过且 1 项真实 LLM 跳过、复杂场景 4 项通过且 1 项真实 LLM 跳过；精确证据见[上线前审计矩阵](../../reports/pre-release-audit/00-traceability-matrix.md)。覆盖范围包括完整 Catalog、复杂类型、同步/异步 Query Job、结果分页、数据库端查询超时、主动取消、粘性事务与 Savepoint、失败事务恢复、终止会话、观测、ANALYZE、VACUUM、错误语义和 Secret 脱敏。跳过的付费 LLM 用例不计为 PostgreSQL 验收通过项。
@@ -393,6 +394,8 @@ Mock 验证内容：
 | 公共 Connector 能力合同覆盖率 |              100% |
 
 本地实测由 [`run-database-access-benchmark.mjs`](../../scripts/run-database-access-benchmark.mjs) 产生，[`database-access-performance.json`](../../reports/database-access-performance.json) 是 `generatedAt`、环境、数据规模、实测值、阈值和逐项结论的唯一事实来源；文档不复制会随机器与候选源码变化的历史数值。报告只代表 SchemaNaut 平台开销；真实数据库性能另行记录连接时间、首批结果、总耗时、扫描量和数据库执行时间，不能把数据库响应时间算作平台开销。
+
+结果读取完成后，调用方应调用 `releaseResult(handleId)`；断开连接时 Runtime 会清理该档案的任务和句柄。PostgreSQL Connector 即使调用方遗漏释放，也会按 TTL、条目数和总字节数淘汰旧结果，避免长运行服务把交互结果无限保留。
 
 ## 8. 安全与边界
 

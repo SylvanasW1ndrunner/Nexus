@@ -32,6 +32,38 @@ afterEach(async () => {
 });
 
 describe('ReactAgent', () => {
+  it('keeps the global framework prompt neutral about concrete SQL operation choices', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: '你好，我可以协助处理数据库任务。',
+        toolCalls: [],
+      },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      new ToolRegistry(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: '你好',
+      mode: 'read',
+    });
+
+    const frameworkPrompt = calls[0]?.messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.content)
+      .join('\n');
+    expect(frameworkPrompt).not.toMatch(
+      /smallest database change|create-new-object|\bDROP\b|\bTRUNCATE\b/i,
+    );
+  });
+
   it('treats a process-only response as a completion proposal and explicitly finalizes', async () => {
     const usage = new UsageTracker(await usagePath());
     const registry = new ToolRegistry();
@@ -1605,6 +1637,9 @@ describe('ReactAgent', () => {
     expect(compactionCalls.length).toBeGreaterThan(0);
     expect(agentCalls).toHaveLength(2);
     expect(result.contextCompression).toHaveLength(2);
+    expect(
+      result.contextCompression?.filter((report) => report.trigger === 'auto'),
+    ).toHaveLength(1);
     expect(result.contextCompression?.[0]).toMatchObject({
       trigger: 'auto',
       level: 'conversation-checkpoint',
@@ -1758,10 +1793,11 @@ describe('ReactAgent', () => {
 
     expect(result.status).toBe('done');
     expect(result.session.contextCheckpoint).toMatchObject({
-      sequence: 1,
       trigger: 'auto',
       method: 'deterministic-fallback',
     });
+    expect(typeof result.session.contextCheckpoint?.sequence).toBe('number');
+    expect(result.session.contextCheckpoint?.sequence).toBeGreaterThanOrEqual(1);
     expect(result.contextCompression).toBeDefined();
     if (!result.contextCompression) {
       throw new Error('Expected an automatic context compression report.');

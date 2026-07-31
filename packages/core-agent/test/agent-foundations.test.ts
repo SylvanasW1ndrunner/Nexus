@@ -116,7 +116,7 @@ describe('Agent run coordination and planning', () => {
     expect(coordinator.isActive('session-a')).toBe(false);
   });
 
-  it('enforces dependencies, one active task, evidence, and terminal transitions', () => {
+  it('enforces plan dependencies, one active task, and terminal transitions', () => {
     let plan = createAgentTaskPlan({
       goal: 'Produce and verify SQL',
       tasks: [
@@ -167,32 +167,41 @@ describe('Agent run coordination and planning', () => {
     expect(() => updateAgentTask(plan, { taskId: 'query', status: 'pending' })).toThrow(
       'cannot transition',
     );
-    const unverifiable = createAgentTaskPlan({
-      goal: 'Cannot self-certify',
+    const lightweight = createAgentTaskPlan({
+      goal: 'Track progress without self-certifying runtime results',
       tasks: [{ id: 'claim', title: 'Claim success' }],
     });
-    expect(() =>
-      updateAgentTask(unverifiable, {
-        taskId: 'claim',
-        status: 'completed',
-        evidence: { kind: 'observation', summary: 'The model says it is done.' },
-      }),
-    ).toThrow('requires concrete');
-    expect(() =>
-      updateAgentTask(unverifiable, {
-        taskId: 'claim',
-        status: 'cancelled',
-      }),
-    ).toThrow('runtime or user-confirmation');
-    const revised = updateAgentTask(unverifiable, {
+    const completed = updateAgentTask(lightweight, {
       taskId: 'claim',
-      status: 'cancelled',
+      status: 'completed',
+    });
+    expect(isAgentTaskPlanComplete(completed)).toBe(true);
+    const cancelled = updateAgentTask(
+      createAgentTaskPlan({
+        goal: 'Cancel obsolete work',
+        tasks: [{ id: 'obsolete', title: 'Obsolete task' }],
+      }),
+      {
+        taskId: 'obsolete',
+        status: 'cancelled',
+      },
+    );
+    expect(isAgentTaskPlanComplete(cancelled)).toBe(true);
+    const revised = updateAgentTask(
+      createAgentTaskPlan({
+        goal: 'Keep legacy evidence compatible',
+        tasks: [{ id: 'claim', title: 'Claim success' }],
+      }),
+      {
+      taskId: 'claim',
+      status: 'completed',
       evidence: {
         kind: 'database-result',
-        summary: 'The configured source does not exist.',
-        reference: 'tool-call-missing-source',
+        summary: 'A runtime supplied this legacy evidence.',
+        reference: 'tool-call-result',
       },
-    });
+      },
+    );
     expect(isAgentTaskPlanComplete(revised)).toBe(true);
     expect(() =>
       createAgentTaskPlan({

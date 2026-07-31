@@ -1,9 +1,11 @@
 import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   classifyCliApprovalInput,
+  CliTraceRenderer,
   initializeCliProject,
   listCliSessions,
   listCliSkills,
@@ -20,6 +22,59 @@ afterEach(async () => {
 });
 
 describe('SchemaNaut CLI', () => {
+  it('shows useful SQL actions by default and clears transient TTY progress before the answer', () => {
+    const capture = captureOutput(true);
+    const trace = new CliTraceRenderer(capture.output);
+
+    trace.start();
+    trace.render({
+      id: 'event-1',
+      sessionId: 'session-1',
+      type: 'sql-prepared',
+      message: '正在准备 SQL。',
+      sql: 'SELECT schema_name FROM information_schema.schemata ORDER BY schema_name',
+      createdAt: '2026-07-31T00:00:00.000Z',
+    });
+    expect(capture.text()).toContain('正在准备 SQL');
+    expect(capture.text()).toContain(
+      'SELECT schema_name FROM information_schema.schemata ORDER BY schema_name',
+    );
+
+    trace.clearBeforeFinal();
+    expect(capture.text()).toContain('\u001B[1A');
+    expect(capture.text()).toContain('\u001B[2K');
+  });
+
+  it('supports disabling action traces and keeps non-TTY logs durable', () => {
+    const silentCapture = captureOutput(false);
+    const silent = new CliTraceRenderer(silentCapture.output);
+    silent.setEnabled(false);
+    silent.start();
+    silent.render({
+      id: 'event-1',
+      sessionId: 'session-1',
+      type: 'exploring',
+      message: '正在读取 Schema。',
+      createdAt: '2026-07-31T00:00:00.000Z',
+    });
+    expect(silentCapture.text()).toBe('');
+
+    const loggedCapture = captureOutput(false);
+    const logged = new CliTraceRenderer(loggedCapture.output);
+    logged.start();
+    logged.render({
+      id: 'event-2',
+      sessionId: 'session-1',
+      type: 'exploring',
+      message: '正在读取 Schema。',
+      createdAt: '2026-07-31T00:00:00.000Z',
+    });
+    const beforeClear = loggedCapture.text();
+    logged.clearBeforeFinal();
+    expect(loggedCapture.text()).toBe(beforeClear);
+    expect(beforeClear).toContain('正在读取 Schema');
+  });
+
   it('distinguishes one-call approval, rejection, and a new steering request', () => {
     expect(['y', 'yes', '允许'].map(classifyCliApprovalInput)).toEqual([
       'approve',
@@ -163,4 +218,19 @@ async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'schemanaut-cli-'));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+function captureOutput(isTTY: boolean): {
+  output: Writable;
+  text: () => string;
+} {
+  const chunks: string[] = [];
+  const output = new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(String(chunk));
+      callback();
+    },
+  });
+  Object.assign(output, { isTTY, columns: 120 });
+  return { output, text: () => chunks.join('') };
 }

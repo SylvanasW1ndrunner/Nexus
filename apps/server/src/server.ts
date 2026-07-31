@@ -2467,25 +2467,13 @@ function toPublicAgentSessionView(session: AgentSessionView): AgentSessionView {
       ? {}
       : {
           taskPlan: {
-            version: session.taskPlan.version,
             goal: session.taskPlan.goal,
             tasks: session.taskPlan.tasks.map((task) => ({
               id: task.id,
               title: task.title,
               ...(task.description === undefined ? {} : { description: task.description }),
               status: task.status,
-              acceptanceCriteria: [...task.acceptanceCriteria],
-              dependsOn: [...task.dependsOn],
-              evidence: task.evidence.map((evidence) => ({
-                kind: evidence.kind,
-                summary: evidence.summary,
-                createdAt: evidence.createdAt,
-              })),
-              createdAt: task.createdAt,
-              updatedAt: task.updatedAt,
             })),
-            createdAt: session.taskPlan.createdAt,
-            updatedAt: session.taskPlan.updatedAt,
           },
         }),
     ...(session.artifacts === undefined

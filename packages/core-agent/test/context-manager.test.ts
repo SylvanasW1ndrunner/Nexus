@@ -38,6 +38,7 @@ describe('Agent context management', () => {
       modelContextTokens: 2_000,
       reservedOutputTokens: 200,
       availablePromptTokens: 1_800,
+      compactionThresholdTokens: 1_800,
       coveredConversationMessageCount: 0,
       maskedToolResultCount: 0,
       warnings: [],

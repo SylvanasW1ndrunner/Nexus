@@ -238,10 +238,14 @@ describe('SchemaNaut local server', () => {
         { role: 'user', content: '继续分析订单' },
         { role: 'assistant', content: '已继续分析。' },
       ],
+      taskPlan: {
+        goal: '完成订单分析',
+        tasks: [{ id: 'query', title: '执行查询', status: 'in_progress' }],
+      },
       activeSkills: [{ name: 'query-and-answer', scope: 'system' }],
     });
     expect(JSON.stringify(session)).not.toMatch(
-      /role":"tool|toolCalls|activeTools|knowledgeSnapshot|private-root-hash|instructions|让我继续验证/,
+      /role":"tool|toolCalls|activeTools|knowledgeSnapshot|private-root-hash|instructions|让我继续验证|acceptanceCriteria|dependsOn|evidence|result-handle/,
     );
 
     const steered = await postJson(
@@ -1910,6 +1914,31 @@ function fakeAgentSession(
       catalogRootHash: 'private-root-hash',
       retrievalProfileId: 'profile-internal',
       indexVersion: 'version-internal',
+    },
+    taskPlan: {
+      version: 1,
+      goal: '完成订单分析',
+      tasks: [
+        {
+          id: 'query',
+          title: '执行查询',
+          status: 'in_progress',
+          acceptanceCriteria: ['返回数据库结果'],
+          dependsOn: [],
+          evidence: [
+            {
+              kind: 'database-result',
+              summary: 'internal evidence',
+              reference: 'result-handle-must-not-leak',
+              createdAt: '2026-07-24T00:00:00.000Z',
+            },
+          ],
+          createdAt: '2026-07-24T00:00:00.000Z',
+          updatedAt: '2026-07-24T00:00:01.000Z',
+        },
+      ],
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:01.000Z',
     },
     ...(contextCheckpoint === undefined ? {} : { contextCheckpoint }),
     aborted: false,

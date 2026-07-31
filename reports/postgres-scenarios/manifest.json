@@ -1,9 +1,9 @@
 {
-  "generatedAt": "2026-07-26T16:17:03.127Z",
-  "runId": "2026-07-26T16-16-08-420Z-2526eb4a-b983-434f-a3a5-2956cdcd81b2",
+  "generatedAt": "2026-07-31T06:28:35.531Z",
+  "runId": "2026-07-31T06-26-17-039Z-56c002c3-36cc-4633-986c-88799d4e933c",
   "database": "dbagent_core_db_test",
   "git": {
-    "commit": "cca716781b17ba454fda0f4e82a7f03cfbe60bc9",
+    "commit": "96feaf5e683dac2e3c9dc506c13f9bb0ea0e6edb",
     "dirty": true
   },
   "fixtures": {
@@ -18,13 +18,13 @@
   "reports": {
     "functional": {
       "path": "functional.json",
-      "sha256": "eea2a6c7345e5da30a7eb578787aa2986aea168bdd5eebcb699633617cd17def",
-      "runCount": 11,
+      "sha256": "fb528ff622c827e28a5d6284d46e2ce7bbc80c74a2167339bfeef6a12355591a",
+      "runCount": 9,
       "passed": true
     },
     "performance": {
       "path": "performance.json",
-      "sha256": "ca76566c63b23b6c9ea949b5ee6374ad8c403e28c6b1defa8612781e263476a0",
+      "sha256": "5e8afd41fbd7229864dd4e83c42078a48fb25411e7862d1dc1408470d465e289",
       "scenarioCount": 4,
       "passed": true
     }

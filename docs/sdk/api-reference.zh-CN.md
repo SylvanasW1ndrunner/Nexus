@@ -272,7 +272,15 @@ type AgentSessionView = {
   }>;
   tokenUsage: LlmUsage;
   project?: { rootPath: string };
-  taskPlan?: AgentTaskPlan;
+  taskPlan?: {
+    goal: string;
+    tasks: Array<{
+      id: string;
+      title: string;
+      description?: string;
+      status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+    }>;
+  };
   artifacts?: AgentArtifactReference[];
   activeSkills?: SkillCatalogEntry[];
   aborted: boolean;
@@ -302,9 +310,9 @@ type AiSqlAgentRunView = {
 };
 ```
 
-`queryResults` 为每次 SQL 执行单独返回最多 1,000 行，不属于 `result.session`。模型只会看到最多两行的临时样例。查询行不会写入 Session 消息、持久 Agent Run 记录或用户偏好。
+`queryResults` 为每次 SQL 执行单独返回最多 1,000 行，不属于 `result.session`。模型临时投影默认最多 100 行且不超过 64 KiB，并遵循调用方显式设置的更小样例数。查询行不会写入 Session 消息、持久 Agent Run 记录或用户偏好。
 
-`AgentSessionView` 不包含 Tool 消息/调用、查询行、知识 Hash 与树索引、已加载 Skill 正文、上下文压缩内部信息和评测细节。公开任务计划中的证据只保留类型、摘要与创建时间。
+`AgentSessionView` 不包含 Tool 消息/调用、查询行、知识 Hash 与树索引、已加载 Skill 正文、上下文压缩内部信息和评测细节。公开任务计划只包含目标、步骤标题/描述和状态；验收规则、依赖与运行证据由内部 Runtime 管理，不进入用户会话视图。
 
 `getAgentRun(runId)` 与 `listAgentRuns(sessionId?, limit?)` 返回 Project 隔离、只含元数据的 Agent Run 记录。进程重启会把未结束的 `running` 记录恢复为 `interrupted`；这些记录从不包含数据库行。
 
@@ -672,7 +680,7 @@ Runtime 会自动填入当前模型；`llmChat`/`llmStream` 请求不提供 `mod
 - 档案：`createProfile`、`updateProfile`、`deleteProfile`、`getProfile`、`listProfiles`；
 - 连接：`testProfile`、`connect`、`reconnect`、`disconnect`、`health`；
 - 能力/发现：`capabilities`、`discoverPage`、`discoverAll`；
-- 查询：`submit`、`getJob`、`cancel`、`readResult`；
+- 查询：`submit`、`getJob`、`cancel`、`readResult`、`releaseResult`；
 - 事务：`beginTransaction`、Savepoint、Commit、Rollback；
 - 资源：`queryResources`、`resourceRelations`、`snapshotResources`；
 - 生命周期：`metrics`、`close`。
@@ -680,6 +688,8 @@ Runtime 会自动填入当前模型；`llmChat`/`llmStream` 请求不提供 `mod
 `runtime.resources` 提供资源新建/更新/查询、关系图与遍历、观测/状态、事件、快照和恢复。
 
 这些是通用基础 API，不是 v1 治理运维 Agent。
+
+`readResult` 返回的句柄只用于临时交互读取。调用方完成读取或导出后应调用 `releaseResult(handleId)`；断开连接也会清理该数据源的句柄。PostgreSQL Connector 会按 TTL、条目数和总字节数做兜底淘汰，Runtime 的已终止 Query Job 跟踪同样有界。
 
 `ConnectionProfile.scope` 可把发现资源绑定到 `tenantId`、`organizationId`、`projectId`、`environment` 和/或 `region`。数据库 Runtime 会把档案范围传播到每个发现资源；Connector 若返回冲突范围会被拒绝。SchemaNaut 快捷连接会自动绑定当前 Runtime 租户与选定 Project。
 

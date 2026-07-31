@@ -76,6 +76,7 @@ export interface DatabaseConnector {
     handleId: string,
     input?: { cursor?: string; limit?: number },
   ): Promise<ResultBatch>;
+  releaseResult?(context: ConnectorContext, handleId: string): Promise<boolean>;
   streamResult?(
     context: ConnectorContext,
     handleId: string,

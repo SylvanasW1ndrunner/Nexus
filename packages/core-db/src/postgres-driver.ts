@@ -1465,6 +1465,16 @@ async function executePagedRead(
 ): Promise<SafePgQueryResult[]> {
   const cursorName = `schemanaut_cursor_${randomUUID().replace(/-/g, '')}`;
   const fetchCount = rowLimit + 1;
+  if (!params || params.length === 0) {
+    return executeBatchedPagedRead(
+      client,
+      sql,
+      cursorName,
+      fetchCount,
+      timeoutMs,
+      readOnly,
+    );
+  }
   try {
     await client.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
     await setLocalStatementTimeout(client, timeoutMs);
@@ -1488,6 +1498,43 @@ async function executePagedRead(
       await client.query('ROLLBACK');
     } catch {
       // Preserve the original query error; rollback failure is secondary.
+    }
+    throw error;
+  }
+}
+
+async function executeBatchedPagedRead(
+  client: PgPoolClient,
+  sql: string,
+  cursorName: string,
+  fetchCount: number,
+  timeoutMs: number | undefined,
+  readOnly: boolean,
+): Promise<SafePgQueryResult[]> {
+  const statements = [
+    readOnly ? 'BEGIN READ ONLY' : 'BEGIN',
+    ...(timeoutMs === undefined
+      ? []
+      : [`SET LOCAL statement_timeout = '${Math.floor(timeoutMs)}ms'`]),
+    `DECLARE ${cursorName} NO SCROLL CURSOR FOR ${sql}`,
+    `FETCH FORWARD ${fetchCount} FROM ${cursorName}`,
+    `CLOSE ${cursorName}`,
+    'COMMIT',
+  ];
+  try {
+    const results = normalizePgResults(
+      await executeTimedQuery(client, statements.join(';\n'), undefined, timeoutMs),
+    );
+    const fetched = results.find((result) => result.command === 'FETCH');
+    if (!fetched) {
+      throw new Error('PostgreSQL cursor batch did not return a FETCH result.');
+    }
+    return [fetched];
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Preserve the original batch error; PostgreSQL may already have rolled it back.
     }
     throw error;
   }

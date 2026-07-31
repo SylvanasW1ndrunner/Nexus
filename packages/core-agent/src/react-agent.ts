@@ -69,8 +69,9 @@ const DEFAULT_MAX_PERSISTED_TOOL_RESULT_CHARS = 12_000;
 const DEFAULT_MAX_PERSISTED_TOOL_ARGUMENT_CHARS = 4_000;
 const DEFAULT_AGENT_USER_ID = 'local-user';
 const PREFERENCE_CONTEXT_PREFIX = '用户长期偏好（自动提炼，可由用户修改或删除）：';
-const MAX_AUTO_COMPACTIONS_PER_ITERATION = 2;
+const MAX_AUTO_COMPACTIONS_PER_ITERATION = 4;
 const MIN_COMPACTION_REDUCTION_RATIO = 0.05;
+const DEFAULT_AUTO_COMPACTION_RECENT_MESSAGES = 12;
 const MAX_COMPACTION_OUTPUT_TOKENS = 4_096;
 const TOOL_ABORT_SETTLE_TIMEOUT_MS = 500;
 export class ReactAgent {
@@ -259,6 +260,8 @@ export class ReactAgent {
         ),
         activeTask: options.userMessage,
       };
+      let adaptiveKeepRecentMessages =
+        contextOptions.keepRecentMessages ?? DEFAULT_AUTO_COMPACTION_RECENT_MESSAGES;
       let currentIteration = 0;
       let consecutiveToolFailures = 0;
       const actionObservations = new Map<string, { observation: string; repeats: number }>();
@@ -386,13 +389,28 @@ export class ReactAgent {
               ...(options.signal === undefined ? {} : { signal: options.signal }),
             });
             context = compacted.context;
-            if (compacted.status === 'skipped') break;
+            const stillExceedsWindow =
+              context.compression.finalTokenEstimate >
+              context.compression.availablePromptTokens;
+            let reducedRecentMessages = false;
+            if (stillExceedsWindow && adaptiveKeepRecentMessages > 1) {
+              adaptiveKeepRecentMessages = Math.max(
+                1,
+                Math.floor(adaptiveKeepRecentMessages / 2),
+              );
+              contextOptions.keepRecentMessages = adaptiveKeepRecentMessages;
+              reducedRecentMessages = true;
+            }
+            if (compacted.status === 'skipped') {
+              if (stillExceedsWindow && reducedRecentMessages) continue;
+              break;
+            }
             contextCompression.push(compacted.report);
             const reduction =
               beforeTokens <= 0
                 ? 1
                 : (beforeTokens - context.compression.finalTokenEstimate) / beforeTokens;
-            if (reduction < MIN_COMPACTION_REDUCTION_RATIO) break;
+            if (reduction < MIN_COMPACTION_REDUCTION_RATIO && !stillExceedsWindow) break;
           }
           if (transientToolResults.size > 0) {
             context = buildAgentContext(
@@ -557,6 +575,9 @@ export class ReactAgent {
               phase: 'done',
               missing: [],
             };
+            // A task plan is transient guidance for the current user request.
+            // Runtime execution records remain the durable evidence after completion.
+            delete session.taskPlan;
             await emitUserEvent({
               type: 'completed',
               message: '任务已完成并通过当前验收检查。',
@@ -938,25 +959,6 @@ export class ReactAgent {
                     : {}),
                   ...sqlExecutionMetrics(modelResult),
                 });
-                const successfulSqlCount = toolExecutions.filter(
-                  (execution) =>
-                    execution.status === 'success' && isSqlExecutionTool(execution.toolName),
-                ).length;
-                if (successfulSqlCount === 6 || successfulSqlCount === 10) {
-                  appendMessage(
-                    session,
-                    createMessage(
-                      {
-                        role: 'system',
-                        content:
-                          successfulSqlCount === 6
-                            ? 'Exploration checkpoint: several SQL observations are already available. If they cover the required schema and business rules, stop probing and execute the single final SQL that answers the user.'
-                            : 'Exploration checkpoint: do not run another diagnostic probe. Execute the final requested SQL now using established facts, or state the one specific missing fact that prevents completion.',
-                      },
-                      this.now,
-                    ),
-                  );
-                }
               }
               await this.saveSession(session);
               await saveCheckpoint(checkpointIteration, 'running');
@@ -1374,7 +1376,8 @@ function runtimePinnedMessages(
       content: [
         'You are SchemaNaut, an autonomous database and SQL agent.',
         'Use tools to inspect facts instead of guessing. Prefer database-side SQL for aggregation, statistics, cleaning, and anomaly detection; never pull an entire dataset into model context.',
-        'Create a task plan only for genuinely multi-step work; a single database question normally needs direct discovery, one final SQL query, and result verification. Verify any plan acceptance criteria with concrete tool evidence before claiming completion.',
+        'For metadata and schema questions, use resource_list, resource_get, or knowledge_search first. Query database system catalogs only when those resources remain insufficient after refresh.',
+        'Create a lightweight task plan only for genuinely multi-step work. The plan guides progress; actual tool outcomes are the completion evidence. A single database question normally needs direct discovery, one final SQL query, and result verification.',
         'When a request refers to configured thresholds, rules, dictionaries, or mappings, find and use the corresponding database resources. Never invent configured business values.',
         'For dirty JSON or event streams, validate required fields and formats before casting, use business dictionaries when present, and deduplicate by the stated business key and arrival order.',
         'When the visible tools do not cover a needed capability, use tool_search before calling the discovered tool.',

@@ -55,7 +55,7 @@ Fixture 位于 [`scripts/dev-db/init.sql`](../../scripts/dev-db/init.sql)。
 ### 3.4 Agent 与权限
 
 - Agent 能按 Skill 组合资源、知识、SQL 和结果工具。
-- 复杂任务建立计划并以证据完成，简单任务走快速路径。
+- 复杂任务建立轻量计划，Runtime 以真实工具证据完成验证；简单任务走快速路径。
 - 相同动作没有新证据时更换工具或查询路径。
 - 模型停止调用工具但完成标准未满足时不能错误标记完成。
 - `read`、`edit`、`full` 对每类 SQL 的行为符合文档。
@@ -72,7 +72,7 @@ Fixture 位于 [`scripts/dev-db/init.sql`](../../scripts/dev-db/init.sql)。
 - 压缩模型失败时使用确定性恢复摘要并产生降级记录。
 - 模型工作视图不包含知识 Hash、节点 ID、树索引和检查点元数据。
 - 聚合由数据库执行，Agent 不接收聚合前的整表行。
-- SDK/API 交互结果最多 1,000 行，模型临时样例最多两行，持久记录不含行值或缓存 ID。
+- SDK/API 交互结果最多 1,000 行，模型临时样例默认最多 100 行并受字节上限约束，持久记录不含行值或缓存 ID。
 - 用户事件不包含 Tool Call ID、检索分数、内部动作签名和评测字段。
 - 子 Agent 继承能力但使用独立上下文，并只向主 Agent 返回摘要、证据和产物引用。
 - Project Skill 跨 Session 生效，Session Skill 不泄漏到其他 Session。
@@ -93,7 +93,7 @@ Fixture 位于 [`scripts/dev-db/init.sql`](../../scripts/dev-db/init.sql)。
 9. 在 `read` 模式下拦截写入并完成单次审批路径。
 10. 错误字段名触发一次结构重读和修正。
 11. 流量清洗 SQL 在数据库内完成 JSON 提取、去重、类型转换和异常聚合。
-12. 大科学场景完成多级 Join、窗口/统计函数，以及“交互结果 1,000 行/模型样例两行/Session 零行值”的边界验证。
+12. 大科学场景完成多级 Join、窗口/统计函数，以及“交互结果 1,000 行/模型样例 100 行且有字节上限/Session 零行值”的边界验证。
 
 真实模型测试显式开启并消耗 Provider Token，不把 12 个语法点拆成脆弱的逐题基准。它通过公共 Agent 管线完成三项复合任务：电商支付/退款净收入、Kafka JSON 清洗与异常检测、分区大科学统计；每项都必须产生真实 PostgreSQL 执行证据。运行日志写入 `reports/postgres-scenarios/live.json`。
 
@@ -111,7 +111,7 @@ Fixture 位于 [`scripts/dev-db/init.sql`](../../scripts/dev-db/init.sql)。
 | 构建压缩后的模型工作视图  | 10,000 条 Session 消息 |          P95 ≤ 50 ms |
 | 自动压缩规划              | 10,000 条 Session 消息 |         P95 ≤ 100 ms |
 | SQLite 追加并恢复 Session | 10,000 条 Session 消息 |         P95 ≤ 500 ms |
-| 自动压缩后的窗口占用      |           达到压缩阈值 | 低于模型可用输入窗口 |
+| 自动压缩后的窗口占用      | 达到模型可用输入上限 | 低于模型可用输入窗口 |
 
 性能报告必须记录 Node.js、操作系统、CPU、数据规模、P50/P95、最大值和阈值结论。
 

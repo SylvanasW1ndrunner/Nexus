@@ -14,8 +14,8 @@
     },
     {
       "path": "apps/server/dist/interactive-cli.d.ts",
-      "sha256": "8f13046f0ce2ed6ef582a4cb786fb18f528763bc1d0ad74c251ddb8308122d76",
-      "bytes": 1010
+      "sha256": "611455f3a051f0e3ce812c650fff599fadae21012660b608662375b312783777",
+      "bytes": 1348
     },
     {
       "path": "apps/server/dist/project-env.d.ts",
@@ -144,8 +144,8 @@
     },
     {
       "path": "packages/core-agent/dist/types.d.ts",
-      "sha256": "c02e547e5fde7c1d5817535c429239980ffaf6682a2d1c66306dcc3a88fa590d",
-      "bytes": 18551
+      "sha256": "884448995fd4d8f51847dd43a5b9f9ad747a4fad9e044ff4b218ff72239c11ef",
+      "bytes": 18956
     },
     {
       "path": "packages/core-agent/dist/user-events.d.ts",
@@ -174,13 +174,13 @@
     },
     {
       "path": "packages/core-db/dist/connector.d.ts",
-      "sha256": "d60264dc5be28253f32efd7e5bd722bd3a81bbc41c88a1767fa2e2716b164ded",
-      "bytes": 3483
+      "sha256": "f4943a246f02d6de3ff32a0d1defc047b282f6a12b73debcb2d903382d012d56",
+      "bytes": 3566
     },
     {
       "path": "packages/core-db/dist/database-access-runtime.d.ts",
-      "sha256": "d77e3b8f6ded61a45cdbc927a1a9a854dd5bdaaf9ae5f76d0e3424e932fc7013",
-      "bytes": 4795
+      "sha256": "c1adfbf10b4ac07d8eb54253dc95c94518c7dd27a702801630d91aa5493b8618",
+      "bytes": 4882
     },
     {
       "path": "packages/core-db/dist/database-driver-registry.d.ts",
@@ -204,8 +204,8 @@
     },
     {
       "path": "packages/core-db/dist/postgres-connector.d.ts",
-      "sha256": "603977b81dc4f4912b759567f64806d3d0800571ec4c5f4e4ba7daf5d1f91750",
-      "bytes": 2765
+      "sha256": "aebcf2c7feb87f0032b87e8849a2bfee907d7c2681717a2792edc05a71087f25",
+      "bytes": 3053
     },
     {
       "path": "packages/core-db/dist/postgres-driver.d.ts",
@@ -299,8 +299,8 @@
     },
     {
       "path": "packages/core-llm/dist/openai-compatible-provider.d.ts",
-      "sha256": "9a4f47fe2d0a8a950b6ef15bdd95e9bd2e8bcba274420599850f58f148b0f606",
-      "bytes": 3308
+      "sha256": "b26c3670049a66f2d873ef606c1dff4206e9846caa4efd7dcefc5b31a3f4c243",
+      "bytes": 3343
     },
     {
       "path": "packages/core-llm/dist/prompt-runtime.d.ts",
@@ -499,8 +499,8 @@
     },
     {
       "path": "packages/core-tools/dist/ai-sql-tools.d.ts",
-      "sha256": "fa8eae70cee429b46ef4bd0b7c7867de9a95435417de5cbd78e30ab20ece7aae",
-      "bytes": 2780
+      "sha256": "86f5a058875c4f3b323aa24c4f6bbda1282d4571b55b18defed9e90835fbeb4d",
+      "bytes": 2923
     },
     {
       "path": "packages/core-tools/dist/index.d.ts",
@@ -594,8 +594,8 @@
     },
     {
       "path": "packages/sdk/dist/runtime.d.ts",
-      "sha256": "276ba6c68ce4110d628d4b7f62ebb22a99399996d9970a3b9e926b364664c135",
-      "bytes": 6974
+      "sha256": "31fee7fe99fb0e464a513983422642c6d5bff17f48e7e24c5ec00d450bc2f30d",
+      "bytes": 7138
     },
     {
       "path": "packages/sdk/dist/sql-run-store.d.ts",
@@ -604,8 +604,8 @@
     },
     {
       "path": "packages/sdk/dist/types.d.ts",
-      "sha256": "3dd924b2074cbe5fb26e7146459040e12fbf1cafaee642537be8857f66af4e22",
-      "bytes": 10026
+      "sha256": "e1793a7c8f03b192b4c95287a640041adb6f095dae4d968170b9203ae0daa1ae",
+      "bytes": 10512
     },
     {
       "path": "packages/shared/dist/contracts/common.d.ts",
@@ -653,5 +653,5 @@
       "bytes": 38
     }
   ],
-  "digest": "d97dffb39fc7d36f30b315a41e554f144543c6c96608323c89fcbf0f2c3ab6e4"
+  "digest": "def55d8a19711769e11a6f42b91436792aa442f0eb93c3f9da0b8f887f3b1232"
 }

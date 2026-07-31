@@ -484,7 +484,7 @@ describe.skipIf(!runPostgresTests)(
             (message) => message.role === 'tool' && message.toolCallId === execution.toolCallId,
           )?.content ?? '';
         expect(firstToolResult.length).toBeLessThan(4_000);
-        expect((JSON.parse(firstToolResult) as { rows: unknown[] }).rows).toHaveLength(2);
+        expect((JSON.parse(firstToolResult) as { rows: unknown[] }).rows).toHaveLength(3);
         const persisted = await runtime.sessions.load(created.result.session.id);
         const durableToolMessage = persisted?.messages.find(
           (message) =>

@@ -11,7 +11,7 @@
 [![Node.js 22.13+](https://img.shields.io/badge/node-%3E%3D22.13-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](packages/sdk/src/index.ts)
 
-[中文](README.zh-CN.md) · [SDK Guide](docs/sdk/README.md) · [API Reference](docs/sdk/api-reference.md) · [Contributing](CONTRIBUTING.md)
+[中文](README.zh-CN.md) · [CLI Guide](docs/cli/README.md) · [SDK Guide](docs/sdk/README.md) · [API Reference](docs/sdk/api-reference.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -33,7 +33,7 @@ It is built for embedding and automation. The primary surfaces are a TypeScript 
 | Progressive Skills     | Standard Markdown `SKILL.md` bundles at system, user, project, and Session scope; only the catalog is shown until a Skill is activated            |
 | Standard MCP client    | Official MCP SDK with stdio, Streamable HTTP, and SSE compatibility, dynamic tool discovery, lifecycle, cancellation, and secret references       |
 | Project tools          | Project-scoped files, optional host web tools, bounded shell execution in `full` mode, and same-capability child Agents with independent context  |
-| Separated query results | The database performs aggregation and filtering; SDK/API callers receive at most 1,000 rows separately while the model sees at most two transient samples |
+| Separated query results | The database performs aggregation and filtering; SDK/API callers receive at most 1,000 rows separately while the model sees at most 100 transient rows within 64 KiB |
 | Integration surfaces   | TypeScript SDK, local REST API, interactive CLI, and lightweight local WebUI                                                                      |
 
 AI database governance and operations are a later product stage. v1 does **not** ship a governance/operations Agent or claim autonomous DBA remediation.
@@ -50,7 +50,7 @@ flowchart LR
     Agent --> Policy["read / edit / full"]
     Policy --> PostgreSQL["PostgreSQL executes SQL"]
     PostgreSQL --> Results["Bounded query result (max 1,000 rows)"]
-    Results --> Preview["Transient model sample (max 2 rows)"]
+    Results --> Preview["Transient model projection (max 100 rows / 64 KiB)"]
     Preview --> Agent
     Results --> Output["Separate result payload"]
     Agent --> Output["Verified answer + SQL + useful events + artifacts"]
@@ -114,6 +114,7 @@ Useful interactive commands:
 /skills
 /<skill> [task]
 /compact [focus]
+/trace on|off
 /mcp list
 /mcp start <server-id>
 /mcp stop <server-id>
@@ -276,6 +277,7 @@ See the [test pipeline](docs/test-pipeline.md) for the three complex PostgreSQL 
 
 - [SDK Guide](docs/sdk/README.md)
 - [SDK API Reference](docs/sdk/api-reference.md)
+- [CLI Guide](docs/cli/README.md)
 - [Product Functional Design](docs/product-functional-overview.md)
 - [Agent and Extension Runtime](docs/agent/README.md)
 - [Test Pipeline](docs/test-pipeline.md)

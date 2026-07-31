@@ -60,7 +60,13 @@ const publicRootFiles = [
   'THIRD_PARTY_NOTICES.md',
 ];
 const publicDocFiles = ['docs/product-functional-overview.md', 'docs/test-pipeline.md'];
-const publicDocDirectories = ['docs/agent', 'docs/ai-sql', 'docs/foundation', 'docs/sdk'];
+const publicDocDirectories = [
+  'docs/agent',
+  'docs/ai-sql',
+  'docs/cli',
+  'docs/foundation',
+  'docs/sdk',
+];
 const releaseRoot = join(repositoryRoot, 'release');
 const releaseDirectory = join(releaseRoot, `SchemaNaut-v${version}`);
 const artifactName = `schemanaut-v${version}.tgz`;

@@ -405,7 +405,7 @@ for (const result of run.queryResults) {
 }
 ```
 
-The SDK/API/CLI payload contains at most 1,000 rows per execution. The Agent receives at most two rows in a transient model-only observation. Neither payload is written to conversation messages, durable Session history, Agent run history, or user preferences. `hasMore: true` means the database produced more rows than the interactive limit.
+The SDK/API/CLI payload contains at most 1,000 rows per execution. The transient model-only projection defaults to at most 100 rows and 64 KiB, while honoring a smaller caller-requested preview. Neither payload is written to conversation messages, durable Session history, Agent run history, or user preferences. `hasMore: true` means the database produced more rows than the interactive limit.
 
 The in-process cache contains only that bounded interactive payload and expires automatically. A restored Session therefore has no historical rows. Re-execute the SQL when an interactive result is needed again. For a complete export, use the lower-level database query/export path or ask the Agent to create an export artifact; stream the database result directly to the destination rather than routing it through the conversation.
 
@@ -735,6 +735,7 @@ Inside chat:
 /skills
 /<skill> [task]
 /compact [focus]
+/trace on|off
 /mcp [list|start <id>|stop <id>]
 /exit
 ```
@@ -769,6 +770,7 @@ Rules for a host application:
 ## 18. Further reading
 
 - [SDK API Reference](api-reference.md)
+- [CLI Guide](../cli/README.md)
 - [Agent and Extension Runtime](../agent/README.md)
 - [AI SQL Engineering Documentation](../ai-sql/README.md)
 - [Product Functional Design](../product-functional-overview.md)

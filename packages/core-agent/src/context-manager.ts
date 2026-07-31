@@ -56,7 +56,7 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
 const DEFAULT_KEEP_RECENT_MESSAGES = 12;
 const DEFAULT_MAX_TOOL_RESULT_CHARS = 1_200;
 const DEFAULT_WARNING_THRESHOLD_RATIO = 0.7;
-const DEFAULT_COMPACTION_THRESHOLD_RATIO = 0.85;
+const DEFAULT_COMPACTION_THRESHOLD_RATIO = 1;
 const COMPACTION_PROMPT = [
   'You are a loss-aware context compactor for a database Agent.',
   'Create a concise semantic checkpoint that lets the Agent continue the same task without the omitted transcript.',

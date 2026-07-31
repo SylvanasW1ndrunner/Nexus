@@ -87,16 +87,6 @@ export function updateAgentTask(plan: AgentTaskPlan, input: UpdateAgentTaskInput
     input.evidence === undefined
       ? current.evidence
       : [...current.evidence, normalizeEvidence(input.evidence, now)];
-  if (status === 'completed' && !evidence.some((item) => item.kind !== 'observation')) {
-    throw new Error(
-      `Task ${taskId} requires concrete tool, database, artifact, or user evidence before completion.`,
-    );
-  }
-  if (status === 'cancelled' && !evidence.some((item) => item.kind !== 'observation')) {
-    throw new Error(
-      `Task ${taskId} can be cancelled only with concrete runtime or user-confirmation evidence.`,
-    );
-  }
   const nextDescription =
     input.description === undefined ? current.description : optionalText(input.description);
   const currentWithoutDescription = { ...current };
@@ -138,14 +128,7 @@ export function currentAgentTask(plan: AgentTaskPlan | undefined): AgentTaskItem
 
 export function unresolvedAgentTasks(plan: AgentTaskPlan | undefined): AgentTaskItem[] {
   return (
-    plan?.tasks.filter(
-      (task) =>
-        task.status !== 'completed' &&
-        !(
-          task.status === 'cancelled' &&
-          task.evidence.some((evidence) => evidence.kind !== 'observation')
-        ),
-    ) ?? []
+    plan?.tasks.filter((task) => task.status !== 'completed' && task.status !== 'cancelled') ?? []
   );
 }
 
@@ -156,26 +139,13 @@ export function isAgentTaskPlanComplete(plan: AgentTaskPlan | undefined): boolea
 export function renderAgentTaskPlanContext(plan: AgentTaskPlan | undefined): string | undefined {
   if (!plan) return undefined;
   const tasks = plan.tasks
-    .map((task) => {
-      const criteria =
-        task.acceptanceCriteria.length === 0
-          ? ''
-          : `\n  Completion: ${task.acceptanceCriteria.join('; ')}`;
-      const evidence =
-        task.evidence.length === 0
-          ? ''
-          : `\n  Evidence: ${task.evidence
-              .slice(-3)
-              .map((item) => item.summary)
-              .join('; ')}`;
-      return `- [${task.status}] ${task.id}: ${task.title}${criteria}${evidence}`;
-    })
+    .map((task) => `- [${task.status}] ${task.id}: ${task.title}`)
     .join('\n');
   return [
     '<task_plan>',
     `Goal: ${plan.goal}`,
     tasks,
-    'Use task tools to keep this plan accurate. Do not claim completion while required tasks remain pending or in progress.',
+    'Keep this plan concise and update it when useful. Runtime tool outcomes independently verify completion.',
     '</task_plan>',
   ].join('\n');
 }

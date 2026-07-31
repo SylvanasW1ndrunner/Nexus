@@ -28,13 +28,13 @@ import {
 } from './agent-knowledge-projection.js';
 import { optionalPositiveInteger, optionalString, requireString } from './validation.js';
 
-const DEFAULT_PREVIEW_ROWS = 2;
+const DEFAULT_PREVIEW_ROWS = 100;
 const DEFAULT_EXECUTION_ROWS = 1_000;
 const DEFAULT_RESULT_TTL_MS = 60 * 60 * 1_000;
 const DEFAULT_MAX_STORED_RESULTS = 100;
 const DEFAULT_MAX_STORED_RESULT_CHARS = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_STORED_RESULT_BYTES = 64 * 1024 * 1024;
-const MAX_MODEL_RESULT_CHARS = 10_000;
+const MAX_MODEL_RESULT_CHARS = 64 * 1024;
 const MAX_RESULT_READ_ROWS = 1_000;
 const DDL_KINDS = new Set(['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'COMMENT', 'RENAME']);
 
@@ -67,6 +67,11 @@ export type AiSqlToolDependencies = {
     | undefined
     | Promise<ActiveDatabaseConnection | undefined>;
   resultStore?: AiSqlResultStore;
+  ensureSchemaFresh?: (input: {
+    connectionId: string;
+    force: boolean;
+    signal?: AbortSignal;
+  }) => Promise<void>;
   onSchemaChanged?: (input: {
     connectionId: string;
     sql: string;
@@ -327,7 +332,8 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
   registry.register(
     {
       name: 'resource_list',
-      description: 'List database resources inside an optional database, schema, or table scope.',
+      description:
+        'Primary fast path for database metadata: list resources inside an optional database, schema, or table scope before querying system catalogs.',
       inputSchema: objectSchema(
         {
           scope: { type: 'string' },
@@ -341,22 +347,48 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
       requiredPermission: 'read',
       source: 'schema-rag',
     },
-    async (args) => {
+    async (args, context) => {
       const active = await requireActiveConnection(dependencies.getActiveConnection);
       const parentReference = optionalString(args, 'scope');
       const kinds = optionalStringArray(args, 'kinds');
       const limit = optionalPositiveInteger(args, 'limit', 200);
-      const catalog = rag.getCatalog(active.connectionId);
-      const parentId =
-        parentReference === undefined
-          ? undefined
-          : resolveAgentResourceReference(catalog, parentReference);
-      const nodes = rag.listResources({
-        connectionId: active.connectionId,
-        ...(parentId === undefined ? {} : { parentId }),
-        ...(kinds === undefined ? {} : { kinds }),
-        ...(limit === undefined ? {} : { limit }),
-      });
+      let catalog = rag.getCatalog(active.connectionId);
+      let parentId: string | undefined;
+      try {
+        parentId =
+          parentReference === undefined
+            ? undefined
+            : resolveAgentResourceReference(catalog, parentReference);
+      } catch (error) {
+        if (!dependencies.ensureSchemaFresh) throw error;
+        await dependencies.ensureSchemaFresh({
+          connectionId: active.connectionId,
+          force: true,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        });
+        catalog = rag.getCatalog(active.connectionId);
+        parentId =
+          parentReference === undefined
+            ? undefined
+            : resolveAgentResourceReference(catalog, parentReference);
+      }
+      const nodes =
+        parentReference === undefined && kinds !== undefined && kinds.length > 0
+          ? Object.values(catalog.nodes)
+              .filter((node) => kinds.includes(node.kind))
+              .sort(
+                (left, right) =>
+                  left.kind.localeCompare(right.kind) ||
+                  left.canonicalName.localeCompare(right.canonicalName) ||
+                  left.resourceId.localeCompare(right.resourceId),
+              )
+              .slice(0, limit)
+          : rag.listResources({
+              connectionId: active.connectionId,
+              ...(parentId === undefined ? {} : { parentId }),
+              ...(kinds === undefined ? {} : { kinds }),
+              ...(limit === undefined ? {} : { limit }),
+            });
       return {
         resources: nodes.map((node) => projectResourceSummary(catalog, node)),
       };
@@ -379,11 +411,23 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
       requiredPermission: 'read',
       source: 'schema-rag',
     },
-    async (args) => {
+    async (args, context) => {
       const active = await requireActiveConnection(dependencies.getActiveConnection);
       const reference = requireString(args, 'resource');
-      const catalog = rag.getCatalog(active.connectionId);
-      const resourceId = resolveAgentResourceReference(catalog, reference);
+      let catalog = rag.getCatalog(active.connectionId);
+      let resourceId: string;
+      try {
+        resourceId = resolveAgentResourceReference(catalog, reference);
+      } catch (error) {
+        if (!dependencies.ensureSchemaFresh) throw error;
+        await dependencies.ensureSchemaFresh({
+          connectionId: active.connectionId,
+          force: true,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        });
+        catalog = rag.getCatalog(active.connectionId);
+        resourceId = resolveAgentResourceReference(catalog, reference);
+      }
       const resource = rag.getResource({ connectionId: active.connectionId, resourceId });
       return projectResourceDetail(catalog, resource);
     },
@@ -408,13 +452,14 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
       requiredPermission: 'read',
       source: 'schema-rag',
     },
-    async (args) => {
+    async (args, context) => {
       const active = await requireActiveConnection(dependencies.getActiveConnection);
       const query = requireString(args, 'query');
       const limit = optionalPositiveInteger(args, 'limit', 8);
       const maxContextTokens = optionalPositiveInteger(args, 'maxContextTokens', 1_500);
       const expandHops = optionalNonNegativeInteger(args, 'expandHops', 1);
-      const items = await rag.searchAsync({
+      const search = () =>
+        rag.searchAsync({
         connectionId: active.connectionId,
         query,
         ...(limit === undefined ? {} : { limit }),
@@ -422,6 +467,15 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
         ...(expandHops === undefined ? {} : { expandHops }),
         includeRelations: true,
       });
+      let items = await search();
+      if (items.length === 0 && dependencies.ensureSchemaFresh) {
+        await dependencies.ensureSchemaFresh({
+          connectionId: active.connectionId,
+          force: true,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        });
+        items = await search();
+      }
       return {
         items: items.map(projectKnowledgeSearchResult),
       };
@@ -484,11 +538,21 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
         sql,
         result,
       });
+      const changesSchema = parsed.statementKinds.some((kind) => DDL_KINDS.has(kind));
+      let schemaRefresh: NonNullable<
+        ReturnType<typeof runtimeCompletionEvidence>['schemaRefresh']
+      > = changesSchema
+        ? result.transaction?.rolledBack === true
+          ? 'rolled-back'
+          : dependencies.onSchemaChanged
+            ? 'refreshed'
+            : 'failed'
+        : 'not-required';
       let schemaRefreshWarning: string | undefined;
       if (
         dependencies.onSchemaChanged &&
         result.transaction?.rolledBack !== true &&
-        parsed.statementKinds.some((kind) => DDL_KINDS.has(kind))
+        changesSchema
       ) {
         try {
           await dependencies.onSchemaChanged({
@@ -498,6 +562,7 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
             result,
           });
         } catch {
+          schemaRefresh = 'failed';
           schemaRefreshWarning =
             'SQL 已成功执行，但 Schema 知识目录刷新失败。不要重新执行该 DDL；请手动刷新 Schema 后再检索新结构。';
         }
@@ -510,10 +575,11 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
       return createAgentToolResultEnvelope({
         modelProjection,
         durableSummary: executionSummary(modelProjection),
-        completionEvidence: {
-          kind: parsed.requiredPermission === 'read' ? 'database-result' : 'database-write',
-          deliveryReady: true,
-        },
+        completionEvidence: runtimeCompletionEvidence({
+          parsed,
+          result: stored.result,
+          schemaRefresh,
+        }),
       });
     },
   );
@@ -684,6 +750,34 @@ function executionSummary(preview: Record<string, unknown>): Record<string, unkn
   const { rows: _rows, ...summary } = preview;
   void _rows;
   return summary;
+}
+
+function runtimeCompletionEvidence(input: {
+  parsed: SqlParseResult;
+  result: QueryExecutionResult;
+  schemaRefresh: 'not-required' | 'refreshed' | 'failed' | 'rolled-back';
+}) {
+  const transactionOutcome =
+    input.result.transaction?.rolledBack === true
+      ? ('rolled-back' as const)
+      : input.result.transaction?.committed === true
+        ? ('committed' as const)
+        : ('not-started' as const);
+  return {
+    kind:
+      input.parsed.requiredPermission === 'read'
+        ? ('database-result' as const)
+        : ('database-write' as const),
+    deliveryReady: true,
+    source: 'runtime' as const,
+    executionId: input.result.queryId,
+    statementKinds: [...input.parsed.statementKinds],
+    requiredPermission: input.parsed.requiredPermission,
+    rowCount: input.result.rowCount,
+    returnedRowCount: input.result.returnedRowCount ?? input.result.rows.length,
+    schemaRefresh: input.schemaRefresh,
+    transactionOutcome,
+  };
 }
 
 function boundedModelRows(

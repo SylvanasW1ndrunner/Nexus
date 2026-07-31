@@ -23,19 +23,20 @@ schemanaut skills [-C project]
 - `/sessions`
 - `/skills`
 - `/<skill-name> [args]`
+- `/trace on|off`
 - `/compact [关注点]`
 - `/mcp list`
 - `/mcp start <server-id>`
 - `/mcp stop <server-id>`
 - `/exit`
 
-Agent 运行中继续输入普通文字，会追加为当前任务的新要求；许可提示中输入新要求会拒绝原操作并转向新要求。`Ctrl+C` 取消当前执行但保留 Session。MCP Server 的新增、删除和 Secret 配置使用项目 `.schemanaut/mcp.json`、SDK 或 REST API 完成。
+Agent 运行中继续输入普通文字，会追加为当前任务的新要求；许可提示中输入新要求会拒绝原操作并转向新要求。`Ctrl+C` 取消当前执行但保留 Session。`/trace` 默认开启，显示有用的运行阶段和即将执行的完整 SQL，不显示隐藏推理。MCP Server 的新增、删除和 Secret 配置使用项目 `.schemanaut/mcp.json`、SDK 或 REST API 完成。
 
 ## 3. 三层输出
 
 ### 最终用户
 
-默认只显示当前工作、生成 SQL、重要修正、批准、结果和文件。
+默认显示当前工作、生成 SQL、重要修正、批准、结果和文件。交互式终端在最终答复前清理本轮临时进度，使最终结果保持清晰；非交互日志保留这些轨迹，便于排障和演示复盘。
 
 ### SDK/API 集成者
 

@@ -25,6 +25,18 @@ const overheadThresholdMs = positiveNumber(
   process.env.DBAGENT_SCENARIO_PLATFORM_OVERHEAD_P95_MS,
   50,
 );
+const scenarioFilter = new Set(
+  (process.env.DBAGENT_SCENARIO_PERF_FILTER ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+const knownScenarioNames = new Set([
+  'ecommerce-finance',
+  'traffic-cleaning-anomaly',
+  'big-science-statistics',
+  'big-science-result-page',
+]);
 const databaseConfig = {
   host: process.env.DBAGENT_TEST_PG_HOST ?? '127.0.0.1',
   port: Number(process.env.DBAGENT_TEST_PG_PORT ?? '5432'),
@@ -84,6 +96,9 @@ async function main() {
       await client.query("select current_setting('server_version') as server_version")
     ).rows[0].server_version;
     const scale = await readScale();
+    for (const name of scenarioFilter) {
+      assert(knownScenarioNames.has(name), `Unknown performance scenario filter: ${name}`);
+    }
     assert(
       scale.ecommerce_orders >= 20_000,
       `电商性能 Fixture 至少需要 20000 个订单，实际为 ${scale.ecommerce_orders}`,
@@ -98,7 +113,7 @@ async function main() {
     );
     const scenarios = [];
 
-    scenarios.push(
+    if (shouldRunScenario('ecommerce-finance')) scenarios.push(
       await benchmarkScenario({
         name: 'ecommerce-finance',
         sql: ECOMMERCE_QUERY,
@@ -109,7 +124,7 @@ async function main() {
         },
       }),
     );
-    scenarios.push(
+    if (shouldRunScenario('traffic-cleaning-anomaly')) scenarios.push(
       await benchmarkScenario({
         name: 'traffic-cleaning-anomaly',
         sql: TRAFFIC_QUERY,
@@ -124,7 +139,7 @@ async function main() {
         },
       }),
     );
-    scenarios.push(
+    if (shouldRunScenario('big-science-statistics')) scenarios.push(
       await benchmarkScenario({
         name: 'big-science-statistics',
         sql: SCIENCE_QUERY,
@@ -138,7 +153,7 @@ async function main() {
         },
       }),
     );
-    scenarios.push(
+    if (shouldRunScenario('big-science-result-page')) scenarios.push(
       await benchmarkScenario({
         name: 'big-science-result-page',
         sql: SCIENCE_RESULT_PAGE_QUERY,
@@ -147,6 +162,7 @@ async function main() {
         },
       }),
     );
+    assert(scenarios.length > 0, 'The performance scenario filter selected no scenarios.');
 
     const report = {
       generatedAt: new Date().toISOString(),
@@ -163,6 +179,7 @@ async function main() {
         comparedPaths: ['pg.Client.query', 'DatabaseAccessRuntime + PostgresConnector'],
         gate: 'SchemaNaut P95 minus direct pg P95',
         platformOverheadP95ThresholdMs: overheadThresholdMs,
+        scenarioFilter: [...scenarioFilter],
       },
       scale,
       scenarios,
@@ -265,12 +282,16 @@ async function runThroughSchemaNaut(sql) {
     authorization: { permissionMode: 'read' },
   });
   assert(job.state === 'succeeded' && job.result, `SchemaNaut query failed for ${profileId}`);
-  const batch = await runtime.readResult(job.result.id, { limit: 10_000 });
-  assert(batch.complete, 'SchemaNaut benchmark result did not fit in one 10000-row page');
-  return {
-    rowCount: job.result.rowCount ?? batch.rows.length,
-    rows: batch.rows,
-  };
+  try {
+    const batch = await runtime.readResult(job.result.id, { limit: 10_000 });
+    assert(batch.complete, 'SchemaNaut benchmark result did not fit in one 10000-row page');
+    return {
+      rowCount: job.result.rowCount ?? batch.rows.length,
+      rows: batch.rows,
+    };
+  } finally {
+    await runtime.releaseResult(job.result.id);
+  }
 }
 
 async function measure(operation) {
@@ -325,6 +346,10 @@ function positiveNumber(value, fallback) {
   if (value === undefined) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function shouldRunScenario(name) {
+  return scenarioFilter.size === 0 || scenarioFilter.has(name);
 }
 
 function assert(condition, message) {

@@ -31,6 +31,16 @@ describe('SchemaNaut system Agent Skills', () => {
     }
   });
 
+  it('keeps built-in Skills procedural instead of prescribing concrete SQL choices', async () => {
+    const skills = await loadSystemSkills();
+    const writeAndVerify = skills.find((skill) => skill.name === 'write-and-verify');
+
+    expect(writeAndVerify).toBeDefined();
+    expect(writeAndVerify?.instructions).not.toMatch(
+      /最小变更|先\s*`DROP`|\bTRUNCATE\b|create-new-object/i,
+    );
+  });
+
   it('provides a metadata-only system catalog', async () => {
     const registry = await createSystemSkillRegistry();
     expect(registry.catalogForModel()).toHaveLength(4);
