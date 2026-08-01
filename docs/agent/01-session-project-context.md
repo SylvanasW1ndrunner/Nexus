@@ -21,6 +21,8 @@ Session 保存：
 
 同一 Session 的写入串行化；不同 Session 可以并行。用户在运行或批准期间输入新消息时，旧批准失效，新消息用于补充或替换当前目标。
 
+完成纠正、Provider Tool Call 重试、无进展换路、连续失败恢复和无 Tool Finalize 属于当前 Run 的控制指令，只加入本轮固定上下文，不写入 Session。恢复旧版本 Session 时会清理这些已知遗留指令，避免“本轮工具不可用”等状态污染下一次请求。
+
 ## 3. 项目目录
 
 ```text
@@ -42,12 +44,24 @@ project/
 - Session SQLite 默认保存在用户应用数据目录，通过规范项目路径生成 Project Key；不默认写入项目仓库。多个 Project 共用一个 SQLite 文件时，Session 的查询和修改仍在持久层按 Project Key 隔离。
 - 打开未初始化目录仍可工作；只有显式执行 `schemanaut init` 才创建项目配置。
 
-## 4. 上下文来源
+## 4. 项目上下文编译
+
+Runtime 打开 Project 时只编译稳定、可复用的项目事实，不扫描文件正文代替 Agent 工作：
+
+- 识别语言、包管理器和常见工程清单。
+- 加载根目录或子目录中的 `AGENTS.md`、`CLAUDE.md`，以及 `.schemanaut/AGENT.md`；子目录说明只作用于对应路径。
+- 汇总当前已连接的数据库能力、MCP Server 状态和 Skill 目录项。
+- 忽略 `.git`、`node_modules`、构建产物、缓存、符号链接和嵌套 `.schemanaut`，并限制扫描深度、文件数与说明文件大小。
+
+编译结果分成两部分：`modelContext` 是可读项目事实；`fingerprint`、扫描计数和截断标志只用于本地失效判断与测试，绝不进入模型消息。
+
+## 5. 上下文来源
 
 | 来源            | 加载方式                           |
 | --------------- | ---------------------------------- |
-| 系统内核        | 每轮稳定加载                       |
-| 项目 `AGENT.md` | 项目打开时加载，保持简短           |
+| Runtime 协议    | 每轮稳定加载，只定义工具和证据协议 |
+| 用户角色提示词  | 默认通用角色；宿主可追加或替换     |
+| 项目说明        | 编译 Project 说明和稳定能力摘要    |
 | 用户长期偏好    | 从 SQLite 检索相关项，可查看和删除 |
 | Session         | 当前计划、语义检查点和最近完整消息 |
 | Skill           | 只在显式或隐式选中后加载正文       |
@@ -56,22 +70,27 @@ project/
 
 数据库事实、查询行和知识索引不复制进 Session。SQL Tool 只持久化无行值摘要；可能变化的事实在需要时重新查询。
 
-## 5. 压缩与恢复
+## 6. 压缩与恢复
 
-- 接近模型物理窗口时先缩短旧 Tool 输出，再生成累积语义检查点。
+- 模型物理窗口和最大输出量来自 Model Registry；Provider 能返回元数据时使用其上下文长度，不能返回时使用明确的保守元数据回退，不允许用户设置一个与模型无关的“会话预算”代替物理窗口。
+- 达到窗口预警线时先缩短旧 Tool 输出；真正达到压缩阈值时生成累积语义检查点。压缩阈值相对于当前模型可用输入窗口计算，而不是按固定对话轮数触发。
 - 计划、未完成事项、用户决定、精确 SQL、必要结果和错误必须保留。
+- 文件、命令、数据库等能力使用同一通用检查点结构；压缩器不假定当前任务一定是 SQL。
 - 原始消息按序保存在 SQLite，压缩只改变模型工作视图。
 - 支持手动 `/compact [focus]`。
 - 项目重新打开时，通过项目路径列出最近 Session；指定 `sessionId` 只能恢复同一 Project 的 Session。旧数据若已保存 `session.project` 会在迁移时回填归属；没有 Project 的更早数据不会被任一 Project Runtime 当作全局 Session。
 
-## 6. 工程与验收
+## 7. 工程与验收
 
 工程入口：
 
 - Session 类型：`packages/core-agent/src/types.ts`
 - SQLite：`packages/core-agent/src/session-store.ts`
-- 项目上下文：`packages/core-agent/src/project-context.ts`
+- Project 生命周期：`packages/core-agent/src/project-context.ts`
+- 项目上下文编译：`packages/core-tools/src/project-context-compiler.ts`
 - 压缩：`packages/core-agent/src/context-manager.ts`
+- 指令分层：`packages/core-agent/src/instruction-compiler.ts`
+- 模型元数据：`packages/core-llm/src/model-registry.ts`、`packages/core-llm/src/openai-compatible-provider.ts`
 
 验收：
 
@@ -80,3 +99,5 @@ project/
 - 同一 Session 并发写入不会交叉或丢失。
 - 项目配置可跨 Session 生效，Session 私有数据不进入项目目录。
 - 10,000 条历史消息能够恢复和构建有界模型工作视图。
+- Run 级纠偏指令在当前模型请求中可见，但不会进入 Session SQLite，下一次用户请求也不会继承；旧版遗留标记在恢复时迁移清理。
+- Project 指纹、文件计数、知识 Hash、Tool 激活版本和检查点内部 ID 不进入模型或用户事件。

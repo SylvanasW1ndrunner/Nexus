@@ -30,6 +30,7 @@ import type {
   AgentArtifactReference,
   AgentToolApprovalRequest,
   AgentUserEvent,
+  AgentSystemPrompt,
   ApprovalProvider,
 } from '@dbagent/core-agent';
 import type { SkillCatalogEntry, SkillOverlay, SkillRefreshResult } from '@dbagent/core-skills';
@@ -42,6 +43,7 @@ import type {
   McpServerSource,
   McpServerStatus,
   McpTransport,
+  ProcessRuntime,
 } from '@dbagent/core-tools';
 import type { UsageTracker } from '@dbagent/core-usage';
 import type { QueryExecutionResult, QuerySafetyReport, SavedConnection } from '@dbagent/shared';
@@ -91,9 +93,21 @@ export type DatabaseAgentRuntimeOptions = {
    * Session. Restored Sessions keep their own persisted overlay.
    */
   sessionSkills?: SkillOverlay[];
+  /** Default user-controlled role instructions. Runtime protocol and permissions remain enforced. */
+  systemPrompt?: AgentSystemPrompt;
+  /** Optional capability guidance layered below the role and above Project instructions. */
+  capabilityInstructions?: string[];
+  /** Optional allow-list applied to every Agent run unless overridden per run. */
+  allowedTools?: string[];
+  /** Deferred tools that should be directly visible without an initial tool_search call. */
+  pinnedTools?: string[];
   webAdapter?: AgentWebAdapter;
   /** Register the host-permission shell tool. Disabled by default. */
   enableShellTool?: boolean;
+  /** Register foreground/background process tools. enableShellTool also enables these for compatibility. */
+  enableProcessTools?: boolean;
+  /** Optional shared process runtime. It is closed with DatabaseAgentRuntime. */
+  processRuntime?: ProcessRuntime;
   dynamicToolDiscovery?: boolean;
   mcpSecretResolver?: McpSecretResolver;
   /** Lazily start trusted MCP configurations marked autoStart. Disabled by default. */
@@ -156,6 +170,10 @@ export type RunAiSqlAgentInput = {
   sessionSkills?: SkillOverlay[];
   maxIterations?: number;
   maxToolExecutionMs?: number;
+  systemPrompt?: AgentSystemPrompt;
+  capabilityInstructions?: string[];
+  allowedTools?: string[];
+  pinnedTools?: string[];
   onEvent?: (event: AgentUserEvent) => void | Promise<void>;
   signal?: AbortSignal;
 };

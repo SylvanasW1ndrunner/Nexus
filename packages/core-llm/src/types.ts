@@ -15,6 +15,9 @@ export type LlmTool = {
   name: string;
   description: string;
   inputSchema: JsonSchema;
+  /** Optional structured namespace retained until the final Provider mapping step. */
+  namespace?: string;
+  outputSchema?: JsonSchema;
 };
 
 export type LlmToolCall = {
@@ -136,6 +139,45 @@ export type LlmCapabilityStatus = 'supported' | 'unsupported' | 'unknown';
 
 export type LlmProviderCapabilities = Record<LlmCapabilityName, LlmCapabilityStatus>;
 
+export type LlmProviderProtocolCapabilityName =
+  | 'nativeDeferredTools'
+  | 'namespaceTools'
+  | 'toolReferences'
+  | 'parallelToolCalls'
+  | 'structuredToolResults'
+  | 'serverWebSearch'
+  | 'promptCaching';
+
+export type LlmProviderProtocolCapabilities = Record<
+  LlmProviderProtocolCapabilityName,
+  LlmCapabilityStatus
+>;
+
+export type LlmProviderProtocolProfileSource =
+  | 'default'
+  | 'builtin'
+  | 'provider-api'
+  | 'provider-declaration'
+  | 'user-declaration';
+
+/**
+ * Transport features are deliberately separate from model intelligence.
+ * A model may support tool calling while a proxy does not forward advanced
+ * tool-reference or deferred-loading protocol fields.
+ */
+export type LlmProviderProtocolProfile = {
+  protocol: string;
+  source: LlmProviderProtocolProfileSource;
+  capabilities: LlmProviderProtocolCapabilities;
+};
+
+export type LlmProviderProtocolProfileInput = Omit<
+  LlmProviderProtocolProfile,
+  'capabilities'
+> & {
+  capabilities?: Partial<LlmProviderProtocolCapabilities>;
+};
+
 export const UNKNOWN_LLM_CAPABILITIES: Readonly<LlmProviderCapabilities> = Object.freeze({
   chat: 'unknown',
   streaming: 'unknown',
@@ -146,12 +188,24 @@ export const UNKNOWN_LLM_CAPABILITIES: Readonly<LlmProviderCapabilities> = Objec
   rerank: 'unknown',
 });
 
+export const UNKNOWN_LLM_PROVIDER_PROTOCOL_CAPABILITIES: Readonly<LlmProviderProtocolCapabilities> =
+  Object.freeze({
+    nativeDeferredTools: 'unknown',
+    namespaceTools: 'unknown',
+    toolReferences: 'unknown',
+    parallelToolCalls: 'unknown',
+    structuredToolResults: 'unknown',
+    serverWebSearch: 'unknown',
+    promptCaching: 'unknown',
+  });
+
 export interface LlmProvider {
   readonly id: string;
   readonly name: string;
   readonly mode: LlmProviderMode;
   readonly protocol?: string;
   readonly capabilities?: Partial<LlmProviderCapabilities>;
+  readonly protocolProfile?: LlmProviderProtocolProfile;
 
   chat(request: LlmChatRequest): Promise<LlmChatResponse>;
   stream?(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent>;

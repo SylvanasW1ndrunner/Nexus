@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import {
   mkdir,
@@ -11,14 +10,19 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { AgentArtifactReference, ToolRegistry } from '@dbagent/core-agent';
+import {
+  createAgentToolResultEnvelope,
+  type AgentArtifactReference,
+  type ToolRegistry,
+} from '@dbagent/core-agent';
+import { ProcessRuntime } from './process-runtime.js';
 import { optionalPositiveInteger, optionalString, requireString } from './validation.js';
 
 const DEFAULT_MAX_READ_BYTES = 256 * 1024;
 const DEFAULT_MAX_OUTPUT_CHARS = 64 * 1024;
 const DEFAULT_MAX_SEARCH_MATCHES = 200;
-const PROCESS_TREE_KILL_GRACE_MS = 250;
 const SKIPPED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist']);
 
 export type WorkspaceToolOptions = {
@@ -26,6 +30,7 @@ export type WorkspaceToolOptions = {
   maxReadBytes?: number;
   maxOutputChars?: number;
   shellTimeoutMs?: number;
+  processRuntime?: ProcessRuntime;
   /**
    * Shell execution is intentionally opt-in because it runs with the host
    * process's operating-system permissions. File tools remain available when
@@ -179,6 +184,7 @@ export function registerWorkspaceTools(
       readonly: false,
       requiredPermission: 'edit',
       source: 'builtin',
+      completion: { role: 'deliverable', group: 'workspace-artifact' },
     },
     async (args, context) => {
       const path = await workspace.target(requireString(args, 'path'));
@@ -194,7 +200,10 @@ export function registerWorkspaceTools(
         Buffer.byteLength(content),
       );
       context.session.artifacts = artifact.artifacts;
-      return { path: workspace.display(path), bytes: Buffer.byteLength(content) };
+      return artifactEnvelope(artifact.artifact, {
+        path: workspace.display(path),
+        bytes: Buffer.byteLength(content),
+      });
     },
   );
 
@@ -217,6 +226,7 @@ export function registerWorkspaceTools(
       readonly: false,
       requiredPermission: 'edit',
       source: 'builtin',
+      completion: { role: 'deliverable', group: 'workspace-artifact' },
     },
     async (args, context) => {
       const path = await workspace.existing(requireString(args, 'path'));
@@ -243,11 +253,93 @@ export function registerWorkspaceTools(
         Buffer.byteLength(content),
       );
       context.session.artifacts = artifact.artifacts;
-      return {
+      return artifactEnvelope(artifact.artifact, {
         path: workspace.display(path),
         replacements: args.replaceAll === true ? occurrences : 1,
         bytes: Buffer.byteLength(content),
-      };
+      });
+    },
+  );
+
+  registry.register(
+    {
+      name: 'workspace_patch',
+      title: 'Patch project file',
+      aliases: ['apply patch', 'multi edit', '批量修改文件'],
+      tags: ['workspace', 'file', 'patch', 'edit'],
+      description:
+        'Atomically apply multiple ordered exact-text edits to one existing UTF-8 project file. The file is not changed if any edit cannot be validated.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          edits: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 50,
+            items: {
+              type: 'object',
+              properties: {
+                oldText: { type: 'string', minLength: 1 },
+                newText: { type: 'string' },
+                replaceAll: { type: 'boolean' },
+              },
+              required: ['oldText', 'newText'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['path', 'edits'],
+        additionalProperties: false,
+      },
+      dangerLevel: 'medium',
+      readonly: false,
+      requiredPermission: 'edit',
+      source: 'builtin',
+      exposure: 'deferred',
+      execution: { concurrency: 'write' },
+      completion: { role: 'deliverable', group: 'workspace-artifact' },
+    },
+    async (args, context) => {
+      const path = await workspace.existing(requireString(args, 'path'));
+      const info = await stat(path);
+      if (!info.isFile()) throw new Error('workspace_patch requires a file.');
+      if (info.size > maxReadBytes) {
+        throw new Error(`File is ${info.size} bytes; patch a smaller text artifact.`);
+      }
+      const edits = requirePatchEdits(args.edits);
+      let content = await readFile(path, 'utf8');
+      let replacements = 0;
+      for (let index = 0; index < edits.length; index += 1) {
+        const edit = edits[index]!;
+        const occurrences = content.split(edit.oldText).length - 1;
+        if (occurrences === 0) {
+          throw new Error(`workspace_patch edit ${index + 1}: oldText was not found.`);
+        }
+        if (occurrences > 1 && edit.replaceAll !== true) {
+          throw new Error(
+            `workspace_patch edit ${index + 1}: oldText occurs ${occurrences} times; provide a unique fragment or set replaceAll=true.`,
+          );
+        }
+        content =
+          edit.replaceAll === true
+            ? content.split(edit.oldText).join(edit.newText)
+            : content.replace(edit.oldText, edit.newText);
+        replacements += edit.replaceAll === true ? occurrences : 1;
+      }
+      await atomicWrite(path, content);
+      const artifact = registerArtifact(
+        context.session.artifacts ?? [],
+        workspace.display(path),
+        Buffer.byteLength(content),
+      );
+      context.session.artifacts = artifact.artifacts;
+      return artifactEnvelope(artifact.artifact, {
+        path: workspace.display(path),
+        edits: edits.length,
+        replacements,
+        bytes: Buffer.byteLength(content),
+      });
     },
   );
 
@@ -276,6 +368,7 @@ export function registerWorkspaceTools(
         const cwd = await workspace.existing(optionalString(args, 'cwd') ?? '.');
         if (!(await stat(cwd)).isDirectory()) throw new Error('shell cwd must be a directory.');
         return runShell({
+          sessionId: context.session.id,
           command: requireString(args, 'command'),
           cwd,
           timeoutMs: Math.min(
@@ -283,6 +376,9 @@ export function registerWorkspaceTools(
             300_000,
           ),
           maxOutputChars,
+          ...(options.processRuntime === undefined
+            ? {}
+            : { runtime: options.processRuntime }),
           ...(context.signal === undefined ? {} : { signal: context.signal }),
         });
       },
@@ -290,7 +386,7 @@ export function registerWorkspaceTools(
   }
 }
 
-class WorkspaceBoundary {
+export class WorkspaceBoundary {
   private readonly root: string;
 
   constructor(rootPath: string) {
@@ -456,7 +552,7 @@ function registerArtifact(
   existing: AgentArtifactReference[],
   path: string,
   sizeBytes: number,
-): { artifacts: AgentArtifactReference[] } {
+): { artifacts: AgentArtifactReference[]; artifact: AgentArtifactReference } {
   const previous = existing.find((artifact) => artifact.path === path);
   const artifact: AgentArtifactReference = {
     id: previous?.id ?? randomUUID(),
@@ -468,14 +564,66 @@ function registerArtifact(
   };
   return {
     artifacts: [...existing.filter((item) => item.path !== path), artifact],
+    artifact,
   };
 }
 
+function artifactEnvelope(
+  artifact: AgentArtifactReference,
+  projection: Record<string, unknown>,
+) {
+  return createAgentToolResultEnvelope({
+    modelProjection: projection,
+    userProjection: projection,
+    durableSummary: projection,
+    auditEvidence: { status: 'success', resultType: 'artifact' },
+    completionEvidence: {
+      kind: 'artifact',
+      deliveryReady: true,
+      outcome: 'succeeded',
+      source: 'runtime',
+      executionId: artifact.id,
+    },
+  });
+}
+
+function requirePatchEdits(value: unknown): Array<{
+  oldText: string;
+  newText: string;
+  replaceAll: boolean;
+}> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 50) {
+    throw new Error('Tool argument "edits" must contain between 1 and 50 edits.');
+  }
+  return value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`workspace_patch edit ${index + 1} must be an object.`);
+    }
+    const edit = item as Record<string, unknown>;
+    if (typeof edit.oldText !== 'string' || edit.oldText.length === 0) {
+      throw new Error(`workspace_patch edit ${index + 1} requires non-empty oldText.`);
+    }
+    if (typeof edit.newText !== 'string') {
+      throw new Error(`workspace_patch edit ${index + 1} requires string newText.`);
+    }
+    if (edit.replaceAll !== undefined && typeof edit.replaceAll !== 'boolean') {
+      throw new Error(`workspace_patch edit ${index + 1} replaceAll must be boolean.`);
+    }
+    return {
+      oldText: edit.oldText,
+      newText: edit.newText,
+      replaceAll: edit.replaceAll === true,
+    };
+  });
+}
+
 async function runShell(input: {
+  sessionId: string;
   command: string;
   cwd: string;
   timeoutMs: number;
   maxOutputChars: number;
+  runtime?: ProcessRuntime;
   signal?: AbortSignal;
 }): Promise<{
   exitCode: number | null;
@@ -484,141 +632,32 @@ async function runShell(input: {
   timedOut: boolean;
   truncated: boolean;
 }> {
-  if (input.signal?.aborted) throw shellAbortError();
-  return await new Promise((resolvePromise, reject) => {
-    const child = spawn(input.command, {
-      cwd: input.cwd,
-      shell: true,
-      detached: process.platform !== 'win32',
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: shellEnvironment(),
+  const ownsRuntime = input.runtime === undefined;
+  const runtime =
+    input.runtime ??
+    new ProcessRuntime({
+      spoolDirectory: join(tmpdir(), `schemanaut-shell-${randomUUID()}`),
+      maxProjectionBytes: input.maxOutputChars,
     });
-    let stdout = '';
-    let stderr = '';
-    let truncated = false;
-    const append = (current: string, chunk: Buffer): string => {
-      const combined = current + chunk.toString('utf8');
-      if (combined.length <= input.maxOutputChars) return combined;
-      truncated = true;
-      return combined.slice(0, input.maxOutputChars);
-    };
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout = append(stdout, chunk);
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr = append(stderr, chunk);
-    });
-    let timedOut = false;
-    let settled = false;
-    let stopping = false;
-    const cleanup = () => {
-      clearTimeout(timeout);
-      input.signal?.removeEventListener('abort', stop);
-    };
-    const stop = () => {
-      if (stopping) return;
-      stopping = true;
-      terminateProcessTree(child);
-    };
-    input.signal?.addEventListener('abort', stop, { once: true });
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      stop();
-    }, input.timeoutMs);
-    if (input.signal?.aborted) stop();
-    child.once('error', (error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    });
-    child.once('close', (exitCode) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolvePromise({ exitCode, stdout, stderr, timedOut, truncated });
-    });
-  });
-}
-
-function terminateProcessTree(child: ReturnType<typeof spawn>): void {
-  const pid = child.pid;
-  if (pid === undefined) {
-    child.kill();
-    return;
-  }
-  if (process.platform === 'win32') {
-    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-    const executable = systemRoot ? join(systemRoot, 'System32', 'taskkill.exe') : 'taskkill.exe';
-    const killer = spawn(executable, ['/PID', String(pid), '/T', '/F'], {
-      env: shellEnvironment(),
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-    let handled = false;
-    const fallback = () => {
-      if (handled) return;
-      handled = true;
-      child.kill();
-    };
-    killer.once('error', fallback);
-    killer.once('close', (exitCode) => {
-      if (exitCode !== 0) fallback();
-      else handled = true;
-    });
-    return;
-  }
-
-  signalProcessGroup(pid, 'SIGTERM', child);
-  const forceKill = setTimeout(() => {
-    signalProcessGroup(pid, 'SIGKILL');
-  }, PROCESS_TREE_KILL_GRACE_MS);
-  forceKill.unref();
-}
-
-function signalProcessGroup(
-  pid: number,
-  signal: NodeJS.Signals,
-  fallbackChild?: ReturnType<typeof spawn>,
-): void {
   try {
-    process.kill(-pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
-    fallbackChild?.kill(signal);
+    const result = await runtime.exec({
+      sessionId: input.sessionId,
+      command: input.command,
+      cwd: input.cwd,
+      timeoutMs: input.timeoutMs,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    });
+    return {
+      exitCode: result.exitCode,
+      stdout: result.output.stdout.text,
+      stderr: result.output.stderr.text,
+      timedOut: result.timedOut,
+      truncated: result.output.stdout.truncated || result.output.stderr.truncated,
+      ...(result.error === undefined ? {} : { error: result.error }),
+    };
+  } finally {
+    if (ownsRuntime) await runtime.close();
   }
-}
-
-function shellAbortError(): Error {
-  const error = new Error('Shell command was aborted before it started.');
-  error.name = 'AbortError';
-  return error;
-}
-
-function shellEnvironment(): NodeJS.ProcessEnv {
-  const allowed = [
-    'COMSPEC',
-    'HOME',
-    'LANG',
-    'LC_ALL',
-    'LOCALAPPDATA',
-    'PATH',
-    'PATHEXT',
-    'SYSTEMDRIVE',
-    'SYSTEMROOT',
-    'TEMP',
-    'TMP',
-    'TMPDIR',
-    'USERPROFILE',
-    'WINDIR',
-  ] as const;
-  return Object.fromEntries(
-    allowed.flatMap((key) => {
-      const value = process.env[key];
-      return value === undefined ? [] : [[key, value]];
-    }),
-  );
 }
 
 async function pathExists(path: string): Promise<boolean> {

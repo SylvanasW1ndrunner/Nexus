@@ -200,6 +200,11 @@ describe('adaptive Agent orchestration', () => {
         (message) => message.role === 'system' && message.content.includes('No-progress guard'),
       ),
     ).toBe(true);
+    expect(
+      result.session.messages.some(
+        (message) => message.role === 'system' && message.content.includes('No-progress guard'),
+      ),
+    ).toBe(false);
   });
 });
 

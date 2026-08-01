@@ -8,6 +8,7 @@ export * from './openai-compatible-provider.js';
 export * from './retry-policy.js';
 export * from './prompt-runtime.js';
 export * from './provider-presets.js';
+export * from './provider-protocol-profile.js';
 export * from './reliability.js';
 export * from './response-cache.js';
 export * from './routing.js';

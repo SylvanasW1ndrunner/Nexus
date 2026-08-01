@@ -4,6 +4,7 @@ import type {
   LlmMessage,
   LlmRouter,
   LlmTool,
+  LlmToolCall,
 } from '@dbagent/core-llm';
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
 import { stringifyPublicJson } from '@dbagent/shared';
@@ -20,6 +21,7 @@ import {
   type AgentContextManagerOptions,
 } from './context-manager.js';
 import { PermissionManager, requiredPermissionForTool } from './permission-manager.js';
+import { compileAgentInstructions, instructionOptionsFromRun } from './instruction-compiler.js';
 import { assertSameAgentProject } from './project-context.js';
 import { addUsage, appendMessage, createAgentSession, createMessage } from './session.js';
 import { redactPersistedAgentString, redactPersistedAgentValue } from './redaction.js';
@@ -29,7 +31,6 @@ import { persistAgentStreamEvents } from './stream-store.js';
 import type { AgentStreamStore } from './stream-store.js';
 import {
   isAgentTaskPlanComplete,
-  renderAgentTaskPlanContext,
   unresolvedAgentTasks,
 } from './task-plan.js';
 import {
@@ -41,6 +42,8 @@ import {
   verifyAgentCompletion,
 } from './completion-verifier.js';
 import { createSingleToolCallExecutionGrant } from './tool-execution-authorization.js';
+import { ToolExecutionRouter } from './tool-execution-router.js';
+import { ToolExposurePlanner } from './tool-exposure-planner.js';
 import { isAgentToolResultEnvelope } from './tool-result.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { AgentUserEventProjector, isUserRelevantAgentEvent } from './user-events.js';
@@ -50,12 +53,10 @@ import type {
   AgentRunOptions,
   AgentRunStore,
   AgentRunResult,
-  AgentToolContext,
   AgentToolApproval,
   AgentToolApprovalRecord,
   AgentToolCompletionEvidence,
   AgentToolExecutionRecord,
-  AgentToolHandler,
   AgentToolSource,
   AgentContextCompressionReport,
   AgentContextCompactionResult,
@@ -73,7 +74,14 @@ const MAX_AUTO_COMPACTIONS_PER_ITERATION = 4;
 const MIN_COMPACTION_REDUCTION_RATIO = 0.05;
 const DEFAULT_AUTO_COMPACTION_RECENT_MESSAGES = 12;
 const MAX_COMPACTION_OUTPUT_TOKENS = 4_096;
-const TOOL_ABORT_SETTLE_TIMEOUT_MS = 500;
+const LEGACY_RUN_SCOPED_INSTRUCTION_PREFIXES = [
+  'Runtime finalization phase:',
+  'The previous response contained textual tool-call markup',
+  'Completion verification failed.',
+  'Finalize the task now.',
+  'No-progress guard:',
+  'Recovery required after ',
+] as const;
 export class ReactAgent {
   private readonly permissionManager: PermissionManager;
   private readonly now: () => string;
@@ -86,6 +94,7 @@ export class ReactAgent {
   private readonly runStore: AgentRunStore | undefined;
   private readonly createRunId: () => string;
   private readonly runRecovery: Promise<number> | undefined;
+  private readonly toolExecutionRouter: ToolExecutionRouter;
 
   constructor(
     private readonly llmRouter: LlmRouter,
@@ -105,6 +114,9 @@ export class ReactAgent {
     this.runStore = dependencies.runStore;
     this.runRecovery = this.runStore?.recoverInterrupted(this.now());
     this.runCoordinator = dependencies.runCoordinator ?? new AgentRunCoordinator();
+    this.toolExecutionRouter = new ToolExecutionRouter(this.toolRegistry, {
+      ...(dependencies.toolHooks === undefined ? {} : { hooks: dependencies.toolHooks }),
+    });
   }
 
   steer(sessionId: string, message: string): boolean {
@@ -132,6 +144,7 @@ export class ReactAgent {
     await this.runRecovery;
     const runStartedAt = Date.now();
     const runId = this.createRunId();
+    const toolActivationPhase = `run:${runId}`;
     const runCreatedAt = this.now();
     const session =
       options.initialSession === undefined
@@ -184,7 +197,7 @@ export class ReactAgent {
       );
       await emitUserEvent({
         type: 'goal-understood',
-        message: '已理解本次请求，正在结合当前数据库与项目上下文处理。',
+        message: '已理解本次请求，正在结合当前项目与可用能力处理。',
       });
       await this.saveSession(session);
 
@@ -218,6 +231,7 @@ export class ReactAgent {
       };
       const toolExecutions: AgentToolExecutionRecord[] = [];
       const transientToolResults = new Map<string, string>();
+      const runScopedInstructions = new Map<string, LlmMessage>();
       const contextCompression: AgentContextCompressionReport[] = [];
       let finalText = '';
       let finalizeCorrectionCount = 0;
@@ -255,10 +269,38 @@ export class ReactAgent {
         pinnedMessages: runtimePinnedMessages(
           pinnedPreferenceMessages,
           session,
-          options.projectInstructions,
-          options.skillCatalog,
+          options,
+          Math.max(
+            2_000,
+            Math.floor((modelContext.modelContextTokens ?? 32_768) * 0.08),
+          ),
         ),
         activeTask: options.userMessage,
+      };
+      const refreshPinnedMessages = (): void => {
+        contextOptions.pinnedMessages = [
+          ...runtimePinnedMessages(
+            pinnedPreferenceMessages,
+            session,
+            options,
+            Math.max(
+              2_000,
+              Math.floor((modelContext.modelContextTokens ?? 32_768) * 0.08),
+            ),
+          ),
+          ...[...runScopedInstructions.values()].map((message) => ({ ...message })),
+        ];
+      };
+      const setRunScopedInstruction = (key: string, content: string): void => {
+        runScopedInstructions.set(key, { role: 'system', content });
+        refreshPinnedMessages();
+      };
+      const clearRunScopedInstructions = (...keys: string[]): void => {
+        let changed = false;
+        for (const key of keys) {
+          if (runScopedInstructions.delete(key)) changed = true;
+        }
+        if (changed) refreshPinnedMessages();
       };
       let adaptiveKeepRecentMessages =
         contextOptions.keepRecentMessages ?? DEFAULT_AUTO_COMPACTION_RECENT_MESSAGES;
@@ -306,6 +348,12 @@ export class ReactAgent {
           toolExecutions: toolExecutions.map((execution) => ({
             toolName: execution.toolName,
             status: execution.status,
+            ...(execution.completionRole === undefined
+              ? {}
+              : { completionRole: execution.completionRole }),
+            ...(execution.completionGroup === undefined
+              ? {}
+              : { completionGroup: execution.completionGroup }),
             ...(execution.completionEvidence === undefined
               ? {}
               : { completionEvidence: structuredClone(execution.completionEvidence) }),
@@ -317,6 +365,148 @@ export class ReactAgent {
           createdAt: runCreatedAt,
           updatedAt: this.now(),
         });
+      };
+
+      const finalizeAfterActionBudget = async (): Promise<AgentRunResult | undefined> => {
+        const readiness = verifyAgentCompletion({
+          ...(session.taskPlan === undefined ? {} : { taskPlan: session.taskPlan }),
+          toolExecutions,
+          proposedFinalText: '',
+        });
+        if (
+          !readiness.verified ||
+          !readiness.deliveryReady ||
+          readiness.evidenceKinds.length === 0 ||
+          options.signal?.aborted ||
+          session.aborted
+        ) {
+          return undefined;
+        }
+
+        runScopedInstructions.clear();
+        setRunScopedInstruction(
+          'finalization',
+          [
+            'Runtime finalization phase: the exploration/action iteration budget is exhausted.',
+            'Tools are intentionally unavailable in this phase.',
+            'Use the latest successful execution evidence to deliver the concise final answer now.',
+            'Do not announce another check or future action. Large results are returned separately by the Runtime.',
+          ].join('\n'),
+        );
+
+        let context = buildAgentContext(
+          sessionWithTransientToolResults(session, transientToolResults),
+          [],
+          contextOptions,
+        );
+        if (context.requiresCompaction) {
+          const compacted = await this.compactSessionContext({
+            providerId: options.providerId,
+            model: options.model,
+            session,
+            round,
+            trigger: 'auto',
+            context,
+            contextOptions,
+            tools: [],
+            iteration: maxIterations,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          });
+          context = compacted.context;
+          if (compacted.status === 'compacted') contextCompression.push(compacted.report);
+        }
+        if (context.compression.finalTokenEstimate > context.compression.availablePromptTokens) {
+          return undefined;
+        }
+
+        await this.auditLog?.append({
+          type: 'model_call_started',
+          timestamp: this.now(),
+          sessionId: session.id,
+          iteration: maxIterations,
+          providerId: options.providerId,
+          model: options.model,
+          toolCount: 0,
+        });
+        const modelStartedAt = Date.now();
+        let response: LlmChatResponse | undefined;
+        try {
+          response = await this.callModel({
+            providerId: options.providerId,
+            model: options.model,
+            request: {
+              model: options.model,
+              messages: context.messages,
+              tools: [],
+              ...(options.signal === undefined ? {} : { signal: options.signal }),
+            },
+            round,
+            sessionId: session.id,
+          });
+          await this.auditLog?.append({
+            type: 'model_call_finished',
+            timestamp: this.now(),
+            sessionId: session.id,
+            iteration: maxIterations,
+            providerId: options.providerId,
+            model: options.model,
+            durationMs: Math.max(0, Date.now() - modelStartedAt),
+            toolCallCount: response.toolCalls.length,
+            textChars: response.text.length,
+            ...(response.usage === undefined ? {} : { usage: response.usage }),
+          });
+          addUsage(session, response.usage);
+        } catch {
+          // Successful runtime evidence must survive a failed final wording call.
+        }
+
+        const proposedText =
+          response?.toolCalls.length === 0
+            ? redactPersistedAgentString(response.text)
+            : '';
+        let verification = verifyAgentCompletion({
+          ...(session.taskPlan === undefined ? {} : { taskPlan: session.taskPlan }),
+          toolExecutions,
+          proposedFinalText: proposedText,
+        });
+        finalText = verification.finalResponseReady
+          ? proposedText
+          : minimalDeliveredResultText(options.userMessage, readiness.evidenceKinds);
+        verification = verifyAgentCompletion({
+          ...(session.taskPlan === undefined ? {} : { taskPlan: session.taskPlan }),
+          toolExecutions,
+          proposedFinalText: finalText,
+        });
+        if (!verification.verified || !verification.finalResponseReady) return undefined;
+
+        appendMessage(session, createMessage({ role: 'assistant', content: finalText }, this.now));
+        lastCompletion = {
+          ...verification,
+          verified: true,
+          deliveryReady: true,
+          finalResponseReady: true,
+          phase: 'done',
+          missing: [],
+        };
+        delete session.taskPlan;
+        await emitUserEvent({
+          type: 'completed',
+          message: '任务已完成并通过当前验收检查。',
+        });
+        await saveCheckpoint(iterationOffset + maxIterations, 'done');
+        await this.saveSession(session);
+        await closeRound('success');
+        await finishRunAudit('done', maxIterations, finalText);
+        return {
+          runId,
+          status: 'done',
+          session,
+          finalText,
+          iterations: maxIterations,
+          toolExecutions,
+          ...resultMetadata('done'),
+          contextCompression,
+        };
       };
 
       try {
@@ -354,16 +544,16 @@ export class ReactAgent {
           }
 
           await saveCheckpoint(checkpointIteration, 'running');
-          contextOptions.pinnedMessages = runtimePinnedMessages(
-            pinnedPreferenceMessages,
+          refreshPinnedMessages();
+          const visibleNames = visibleToolNames(
+            this.toolRegistry,
             session,
-            options.projectInstructions,
-            options.skillCatalog,
+            options,
+            this.llmRouter.providerProtocolProfile(options.providerId),
+            toolActivationPhase,
           );
-          const visibleNames = visibleToolNames(this.toolRegistry, session, options);
           const llmTools = this.toolRegistry.llmTools(visibleNames);
-          const visibleToolSet =
-            options.dynamicToolDiscovery === true ? new Set(visibleNames ?? []) : undefined;
+          const visibleToolSet = new Set(visibleNames ?? []);
           let context = buildAgentContext(
             sessionWithTransientToolResults(session, transientToolResults),
             llmTools,
@@ -494,22 +684,14 @@ export class ReactAgent {
           if (response.toolCalls.length === 0) {
             finalText = persistedResponseText;
             if (looksLikeUnparsedToolInvocation(finalText)) {
-              appendMessage(
-                session,
-                createMessage(
-                  {
-                    role: 'system',
-                    content:
-                      'The previous response contained textual tool-call markup that the provider did not expose as a standard tool call. Do not claim completion and do not repeat tool markup in text. Retry the needed action through the provider tool-calling API, or explain that the configured model/provider cannot call tools.',
-                  },
-                  this.now,
-                ),
+              setRunScopedInstruction(
+                'provider-tool-protocol',
+                'The previous response contained textual tool-call markup that the provider did not expose as a standard tool call. Do not claim completion and do not repeat tool markup in text. Retry the needed action through the provider tool-calling API, or explain that the configured model/provider cannot call tools.',
               );
               await emitUserEvent({
                 type: 'correcting',
                 message: '模型返回的工具调用格式未被 Provider 识别，正在改用标准工具调用重试。',
               });
-              await this.saveSession(session);
               continue;
             }
             const verification = verifyAgentCompletion({
@@ -519,51 +701,37 @@ export class ReactAgent {
             });
             lastCompletion = verification;
             if (!verification.verified) {
-              appendMessage(
-                session,
-                createMessage(
-                  {
-                    role: 'system',
-                    content: completionCorrectionMessage(verification),
-                  },
-                  this.now,
-                ),
-              );
+              setRunScopedInstruction('completion', completionCorrectionMessage(verification));
               await emitUserEvent({
                 type: 'correcting',
                 message: '验收条件尚未全部满足，正在继续检查和补全。',
               });
-              await this.saveSession(session);
               continue;
             }
             if (!verification.finalResponseReady) {
               if (
                 finalizeCorrectionCount >= 1 &&
                 verification.deliveryReady &&
-                verification.evidenceKinds.includes('database-result')
+                verification.evidenceKinds.length > 0
               ) {
-                finalText = '查询已完成，结果已单独返回。';
+                finalText = minimalDeliveredResultText(
+                  options.userMessage,
+                  verification.evidenceKinds,
+                );
                 appendMessage(
                   session,
                   createMessage({ role: 'assistant', content: finalText }, this.now),
                 );
               } else {
                 finalizeCorrectionCount += 1;
-                appendMessage(
-                  session,
-                  createMessage(
-                    {
-                      role: 'system',
-                      content: completionCorrectionMessage(verification),
-                    },
-                    this.now,
-                  ),
+                setRunScopedInstruction(
+                  'completion',
+                  completionCorrectionMessage(verification),
                 );
                 await emitUserEvent({
                   type: 'correcting',
                   message: '结果已经具备，但答复仍是过程描述，正在收敛为最终交付。',
                 });
-                await this.saveSession(session);
                 continue;
               }
             }
@@ -600,19 +768,23 @@ export class ReactAgent {
 
           finalizeCorrectionCount = 0;
           for (const toolCall of response.toolCalls) {
-            const startedAt = Date.now();
-            const tool = this.toolRegistry.get(toolCall.name);
-            const planBeforeTool = JSON.stringify(session.taskPlan ?? null);
-            const artifactIdsBeforeTool = new Set(
-              (session.artifacts ?? []).map((artifact) => artifact.id),
-            );
-            const actionSignature = stableActionSignature(toolCall.name, toolCall.arguments);
+            const command =
+              isProcessExecutionTool(toolCall.name) &&
+              typeof toolCall.arguments.command === 'string'
+                ? toolCall.arguments.command
+                : undefined;
             await emitUserEvent({
-              type: toolCall.name.includes('sql') ? 'sql-prepared' : 'exploring',
+              type: toolCall.name.includes('sql')
+                ? 'sql-prepared'
+                : command === undefined
+                  ? 'exploring'
+                  : 'command-prepared',
               message: userToolProgressMessage(toolCall.name),
+              toolName: toolCall.name,
               ...(typeof toolCall.arguments.sql === 'string'
                 ? { sql: toolCall.arguments.sql }
                 : {}),
+              ...(command === undefined ? {} : { command }),
             });
             await this.auditLog?.append({
               type: 'tool_call_started',
@@ -623,6 +795,51 @@ export class ReactAgent {
               toolName: toolCall.name,
               argumentPreview: serializeToolArguments(toolCall.arguments),
             });
+          }
+          const readonlyCalls = response.toolCalls.filter((toolCall) =>
+            canPreexecuteReadonlyCall(this.toolRegistry, toolCall),
+          );
+          const readonlyOutcomes =
+            readonlyCalls.length === 0
+              ? []
+              : await this.toolExecutionRouter.execute({
+                  calls: readonlyCalls,
+                  context: {
+                    session,
+                    ...(options.allowedTools === undefined
+                      ? {}
+                      : { allowedTools: options.allowedTools }),
+                    ...(options.signal === undefined ? {} : { runSignal: options.signal }),
+                    ...(options.signal === undefined ? {} : { signal: options.signal }),
+                    toolActivationScope: {
+                      catalogRevision: this.toolRegistry.catalogRevision,
+                      ...(session.contextCheckpoint?.sequence === undefined
+                        ? {}
+                        : { checkpointSequence: session.contextCheckpoint.sequence }),
+                      taskPhase: toolActivationPhase,
+                      activatedAt: this.now(),
+                    },
+                  },
+                  ...(options.allowedTools === undefined
+                    ? {}
+                    : { allowedTools: options.allowedTools }),
+                  ...(visibleToolSet === undefined
+                    ? {}
+                    : { visibleTools: [...visibleToolSet] }),
+                  defaultTimeoutMs: maxToolExecutionMs,
+                });
+          const readonlyOutcomesByCall = new Map(
+            readonlyOutcomes.map((outcome) => [outcome.call.id, outcome]),
+          );
+          for (const toolCall of response.toolCalls) {
+            const preexecuted = readonlyOutcomesByCall.get(toolCall.id);
+            const startedAt = Date.now() - Math.ceil(preexecuted?.durationMs ?? 0);
+            const tool = this.toolRegistry.get(toolCall.name);
+            const planBeforeTool = JSON.stringify(session.taskPlan ?? null);
+            const artifactIdsBeforeTool = new Set(
+              (session.artifacts ?? []).map((artifact) => artifact.id),
+            );
+            const actionSignature = stableActionSignature(toolCall.name, toolCall.arguments);
             if (allowedToolSet !== undefined && !allowedToolSet.has(toolCall.name)) {
               const record = executionRecord(
                 toolCall.id,
@@ -632,6 +849,7 @@ export class ReactAgent {
                 toolCall.arguments,
                 'Tool not allowed by run policy.',
                 {
+                  ...completionRecordMetadata(tool),
                   failure: classifyAgentToolFailure('Tool not allowed by run policy.'),
                 },
               );
@@ -670,6 +888,7 @@ export class ReactAgent {
                 toolCall.arguments,
                 message,
                 {
+                  ...completionRecordMetadata(tool),
                   failure: classifyAgentToolFailure(message),
                 },
               );
@@ -732,11 +951,9 @@ export class ReactAgent {
               await this.saveSession(session);
               await saveCheckpoint(checkpointIteration, 'running');
               if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
-                appendRecoveryInstruction(
-                  session,
-                  consecutiveToolFailures,
-                  record.resultPreview,
-                  this.now,
+                setRunScopedInstruction(
+                  'recovery',
+                  recoveryInstruction(consecutiveToolFailures, record.resultPreview),
                 );
                 consecutiveToolFailures = 0;
                 await emitUserEvent({
@@ -747,107 +964,7 @@ export class ReactAgent {
               continue;
             }
 
-            const effectiveTool =
-              tool.resolveRequiredPermission === undefined
-                ? tool
-                : {
-                    ...tool,
-                    requiredPermission: tool.resolveRequiredPermission(toolCall.arguments),
-                  };
-            const requiredPermission = requiredPermissionForTool(effectiveTool);
-            const invocation = {
-              toolCallId: toolCall.id,
-              toolName: tool.name,
-              requiredPermission,
-            };
-            const permission = await this.permissionManager.checkDetailed(
-              {
-                mode: session.mode,
-                tool: effectiveTool,
-                toolCall,
-                sessionId: session.id,
-                sessionTitle: session.title,
-                ...(options.signal === undefined ? {} : { signal: options.signal }),
-              },
-              async () => {
-                await emitUserEvent({
-                  type: 'approval-required',
-                  message: `需要你的许可后才能执行：${tool.name}`,
-                  ...(typeof toolCall.arguments.sql === 'string'
-                    ? { sql: toolCall.arguments.sql }
-                    : {}),
-                });
-              },
-            );
-
-            if (permission.decision !== 'allow') {
-              const record = executionRecord(
-                toolCall.id,
-                tool.name,
-                'denied',
-                startedAt,
-                toolCall.arguments,
-                `Permission: ${permission.decision}`,
-                {
-                  failure: classifyAgentToolFailure(`Permission: ${permission.decision}`),
-                },
-              );
-              toolExecutions.push(record);
-              await this.auditLog?.append(
-                toolFinishedAuditEvent(session.id, iteration, record, this.now()),
-              );
-              await saveCheckpoint(checkpointIteration, 'running');
-              appendMessage(
-                session,
-                createMessage(
-                  {
-                    role: 'tool',
-                    toolCallId: toolCall.id,
-                    toolName: tool.name,
-                    content: JSON.stringify({
-                      error: 'Permission denied.',
-                      permission: permission.decision,
-                    }),
-                  },
-                  this.now,
-                ),
-              );
-              await this.saveSession(session);
-              await saveCheckpoint(checkpointIteration, 'running');
-              await emitUserEvent({
-                type:
-                  permission.source === 'missing-approval-provider'
-                    ? 'needs-user-input'
-                    : 'correcting',
-                message:
-                  permission.source === 'missing-approval-provider'
-                    ? `需要许可才能执行：${tool.name}`
-                    : '该操作未获许可，正在保留现有结果并尝试其他路径。',
-              });
-              continue;
-            }
-
-            const approval =
-              permission.source === 'approval-provider'
-                ? ({
-                    granted: true,
-                    source: permission.source,
-                    sessionId: session.id,
-                    toolCallId: toolCall.id,
-                    toolName: tool.name,
-                    grantedPermission: requiredPermission,
-                    approvedAt: permission.approvedAt ?? this.now(),
-                    ...(permission.approvalRequestId === undefined
-                      ? {}
-                      : { requestId: permission.approvalRequestId }),
-                    ...(permission.approvedBy === undefined
-                      ? {}
-                      : { approvedBy: permission.approvedBy }),
-                    ...(permission.reason === undefined ? {} : { reason: permission.reason }),
-                  } satisfies AgentToolApproval)
-                : undefined;
-            const approvalMetadata = approvalRecord(approval);
-
+            let approvalMetadata: AgentToolApprovalRecord | undefined;
             try {
               const context = {
                 session,
@@ -856,21 +973,160 @@ export class ReactAgent {
                   : { allowedTools: options.allowedTools }),
                 ...(options.signal === undefined ? {} : { runSignal: options.signal }),
                 ...(options.signal === undefined ? {} : { signal: options.signal }),
-                invocation,
-                ...(approval === undefined ? {} : { approval }),
-                ...(approval === undefined
-                  ? {}
-                  : {
-                      executionGrant: createSingleToolCallExecutionGrant(approval),
-                    }),
+                toolActivationScope: {
+                  catalogRevision: this.toolRegistry.catalogRevision,
+                  ...(session.contextCheckpoint?.sequence === undefined
+                    ? {}
+                    : { checkpointSequence: session.contextCheckpoint.sequence }),
+                  taskPhase: toolActivationPhase,
+                  activatedAt: this.now(),
+                },
               };
-              const result = await executeToolWithTimeout(
-                tool.name,
-                tool.handler,
-                toolCall.arguments,
-                context,
-                maxToolExecutionMs,
-              );
+              let approval: AgentToolApproval | undefined;
+              let permissionSource:
+                | 'automatic'
+                | 'approval-provider'
+                | 'missing-approval-provider'
+                | undefined;
+              const routed =
+                preexecuted ??
+                (
+                  await this.toolExecutionRouter.execute({
+                    calls: [toolCall],
+                    context,
+                    ...(options.allowedTools === undefined
+                      ? {}
+                      : { allowedTools: options.allowedTools }),
+                    ...(visibleToolSet === undefined
+                      ? {}
+                      : { visibleTools: [...visibleToolSet] }),
+                    defaultTimeoutMs: maxToolExecutionMs,
+                    authorize: async ({ call, tool: routedTool, requiredPermission }) => {
+                      const effectiveTool =
+                        routedTool.resolveRequiredPermission === undefined
+                          ? routedTool
+                          : {
+                              ...routedTool,
+                              requiredPermission: routedTool.resolveRequiredPermission(
+                                call.arguments,
+                              ),
+                            };
+                      const permission = await this.permissionManager.checkDetailed(
+                        {
+                          mode: session.mode,
+                          tool: effectiveTool,
+                          toolCall: call,
+                          sessionId: session.id,
+                          sessionTitle: session.title,
+                          ...(options.signal === undefined ? {} : { signal: options.signal }),
+                        },
+                        async () => {
+                          await emitUserEvent({
+                            type: 'approval-required',
+                            message: `需要你的许可后才能执行：${routedTool.name}`,
+                            toolName: routedTool.name,
+                            ...(typeof call.arguments.sql === 'string'
+                              ? { sql: call.arguments.sql }
+                              : {}),
+                            ...(typeof call.arguments.command === 'string'
+                              ? { command: call.arguments.command }
+                              : {}),
+                          });
+                        },
+                      );
+                      permissionSource = permission.source;
+                      if (permission.decision !== 'allow') {
+                        return {
+                          decision: 'deny' as const,
+                          reason: `Permission: ${permission.decision}`,
+                        };
+                      }
+                      approval =
+                        permission.source === 'approval-provider'
+                          ? ({
+                              granted: true,
+                              source: permission.source,
+                              sessionId: session.id,
+                              toolCallId: call.id,
+                              toolName: routedTool.name,
+                              grantedPermission: requiredPermission,
+                              approvedAt: permission.approvedAt ?? this.now(),
+                              ...(permission.approvalRequestId === undefined
+                                ? {}
+                                : { requestId: permission.approvalRequestId }),
+                              ...(permission.approvedBy === undefined
+                                ? {}
+                                : { approvedBy: permission.approvedBy }),
+                              ...(permission.reason === undefined
+                                ? {}
+                                : { reason: permission.reason }),
+                            } satisfies AgentToolApproval)
+                          : undefined;
+                      return {
+                        decision: 'allow' as const,
+                        ...(approval === undefined
+                          ? {}
+                          : {
+                              context: {
+                                approval,
+                                executionGrant: createSingleToolCallExecutionGrant(approval),
+                              },
+                            }),
+                      };
+                    },
+                  })
+                )[0]!;
+              // Authorization belongs to the attempted Tool Call even when a harder
+              // runtime boundary rejects the operation after approval.
+              approvalMetadata = approvalRecord(approval);
+              if (routed.status === 'denied') {
+                const denial = routed.error ?? 'Tool execution was denied.';
+                const record = executionRecord(
+                  toolCall.id,
+                  tool.name,
+                  'denied',
+                  startedAt,
+                  toolCall.arguments,
+                  denial,
+                  {
+                    ...completionRecordMetadata(tool),
+                    failure: classifyAgentToolFailure(denial),
+                  },
+                );
+                toolExecutions.push(record);
+                await this.auditLog?.append(
+                  toolFinishedAuditEvent(session.id, iteration, record, this.now()),
+                );
+                appendMessage(
+                  session,
+                  createMessage(
+                    {
+                      role: 'tool',
+                      toolCallId: toolCall.id,
+                      toolName: tool.name,
+                      content: JSON.stringify({ error: denial }),
+                    },
+                    this.now,
+                  ),
+                );
+                await this.saveSession(session);
+                await saveCheckpoint(checkpointIteration, 'running');
+                await emitUserEvent({
+                  type:
+                    permissionSource === 'missing-approval-provider'
+                      ? 'needs-user-input'
+                      : 'correcting',
+                  message:
+                    permissionSource === 'missing-approval-provider'
+                      ? `需要许可才能执行：${tool.name}`
+                      : '该操作未获许可或被运行策略拒绝，正在保留现有结果并尝试其他路径。',
+                });
+                continue;
+              }
+              if (routed.status !== 'success') {
+                throw new Error(routed.error ?? 'Tool execution failed.');
+              }
+              const result = routed.result;
               const envelope = isAgentToolResultEnvelope(result) ? result : undefined;
               const persistedResult = persistedSuccessfulToolResult(
                 tool.source,
@@ -895,6 +1151,7 @@ export class ReactAgent {
                 toolCall.arguments,
                 preview,
                 {
+                  ...completionRecordMetadata(tool),
                   ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
                   ...(envelope?.completionEvidence === undefined
                     ? {}
@@ -906,6 +1163,12 @@ export class ReactAgent {
                 toolFinishedAuditEvent(session.id, iteration, record, this.now()),
               );
               consecutiveToolFailures = 0;
+              clearRunScopedInstructions(
+                'completion',
+                'provider-tool-protocol',
+                'recovery',
+                'no-progress',
+              );
               appendMessage(
                 session,
                 createMessage(
@@ -920,16 +1183,9 @@ export class ReactAgent {
               );
               const noProgress = observeActionResult(actionObservations, actionSignature, preview);
               if (noProgress) {
-                appendMessage(
-                  session,
-                  createMessage(
-                    {
-                      role: 'system',
-                      content:
-                        'No-progress guard: this unchanged action produced the same observation repeatedly. Choose a materially different tool, query, or source before retrying.',
-                    },
-                    this.now,
-                  ),
+                setRunScopedInstruction(
+                  'no-progress',
+                  'No-progress guard: this unchanged action produced the same observation repeatedly. Choose a materially different tool, query, or source before retrying.',
                 );
                 await emitUserEvent({
                   type: 'correcting',
@@ -959,6 +1215,19 @@ export class ReactAgent {
                     : {}),
                   ...sqlExecutionMetrics(modelResult),
                 });
+              } else if (isProcessExecutionTool(tool.name)) {
+                await emitUserEvent({
+                  type: 'command-executed',
+                  message: processExecutionProgressMessage(modelResult),
+                  toolName: tool.name,
+                  ...(typeof toolCall.arguments.command === 'string'
+                    ? { command: toolCall.arguments.command }
+                    : {}),
+                  metrics: {
+                    durationMs: record.durationMs,
+                    ...processExecutionMetrics(modelResult),
+                  },
+                });
               }
               await this.saveSession(session);
               await saveCheckpoint(checkpointIteration, 'running');
@@ -975,6 +1244,7 @@ export class ReactAgent {
                 toolCall.arguments,
                 message,
                 {
+                  ...completionRecordMetadata(tool),
                   failure: classifyAgentToolExecutionFailure(tool.name, message),
                   ...(approvalMetadata === undefined ? {} : { approval: approvalMetadata }),
                 },
@@ -998,12 +1268,22 @@ export class ReactAgent {
               );
               await this.saveSession(session);
               await saveCheckpoint(checkpointIteration, 'running');
+              await emitUserEvent({
+                type: 'tool-failed',
+                message: `${tool.name} 执行失败：${message.slice(0, 500)}`,
+                toolName: tool.name,
+                ...(typeof toolCall.arguments.command === 'string'
+                  ? { command: toolCall.arguments.command }
+                  : {}),
+                ...(typeof toolCall.arguments.sql === 'string'
+                  ? { sql: toolCall.arguments.sql }
+                  : {}),
+                metrics: { durationMs: record.durationMs },
+              });
               if (consecutiveToolFailures >= maxConsecutiveToolFailures) {
-                appendRecoveryInstruction(
-                  session,
-                  consecutiveToolFailures,
-                  record.resultPreview,
-                  this.now,
+                setRunScopedInstruction(
+                  'recovery',
+                  recoveryInstruction(consecutiveToolFailures, record.resultPreview),
                 );
                 consecutiveToolFailures = 0;
                 await emitUserEvent({
@@ -1014,6 +1294,9 @@ export class ReactAgent {
             }
           }
         }
+
+        const finalized = await finalizeAfterActionBudget();
+        if (finalized) return finalized;
 
         finalText = incompleteRunText(session, toolExecutions);
         appendMessage(session, createMessage({ role: 'assistant', content: finalText }, this.now));
@@ -1067,7 +1350,16 @@ export class ReactAgent {
         session,
         this.sessionStore,
       );
-      const tools = this.toolRegistry.llmTools(options.allowedTools);
+      const compactableToolNames = new ToolExposurePlanner()
+        .plan({
+          registry: this.toolRegistry,
+          ...(options.allowedTools === undefined
+            ? {}
+            : { allowedTools: options.allowedTools }),
+          dynamicDiscovery: false,
+        })
+        .modelTools.map((tool) => tool.name);
+      const tools = this.toolRegistry.llmTools(compactableToolNames);
       const contextOptions: AgentContextManagerOptions = {
         ...this.resolveModelContext(options.providerId, options.model),
         ...(options.keepRecentMessages === undefined
@@ -1335,6 +1627,9 @@ function cloneSessionForRun(
     ...(session.sessionSkills === undefined
       ? {}
       : { sessionSkills: structuredClone(session.sessionSkills) }),
+    ...(session.toolActivations === undefined
+      ? {}
+      : { toolActivations: structuredClone(session.toolActivations) }),
     ...(subagentDepth === undefined
       ? session.subagentDepth === undefined
         ? {}
@@ -1343,10 +1638,21 @@ function cloneSessionForRun(
     ...(session.contextCheckpoint === undefined
       ? {}
       : { contextCheckpoint: structuredClone(session.contextCheckpoint) }),
-    messages: session.messages.map((message) => ({ ...message })),
+    messages: session.messages
+      .filter((message) => !isLegacyRunScopedInstruction(message))
+      .map((message) => ({ ...message })),
     tokenUsage: { ...session.tokenUsage },
     aborted: false,
   };
+}
+
+function isLegacyRunScopedInstruction(message: AgentSession['messages'][number]): boolean {
+  return (
+    message.role === 'system' &&
+    LEGACY_RUN_SCOPED_INSTRUCTION_PREFIXES.some((prefix) =>
+      message.content.startsWith(prefix),
+    )
+  );
 }
 
 function mergeActivatedSkills(
@@ -1366,59 +1672,15 @@ function mergeActivatedSkills(
 function runtimePinnedMessages(
   preferences: LlmMessage[],
   session: AgentSession,
-  projectInstructions?: string,
-  skillCatalog: AgentRunOptions['skillCatalog'] = [],
+  options: AgentRunOptions,
+  maxSkillCatalogChars: number,
 ): LlmMessage[] {
-  const taskPlan = renderAgentTaskPlanContext(session.taskPlan);
-  return [
-    {
-      role: 'system',
-      content: [
-        'You are SchemaNaut, an autonomous database and SQL agent.',
-        'Use tools to inspect facts instead of guessing. Prefer database-side SQL for aggregation, statistics, cleaning, and anomaly detection; never pull an entire dataset into model context.',
-        'For metadata and schema questions, use resource_list, resource_get, or knowledge_search first. Query database system catalogs only when those resources remain insufficient after refresh.',
-        'Create a lightweight task plan only for genuinely multi-step work. The plan guides progress; actual tool outcomes are the completion evidence. A single database question normally needs direct discovery, one final SQL query, and result verification.',
-        'When a request refers to configured thresholds, rules, dictionaries, or mappings, find and use the corresponding database resources. Never invent configured business values.',
-        'For dirty JSON or event streams, validate required fields and formats before casting, use business dictionaries when present, and deduplicate by the stated business key and arrival order.',
-        'When the visible tools do not cover a needed capability, use tool_search before calling the discovered tool.',
-        'For complex or reusable SQL, discover the project file tools and save a readable script under sql/ when that artifact helps the user.',
-        'When an action fails or permission is denied, use the observation to choose another valid path. Do not repeat an unchanged action without new information.',
-        'Once the requested final SQL has executed successfully and its result satisfies the goal, stop exploring and answer from that verified result.',
-        'Keep user-facing explanations concise. Do not expose internal hashes, retrieval scores, node identifiers, action signatures, or hidden implementation state.',
-      ].join('\n'),
-    },
-    ...(projectInstructions?.trim()
-      ? [
-          {
-            role: 'system' as const,
-            content: `Project guidance:\n${projectInstructions.trim()}`,
-          },
-        ]
-      : []),
-    ...preferences,
-    ...(skillCatalog.length > 0
-      ? [
-          {
-            role: 'system' as const,
-            content: [
-              'Available Skills (load a Skill only when its guidance is relevant):',
-              ...skillCatalog.map(
-                (skill) => `- ${skill.name} [${skill.scope}]: ${skill.description}`,
-              ),
-            ].join('\n'),
-          },
-        ]
-      : []),
-    ...(session.activeSkills ?? []).map((skill) => ({
-      role: 'system' as const,
-      content: [
-        `<activated_skill name="${skill.name}" scope="${skill.scope}">`,
-        skill.instructions,
-        '</activated_skill>',
-      ].join('\n'),
-    })),
-    ...(taskPlan ? [{ role: 'system' as const, content: taskPlan }] : []),
-  ];
+  return compileAgentInstructions({
+    session,
+    ...instructionOptionsFromRun(options),
+    preferenceMessages: preferences,
+    maxSkillCatalogChars,
+  });
 }
 
 const ALWAYS_VISIBLE_TOOL_NAMES = new Set([
@@ -1427,9 +1689,7 @@ const ALWAYS_VISIBLE_TOOL_NAMES = new Set([
   'task_list',
   'tool_search',
   'tool_describe',
-  'skill_search',
-  'skill_load',
-  'skill_resource_read',
+  'skill',
   'resource_list',
   'resource_get',
   'knowledge_search',
@@ -1441,18 +1701,33 @@ function visibleToolNames(
   registry: ToolRegistry,
   session: AgentSession,
   options: AgentRunOptions,
+  providerProfile: ReturnType<LlmRouter['providerProtocolProfile']>,
+  taskPhase: string,
 ): string[] | undefined {
-  if (options.dynamicToolDiscovery !== true) return options.allowedTools;
-  const allowed = options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
-  const active = new Set(session.activeTools ?? []);
-  return registry
-    .list()
-    .map((tool) => tool.name)
-    .filter(
-      (name) =>
-        (allowed === undefined || allowed.has(name)) &&
-        (ALWAYS_VISIBLE_TOOL_NAMES.has(name) || active.has(name)),
-    );
+  const activations =
+    session.toolActivations ??
+    (session.activeTools ?? []).map((toolName) => ({
+      toolName,
+      catalogRevision: registry.catalogRevision,
+      ...(session.contextCheckpoint?.sequence === undefined
+        ? {}
+        : { checkpointSequence: session.contextCheckpoint.sequence }),
+      taskPhase,
+      activatedAt: 'legacy-session-migration',
+    }));
+  const plan = new ToolExposurePlanner().plan({
+    registry,
+    ...(options.allowedTools === undefined ? {} : { allowedTools: options.allowedTools }),
+    pinnedTools: [...new Set([...ALWAYS_VISIBLE_TOOL_NAMES, ...(options.pinnedTools ?? [])])],
+    activations,
+    ...(session.contextCheckpoint?.sequence === undefined
+      ? {}
+      : { checkpointSequence: session.contextCheckpoint.sequence }),
+    taskPhase,
+    dynamicDiscovery: options.dynamicToolDiscovery === true,
+    providerProfile,
+  });
+  return plan.modelTools.map((tool) => tool.name);
 }
 
 function cloneSessionForCompaction(session: AgentSession): AgentSession {
@@ -1466,6 +1741,9 @@ function cloneSessionForCompaction(session: AgentSession): AgentSession {
     ...(session.contextCheckpoint === undefined
       ? {}
       : { contextCheckpoint: structuredClone(session.contextCheckpoint) }),
+    ...(session.toolActivations === undefined
+      ? {}
+      : { toolActivations: structuredClone(session.toolActivations) }),
   };
 }
 
@@ -1607,6 +1885,12 @@ function executionRecord(
     ...(metadata.completionEvidence === undefined
       ? {}
       : { completionEvidence: metadata.completionEvidence }),
+    ...(metadata.completionRole === undefined
+      ? {}
+      : { completionRole: metadata.completionRole }),
+    ...(metadata.completionGroup === undefined
+      ? {}
+      : { completionGroup: metadata.completionGroup }),
   };
 }
 
@@ -1617,7 +1901,20 @@ type ExecutionRecordMetadata = {
   };
   approval?: AgentToolApprovalRecord;
   completionEvidence?: AgentToolCompletionEvidence;
+  completionRole?: AgentToolExecutionRecord['completionRole'];
+  completionGroup?: string;
 };
+
+function completionRecordMetadata(
+  tool: ReturnType<ToolRegistry['get']>,
+): Pick<ExecutionRecordMetadata, 'completionRole' | 'completionGroup'> {
+  const completion = tool?.descriptor.completion;
+  if (!completion || completion.role === 'none') return {};
+  return {
+    completionRole: completion.role,
+    ...(completion.group === undefined ? {} : { completionGroup: completion.group }),
+  };
+}
 
 function approvalRecord(
   approval: AgentToolApproval | undefined,
@@ -1654,26 +1951,12 @@ function toolFinishedAuditEvent(
   };
 }
 
-function appendRecoveryInstruction(
-  session: AgentSession,
-  failureCount: number,
-  lastError: string,
-  now: () => string,
-): void {
-  appendMessage(
-    session,
-    createMessage(
-      {
-        role: 'system',
-        content: [
-          `Recovery required after ${failureCount} consecutive tool failures.`,
-          `Latest observation: ${lastError}`,
-          'Do not repeat the same unchanged action. Inspect the error, discover another available tool, simplify the query, or ask the user only when essential information is genuinely missing.',
-        ].join('\n'),
-      },
-      now,
-    ),
-  );
+function recoveryInstruction(failureCount: number, lastError: string): string {
+  return [
+    `Recovery required after ${failureCount} consecutive tool failures.`,
+    `Latest observation: ${lastError}`,
+    'Do not repeat the same unchanged action. Inspect the error, discover another available tool, simplify the query, or ask the user only when essential information is genuinely missing.',
+  ].join('\n');
 }
 
 function stableActionSignature(toolName: string, args: Record<string, unknown>): string {
@@ -1724,6 +2007,7 @@ function userToolProgressMessage(toolName: string): string {
     return '正在查找完成任务所需的信息。';
   }
   if (toolName.includes('subagent')) return '正在并行处理一个独立子任务。';
+  if (isProcessExecutionTool(toolName)) return '正在执行项目命令。';
   return '正在执行下一步并检查结果。';
 }
 
@@ -1738,6 +2022,37 @@ function planProgressMessage(session: AgentSession): string {
 
 function isSqlExecutionTool(toolName: string): boolean {
   return /(?:^|_)(?:sql_)?execute$|sql_execute|query_execute/i.test(toolName);
+}
+
+function isProcessExecutionTool(toolName: string): boolean {
+  return toolName === 'process_exec' || toolName === 'shell_run';
+}
+
+function processExecutionProgressMessage(result: unknown): string {
+  const status = stringResultField(result, 'status');
+  const exitCode = nullableNumberResultField(result, 'exitCode');
+  if (status === 'running') return '命令已在后台启动，可继续轮询进度。';
+  if (exitCode !== undefined) return `命令执行完成，退出码 ${String(exitCode)}。`;
+  return status ? `命令状态：${status}。` : '命令执行完成，正在核对输出。';
+}
+
+function processExecutionMetrics(result: unknown): { exitCode?: number | null } {
+  const exitCode = nullableNumberResultField(result, 'exitCode');
+  return exitCode === undefined ? {} : { exitCode };
+}
+
+function stringResultField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === 'string' ? field : undefined;
+}
+
+function nullableNumberResultField(value: unknown, key: string): number | null | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return field === null || (typeof field === 'number' && Number.isFinite(field))
+    ? field
+    : undefined;
 }
 
 function sqlExecutionProgressMessage(result: unknown): string {
@@ -1770,6 +2085,21 @@ function numericResultField(value: unknown, key: 'rowCount' | 'affectedRows'): n
   return typeof field === 'number' && Number.isFinite(field) ? field : undefined;
 }
 
+function minimalDeliveredResultText(
+  userMessage: string,
+  evidenceKinds: readonly string[],
+): string {
+  const usesChinese = /[\u3400-\u9fff]/u.test(userMessage);
+  if (evidenceKinds.includes('database-result')) {
+    return usesChinese
+      ? '查询已完成，结果已单独返回。'
+      : 'The query completed; its result is returned separately.';
+  }
+  return usesChinese
+    ? '任务已完成，相关执行结果和产物已单独返回。'
+    : 'The task completed; related execution results and artifacts are returned separately.';
+}
+
 function incompleteRunText(session: AgentSession, executions: AgentToolExecutionRecord[]): string {
   const unresolved = unresolvedAgentTasks(session.taskPlan);
   const latestFailure = [...executions]
@@ -1786,77 +2116,17 @@ function incompleteRunText(session: AgentSession, executions: AgentToolExecution
     .join('\n');
 }
 
-async function executeToolWithTimeout(
-  toolName: string,
-  handler: AgentToolHandler,
-  args: Record<string, unknown>,
-  context: AgentToolContext,
-  timeoutMs: number,
-): Promise<unknown> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return handler(args, context);
-  }
-
-  const controller = new AbortController();
-  const parentSignal = context.signal;
-  if (parentSignal?.aborted) {
-    throw new Error('Agent run was aborted before tool execution.');
-  }
-
-  let timedOut = false;
-  const abortFromParent = () => controller.abort(parentSignal?.reason);
-  parentSignal?.addEventListener('abort', abortFromParent, { once: true });
-
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    const rejectOnAbort = () => {
-      reject(
-        new Error(
-          timedOut
-            ? toolTimeoutMessage(toolName, timeoutMs)
-            : 'Agent run was aborted during tool execution.',
-        ),
-      );
-    };
-    controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
-    timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort(new Error(toolTimeoutMessage(toolName, timeoutMs)));
-    }, timeoutMs);
-  });
-  const handlerPromise = Promise.resolve().then(() =>
-    handler(args, { ...context, signal: controller.signal }),
-  );
-
-  try {
-    return await Promise.race([handlerPromise, timeoutPromise]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-    parentSignal?.removeEventListener('abort', abortFromParent);
-    if (controller.signal.aborted) {
-      await waitForToolCleanup(handlerPromise, TOOL_ABORT_SETTLE_TIMEOUT_MS);
-    }
-  }
-}
-
-async function waitForToolCleanup(
-  handlerPromise: Promise<unknown>,
-  timeoutMs: number,
-): Promise<void> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      handlerPromise.then(
-        () => undefined,
-        () => undefined,
-      ),
-      new Promise<void>((resolvePromise) => {
-        timeout = setTimeout(resolvePromise, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
+function canPreexecuteReadonlyCall(registry: ToolRegistry, toolCall: LlmToolCall): boolean {
+  const tool = registry.get(toolCall.name);
+  if (!tool || tool.descriptor.execution.concurrency !== 'read') return false;
+  const effective =
+    tool.resolveRequiredPermission === undefined
+      ? tool
+      : {
+          ...tool,
+          requiredPermission: tool.resolveRequiredPermission(toolCall.arguments),
+        };
+  return requiredPermissionForTool(effective) === 'read';
 }
 
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
@@ -1867,8 +2137,4 @@ function normalizePositiveInteger(value: number | undefined, fallback: number): 
 function normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
   return Math.floor(value);
-}
-
-function toolTimeoutMessage(toolName: string, timeoutMs: number): string {
-  return `工具 ${toolName} 执行超时（${timeoutMs}ms）。`;
 }

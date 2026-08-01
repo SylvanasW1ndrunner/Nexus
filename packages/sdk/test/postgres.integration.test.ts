@@ -789,8 +789,9 @@ describe.skipIf(!runPostgresTests)('DatabaseAgentRuntime real PostgreSQL AI SQL 
       expect(output.result.toolExecutions[0]).toMatchObject({
         toolName: 'sql_execute',
         status: 'failed',
+        failureKind: 'timeout',
       });
-      expect(output.result.toolExecutions[0]?.resultPreview).toContain('超时');
+      expect(output.result.toolExecutions[0]?.resultPreview).toMatch(/timed out|超时/iu);
       expect(durationMs).toBeLessThan(3_000);
       const cancellationWaitStarted = performance.now();
       while (
@@ -868,9 +869,42 @@ describe.skipIf(!runLiveModel)('DatabaseAgentRuntime live model + PostgreSQL Age
       const executions = output.result.toolExecutions.filter(
         (item) => item.toolName === 'sql_execute',
       );
-      expect(executions.some((item) => item.resultPreview.includes('Shanghai'))).toBe(true);
-      expect(executions.some((item) => item.resultPreview.includes('Beijing'))).toBe(true);
-      expect(executions.some((item) => item.resultPreview.includes('Guangdong'))).toBe(true);
+      const resultEvidence = JSON.stringify(
+        {
+          finalText: output.result.finalText,
+          executions: executions.map((item) => ({
+            arguments: item.argumentPreview,
+            result: item.resultPreview,
+            failureKind: item.failureKind,
+          })),
+        },
+        null,
+        2,
+      );
+      const finalExecution = executions.at(-1);
+      expect(finalExecution, resultEvidence).toBeDefined();
+      expect(
+        finalExecution?.argumentPreview,
+        resultEvidence,
+      ).toMatch(/customer.*province/iu);
+      expect(
+        finalExecution?.argumentPreview,
+        resultEvidence,
+      ).toMatch(/amount/iu);
+      expect(
+        finalExecution?.argumentPreview,
+        resultEvidence,
+      ).toMatch(/group by/iu);
+      expect(finalExecution?.resultPreview, resultEvidence).toContain('"rowCount":3');
+      expect(finalExecution?.resultPreview, resultEvidence).toContain('"name":"province"');
+      expect(
+        executions.some((item) => /Shanghai|Beijing|Guangdong/u.test(item.resultPreview)),
+        'Durable Tool execution history must not retain SQL result rows.',
+      ).toBe(false);
+      const normalizedFinalText = output.result.finalText.replaceAll(',', '');
+      for (const expected of ['Shanghai', 'Beijing', 'Guangdong', '2199', '799', '128.5']) {
+        expect(normalizedFinalText, resultEvidence).toContain(expected);
+      }
       expect(output.result.finalText.length).toBeGreaterThan(10);
       expectModelRequestsToExcludeKnowledgeInternals(provider.requests, [
         runtime.status().connection!.id,

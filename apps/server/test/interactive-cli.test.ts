@@ -75,6 +75,35 @@ describe('SchemaNaut CLI', () => {
     expect(beforeClear).toContain('正在读取 Schema');
   });
 
+  it('shows process commands and useful completion status without dumping process internals', () => {
+    const capture = captureOutput(false);
+    const trace = new CliTraceRenderer(capture.output);
+
+    trace.render({
+      id: 'event-command-1',
+      sessionId: 'session-1',
+      type: 'command-prepared',
+      message: '正在执行项目命令。',
+      command: 'pnpm test --filter core-agent',
+      toolName: 'process_exec',
+      createdAt: '2026-08-01T00:00:00.000Z',
+    });
+    trace.render({
+      id: 'event-command-2',
+      sessionId: 'session-1',
+      type: 'command-executed',
+      message: '命令执行完成，退出码 0。',
+      command: 'pnpm test --filter core-agent',
+      toolName: 'process_exec',
+      metrics: { durationMs: 1250, exitCode: 0 },
+      createdAt: '2026-08-01T00:00:01.250Z',
+    });
+
+    expect(capture.text()).toContain('pnpm test --filter core-agent');
+    expect(capture.text()).toContain('退出码 0');
+    expect(capture.text()).not.toMatch(/processId|nextCursor|spool|catalogRevision/);
+  });
+
   it('distinguishes one-call approval, rejection, and a new steering request', () => {
     expect(['y', 'yes', '允许'].map(classifyCliApprovalInput)).toEqual([
       'approve',

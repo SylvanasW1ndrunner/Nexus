@@ -371,7 +371,11 @@ async function handleRequest(
       return;
     }
     if (method === 'GET' && url.pathname === '/health') {
-      sendJson(response, 200, { status: 'ok', service: 'schemanaut-server', version: '0.1.0' });
+      sendJson(response, 200, {
+        status: 'ok',
+        service: 'schemanaut-server',
+        version: '0.1.0-alpha.1',
+      });
       return;
     }
     if (method === 'GET' && url.pathname === '/v1/capabilities') {
@@ -1326,6 +1330,15 @@ function parseAgentRunBody(body: Record<string, unknown>): RunAiSqlAgentInput {
   const userId = optionalString(body, 'userId');
   const maxIterations = optionalInteger(body, 'maxIterations');
   const maxToolExecutionMs = optionalInteger(body, 'maxToolExecutionMs');
+  const capabilityInstructions = parseOptionalStringArray(
+    body.capabilityInstructions,
+    'capabilityInstructions',
+    100,
+    20_000,
+  );
+  const allowedTools = parseOptionalStringArray(body.allowedTools, 'allowedTools', 2_000, 300);
+  const pinnedTools = parseOptionalStringArray(body.pinnedTools, 'pinnedTools', 2_000, 300);
+  const systemPrompt = parseAgentSystemPrompt(body.systemPrompt);
   assertIntegerRange(maxIterations, 'maxIterations', 1, MAX_AGENT_ITERATIONS);
   assertIntegerRange(maxToolExecutionMs, 'maxToolExecutionMs', 1, MAX_TOOL_EXECUTION_MS);
   return {
@@ -1335,7 +1348,25 @@ function parseAgentRunBody(body: Record<string, unknown>): RunAiSqlAgentInput {
     ...(userId === undefined ? {} : { userId }),
     ...(maxIterations === undefined ? {} : { maxIterations }),
     ...(maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs }),
+    ...(systemPrompt === undefined ? {} : { systemPrompt }),
+    ...(capabilityInstructions === undefined ? {} : { capabilityInstructions }),
+    ...(allowedTools === undefined ? {} : { allowedTools }),
+    ...(pinnedTools === undefined ? {} : { pinnedTools }),
   };
+}
+
+function parseAgentSystemPrompt(value: unknown): RunAiSqlAgentInput['systemPrompt'] {
+  if (value === undefined) return undefined;
+  const prompt = requireRecord(value, 'systemPrompt');
+  const mode = requireString(prompt, 'mode');
+  if (mode !== 'append' && mode !== 'replace') {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      'systemPrompt.mode 必须是 append 或 replace。',
+      false,
+    );
+  }
+  return { mode, content: requireString(prompt, 'content') };
 }
 
 function parseMcpServerInput(body: Record<string, unknown>): McpServerRegistrationInput {
@@ -2125,6 +2156,7 @@ function parseOptionalStringArray(
   value: unknown,
   name: string,
   maxItems: number,
+  maxItemChars = 500,
 ): string[] | undefined {
   if (value === undefined) return undefined;
   if (
@@ -2137,7 +2169,7 @@ function parseOptionalStringArray(
       `${name} must be a string array with at most ${maxItems} items.`,
     );
   }
-  return value.map((item) => (item as string).slice(0, 500));
+  return value.map((item) => (item as string).slice(0, maxItemChars));
 }
 
 async function readOptionalJson(request: IncomingMessage): Promise<Record<string, unknown>> {

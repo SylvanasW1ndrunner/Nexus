@@ -4,7 +4,7 @@
 
 This reference documents the public v1 Node.js/TypeScript surface of `@nwlworkshop/schemanaut` and the main local REST endpoints.
 
-SchemaNaut v1 provides AI SQL and common Agent infrastructure. It does not provide a governance/operations Agent or database IDE.
+SchemaNaut v1 provides a general technical-Agent kernel and a database capability package. Its current database golden path is PostgreSQL, Schema RAG, and AI SQL. The first release does not ship a governance/operations capability package and is not a database IDE.
 
 ## `DatabaseAgentRuntime`
 
@@ -31,6 +31,7 @@ const runtime = new DatabaseAgentRuntime(options);
 | `databaseAuditSink`    | `DatabaseAuditSink`                            | Receive lower-level database access audit events                      |
 | `rag`                  | `SchemaRagEngine`                              | Inject a knowledge/retrieval engine                                   |
 | `schemaSnapshotDirectory` | `string`                                    | Opt in to durable Schema RAG snapshots; relative to the Project root  |
+| `schemaFreshnessIntervalMs` | `number`                                  | Minimum interval for background external-Schema checks; `0` in tests  |
 | `retrievalProfile`     | `SchemaRagRetrievalProfile`                    | Configure lexical, embedding, reranking, and graph retrieval          |
 | `createRunId`          | `() => string`                                 | Override generated deterministic SQL run IDs                          |
 | `createConnectionId`   | `() => string`                                 | Override shortcut connection IDs                                      |
@@ -41,12 +42,19 @@ const runtime = new DatabaseAgentRuntime(options);
 | `agentDependencies`    | `AgentRunDependencies`                         | Inject Agent persistence/audit/checkpoint dependencies                |
 | `sessionStore`         | `AgentSessionStore`                            | Inject a store; Runtime creates a Project-bound view over it           |
 | `sessionDatabasePath`  | `string`                                       | OS user-data path from `defaultAgentStateDatabasePath()`              |
+| `sqlRunStore`          | `SqlRunStore`                                  | Inject the durable deterministic SQL-run store                        |
 | `resultStore`          | `AiSqlResultStore`                             | Inject the bounded, ephemeral interactive-result cache                |
 | `projectDirectory`     | `string`                                       | `process.cwd()`; selected Project root                                |
 | `userSkillsDirectory`  | `string`                                       | `~/.schemanaut/skills`                                                |
 | `sessionSkills`        | `SkillOverlay[]`                               | Default template copied into newly created Sessions                   |
+| `systemPrompt`         | `AgentSystemPrompt`                            | Default user role instructions in `append` or `replace` mode          |
+| `capabilityInstructions` | `string[]`                                   | Default capability-package guidance; never a permission boundary      |
+| `allowedTools`         | `string[]`                                     | Runtime-wide hard tool allowlist                                      |
+| `pinnedTools`          | `string[]`                                     | Allowed deferred tools made directly visible by default               |
 | `webAdapter`           | `AgentWebAdapter`                              | Host-provided web search/fetch implementation                         |
-| `enableShellTool`      | `boolean`                                      | `false`; register `shell_run` only for a trusted host                 |
+| `enableShellTool`      | `boolean`                                      | `false`; compatibility switch for legacy shell and Process Tools      |
+| `enableProcessTools`   | `boolean`                                      | `false`; register foreground/background Process Tools                 |
+| `processRuntime`       | `ProcessRuntime`                               | Inject a shared Process Runtime; closed with the Runtime               |
 | `dynamicToolDiscovery` | `boolean`                                      | `true`; expose discovery first and activate tools on demand           |
 | `mcpSecretResolver`    | `(ref) => string \| undefined \| Promise<...>` | Resolve MCP environment/header secret references                      |
 | `autoStartMcp`         | `boolean`                                      | `false`; opt in to starting reviewed `autoStart` MCP servers          |
@@ -203,7 +211,7 @@ When `schemaSnapshotDirectory` is configured, successful indexes are restored fo
 
 The snapshot directory contains plaintext Schema names, comments, business-glossary text, and derived vectors. SchemaNaut does not encrypt this directory. The embedding host owns its filesystem permissions, backups, retention, and secure deletion.
 
-## AI SQL Agent
+## General Agent and AI SQL capability
 
 ### `runAgent(input): Promise<AiSqlAgentRun>`
 
@@ -217,6 +225,13 @@ type RunAiSqlAgentInput = {
   sessionSkills?: SkillOverlay[]; // new Session only
   maxIterations?: number;
   maxToolExecutionMs?: number;
+  systemPrompt?: {
+    mode: 'append' | 'replace';
+    content: string;
+  };
+  capabilityInstructions?: string[];
+  allowedTools?: string[];
+  pinnedTools?: string[];
   onEvent?: (event: AgentUserEvent) => void | Promise<void>;
   signal?: AbortSignal;
 };
@@ -229,6 +244,8 @@ type AiSqlAgentRun = {
 ```
 
 `session` and `sessionId` are mutually exclusive. A loaded Session must belong to the Runtime's Project. `sessionSkills` overrides the constructor default for one new Session; it cannot be supplied with `session` or `sessionId`. The overlay is persisted with the new Session, and restoration does not reapply a later Runtime default.
+
+`systemPrompt`, `capabilityInstructions`, `allowedTools`, and `pinnedTools` override or extend constructor defaults. `replace` changes the default role only, not the Runtime tool protocol or code-enforced gates. The allowlist also constrains subagents, and pinned tools cannot escape it. Project, process, web, MCP, and subagent tasks can run without a database connection.
 
 `AgentRunResult`:
 
@@ -329,20 +346,26 @@ type AgentUserEvent = {
     | 'plan-updated'
     | 'exploring'
     | 'sql-prepared'
+    | 'command-prepared'
     | 'approval-required'
     | 'sql-executed'
+    | 'command-executed'
+    | 'tool-failed'
     | 'correcting'
     | 'artifact-created'
     | 'completed'
     | 'needs-user-input';
   message: string;
   createdAt: string;
+  toolName?: string;
   sql?: string;
+  command?: string;
   artifact?: AgentArtifactReference;
   metrics?: {
     durationMs?: number;
     rowCount?: number;
     affectedRows?: number;
+    exitCode?: number | null;
   };
 };
 ```
@@ -590,12 +613,15 @@ The summary intentionally omits command, URL, environment variables, headers, an
 
 ## `runtime.tools`
 
-| Method                               | Purpose                                                      |
-| ------------------------------------ | ------------------------------------------------------------ |
-| `register(definition, handler)`      | Registers a tool; duplicate names throw                      |
-| `unregister(name)`                   | Removes a tool                                               |
-| `get(name)` / `list()` / `has(name)` | Reads registrations                                          |
-| `llmTools(allowedTools?)`            | Projects model-visible names, descriptions, and JSON Schemas |
+| Method                                    | Purpose                                                            |
+| ----------------------------------------- | ------------------------------------------------------------------ |
+| `register(definition, handler)`           | Registers a tool and increments catalog revision; duplicates throw |
+| `unregister(name)`                        | Removes a tool and increments catalog revision                     |
+| `get(name)` / `list()` / `has(name)`      | Reads registrations                                                |
+| `listDescriptors()` / `getRuntime(id)`    | Reads local catalog descriptors or execution runtimes              |
+| `subscribe(listener)`                     | Subscribes to register/unregister events                            |
+| `catalogRevision`                         | Current catalog version                                            |
+| `llmTools(allowedTools?)`                 | Low-level projection; Agent runs use the Exposure Planner           |
 
 Definitions include danger level, source, read-only metadata, and static or argument-dependent required permission. Handlers receive the Session, abort signal, and one-call approval evidence.
 
@@ -606,15 +632,17 @@ Built-in names and required modes:
 | `resource_list`, `resource_get`, `knowledge_search`, `sql_explain`                | `read`                                             |
 | `sql_execute`                                                                     | Calculated from SQL: `read`, `edit`, or `full`     |
 | `task_plan_create`, `task_update`, `task_list`, `tool_search`, `tool_describe`    | `read`                                             |
-| `skill_search`, `skill_load`, `skill_resource_read`                               | `read`                                             |
+| `skill`                                                                          | `read`; unified search, load, and resource-read entry |
 | `workspace_list`, `workspace_read`, `workspace_search`                            | `read`                                             |
-| `workspace_write`, `workspace_edit`                                               | `edit`                                             |
-| `shell_run`                                                                       | `full`; registered only with `enableShellTool`     |
+| `workspace_write`, `workspace_edit`, `workspace_patch`                            | `edit`                                             |
+| `process_poll`                                                                    | `read`; present only when Process Tools are enabled |
+| `process_exec`, `process_write`, `process_terminate`                              | `full`; present only when Process Tools are enabled |
+| `shell_run`                                                                       | `full`; compatibility-only registration            |
 | `subagent_spawn`, `subagent_list`, `subagent_wait`                                | `read`                                             |
-| `subagent_stop`                                                                   | `edit`                                             |
+| `subagent_message`, `subagent_stop`                                               | `edit`                                             |
 | `web_search`, `web_fetch`                                                         | `read`; present only when `webAdapter` is supplied |
 
-Workspace file tools enforce the Project path boundary. An enabled `shell_run` restricts its working directory and receives a reduced environment, but it is not an OS sandbox.
+Workspace tools enforce the Project path boundary. Process handles are Session-scoped, output is incremental and bounded, and termination cleans up descendants; enabled commands are still not an OS sandbox.
 
 The host-provided `webAdapter` is responsible for destination policy, credentials, rate limiting, and SSRF protection.
 
@@ -732,7 +760,7 @@ await started.close();
 | `POST /v1/setup`                                         | `{ llm, database }`; configures provider and connects PostgreSQL                                            |
 | `POST /v1/schema/index`                                  | `{ maxTables? }`; builds the knowledge index                                                                |
 | `GET /v1/schema/status`                                  | Current `SchemaIndexSnapshot`                                                                               |
-| `POST /v1/agent/run`                                     | `{ message, userId?, mode?, sessionId?, maxIterations?, maxToolExecutionMs? }`; returns `AiSqlAgentRunView` |
+| `POST /v1/agent/run`                                     | `{ message, userId?, mode?, sessionId?, maxIterations?, maxToolExecutionMs?, systemPrompt?, capabilityInstructions?, allowedTools?, pinnedTools? }`; returns `AiSqlAgentRunView` |
 | `POST /v1/agent/run/stream`                              | Same body; semantic Server-Sent Events followed by a projected `result`                                     |
 | `GET /v1/agent/runs?sessionId=&limit=`                   | Durable metadata-only Agent run records                                                                      |
 | `GET /v1/agent/runs/:id`                                 | One durable Agent run record; `404` when absent                                                              |

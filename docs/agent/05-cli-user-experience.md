@@ -30,7 +30,7 @@ schemanaut skills [-C project]
 - `/mcp stop <server-id>`
 - `/exit`
 
-Agent 运行中继续输入普通文字，会追加为当前任务的新要求；许可提示中输入新要求会拒绝原操作并转向新要求。`Ctrl+C` 取消当前执行但保留 Session。`/trace` 默认开启，显示有用的运行阶段和即将执行的完整 SQL，不显示隐藏推理。MCP Server 的新增、删除和 Secret 配置使用项目 `.schemanaut/mcp.json`、SDK 或 REST API 完成。
+Agent 运行中继续输入普通文字，会追加为当前任务的新要求；许可提示中输入新要求会拒绝原操作并转向新要求。`Ctrl+C` 取消当前执行但保留 Session。`/trace` 默认开启，显示有用的运行阶段、即将执行的完整 SQL/命令、执行结果和失败恢复，不显示隐藏推理。MCP Server 的新增、删除和 Secret 配置使用项目 `.schemanaut/mcp.json`、SDK 或 REST API 完成。
 
 ## 3. 三层输出
 
@@ -56,14 +56,17 @@ Agent 运行中继续输入普通文字，会追加为当前任务的新要求�
 - `plan-updated`
 - `exploring`
 - `sql-prepared`
+- `command-prepared`
 - `approval-required`
 - `sql-executed`
+- `command-executed`
+- `tool-failed`
 - `correcting`
 - `artifact-created`
 - `completed`
 - `needs-user-input`
 
-事件文本使用用户语言，并包含真正有帮助的 SQL、对象名、影响行数、耗时或文件路径。事件不包含隐藏推理、知识 Hash、内部节点、Tool Call ID 和评测字段。
+事件文本使用用户语言，并包含真正有帮助的 SQL、命令、对象名、影响行数、退出码、耗时或文件路径。结构化自动化使用 `event.sql`、`event.command`、`event.metrics` 和 `event.artifact`，不解析显示文本。事件不包含隐藏推理、知识 Hash、内部节点、Tool Call ID 和评测字段。
 
 ## 5. 许可交互
 

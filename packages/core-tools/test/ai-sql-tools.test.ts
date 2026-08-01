@@ -110,6 +110,15 @@ describe('AI SQL built-in tools', () => {
       ),
     ).toBe(true);
 
+    const schemasFromCommonScopeShorthand = (await harness.registry
+      .get('resource_list')!
+      .handler({ scope: 'schema' }, context('session-a'))) as ResourceListOutput;
+    expect(
+      schemasFromCommonScopeShorthand.resources.some(
+        (resource) => resource.name === 'public' && resource.kind === 'schema',
+      ),
+    ).toBe(true);
+
     const schemaChildren = (await harness.registry
       .get('resource_list')!
       .handler({ scope: 'conn_1' }, context('session-a'))) as ResourceListOutput;

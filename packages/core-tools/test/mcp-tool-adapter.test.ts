@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ReactAgent, ToolRegistry } from '@dbagent/core-agent';
+import { ReactAgent, ToolRegistry, isAgentToolResultEnvelope } from '@dbagent/core-agent';
 import { LlmRouter, type LlmChatResponse, type LlmProvider } from '@dbagent/core-llm';
 import { UsageTracker } from '@dbagent/core-usage';
 import {
@@ -24,13 +24,16 @@ afterEach(async () => {
 });
 
 describe('MCP tool adapter', () => {
-  it('normalizes MCP tool names and schemas without trusting remote readonly metadata', () => {
+  it('maps an MCP tool into the unified catalog with protocol metadata', () => {
     const definition = adaptMcpToolDefinition({
       serverId: 'customer db',
       source: 'user-mcp',
       tool: {
         name: 'list_tables',
         description: 'List tables from the remote database',
+        title: 'List database tables',
+        annotations: { readOnlyHint: true, idempotentHint: true },
+        execution: { taskSupport: 'optional' },
         inputSchema: {
           type: 'object',
           properties: { schema: { type: 'string' } },
@@ -44,9 +47,18 @@ describe('MCP tool adapter', () => {
       originalName: 'list_tables',
       source: 'user-mcp',
       sourceId: 'customer db',
-      dangerLevel: 'medium',
-      readonly: false,
-      requiredPermission: 'edit',
+      title: 'List database tables',
+      dangerLevel: 'safe',
+      readonly: true,
+      requiredPermission: 'read',
+      exposure: 'deferred',
+      execution: { concurrency: 'read' },
+      completion: { role: 'supporting', group: 'mcp:customer db' },
+      protocolMetadata: {
+        protocol: 'mcp',
+        taskSupport: 'optional',
+        annotations: { readOnlyHint: true, idempotentHint: true },
+      },
       inputSchema: {
         type: 'object',
         properties: { schema: { type: 'string' } },
@@ -76,6 +88,7 @@ describe('MCP tool adapter', () => {
         publisher: 'fixture',
         nested: { version: 2 },
       },
+      execution: { taskSupport: 'required' },
     });
 
     expect(spec).toEqual({
@@ -98,10 +111,11 @@ describe('MCP tool adapter', () => {
         publisher: 'fixture',
         nested: { version: 2 },
       },
+      execution: { taskSupport: 'required' },
     });
   });
 
-  it('uses a local edit floor and lets remote metadata only raise risk', () => {
+  it('uses MCP annotations with local name-based conflict checks', () => {
     expect(
       inferMcpToolRisk({ name: 'summarize', description: 'custom action' }, 'user-mcp'),
     ).toEqual({
@@ -117,8 +131,8 @@ describe('MCP tool adapter', () => {
     expect(
       inferMcpToolRisk({ name: 'decrypt_phone', annotations: { readOnlyHint: true } }, 'user-mcp'),
     ).toEqual({
-      dangerLevel: 'medium',
-      readonly: false,
+      dangerLevel: 'safe',
+      readonly: true,
     });
     expect(
       inferMcpToolRisk(
@@ -213,10 +227,16 @@ describe('MCP tool adapter', () => {
         sourceId: 'decryptor',
       },
     ]);
-    await expect(
-      registry.get('decryptor__decrypt_phone')?.handler({ value: 'enc:phone' }, toolContext()),
-    ).resolves.toEqual({
-      city: 'Shanghai',
+    const value = await registry
+      .get('decryptor__decrypt_phone')
+      ?.handler({ value: 'enc:phone' }, toolContext());
+    expect(isAgentToolResultEnvelope(value)).toBe(true);
+    if (!isAgentToolResultEnvelope(value)) throw new Error('Expected MCP result envelope.');
+    expect(value.modelProjection).toEqual({ city: 'Shanghai' });
+    expect(value.durableSummary).toMatchObject({
+      serverId: 'decryptor',
+      toolName: 'decrypt_phone',
+      isError: false,
     });
     expect(calls).toEqual([
       { toolName: 'decrypt_phone', args: { value: 'enc:phone' }, aborted: false },
@@ -270,7 +290,7 @@ describe('MCP tool adapter', () => {
     ).rejects.toBeInstanceOf(McpToolTimeoutError);
   });
 
-  it('denies every untrusted MCP tool in read mode and requires full mode for destructive tools', async () => {
+  it('allows annotated readonly MCP tools in read mode and requires full mode for destructive tools', async () => {
     const registry = new ToolRegistry();
     const health = new McpHealthManager();
     health.markHealthy('warehouse');
@@ -320,10 +340,10 @@ describe('MCP tool adapter', () => {
     expect(readResult.toolExecutions).toMatchObject([
       {
         toolName: 'warehouse__list_tables',
-        status: 'denied',
+        status: 'success',
       },
     ]);
-    expect(calledTools).toEqual([]);
+    expect(calledTools).toEqual(['list_tables']);
 
     const blockedAgent = new ReactAgent(
       new LlmRouter(usage, [
@@ -349,7 +369,25 @@ describe('MCP tool adapter', () => {
         status: 'denied',
       },
     ]);
-    expect(calledTools).toEqual([]);
+    expect(calledTools).toEqual(['list_tables']);
+  });
+
+  it('turns an MCP isError result into a failed tool execution', async () => {
+    const registry = new ToolRegistry();
+    registerMcpTools({
+      registry,
+      serverId: 'remote',
+      source: 'user-mcp',
+      tools: [{ name: 'read_status', annotations: { readOnlyHint: true } }],
+      callTool: () => ({
+        isError: true,
+        content: [{ type: 'text', text: 'remote service unavailable' }],
+      }),
+    });
+
+    await expect(
+      registry.get('remote__read_status')!.handler({}, toolContext()),
+    ).rejects.toThrow('remote service unavailable');
   });
 });
 

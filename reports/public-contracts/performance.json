@@ -1,7 +1,7 @@
 {
   "kind": "public-contracts-performance",
   "status": "passed",
-  "generatedAt": "2026-07-26T16:11:48.399Z",
+  "generatedAt": "2026-08-01T04:45:37.957Z",
   "environment": {
     "node": "v24.14.0",
     "platform": "win32",
@@ -9,8 +9,8 @@
     "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
     "cpuCount": 32,
     "memory": {
-      "rssMiB": 97.29,
-      "heapUsedMiB": 29.22
+      "rssMiB": 110.86,
+      "heapUsedMiB": 28.78
     }
   },
   "dataset": {
@@ -30,36 +30,36 @@
     "fixtureCompatibilityRate": 1
   },
   "metrics": {
-    "resourceValidationP95Ms": 0.021700000000009823,
-    "queryValidationP95Ms": 0.004300000000000637,
-    "ordinaryEncodingP95Ms": 0.004200000000025739,
-    "mixedThousandRowEncodingP95Ms": 7.284800000000359,
-    "tenMegabyteEncodingMs": 22.405399999999645,
+    "resourceValidationP95Ms": 0.009500000000002728,
+    "queryValidationP95Ms": 0.002899999999996794,
+    "ordinaryEncodingP95Ms": 0.00190000000000623,
+    "mixedThousandRowEncodingP95Ms": 2.861499999999978,
+    "tenMegabyteEncodingMs": 9.226200000000063,
     "fixtureCompatibilityRate": 1
   },
   "checks": {
     "resourceValidationP95Ms": {
-      "actual": 0.021700000000009823,
+      "actual": 0.009500000000002728,
       "maximum": 1,
       "passed": true
     },
     "queryValidationP95Ms": {
-      "actual": 0.004300000000000637,
+      "actual": 0.002899999999996794,
       "maximum": 1,
       "passed": true
     },
     "ordinaryEncodingP95Ms": {
-      "actual": 0.004200000000025739,
+      "actual": 0.00190000000000623,
       "maximum": 1,
       "passed": true
     },
     "mixedThousandRowEncodingP95Ms": {
-      "actual": 7.284800000000359,
+      "actual": 2.861499999999978,
       "maximum": 10,
       "passed": true
     },
     "tenMegabyteEncodingMs": {
-      "actual": 22.405399999999645,
+      "actual": 9.226200000000063,
       "maximum": 250,
       "passed": true
     },

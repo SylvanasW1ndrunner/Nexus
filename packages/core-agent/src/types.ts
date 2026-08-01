@@ -5,6 +5,7 @@ import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import type { AgentSessionWriter } from './session-store.js';
 import type { AgentStreamStore } from './stream-store.js';
 import type { AgentRunCoordinator } from './run-coordinator.js';
+import type { AgentToolExecutionHook } from './tool-execution-router.js';
 
 export type AgentAccessMode = 'read' | 'edit' | 'full';
 export type AgentMode = AgentAccessMode;
@@ -32,6 +33,8 @@ export type AgentSession = {
   taskPlan?: AgentTaskPlan;
   artifacts?: AgentArtifactReference[];
   activeTools?: string[];
+  /** Catalog-scoped deferred tool activations. `activeTools` is retained for legacy Sessions. */
+  toolActivations?: AgentToolActivation[];
   activeSkills?: AgentActivatedSkill[];
   /**
    * Private Markdown Skill overlays owned by this Session. Trusted runtimes
@@ -98,6 +101,8 @@ export type AgentRunRecord = {
   toolExecutions: Array<{
     toolName: string;
     status: AgentToolExecutionRecord['status'];
+    completionRole?: AgentToolCompletionRole;
+    completionGroup?: string;
     completionEvidence?: AgentToolCompletionEvidence;
   }>;
   completion?: AgentCompletionVerification;
@@ -121,6 +126,8 @@ export type AgentRunOptions = {
   initialSession?: AgentSession;
   initialIteration?: number;
   allowedTools?: string[];
+  /** Tools that remain directly visible even when dynamic discovery is enabled. */
+  pinnedTools?: string[];
   usageMode?: UsageMode;
   mode?: AgentMode;
   knowledgeSnapshot?: AgentKnowledgeSnapshotReference;
@@ -131,6 +138,9 @@ export type AgentRunOptions = {
   maxToolExecutionMs?: number;
   project?: AgentProjectReference;
   projectInstructions?: string;
+  systemPrompt?: AgentSystemPrompt;
+  managedInstructions?: string[];
+  capabilityInstructions?: string[];
   dynamicToolDiscovery?: boolean;
   skillCatalog?: AgentSkillCatalogEntry[];
   activatedSkills?: AgentActivatedSkill[];
@@ -140,6 +150,11 @@ export type AgentRunOptions = {
   subagentDepth?: number;
   eventSink?: AgentUserEventSink;
   signal?: AbortSignal;
+};
+
+export type AgentSystemPrompt = {
+  mode: 'append' | 'replace';
+  content: string;
 };
 
 export type ToolDangerLevel = 'safe' | 'medium' | 'high' | 'critical';
@@ -154,7 +169,64 @@ export type AgentToolSource =
   | 'builtin'
   | 'unknown';
 
+export type ToolExposure = 'direct' | 'deferred' | 'hidden' | 'disabled';
+
+export type AgentToolId = {
+  namespace?: string;
+  name: string;
+};
+
+export type AgentToolConcurrency = 'read' | 'write' | 'exclusive';
+
+export type AgentToolExecutionMetadata = {
+  concurrency: AgentToolConcurrency;
+  timeoutMs?: number;
+};
+
+export type AgentToolProtocolMetadata = {
+  protocol: 'mcp';
+  taskSupport?: 'forbidden' | 'optional' | 'required';
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
+};
+
+export type AgentToolDescriptor = {
+  id: AgentToolId;
+  /** Provider-compatible name. It remains unique inside one Runtime catalog. */
+  flatName: string;
+  title?: string;
+  description: string;
+  aliases: string[];
+  tags: string[];
+  inputSchema: LlmTool['inputSchema'];
+  outputSchema?: LlmTool['outputSchema'];
+  dangerLevel: ToolDangerLevel;
+  readonly: boolean;
+  source: AgentToolSource;
+  sourceId?: string;
+  exposure: ToolExposure;
+  requiredPermission?: AgentAccessMode;
+  execution: AgentToolExecutionMetadata;
+  completion?: AgentToolCompletionPolicy;
+  protocolMetadata?: AgentToolProtocolMetadata;
+};
+
+export type AgentToolCompletionRole = 'none' | 'supporting' | 'deliverable';
+
+export type AgentToolCompletionPolicy = {
+  role: AgentToolCompletionRole;
+  group?: string;
+};
+
 export type AgentToolDefinition = LlmTool & {
+  namespace?: string;
+  title?: string;
+  aliases?: string[];
+  tags?: string[];
   dangerLevel: ToolDangerLevel;
   readonly?: boolean;
   source?: AgentToolSource;
@@ -162,6 +234,10 @@ export type AgentToolDefinition = LlmTool & {
   originalName?: string;
   requiredPermission?: AgentAccessMode;
   resolveRequiredPermission?: (args: Record<string, unknown>) => AgentAccessMode;
+  exposure?: ToolExposure;
+  execution?: Partial<AgentToolExecutionMetadata>;
+  completion?: AgentToolCompletionPolicy;
+  protocolMetadata?: AgentToolProtocolMetadata;
 };
 
 export type AgentToolApproval = {
@@ -221,6 +297,13 @@ export type AgentToolContext = {
   executionGrant?: AgentToolExecutionGrant;
   /** Approval provenance for tool-specific handling and internal audit. */
   approval?: AgentToolApproval;
+  /** Scope used when a discovery tool activates a deferred schema. */
+  toolActivationScope?: {
+    catalogRevision: number;
+    checkpointSequence?: number;
+    taskPhase?: string;
+    activatedAt: string;
+  };
 };
 
 export type AgentToolHandler = (
@@ -229,12 +312,43 @@ export type AgentToolHandler = (
 ) => unknown;
 
 export type RegisteredAgentTool = AgentToolDefinition & {
+  descriptor: AgentToolDescriptor;
   handler: AgentToolHandler;
 };
 
+export type AgentToolRuntime = {
+  id: AgentToolId;
+  flatName: string;
+  handler: AgentToolHandler;
+};
+
+export type AgentToolCatalogChange = {
+  revision: number;
+  kind: 'registered' | 'unregistered';
+  toolName: string;
+  descriptor?: AgentToolDescriptor;
+};
+
+export type AgentToolActivation = {
+  toolName: string;
+  catalogRevision: number;
+  checkpointSequence?: number;
+  taskPhase?: string;
+  activatedAt: string;
+};
+
 export type AgentToolCompletionEvidence = {
-  kind: 'database-result' | 'database-write' | 'artifact';
+  kind:
+    | 'database-result'
+    | 'database-write'
+    | 'artifact'
+    | 'file'
+    | 'process'
+    | 'mcp'
+    | 'subagent'
+    | 'generic';
   deliveryReady: boolean;
+  outcome?: 'pending' | 'succeeded' | 'failed' | 'cancelled';
   /** Deterministic runtime evidence; omitted only for legacy/custom tools. */
   source?: 'runtime';
   executionId?: string;
@@ -249,8 +363,18 @@ export type AgentToolCompletionEvidence = {
 export type AgentToolResultEnvelope = {
   type: 'schemanaut.agent-tool-result.v1';
   modelProjection: unknown;
+  userProjection?: unknown;
   durableSummary: unknown;
+  auditEvidence?: AgentToolAuditEvidence;
   completionEvidence?: AgentToolCompletionEvidence;
+};
+
+export type AgentToolAuditEvidence = {
+  status: 'success' | 'denied' | 'failed';
+  durationMs?: number;
+  resultType?: string;
+  argumentSummary?: string;
+  failureKind?: AgentToolFailureKind;
 };
 
 export type AgentToolExecutionRecord = {
@@ -264,6 +388,8 @@ export type AgentToolExecutionRecord = {
   retryable?: boolean;
   approval?: AgentToolApprovalRecord;
   completionEvidence?: AgentToolCompletionEvidence;
+  completionRole?: AgentToolCompletionRole;
+  completionGroup?: string;
 };
 
 export type AgentToolApprovalRecord = {
@@ -316,6 +442,7 @@ export type AgentRunDependencies = {
   streamStore?: AgentStreamStore;
   auditLog?: AgentAuditLogWriter;
   runCoordinator?: AgentRunCoordinator;
+  toolHooks?: AgentToolExecutionHook[];
 };
 
 export type AgentProjectReference = {
@@ -396,8 +523,11 @@ export type AgentUserEventType =
   | 'plan-updated'
   | 'exploring'
   | 'sql-prepared'
+  | 'command-prepared'
   | 'approval-required'
   | 'sql-executed'
+  | 'command-executed'
+  | 'tool-failed'
   | 'correcting'
   | 'artifact-created'
   | 'completed'
@@ -409,12 +539,15 @@ export type AgentUserEvent = {
   type: AgentUserEventType;
   message: string;
   createdAt: string;
+  toolName?: string;
   sql?: string;
+  command?: string;
   artifact?: AgentArtifactReference;
   metrics?: {
     durationMs?: number;
     rowCount?: number;
     affectedRows?: number;
+    exitCode?: number | null;
   };
 };
 
@@ -423,12 +556,14 @@ export type AgentUserEventDraft = Omit<AgentUserEvent, 'id' | 'sessionId' | 'cre
 export type AgentUserEventSink = (event: AgentUserEvent) => void | Promise<void>;
 
 export type AgentSubagentStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type AgentSubagentContextStrategy = 'fresh' | 'fork';
 
 export type AgentSubagentRecord = {
   id: string;
   parentSessionId: string;
   childSessionId?: string;
   task: string;
+  contextStrategy: AgentSubagentContextStrategy;
   status: AgentSubagentStatus;
   depth: number;
   summary?: string;
@@ -456,6 +591,7 @@ export type AgentSubagentRunner = (options: AgentRunOptions) => Promise<AgentRun
 export type SpawnAgentSubagentInput = {
   parentSessionId: string;
   task: string;
+  contextStrategy?: AgentSubagentContextStrategy;
   depth?: number;
   options: AgentRunOptions;
 };

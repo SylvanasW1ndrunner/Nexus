@@ -4,7 +4,7 @@ All notable changes to SchemaNaut will be documented here.
 
 SchemaNaut 的重要变更都会记录在这里。
 
-## [0.1.0] - Unreleased / 未发布
+## [0.1.0-alpha.1] - 2026-07-31
 
 ### Added / 新增
 
@@ -24,4 +24,4 @@ SchemaNaut 的重要变更都会记录在这里。
 - MCP and user Skill extension foundations are not yet exposed through every public SDK/API path.
 - SchemaNaut does not provide user accounts or sign-in; the embedding host application or gateway owns identity and API access control.
 - MCP and provider secrets must be supplied through host-managed references; SchemaNaut does not provide a credential vault.
-- The public npm package has not yet been published.
+- The first public npm release is distributed under the `alpha` dist-tag.

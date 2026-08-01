@@ -1,9 +1,9 @@
 {
-  "generatedAt": "2026-07-31T06:28:35.531Z",
-  "runId": "2026-07-31T06-26-17-039Z-56c002c3-36cc-4633-986c-88799d4e933c",
+  "generatedAt": "2026-07-31T21:15:04.782Z",
+  "runId": "2026-07-31T21-05-11-856Z-9cc90c28-1d1f-41ff-b5bb-67bab5d1d462",
   "database": "dbagent_core_db_test",
   "git": {
-    "commit": "96feaf5e683dac2e3c9dc506c13f9bb0ea0e6edb",
+    "commit": "c78985f5be4308546a6a7ee3c0f1eb2b4d5bed31",
     "dirty": true
   },
   "fixtures": {
@@ -18,14 +18,25 @@
   "reports": {
     "functional": {
       "path": "functional.json",
-      "sha256": "fb528ff622c827e28a5d6284d46e2ce7bbc80c74a2167339bfeef6a12355591a",
+      "sha256": "a0f15d4c1bc22d798f505ec65ec1158fc9ac43f7c596e563a524f7f8150631c0",
       "runCount": 9,
       "passed": true
     },
     "performance": {
       "path": "performance.json",
-      "sha256": "5e8afd41fbd7229864dd4e83c42078a48fb25411e7862d1dc1408470d465e289",
+      "sha256": "b8708c13ab36d4df6b56812abb4b0dafd2115504a1fa65accd5f80f834729369",
       "scenarioCount": 4,
+      "passed": true
+    },
+    "live": {
+      "path": "live.json",
+      "sha256": "67aa5f1057087497c37c03f1c7f72172632ea0b0097c58b8b679bff9d10643dd",
+      "runCount": 4,
+      "passed": true
+    },
+    "generalAgent": {
+      "path": "../agent-runtime/live-project.json",
+      "sha256": "06b3889edc0535ea917f50886c30e824e39c5a43309a56360fce2334ee95e4c2",
       "passed": true
     }
   },

@@ -4,7 +4,7 @@
 
 ### 用自然语言提问，得到 SQL，把控制权留给你
 
-**可嵌入、开源的 PostgreSQL AI SQL Agent。**
+**面向数据库的可嵌入开源 Agent，首个完整能力包是 PostgreSQL AI SQL。**
 
 [![状态：Alpha](https://img.shields.io/badge/status-alpha-f59e0b)](CHANGELOG.md)
 [![许可证：Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
@@ -15,7 +15,7 @@
 
 </div>
 
-SchemaNaut 把一段自然语言需求变成数据库任务：检索相关 Schema 与业务知识、规划工作、生成 SQL、在必要时申请许可、交给数据库执行，并根据真实错误继续修正。
+SchemaNaut 由通用技术 Agent 内核与数据库专业能力包组成。当前它可以把自然语言需求变成数据库任务：检索相关 Schema 与业务知识、规划工作、生成 SQL、在必要时申请许可、交给数据库执行，并根据真实错误继续修正；同一内核也支持项目文件、进程、Web、MCP 与子 Agent 能力。
 
 它为嵌入和自动化而设计。核心入口是 TypeScript SDK 与本地 REST API，同时提供交互式 CLI 和刻意保持轻量的 WebUI；它不是数据库 IDE。
 
@@ -32,7 +32,7 @@ SchemaNaut 把一段自然语言需求变成数据库任务：检索相关 Schem
 | 明确权限          | `read`、`edit`、`full` 三级权限；超出当前模式的动作可通过回调申请单次许可                           |
 | 渐进式 Skills     | 系统、用户、Project、Session 四级标准 Markdown `SKILL.md`；未激活前只把目录信息提供给模型           |
 | 标准 MCP Client   | 基于官方 MCP SDK，支持 stdio、Streamable HTTP、SSE 兼容、动态工具发现、生命周期、取消和 Secret 引用 |
-| Project Tools     | Project 范围文件、可选宿主网络工具、`full` 模式下的有界 Shell，以及上下文独立、能力相同的子 Agent   |
+| Project Tools     | Project 范围文件与原子 Patch、可选 Web/前后台进程，以及上下文独立、能力相同的子 Agent             |
 | 查询结果分离      | 聚合和筛选交给数据库；SDK/API 单独返回最多 1,000 行，模型临时投影最多 100 行且不超过 64 KiB       |
 | 使用入口          | TypeScript SDK、本地 REST API、交互式 CLI 与轻量本地 WebUI                                          |
 
@@ -67,20 +67,26 @@ flowchart LR
 - OpenAI-compatible 模型 Endpoint 或 Anthropic Messages Endpoint
 - Agent 工作流需要模型支持 Tool Calling
 
-公开 npm 包尚未发布。现在可以从仓库构建可安装包：
+安装当前公开 Alpha 版本：
+
+```bash
+npm install @nwlworkshop/schemanaut@alpha
+```
+
+或者从仓库构建完全一致的可安装包：
 
 ```bash
 pnpm install
 pnpm package:npm
-npm install ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+npm install ./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
 ```
 
 `pnpm test:npm-package:functional` 会在接受该归档前校验 `SHA256SUMS.txt`、
 发行版本元数据、密钥扫描、隔离本地安装、SDK/REST/CLI 行为和 TypeScript 声明。
 
-计划发布的包名是 `@nwlworkshop/schemanaut`。
+包名是 `@nwlworkshop/schemanaut`。
 下文统一使用 `npx schemanaut`，它会从当前项目的本地安装中解析 CLI。
-只有明确需要全局命令时，才使用 `npm install --global ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz`。
+只有明确需要全局命令时，才使用 `npm install --global @nwlworkshop/schemanaut@alpha`。
 
 ## 最快体验：交互式 CLI
 
@@ -252,12 +258,13 @@ pnpm test:npm-package:functional
 
 ```bash
 pnpm test:functional:live
+pnpm test:agent-runtime:live
 pnpm test:performance:live
 ```
 
 凭据只能存放在已忽略的环境文件或外部 Secret Store 中，禁止提交到仓库。
 
-三类复杂 PostgreSQL 场景、性能阈值、报告位置和完整发布验收顺序见[测试链路](docs/test-pipeline.md)。
+三类复杂 PostgreSQL 场景、Schema 快速收敛、无数据库 Project Agent、性能阈值、报告位置和完整发布验收顺序见[测试链路](docs/test-pipeline.md)。
 
 ## 当前边界
 
@@ -267,7 +274,7 @@ pnpm test:performance:live
 - WebUI 是轻量本地配置和试用界面，不是 IDE。
 - Agent 交互结果最多返回 1,000 行，只存在于当前响应与进程内缓存；恢复 Session 不恢复数据库行，需要时重新执行 SQL 或使用显式数据库导出。
 - 默认 Runtime 支持 MCP Secret 引用，但不配置 MCP OAuth，也不提供凭据保险库。
-- 只有宿主显式设置 `enableShellTool: true` 时才会注册 `shell_run`。它需要 `full` 模式，使用 Project 范围内的工作目录和精简环境变量，但仍继承宿主进程的操作系统权限，并不是操作系统沙箱。
+- 只有宿主显式设置 `enableProcessTools: true` 时才会注册前台/后台进程工具。命令执行、输入和终止需要 `full` 模式，Handle 按 Session 隔离，工作目录限定在 Project 内，但仍继承宿主进程的操作系统权限，并不是操作系统沙箱。`enableShellTool` 仅作为旧 `shell_run` 兼容字段保留。
 - MCP Server 默认只加载配置，不自动启动。应显式启动已审核的 Server；只有可信宿主才应开启 `autoStartMcp`。
 - Agent 效果仍取决于所选模型的推理与 Tool Calling 能力。
 - AI 治理与运维仍是路线图内容，不属于 v1。

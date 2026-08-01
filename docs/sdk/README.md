@@ -4,25 +4,31 @@
 
 This guide shows how to use SchemaNaut v1 through the TypeScript SDK, local REST API, and CLI. All examples describe the current source API.
 
-SchemaNaut v1 is an AI SQL Agent, not a database IDE and not an AI governance/operations Agent.
+SchemaNaut v1 combines a general technical-Agent kernel with a database capability package. Its current golden path is PostgreSQL, Schema RAG, and AI SQL, while the same Runtime can perform project-file, process, web, MCP, and subagent work without a database connection. It is not a database IDE, and the first release does not yet ship the governance/operations capability package.
 
 ## 1. Requirements and installation
 
 - Node.js 22.13 or newer (durable Sessions use `node:sqlite`; the `--experimental-sqlite` startup flag is not required, but Node 22 still labels the module experimental)
 - ESM application, or a build tool that consumes ESM
-- PostgreSQL
+- PostgreSQL (only when database capabilities are used)
 - An OpenAI-compatible endpoint or Anthropic Messages endpoint
 - A model with tool calling for `runAgent()`
 
-The public npm package is not published yet. Build and install the archive locally:
+Install the public Alpha release:
+
+```bash
+npm install @nwlworkshop/schemanaut@alpha
+```
+
+Or build and install the archive locally:
 
 ```bash
 pnpm install
 pnpm package:npm
-npm install ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+npm install ./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
 ```
 
-The planned package name is `@nwlworkshop/schemanaut`.
+The package name is `@nwlworkshop/schemanaut`.
 CLI examples use `npx schemanaut` so they resolve the command from this local installation.
 
 ## 2. Runtime, Project, and Session
@@ -81,6 +87,11 @@ const runtime = new DatabaseAgentRuntime({
     apiKey,
   }),
   model: process.env.LLM_MODEL!,
+  enableProcessTools: true,
+  systemPrompt: {
+    mode: 'append',
+    content: 'Use concise English and run relevant tests after code changes.',
+  },
 });
 
 try {
@@ -186,7 +197,7 @@ The knowledge layer uses a database → schema → relation → column hierarchy
 
 Successful DDL executed through the built-in Agent SQL tool refreshes the active index. The default unified PostgreSQL path also compares a stable schema revision before SQL generation and Agent runs, so external DDL is refreshed automatically. Hosts using a custom compatibility `driver` must call `indexSchema()` after out-of-band schema changes.
 
-## 6. Run the plan-guided AI SQL Agent
+## 6. Run the general Agent and AI SQL capability
 
 ```ts
 const run = await runtime.runAgent({
@@ -215,12 +226,40 @@ The SDK is a trusted integration surface: `runAgent()` returns the complete `AiS
 1. understand the goal;
 2. create or update a task plan when useful;
 3. discover and activate only the required Skills and tools;
-4. retrieve Schema or inspect small data samples;
-5. generate and execute SQL;
-6. observe database errors or results and change course;
+4. inspect the project, retrieve Schema, run a process, or call an external capability;
+5. observe real tool outcomes and change course;
+6. let the capability package and Runtime evidence determine whether delivery is complete;
 7. verify task evidence before reporting completion.
 
 There is no user-selectable Agent strategy. `activatedSkills` is the list actually active in the returned Session.
+
+A database connection is not required by `runAgent()`. This Project task uses only file and process capabilities:
+
+```ts
+const run = await runtime.runAgent({
+  message: 'Investigate the failing tests, fix the root cause, and rerun them.',
+  mode: 'full',
+  allowedTools: [
+    'task_plan_create',
+    'task_update',
+    'task_list',
+    'tool_search',
+    'tool_describe',
+    'workspace_list',
+    'workspace_read',
+    'workspace_search',
+    'workspace_write',
+    'workspace_edit',
+    'workspace_patch',
+    'process_exec',
+    'process_poll',
+    'process_terminate',
+  ],
+  pinnedTools: ['workspace_read', 'workspace_patch', 'process_exec'],
+});
+```
+
+`systemPrompt` accepts `{ mode: 'append' | 'replace', content }`. Even in `replace` mode, tool protocol, allowlists, permissions, cancellation, scheduling, and evidence gates remain code-enforced. `capabilityInstructions` lets a host describe capabilities for a run and must not carry permission rules. `allowedTools` is a hard allowlist; `pinnedTools` only makes allowed deferred tools directly visible for that run.
 
 The `onEvent` callback receives user-facing semantic events only:
 
@@ -229,8 +268,11 @@ goal-understood
 plan-updated
 exploring
 sql-prepared
+command-prepared
 approval-required
 sql-executed
+command-executed
+tool-failed
 correcting
 artifact-created
 completed
@@ -244,12 +286,12 @@ Internal reasoning, knowledge hashes, node IDs, ranking scores, and evaluation t
 The Runtime registers general tools in addition to database and knowledge tools:
 
 - `workspace_list`, `workspace_read`, and `workspace_search` read Project files;
-- `workspace_write` and `workspace_edit` create or modify Project files and register artifacts;
-- `shell_run` runs a bounded command only when the host opts in with `enableShellTool: true`;
+- `workspace_write`, `workspace_edit`, and `workspace_patch` create or atomically modify Project files and register artifacts;
+- `process_exec`, `process_poll`, `process_write`, and `process_terminate` are registered only when the host sets `enableProcessTools: true`;
 - `web_search` and `web_fetch` are registered only when the host provides `webAdapter`;
-- `subagent_spawn`, `subagent_list`, `subagent_wait`, and `subagent_stop` manage bounded child tasks.
+- `subagent_spawn`, `subagent_list`, `subagent_wait`, `subagent_message`, and `subagent_stop` manage bounded child tasks.
 
-Dedicated file tools reject absolute paths, traversal outside the Project, and symlink escapes. `shell_run` is not registered by default. When enabled, its working directory must be inside the Project and its child environment is reduced to ordinary operating-system variables, but the process still inherits the SchemaNaut host's OS permissions. It is not an OS sandbox.
+Dedicated file tools reject absolute paths, traversal outside the Project, and symlink escapes. `workspace_patch` commits only after every replacement has been validated, preventing partial edits. Process tools are not registered by default. When enabled, their working directories remain inside the Project, handles are Session-scoped, output is incremental and bounded, and termination cleans up descendant processes. Child processes receive a reduced environment but still inherit the SchemaNaut host's OS permissions; this is not an OS sandbox. `enableShellTool` remains compatibility-only; new integrations should use `enableProcessTools`.
 
 The host web adapter is also the network policy boundary. It must enforce the application's destination allowlist, authentication, rate limits, and SSRF protections.
 
@@ -764,7 +806,7 @@ Rules for a host application:
 - use a least-privilege database account;
 - use either the default approval broker or a custom `approvalProvider` wherever users or organizational policy must approve actions;
 - treat `full` mode as host command-execution authority, not only database DDL authority;
-- leave `enableShellTool` and REST `allowProcessMcpManagement` disabled unless the deployment explicitly needs and trusts them;
+- leave `enableProcessTools`, the compatibility-only `enableShellTool`, and REST `allowProcessMcpManagement` disabled unless the deployment explicitly needs and trusts them;
 - treat user-provided Skills, MCP servers, and project instructions as executable configuration that requires trust review.
 
 ## 18. Further reading

@@ -2,15 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { createAgentTaskPlan, verifyAgentCompletion } from '../src/index.js';
 
 describe('Agent completion verification', () => {
-  it('accepts a delivered database result only with a terminal final response', () => {
+  it('accepts deliverable evidence but rejects a process-only final response', () => {
     const verification = verifyAgentCompletion({
       toolExecutions: [
         {
-          toolCallId: 'sql-1',
-          toolName: 'sql_execute',
+          toolCallId: 'query-1',
+          toolName: 'database_execute',
           status: 'success',
           durationMs: 1,
           resultPreview: '{"returnedRowCount":3}',
+          completionRole: 'deliverable',
+          completionGroup: 'database-execution',
           completionEvidence: {
             kind: 'database-result',
             deliveryReady: true,
@@ -29,16 +31,50 @@ describe('Agent completion verification', () => {
     });
   });
 
-  it('rejects a failed SQL attempt and keeps simple non-tool answers valid', () => {
+  it('rejects references to hidden earlier output as a final delivery', () => {
+    for (const proposedFinalText of [
+      '查询已完成，统计结果已如上表呈现。',
+      'The query completed and the results are shown above.',
+    ]) {
+      expect(
+        verifyAgentCompletion({
+          toolExecutions: [
+            {
+              toolCallId: 'query-reference-only',
+              toolName: 'database_execute',
+              status: 'success',
+              durationMs: 1,
+              resultPreview: '{"returnedRowCount":9}',
+              completionRole: 'deliverable',
+              completionEvidence: {
+                kind: 'database-result',
+                deliveryReady: true,
+              },
+            },
+          ],
+          proposedFinalText,
+        }),
+      ).toMatchObject({
+        verified: true,
+        deliveryReady: true,
+        finalResponseReady: false,
+        phase: 'finalize',
+      });
+    }
+  });
+
+  it('rejects a failed deliverable action and keeps simple non-tool answers valid', () => {
     expect(
       verifyAgentCompletion({
         toolExecutions: [
           {
-            toolCallId: 'sql-1',
-            toolName: 'sql_execute',
+            toolCallId: 'file-1',
+            toolName: 'file_write',
             status: 'failed',
             durationMs: 1,
-            resultPreview: 'syntax error',
+            resultPreview: 'disk full',
+            completionRole: 'deliverable',
+            completionGroup: 'artifact-write',
           },
         ],
         proposedFinalText: 'Done.',
@@ -47,7 +83,7 @@ describe('Agent completion verification', () => {
       verified: false,
       deliveryReady: false,
       phase: 'verify',
-      missing: ['the latest SQL execution did not succeed'],
+      missing: ['the latest deliverable action did not succeed'],
     });
 
     expect(
@@ -63,26 +99,28 @@ describe('Agent completion verification', () => {
     });
   });
 
-  it('requires the latest SQL execution to be successful and deliverable', () => {
+  it('requires the latest deliverable action to be successful and deliverable', () => {
     const verification = verifyAgentCompletion({
       toolExecutions: [
         {
-          toolCallId: 'sql-success',
-          toolName: 'sql_execute',
+          toolCallId: 'query-success',
+          toolName: 'database_execute',
           status: 'success',
           durationMs: 1,
           resultPreview: '{"rowCount":1}',
+          completionRole: 'deliverable',
           completionEvidence: {
             kind: 'database-result',
             deliveryReady: true,
           },
         },
         {
-          toolCallId: 'sql-final-failure',
-          toolName: 'sql_execute',
+          toolCallId: 'query-final-failure',
+          toolName: 'database_execute',
           status: 'failed',
           durationMs: 1,
           resultPreview: 'statement timeout',
+          completionRole: 'deliverable',
         },
       ],
       proposedFinalText: 'The query is complete.',
@@ -92,23 +130,24 @@ describe('Agent completion verification', () => {
       verified: false,
       deliveryReady: false,
       phase: 'verify',
-      missing: ['the latest SQL execution did not succeed'],
+      missing: ['the latest deliverable action did not succeed'],
     });
   });
 
-  it('accepts a denied or failed SQL outcome only when the final response explicitly delivers it', () => {
+  it('accepts a denied or failed deliverable only when the final response delivers it', () => {
     expect(
       verifyAgentCompletion({
         toolExecutions: [
           {
-            toolCallId: 'sql-denied',
-            toolName: 'sql_execute',
+            toolCallId: 'write-denied',
+            toolName: 'file_write',
             status: 'denied',
             durationMs: 1,
             resultPreview: 'Approval was denied.',
+            completionRole: 'deliverable',
           },
         ],
-        proposedFinalText: '本次修改未获批准，因此没有执行。',
+        proposedFinalText: '本次写入未获批准，因此没有执行。',
       }),
     ).toMatchObject({
       verified: true,
@@ -121,14 +160,15 @@ describe('Agent completion verification', () => {
       verifyAgentCompletion({
         toolExecutions: [
           {
-            toolCallId: 'sql-timeout',
-            toolName: 'sql_execute',
+            toolCallId: 'process-timeout',
+            toolName: 'process_wait',
             status: 'failed',
             durationMs: 100,
-            resultPreview: 'statement timeout',
+            resultPreview: 'process timeout',
+            completionRole: 'deliverable',
           },
         ],
-        proposedFinalText: '查询已超时并取消，没有继续等待。',
+        proposedFinalText: '任务已超时并取消，没有继续等待。',
       }),
     ).toMatchObject({
       verified: true,
@@ -152,11 +192,12 @@ describe('Agent completion verification', () => {
       taskPlan,
       toolExecutions: [
         {
-          toolCallId: 'sql-1',
-          toolName: 'sql_execute',
+          toolCallId: 'query-1',
+          toolName: 'database_execute',
           status: 'success',
           durationMs: 1,
           resultPreview: '{"returnedRowCount":7}',
+          completionRole: 'deliverable',
           completionEvidence: {
             kind: 'database-result',
             deliveryReady: true,

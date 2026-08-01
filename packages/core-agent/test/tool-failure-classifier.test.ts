@@ -9,7 +9,7 @@ describe('classifyAgentToolFailure', () => {
     ['Permission denied.', 'permission', false],
     ['Tool is not registered.', 'tool_unavailable', false],
     ['Invalid connectionId must be a string.', 'validation', false],
-  ] as const)('classifies %s', (message, failureKind, retryable) => {
+  ] as const)('classifies %s', (message: string, failureKind: string, retryable: boolean) => {
     expect(classifyAgentToolFailure(message)).toEqual({ failureKind, retryable });
   });
 });

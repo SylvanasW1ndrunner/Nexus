@@ -4,25 +4,31 @@
 
 本文说明如何通过 TypeScript SDK、本地 REST API 与 CLI 使用 SchemaNaut v1。所有示例均以当前源码 API 为准。
 
-SchemaNaut v1 是 AI SQL Agent，不是数据库 IDE，也不是 AI 治理运维 Agent。
+SchemaNaut v1 是“通用技术 Agent 内核 + 数据库专业能力包”：当前稳定黄金链路是 PostgreSQL、Schema RAG 与 AI SQL；同一 Runtime 也可在不连接数据库时完成项目文件、进程、Web、MCP 和子 Agent 任务。它不是数据库 IDE，首版也尚未交付治理运维能力包。
 
 ## 1. 环境与安装
 
 - Node.js 22.13 或更高版本（持久化 Session 使用 `node:sqlite`；无需 `--experimental-sqlite` 启动参数，但 Node 22 仍将该模块标为实验性）
 - ESM 应用，或能够使用 ESM 的构建工具
-- PostgreSQL
+- PostgreSQL（只在使用数据库能力时需要）
 - OpenAI-compatible Endpoint 或 Anthropic Messages Endpoint
 - 使用 `runAgent()` 时，模型需要支持 Tool Calling
 
-公开 npm 包尚未发布。现在可以在仓库中构建并安装：
+安装公开 Alpha 版本：
+
+```bash
+npm install @nwlworkshop/schemanaut@alpha
+```
+
+或者在仓库中构建并安装：
 
 ```bash
 pnpm install
 pnpm package:npm
-npm install ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+npm install ./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
 ```
 
-计划发布的包名是 `@nwlworkshop/schemanaut`。
+包名是 `@nwlworkshop/schemanaut`。
 CLI 示例统一使用 `npx schemanaut`，从当前项目的本地安装中解析命令。
 
 ## 2. Runtime、Project 与 Session
@@ -81,6 +87,11 @@ const runtime = new DatabaseAgentRuntime({
     apiKey,
   }),
   model: process.env.LLM_MODEL!,
+  enableProcessTools: true,
+  systemPrompt: {
+    mode: 'append',
+    content: '回答使用中文；修改代码后运行相关测试。',
+  },
 });
 
 try {
@@ -186,7 +197,7 @@ console.log(connection.id, schema.tableCount, schema.columnCount);
 
 通过内置 Agent SQL Tool 成功执行 DDL 后，当前索引会自动刷新。默认统一 PostgreSQL 路径还会在 SQL 生成和 Agent 运行前比较稳定的 Schema 修订值，因此外部 DDL 会自动触发刷新。使用自定义兼容 `driver` 的宿主仍需在外部 Schema 变化后调用 `indexSchema()`。
 
-## 6. 运行计划式 AI SQL Agent
+## 6. 运行通用 Agent 与 AI SQL 能力
 
 ```ts
 const run = await runtime.runAgent({
@@ -215,12 +226,40 @@ SDK 是可信集成入口：`runAgent()` 返回完整 `AiSqlAgentRun`，其中�
 1. 理解目标；
 2. 在有价值时创建或更新任务计划；
 3. 只发现并激活当前需要的 Skills 与 Tools；
-4. 检索 Schema 或查看小型数据样例；
-5. 生成并执行 SQL；
-6. 观察数据库错误或结果并更换路径；
+4. 读取项目、检索 Schema、执行进程或调用外部能力；
+5. 观察真实 Tool 结果并更换路径；
+6. 由能力包和 Runtime 证据判断交付是否完成；
 7. 根据任务证据验证完成情况后再输出。
 
 Agent 不提供让用户选择的策略。`activatedSkills` 是返回 Session 中实际激活的 Skill 名称。
+
+数据库不是 `runAgent()` 的前置条件。下面的 Project 任务只启用文件和进程能力：
+
+```ts
+const run = await runtime.runAgent({
+  message: '检查这个项目的测试失败，修复根因并重新运行测试。',
+  mode: 'full',
+  allowedTools: [
+    'task_plan_create',
+    'task_update',
+    'task_list',
+    'tool_search',
+    'tool_describe',
+    'workspace_list',
+    'workspace_read',
+    'workspace_search',
+    'workspace_write',
+    'workspace_edit',
+    'workspace_patch',
+    'process_exec',
+    'process_poll',
+    'process_terminate',
+  ],
+  pinnedTools: ['workspace_read', 'workspace_patch', 'process_exec'],
+});
+```
+
+`systemPrompt` 支持 `{ mode: 'append' | 'replace', content }`；即使使用 `replace`，Runtime 的工具协议、允许工具、权限、取消、调度和证据门禁仍由代码执行。`capabilityInstructions` 用于宿主提供本轮能力说明，不应承载权限规则。`allowedTools` 是硬允许列表，`pinnedTools` 只让允许列表中的延迟工具本轮直接可见。
 
 `onEvent` 只接收面向用户的语义事件：
 
@@ -229,8 +268,11 @@ goal-understood
 plan-updated
 exploring
 sql-prepared
+command-prepared
 approval-required
 sql-executed
+command-executed
+tool-failed
 correcting
 artifact-created
 completed
@@ -244,12 +286,12 @@ needs-user-input
 除数据库和知识工具外，Runtime 还注册通用工具：
 
 - `workspace_list`、`workspace_read`、`workspace_search` 读取 Project 文件；
-- `workspace_write`、`workspace_edit` 创建或修改 Project 文件，并登记产物；
-- 只有宿主设置 `enableShellTool: true` 时，`shell_run` 才会运行有界命令；
+- `workspace_write`、`workspace_edit`、`workspace_patch` 创建或原子修改 Project 文件，并登记产物；
+- 只有宿主设置 `enableProcessTools: true` 时才注册 `process_exec`、`process_poll`、`process_write` 和 `process_terminate`；
 - 只有宿主提供 `webAdapter` 时才注册 `web_search` 和 `web_fetch`；
-- `subagent_spawn`、`subagent_list`、`subagent_wait`、`subagent_stop` 管理有界子任务。
+- `subagent_spawn`、`subagent_list`、`subagent_wait`、`subagent_message`、`subagent_stop` 管理有界子任务。
 
-专用文件工具会拒绝绝对路径、Project 外路径和符号链接逃逸。`shell_run` 默认不注册；启用后，其工作目录必须位于 Project 内，子进程只接收精简的常规系统环境变量，但仍继承 SchemaNaut 宿主进程的操作系统权限，并不是操作系统沙箱。
+专用文件工具会拒绝绝对路径、Project 外路径和符号链接逃逸。`workspace_patch` 在全部替换验证成功后才提交，避免半写入。Process Tools 默认不注册；启用后，工作目录必须位于 Project 内，Handle 按 Session 隔离，输出增量读取且有界，终止会清理后代进程。子进程只接收精简的常规系统环境变量，但仍继承 SchemaNaut 宿主进程的操作系统权限，并不是操作系统沙箱。`enableShellTool` 仅保留兼容用途，新集成使用 `enableProcessTools`。
 
 宿主 Web Adapter 同时是网络策略边界，必须由它落实目标地址白名单、认证、限流和 SSRF 防护。
 
@@ -764,7 +806,7 @@ SDK 错误使用 `DatabaseAgentError`：
 - 使用最小权限数据库账号；
 - 需要用户或组织审批时，必须使用默认许可 Broker 或自定义 `approvalProvider`；
 - 将 `full` 模式视为宿主命令执行权限，而不只是数据库 DDL 权限；
-- 除非部署明确需要并信任，否则保持 `enableShellTool` 和 REST `allowProcessMcpManagement` 关闭；
+- 除非部署明确需要并信任，否则保持 `enableProcessTools`、兼容字段 `enableShellTool` 和 REST `allowProcessMcpManagement` 关闭；
 - 用户提供的 Skills、MCP Server 和项目指令属于可执行配置，需要经过信任审核。
 
 ## 18. 继续阅读

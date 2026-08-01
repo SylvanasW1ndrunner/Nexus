@@ -2,7 +2,11 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ToolRegistry, createAgentSession } from '@dbagent/core-agent';
+import {
+  ToolRegistry,
+  createAgentSession,
+  isAgentToolResultEnvelope,
+} from '@dbagent/core-agent';
 import { registerWorkspaceTools } from '../src/index.js';
 
 const temporaryDirectories: string[] = [];
@@ -14,6 +18,61 @@ afterEach(async () => {
 });
 
 describe('workspace tools', () => {
+  it('applies an atomic multi-edit patch and returns durable artifact evidence', async () => {
+    const directory = await temporaryDirectory();
+    await writeFile(
+      join(directory, 'service.ts'),
+      'export const host = "localhost";\nexport const port = 3000;\n',
+      'utf8',
+    );
+    const registry = new ToolRegistry();
+    registerWorkspaceTools(registry, { rootPath: directory });
+    const session = createAgentSession({
+      id: 'workspace-patch-session',
+      title: 'Workspace patch',
+      mode: 'edit',
+      now: fixedNow,
+    });
+
+    const patched = await registry.get('workspace_patch')!.handler(
+      {
+        path: 'service.ts',
+        edits: [
+          { oldText: '"localhost"', newText: '"127.0.0.1"' },
+          { oldText: '3000', newText: '3721' },
+        ],
+      },
+      { session },
+    );
+
+    expect(isAgentToolResultEnvelope(patched)).toBe(true);
+    if (!isAgentToolResultEnvelope(patched)) throw new Error('Expected result envelope.');
+    expect(patched.modelProjection).toMatchObject({ path: 'service.ts', replacements: 2 });
+    expect(patched.completionEvidence).toMatchObject({
+      kind: 'artifact',
+      deliveryReady: true,
+      outcome: 'succeeded',
+    });
+    await expect(readFile(join(directory, 'service.ts'), 'utf8')).resolves.toContain(
+      '"127.0.0.1"',
+    );
+
+    const beforeFailure = await readFile(join(directory, 'service.ts'), 'utf8');
+    await expect(
+      registry.get('workspace_patch')!.handler(
+        {
+          path: 'service.ts',
+          edits: [
+            { oldText: '3721', newText: '4000' },
+            { oldText: 'missing fragment', newText: 'never written' },
+          ],
+        },
+        { session },
+      ),
+    ).rejects.toThrow('edit 2');
+    await expect(readFile(join(directory, 'service.ts'), 'utf8')).resolves.toBe(beforeFailure);
+  });
+
   it('writes, reads, searches and edits durable Agent artifacts', async () => {
     const directory = await temporaryDirectory();
     const registry = new ToolRegistry();
@@ -146,7 +205,8 @@ describe('workspace tools', () => {
     };
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toHaveLength(64);
+    expect(result.stdout.length).toBeLessThanOrEqual(64);
+    expect(result.stdout).toContain('bytes omitted');
     expect(result.truncated).toBe(true);
   });
 

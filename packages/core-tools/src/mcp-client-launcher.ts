@@ -80,7 +80,7 @@ const DEFAULT_STDERR_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_RESULT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_PAGINATION_PAGE_LIMIT = 1_000;
-const DEFAULT_CLIENT_INFO = { name: 'SchemaNaut', version: '0.1.0' };
+const DEFAULT_CLIENT_INFO = { name: 'SchemaNaut', version: '0.1.0-alpha.1' };
 
 export class McpResultTooLargeError extends Error {
   constructor(

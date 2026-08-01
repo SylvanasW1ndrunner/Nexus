@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto';
 import type {
+  AgentToolCompletionPolicy,
   AgentToolDefinition,
   AgentToolHandler,
   ToolDangerLevel,
   ToolRegistry,
+} from '@dbagent/core-agent';
+import {
+  createAgentToolResultEnvelope,
+  isAgentToolResultEnvelope,
 } from '@dbagent/core-agent';
 import {
   invokeMcpToolWithTimeout,
@@ -27,6 +32,9 @@ export type McpToolSpec = Record<string, unknown> & {
   inputSchema?: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
   annotations?: McpToolAnnotations;
+  execution?: {
+    taskSupport?: 'forbidden' | 'optional' | 'required';
+  };
   _meta?: Record<string, unknown>;
 };
 
@@ -46,6 +54,7 @@ export type McpToolAdapterOptions = McpToolTimeoutOptions & {
   tools: McpToolSpec[];
   callTool: McpToolCall;
   health?: McpHealthManager;
+  resolveCompletion?: (tool: McpToolSpec) => AgentToolCompletionPolicy | undefined;
 };
 
 export type AdaptedMcpToolDefinition = AgentToolDefinition & {
@@ -64,15 +73,52 @@ export type RegisteredMcpTool = {
 const MAX_TOOL_NAME_LENGTH = 64;
 const UNKNOWN_SCHEMA: Record<string, unknown> = { type: 'object', properties: {} };
 
+export class McpRemoteToolError extends Error {
+  readonly code = 'MCP_REMOTE_TOOL_ERROR';
+
+  constructor(
+    readonly serverId: string,
+    readonly toolName: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'McpRemoteToolError';
+  }
+}
+
 export function registerMcpTools(options: McpToolAdapterOptions): RegisteredMcpTool[] {
-  const { registry, serverId, source, tools, callTool, health, timeoutMs, signal } = options;
+  const {
+    registry,
+    serverId,
+    source,
+    tools,
+    callTool,
+    health,
+    timeoutMs,
+    signal,
+    resolveCompletion,
+  } = options;
   const seen = new Set<string>();
   const registered: RegisteredMcpTool[] = [];
   const prepared = tools.map((tool) => {
-    const definition = adaptMcpToolDefinition({ serverId, source, tool, usedNames: seen });
+    const completion = resolveCompletion?.(tool) ?? {
+      role: 'supporting' as const,
+      group: `mcp:${serverId}`,
+    };
+    const definition = adaptMcpToolDefinition({
+      serverId,
+      source,
+      tool,
+      usedNames: seen,
+      completion,
+    });
+    if (timeoutMs !== undefined) {
+      definition.execution = { ...definition.execution, timeoutMs };
+    }
     const handler = createMcpToolHandler({
       serverId,
       originalName: tool.name,
+      completion,
       callTool,
       ...(health === undefined ? {} : { health }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -112,6 +158,20 @@ export function normalizeMcpToolSpec(input: unknown): McpToolSpec {
   if (input.annotations !== undefined && !isRecord(input.annotations)) {
     throw new Error(`Invalid MCP annotations for tool ${input.name}.`);
   }
+  if (input.execution !== undefined) {
+    if (!isRecord(input.execution)) {
+      throw new Error(`Invalid MCP execution metadata for tool ${input.name}.`);
+    }
+    const taskSupport = input.execution.taskSupport;
+    if (
+      taskSupport !== undefined &&
+      taskSupport !== 'forbidden' &&
+      taskSupport !== 'optional' &&
+      taskSupport !== 'required'
+    ) {
+      throw new Error(`Invalid MCP taskSupport for tool ${input.name}.`);
+    }
+  }
   return JSON.parse(JSON.stringify(input)) as McpToolSpec;
 }
 
@@ -120,6 +180,7 @@ export function adaptMcpToolDefinition(input: {
   source: McpToolSource;
   tool: McpToolSpec;
   usedNames?: Set<string>;
+  completion?: AgentToolCompletionPolicy;
 }): AdaptedMcpToolDefinition {
   const originalName = input.tool.name.trim();
   if (!originalName) throw new Error('MCP tool name is required.');
@@ -129,16 +190,43 @@ export function adaptMcpToolDefinition(input: {
 
   return {
     name,
+    namespace: `mcp:${input.serverId}`,
+    ...(input.tool.title?.trim() ? { title: input.tool.title.trim() } : {}),
+    aliases: [originalName, input.tool.title?.trim()].filter(
+      (value): value is string => Boolean(value),
+    ),
+    tags: ['mcp', input.serverId],
     description:
       input.tool.description?.trim() || `MCP tool ${originalName} from ${input.serverId}.`,
     inputSchema: normalizeInputSchema(input.tool.inputSchema),
+    ...(input.tool.outputSchema === undefined
+      ? {}
+      : { outputSchema: structuredClone(input.tool.outputSchema) }),
     dangerLevel: inferred.dangerLevel,
     readonly: inferred.readonly,
-    requiredPermission:
-      inferred.dangerLevel === 'high' || inferred.dangerLevel === 'critical' ? 'full' : 'edit',
+    requiredPermission: inferred.readonly
+      ? 'read'
+      : inferred.dangerLevel === 'high' || inferred.dangerLevel === 'critical'
+        ? 'full'
+        : 'edit',
     source: input.source,
     sourceId: input.serverId,
     originalName,
+    exposure: 'deferred',
+    execution: { concurrency: inferred.readonly ? 'read' : 'exclusive' },
+    completion: input.completion ?? {
+      role: 'supporting',
+      group: `mcp:${input.serverId}`,
+    },
+    protocolMetadata: {
+      protocol: 'mcp',
+      ...(input.tool.execution?.taskSupport === undefined
+        ? {}
+        : { taskSupport: input.tool.execution.taskSupport }),
+      ...(input.tool.annotations === undefined
+        ? {}
+        : { annotations: standardMcpAnnotations(input.tool.annotations) }),
+    },
   };
 }
 
@@ -162,9 +250,9 @@ export function inferMcpToolRisk(
   if (/\b(shell|exec|execute|command|subprocess|process|run)\b/.test(text)) {
     return { dangerLevel: 'high', readonly: false };
   }
-
-  // MCP annotations are assertions from a remote, potentially untrusted server. A
-  // readOnlyHint or a read-like name must never lower the local permission floor.
+  if (tool.annotations?.readOnlyHint === true) {
+    return { dangerLevel: 'safe', readonly: true };
+  }
   return { dangerLevel: 'medium', readonly: false };
 }
 
@@ -182,6 +270,7 @@ export function namespacedToolName(serverId: string, toolName: string): string {
 function createMcpToolHandler(input: {
   serverId: string;
   originalName: string;
+  completion: AgentToolCompletionPolicy;
   callTool: McpToolCall;
   health?: McpHealthManager;
   timeoutMs?: number;
@@ -189,7 +278,7 @@ function createMcpToolHandler(input: {
 }): AgentToolHandler {
   return async (args, context) => {
     input.health?.assertAvailable(input.serverId);
-    return invokeMcpToolWithTimeout(
+    const result = await invokeMcpToolWithTimeout(
       (signal) =>
         input.callTool({
           serverId: input.serverId,
@@ -204,7 +293,91 @@ function createMcpToolHandler(input: {
           : { signal: context.signal ?? input.signal }),
       },
     );
+    if (isAgentToolResultEnvelope(result)) return result;
+    if (isRecord(result) && result.isError === true) {
+      throw new McpRemoteToolError(
+        input.serverId,
+        input.originalName,
+        mcpErrorMessage(result),
+      );
+    }
+    const projection = projectMcpResult(result);
+    return createAgentToolResultEnvelope({
+      modelProjection: projection,
+      userProjection: projection,
+      durableSummary: {
+        serverId: input.serverId,
+        toolName: input.originalName,
+        isError: false,
+        result: boundedProjection(projection, 4_000),
+      },
+      auditEvidence: { status: 'success', resultType: 'mcp' },
+      ...(input.completion.role !== 'deliverable'
+        ? {}
+        : {
+            completionEvidence: {
+              kind: 'mcp' as const,
+              deliveryReady: true,
+              source: 'runtime' as const,
+              outcome: 'succeeded' as const,
+            },
+          }),
+    });
   };
+}
+
+function standardMcpAnnotations(annotations: McpToolAnnotations) {
+  return {
+    ...(annotations.readOnlyHint === undefined
+      ? {}
+      : { readOnlyHint: annotations.readOnlyHint }),
+    ...(annotations.destructiveHint === undefined
+      ? {}
+      : { destructiveHint: annotations.destructiveHint }),
+    ...(annotations.idempotentHint === undefined
+      ? {}
+      : { idempotentHint: annotations.idempotentHint }),
+    ...(annotations.openWorldHint === undefined
+      ? {}
+      : { openWorldHint: annotations.openWorldHint }),
+  };
+}
+
+function projectMcpResult(result: unknown): unknown {
+  if (!isRecord(result)) return result;
+  if (result.structuredContent === undefined) return boundedProjection(result, 20_000);
+  return {
+    structuredContent: boundedProjection(result.structuredContent, 16_000),
+    ...(result.content === undefined ? {} : { content: boundedProjection(result.content, 4_000) }),
+  };
+}
+
+function boundedProjection(value: unknown, maxChars: number): unknown {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return { type: typeof value, unavailable: 'non-serializable MCP result' };
+  }
+  if (serialized.length <= maxChars) return structuredClone(value);
+  return {
+    truncated: true,
+    originalChars: serialized.length,
+    preview: serialized.slice(0, maxChars),
+  };
+}
+
+function mcpErrorMessage(result: Record<string, unknown>): string {
+  if (Array.isArray(result.content)) {
+    const text = result.content
+      .filter(isRecord)
+      .filter((item) => item.type === 'text' && typeof item.text === 'string')
+      .map((item) => item.text as string)
+      .join('\n')
+      .trim();
+    if (text) return text;
+  }
+  return 'MCP server reported a tool execution error.';
 }
 
 function normalizeInputSchema(

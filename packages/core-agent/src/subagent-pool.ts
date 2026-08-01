@@ -24,6 +24,7 @@ export class AgentSubagentPool {
       now?: () => string;
       createId?: () => string;
       store?: AgentSubagentStore;
+      steer?: (childSessionId: string, message: string) => boolean;
     } = {},
   ) {
     this.restorePersistedRecords();
@@ -54,7 +55,11 @@ export class AgentSubagentPool {
         id,
         parentSessionId: requireText(input.parentSessionId, 'parentSessionId'),
         task: requireText(input.task, 'task'),
+        contextStrategy: input.contextStrategy ?? 'fresh',
         status: parentSignal?.aborted ? 'cancelled' : 'running',
+        ...(input.options.initialSession === undefined
+          ? {}
+          : { childSessionId: input.options.initialSession.id }),
         depth,
         createdAt,
         updatedAt: createdAt,
@@ -122,6 +127,14 @@ export class AgentSubagentPool {
 
   stop(id: string): boolean {
     return this.cancel(id);
+  }
+
+  message(id: string, message: string): boolean {
+    const record = this.records.get(id);
+    if (!record || record.status !== 'running' || !record.childSessionId) return false;
+    const steer = this.options.steer;
+    if (!steer) return false;
+    return steer(record.childSessionId, requireText(message, 'message'));
   }
 
   private cancel(id: string, reason?: unknown): boolean {

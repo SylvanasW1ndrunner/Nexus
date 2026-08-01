@@ -15,24 +15,24 @@ SchemaNaut CLI 是本地交互入口。它与 SDK、REST API 使用同一套 Run
 
 ## 2. 安装
 
-公开 npm 包发布后：
+安装当前公开 Alpha 版本：
 
 ```bash
-npm install @nwlworkshop/schemanaut
+npm install @nwlworkshop/schemanaut@alpha
 ```
 
-当前可以安装仓库生成的本地发行包：
+也可以构建并安装仓库生成的本地发行包：
 
 ```bash
 pnpm install
 pnpm package:npm
-npm install ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+npm install ./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
 ```
 
 本文统一使用 `npx schemanaut`。它优先运行当前项目安装的版本，不要求全局安装。只有确实需要系统级命令时才使用：
 
 ```bash
-npm install --global ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+npm install --global @nwlworkshop/schemanaut@alpha
 schemanaut --help
 ```
 
@@ -149,7 +149,7 @@ npx schemanaut --help
 - `/resume` 恢复一个持久 Session；可先用 `/sessions` 找到 ID。
 - `/skills` 列出可用 Skill；使用 `/<skill> [任务]` 显式激活。
 - `/compact` 手动触发当前 Session 的上下文压缩；完整历史仍保留。
-- `/trace on|off` 显示或隐藏面向用户的执行轨迹，默认开启。
+- `/trace on|off` 显示或隐藏面向用户的执行轨迹，默认开启；轨迹包含完整 SQL/命令、执行状态、耗时、退出码、重要错误与产物，不包含隐藏推理。
 - `/mcp` 管理当前 Project 在 `.schemanaut/mcp.json` 中声明的 MCP Server。
 - `/exit` 或 `/quit` 退出。
 
@@ -160,8 +160,8 @@ Agent 运行时继续输入普通文字，会把新要求追加到当前任务�
 | 模式 | 无需许可即可执行 | 超出模式时 |
 | --- | --- | --- |
 | `read` | Schema 查看和只读 SQL | 修改数据、DDL、管理动作会请求单次许可 |
-| `edit` | `read` 能力、行数据修改、Project 文件编辑 | DDL、破坏性 Schema 变更、Shell 和管理动作会请求单次许可 |
-| `full` | 读、写、DDL、破坏性操作和已启用的管理工具 | 不会仅因权限模式请求许可 |
+| `edit` | `read` 能力、行数据修改、Project 文件编辑 | DDL、破坏性 Schema 变更、进程执行和管理动作会请求单次许可 |
+| `full` | 读、写、DDL、破坏性操作、进程和已启用的管理工具 | 不会仅因权限模式请求许可 |
 
 出现许可请求时：
 

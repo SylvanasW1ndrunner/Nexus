@@ -5,6 +5,7 @@ license: Apache-2.0
 metadata:
   author: SchemaNaut
   version: '1.0.0'
+  capabilities: database
 ---
 
 # 发现结构与数据形态

@@ -19,26 +19,64 @@ const tempDirectories: string[] = [];
 const scenarioRunLogs: ScenarioRunLog[] = [];
 const liveScenarioRunLogs: ScenarioRunLog[] = [];
 const EXPECTED_FUNCTIONAL_RUN_COUNT = 9;
-const LIVE_SCENARIOS = [
+const SCENARIO_TIME_ZONE = process.env.DBAGENT_TEST_TIME_ZONE ?? 'Asia/Shanghai';
+type LiveScenario = {
+  scenario: string;
+  message: string;
+  expectedValues: readonly string[];
+  resultMode: 'query' | 'answer';
+  requiredTools?: readonly string[];
+  requiredAnyTools?: readonly string[];
+  forbiddenTools?: readonly string[];
+  maxIterations: number;
+  maxTotalTokens: number;
+  maxDurationMs: number;
+};
+
+const LIVE_SCENARIOS: readonly LiveScenario[] = [
+  {
+    scenario: 'schema-catalog-live',
+    message:
+      '请优先使用已有 Schema 知识目录，列出当前数据库中的用户业务 schema，不需要读取任何表数据。请直接交付名称列表。',
+    expectedValues: ['commerce', 'traffic_lab', 'science', '供应链', '电商运营'],
+    resultMode: 'answer',
+    requiredAnyTools: ['knowledge_search', 'resource_list'],
+    forbiddenTools: ['sql_execute', 'sql_explain'],
+    maxIterations: 5,
+    maxTotalTokens: 60_000,
+    maxDurationMs: 120_000,
+  },
   {
     scenario: 'ecommerce-live',
     message:
       '请从 commerce 订单、支付和退款中，按月份和渠道统计 2026 年 1 月到 3 月的已结算净收入（已结算支付减成功退款），必须执行 SQL 并返回数据库结果。',
     expectedValues: ['2026-03', '150.00'],
+    resultMode: 'query',
+    maxIterations: 10,
+    maxTotalTokens: 180_000,
+    maxDurationMs: 300_000,
   },
   {
     scenario: 'traffic-cleaning-live',
     message:
       'traffic_lab.raw_kafka_events 只有 JSONB value。请自行确认结构，在 PostgreSQL 中完成字段提取、按 event_id 保留 ingested_at 最新一条、过滤 event_id/visitor_id/event_time/latency_ms 缺失或格式错误的脏数据。高延迟和每分钟流量必须使用 traffic_lab.anomaly_thresholds 的配置值，不得自行设阈值；事件类型必须连接 traffic_lab.event_type_dictionary，并且只保留字典中 active=true 的事件。返回有效事件总数、高延迟事件总数、超过每分钟流量阈值的分钟数，并执行最终 SQL。',
     expectedValues: ['20011', '1', '201'],
+    resultMode: 'query',
+    maxIterations: 14,
+    maxTotalTokens: 280_000,
+    maxDurationMs: 480_000,
   },
   {
     scenario: 'big-science-live',
     message:
       '请查询 science 的分区观测数据，按实验返回样本数、观测数、净信号（signal-background）的样本均值均值，并验证两个实验各有 12000 条观测。必须执行 SQL。',
     expectedValues: ['EXP-PHOTON-001', 'EXP-GENOME-002', '12000'],
+    resultMode: 'query',
+    maxIterations: 10,
+    maxTotalTokens: 180_000,
+    maxDurationMs: 300_000,
   },
-] as const;
+];
 const SELECTED_LIVE_SCENARIOS = process.env.DBAGENT_LIVE_SCENARIO?.trim()
   ? LIVE_SCENARIOS.filter(
       (liveCase) => liveCase.scenario === process.env.DBAGENT_LIVE_SCENARIO?.trim(),
@@ -53,6 +91,32 @@ if (
     `Unknown DBAGENT_LIVE_SCENARIO: ${process.env.DBAGENT_LIVE_SCENARIO.trim()}`,
   );
 }
+
+describe('PostgreSQL scenario evidence normalization', () => {
+  it('compares database datetimes in the configured scenario timezone', () => {
+    const rows = [
+      {
+        month: new Date('2026-02-28T16:00:00.000Z'),
+        net_revenue: '150.00',
+      },
+    ];
+
+    expect(resultContainsEveryValue(rows, ['2026-03', '150.00'])).toBe(true);
+    expect(
+      resultContainsEveryValue(
+        [
+          {
+            month: {
+              $schemanautType: 'datetime',
+              value: '2026-02-28T16:00:00.000Z',
+            },
+          },
+        ],
+        ['2026-03'],
+      ),
+    ).toBe(true);
+  });
+});
 const functionalReportPath = fileURLToPath(
   new URL('../../../reports/postgres-scenarios/functional.json', import.meta.url),
 );
@@ -442,7 +506,7 @@ describe.skipIf(!runPostgresTests)(
       const provider = new ScriptedAgentProvider([
         toolCall('large-science-result', 'sql_execute', {
           sql: SCIENCE_LARGE_RESULT_SQL,
-          maxRows: 2_000,
+          maxRows: 1_000,
           previewRows: 3,
         }),
         finalAnswer('大结果查询已完成，最多 1000 行的交互结果已单独返回。'),
@@ -513,7 +577,7 @@ describe.skipIf(!runPostgresTests || !runLiveModel)(
 
     it.each(SELECTED_LIVE_SCENARIOS)(
       'solves $scenario independently through the real Agent pipeline',
-      async (liveCase) => {
+      async (liveCase: LiveScenario) => {
         const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
         if (!apiKey) {
           throw new Error('需要 TEST_SILICONFLOW_API_KEY 或 DBAGENT_LLM_API_KEY。');
@@ -535,15 +599,18 @@ describe.skipIf(!runPostgresTests || !runLiveModel)(
 
         let output: Awaited<ReturnType<DatabaseAgentRuntime['runAgent']>> | undefined;
         let scenarioLog: ScenarioRunLog | undefined;
+        const startedAt = performance.now();
+        let durationMs = 0;
         try {
           await runtime.indexSchema();
           output = await runtime.runAgent({
             userId: 'live-scenario-user',
             message: liveCase.message,
             mode: 'read',
-            maxIterations: 16,
+            maxIterations: liveCase.maxIterations,
             maxToolExecutionMs: 120_000,
           });
+          durationMs = Math.round(performance.now() - startedAt);
           expect(output.result.status).toBe('done');
           expect(output.result.completion).toMatchObject({
             verified: true,
@@ -552,14 +619,56 @@ describe.skipIf(!runPostgresTests || !runLiveModel)(
             phase: 'done',
           });
           expect(isProcessOnlyFinalText(output.result.finalText)).toBe(false);
-          const finalResult = output.queryResults.at(-1);
-          expect(finalResult, `${liveCase.scenario} 没有最终 SQL 结果`).toBeDefined();
-          expect(finalResult?.sql?.trim().length).toBeGreaterThan(0);
-          const observedValues = flattenResultValues(finalResult?.rows ?? []);
+          expect(output.result.iterations).toBeLessThanOrEqual(liveCase.maxIterations);
+          expect(output.result.session.tokenUsage.totalTokens).toBeLessThanOrEqual(
+            liveCase.maxTotalTokens,
+          );
+          expect(durationMs).toBeLessThanOrEqual(liveCase.maxDurationMs);
+          for (const requiredTool of liveCase.requiredTools ?? []) {
+            expect(
+              output.result.toolExecutions.some(
+                (tool) => tool.toolName === requiredTool && tool.status === 'success',
+              ),
+              `${liveCase.scenario} 未成功使用 ${requiredTool}`,
+            ).toBe(true);
+          }
+          if ((liveCase.requiredAnyTools?.length ?? 0) > 0) {
+            expect(
+              output.result.toolExecutions.some(
+                (tool) =>
+                  liveCase.requiredAnyTools?.includes(tool.toolName) === true &&
+                  tool.status === 'success',
+              ),
+              `${liveCase.scenario} 未使用任一知识/资源目录工具`,
+            ).toBe(true);
+          }
+          for (const forbiddenTool of liveCase.forbiddenTools ?? []) {
+            expect(
+              output.result.toolExecutions.some((tool) => tool.toolName === forbiddenTool),
+              `${liveCase.scenario} 不应使用 ${forbiddenTool}`,
+            ).toBe(false);
+          }
+          if (liveCase.resultMode === 'query') {
+            const finalResult = [...output.queryResults]
+              .reverse()
+              .find((result) => resultContainsEveryValue(result.rows, liveCase.expectedValues));
+            expect(
+              finalResult,
+              `${liveCase.scenario} 没有一条同时覆盖全部验收值的最终 SQL 证据`,
+            ).toBeDefined();
+            expect(finalResult?.sql?.trim().length).toBeGreaterThan(0);
+            const observedValues = flattenResultValues(finalResult?.rows ?? []);
+            for (const expected of liveCase.expectedValues) {
+              expect(
+                observedValues.some((value) => value.includes(expected)),
+                `${liveCase.scenario} 最终 SQL 结果缺少 ${expected}`,
+              ).toBe(true);
+            }
+          }
           for (const expected of liveCase.expectedValues) {
             expect(
-              observedValues.some((value) => value.includes(expected)),
-              `${liveCase.scenario} 最终 SQL 结果缺少 ${expected}`,
+              comparableText(output.result.finalText).includes(comparableText(expected)),
+              `${liveCase.scenario} 最终答复没有交付 ${expected}`,
             ).toBe(true);
           }
           scenarioLog = recordRun(
@@ -567,8 +676,13 @@ describe.skipIf(!runPostgresTests || !runLiveModel)(
             'real-model-agent',
             output,
             liveScenarioRunLogs,
+            true,
+            undefined,
+            durationMs,
+            liveCase.expectedValues,
           );
         } catch (error) {
+          durationMs = Math.round(performance.now() - startedAt);
           if (output) {
             scenarioLog = recordRun(
               liveCase.scenario,
@@ -577,9 +691,16 @@ describe.skipIf(!runPostgresTests || !runLiveModel)(
               liveScenarioRunLogs,
               false,
               error,
+              durationMs,
+              liveCase.expectedValues,
             );
           } else {
-            scenarioLog = recordFailedRun(liveCase.scenario, 'real-model-agent', error);
+            scenarioLog = recordFailedRun(
+              liveCase.scenario,
+              'real-model-agent',
+              error,
+              durationMs,
+            );
           }
           throw error;
         } finally {
@@ -608,6 +729,7 @@ type ScenarioRunLog = {
     resultPreview: string;
   }>;
   finalText: string;
+  durationMs?: number;
   error?: string;
   completion?: Awaited<ReturnType<DatabaseAgentRuntime['runAgent']>>['result']['completion'];
   finalQuery?: {
@@ -625,11 +747,12 @@ type ScenarioRunLog = {
 
 function flattenResultValues(value: unknown): string[] {
   if (Array.isArray(value)) return value.flatMap(flattenResultValues);
-  if (value instanceof Date) return [value.toISOString()];
+  if (value instanceof Date) return dateEvidenceValues(value);
   if (value && typeof value === 'object') {
-    const tagged = value as { $type?: unknown; value?: unknown };
-    if (tagged.$type === 'datetime' && typeof tagged.value === 'string') {
-      return [tagged.value];
+    const tagged = value as { $schemanautType?: unknown; value?: unknown };
+    if (tagged.$schemanautType === 'datetime' && typeof tagged.value === 'string') {
+      const parsed = new Date(tagged.value);
+      return Number.isNaN(parsed.getTime()) ? [tagged.value] : dateEvidenceValues(parsed);
     }
     return Object.values(value).flatMap(flattenResultValues);
   }
@@ -637,6 +760,32 @@ function flattenResultValues(value: unknown): string[] {
   if (typeof value === 'number' || typeof value === 'bigint') return [value.toString()];
   if (typeof value === 'boolean') return [value ? 'true' : 'false'];
   return [];
+}
+
+function dateEvidenceValues(value: Date): string[] {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: SCENARIO_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value);
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((item) => item.type === type)?.value ?? '';
+  return [value.toISOString(), `${part('year')}-${part('month')}-${part('day')}`];
+}
+
+function resultContainsEveryValue(rows: unknown, expectedValues: readonly string[]): boolean {
+  const observedValues = flattenResultValues(rows);
+  return expectedValues.every((expected) =>
+    observedValues.some((value) => value.includes(expected)),
+  );
+}
+
+function comparableText(value: string): string {
+  return value
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
 function queryResultJson(
@@ -656,8 +805,15 @@ function recordRun(
   target: ScenarioRunLog[] = scenarioRunLogs,
   passed = true,
   error?: unknown,
+  durationMs?: number,
+  finalQueryExpectedValues?: readonly string[],
 ): ScenarioRunLog {
-  const finalQuery = run.queryResults.at(-1);
+  const finalQuery =
+    finalQueryExpectedValues === undefined
+      ? run.queryResults.at(-1)
+      : [...run.queryResults]
+          .reverse()
+          .find((result) => resultContainsEveryValue(result.rows, finalQueryExpectedValues));
   const log: ScenarioRunLog = {
     scenario,
     step,
@@ -684,6 +840,7 @@ function recordRun(
           : `${tool.resultPreview.slice(0, 1_485)}...[truncated]`,
     })),
     finalText: run.result.finalText,
+    ...(durationMs === undefined ? {} : { durationMs }),
     ...(run.result.completion === undefined
       ? {}
       : { completion: structuredClone(run.result.completion) }),
@@ -716,7 +873,12 @@ function describeUnknownError(error: unknown): string {
   }
 }
 
-function recordFailedRun(scenario: string, step: string, error: unknown): ScenarioRunLog {
+function recordFailedRun(
+  scenario: string,
+  step: string,
+  error: unknown,
+  durationMs?: number,
+): ScenarioRunLog {
   const log: ScenarioRunLog = {
     scenario,
     step,
@@ -725,6 +887,7 @@ function recordFailedRun(scenario: string, step: string, error: unknown): Scenar
     iterations: 0,
     tools: [],
     finalText: '',
+    ...(durationMs === undefined ? {} : { durationMs }),
     error: describeUnknownError(error),
     tokenUsage: {
       promptTokens: 0,
@@ -813,7 +976,16 @@ class ScriptedAgentProvider implements LlmProvider {
   chat(request: LlmChatRequest): Promise<LlmChatResponse> {
     this.requests.push(structuredClone(request));
     const response = this.responses.shift();
-    if (!response) throw new Error('No scripted scenario response remains.');
+    if (!response) {
+      const tail = request.messages.slice(-4).map((message) => ({
+        role: message.role,
+        content: message.content.slice(0, 800),
+      }));
+      throw new Error(
+        `No scripted scenario response remains after ${this.requests.length} requests. ` +
+          `Latest context: ${JSON.stringify(tail)}`,
+      );
+    }
     return Promise.resolve(structuredClone(response));
   }
 

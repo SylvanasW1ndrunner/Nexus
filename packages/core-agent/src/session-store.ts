@@ -140,6 +140,7 @@ type SubagentRow = {
   parent_session_id: string;
   child_session_id: string | null;
   task: string;
+  context_strategy: AgentSubagentRecord['contextStrategy'];
   status: AgentSubagentRecord['status'];
   depth: number;
   summary: string | null;
@@ -649,14 +650,15 @@ export class AgentSessionStore implements AgentSessionWriter, AgentSubagentStore
         .prepare(
           `
           INSERT INTO agent_subagents (
-            id, project_key, parent_session_id, child_session_id, task, status,
+            id, project_key, parent_session_id, child_session_id, task, context_strategy, status,
             depth, summary, artifact_references_json, error_message,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             parent_session_id = excluded.parent_session_id,
             child_session_id = excluded.child_session_id,
             task = excluded.task,
+            context_strategy = excluded.context_strategy,
             status = excluded.status,
             depth = excluded.depth,
             summary = excluded.summary,
@@ -674,6 +676,7 @@ export class AgentSessionStore implements AgentSessionWriter, AgentSubagentStore
           persisted.parentSessionId,
           persisted.childSessionId ?? null,
           persisted.task,
+          persisted.contextStrategy,
           persisted.status,
           persisted.depth,
           persisted.summary ?? null,
@@ -868,6 +871,7 @@ function initializeDatabase(database: NodeDatabaseSync): void {
       parent_session_id TEXT NOT NULL,
       child_session_id TEXT,
       task TEXT NOT NULL,
+      context_strategy TEXT NOT NULL DEFAULT 'fresh' CHECK (context_strategy IN ('fresh', 'fork')),
       status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
       depth INTEGER NOT NULL CHECK (depth > 0),
       summary TEXT,
@@ -923,6 +927,7 @@ function initializeDatabase(database: NodeDatabaseSync): void {
       ON agent_sessions(project_key, user_id, archived, updated_at DESC);
   `);
   migrateLegacySessionPayloads(database);
+  migrateLegacySubagentContextStrategy(database);
   migrateLegacySqlToolResults(database);
 }
 
@@ -977,6 +982,9 @@ function assertSubagentRecord(record: AgentSubagentRecord): void {
   requireText(record.parentSessionId, 'parentSessionId');
   if (record.childSessionId !== undefined) requireText(record.childSessionId, 'childSessionId');
   requireText(record.task, 'subagent task');
+  if (record.contextStrategy !== 'fresh' && record.contextStrategy !== 'fork') {
+    throw new Error(`Unsupported subagent context strategy: ${String(record.contextStrategy)}.`);
+  }
   requireText(record.createdAt, 'subagent createdAt');
   requireText(record.updatedAt, 'subagent updatedAt');
   if (!['running', 'completed', 'failed', 'cancelled'].includes(record.status)) {
@@ -1020,6 +1028,7 @@ function subagentFromRow(row: SubagentRow): AgentSubagentRecord {
     parentSessionId: row.parent_session_id,
     ...(row.child_session_id === null ? {} : { childSessionId: row.child_session_id }),
     task: row.task,
+    contextStrategy: row.context_strategy,
     status: row.status,
     depth: row.depth,
     ...(row.summary === null ? {} : { summary: row.summary }),
@@ -1028,6 +1037,17 @@ function subagentFromRow(row: SubagentRow): AgentSubagentRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function migrateLegacySubagentContextStrategy(database: NodeDatabaseSync): void {
+  const columns = database.prepare('PRAGMA table_info(agent_subagents)').all() as unknown as Array<{
+    name: string;
+  }>;
+  if (!columns.some((column) => column.name === 'context_strategy')) {
+    database.exec(
+      "ALTER TABLE agent_subagents ADD COLUMN context_strategy TEXT NOT NULL DEFAULT 'fresh' CHECK (context_strategy IN ('fresh', 'fork'))",
+    );
+  }
 }
 
 function projectReferenceFromPayload(payload: string): AgentProjectReference | undefined {

@@ -1,7 +1,7 @@
 {
   "kind": "ai-sql-performance",
   "status": "passed",
-  "generatedAt": "2026-07-26T16:15:52.062Z",
+  "generatedAt": "2026-07-31T21:03:50.101Z",
   "environment": {
     "node": "v24.14.0",
     "platform": "win32",
@@ -9,8 +9,8 @@
     "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
     "cpuCount": 32,
     "memory": {
-      "rssMiB": 426.59,
-      "heapUsedMiB": 262.03
+      "rssMiB": 433.53,
+      "heapUsedMiB": 244.49
     }
   },
   "dataset": {
@@ -41,47 +41,47 @@
     "cachedResultPageP95Ms": 10
   },
   "metrics": {
-    "catalogBuildMs": 506.234,
+    "catalogBuildMs": 312.148,
     "rootHashComparisonMs": {
       "samples": 10000,
       "p50": 0,
       "p95": 0,
-      "max": 0.067
+      "max": 0.027
     },
     "merkleDiffMs": {
       "samples": 100,
-      "p50": 0.025,
-      "p95": 0.189,
-      "max": 0.366
+      "p50": 0.018,
+      "p95": 0.059,
+      "max": 0.369
     },
     "directChildBrowseMs": {
       "samples": 500,
-      "p50": 3.731,
-      "p95": 4.296,
-      "max": 7.009
+      "p50": 1.404,
+      "p95": 1.988,
+      "max": 3.198
     },
     "localRetrievalMs": {
       "samples": 80,
-      "p50": 14.383,
-      "p95": 19.034,
-      "max": 20.357
+      "p50": 5.398,
+      "p95": 6.761,
+      "max": 8.057
     },
     "twoHopGraphRetrievalMs": {
       "samples": 80,
-      "p50": 17.769,
-      "p95": 21.016,
-      "max": 28.932
+      "p50": 5.737,
+      "p95": 7.537,
+      "max": 8.878
     },
     "cachedResultPageMs": {
       "samples": 1000,
-      "p50": 0.51,
-      "p95": 0.725,
-      "max": 1.726
+      "p50": 0.037,
+      "p95": 0.053,
+      "max": 0.563
     }
   },
   "checks": {
     "catalogBuild": {
-      "actual": 506.234,
+      "actual": 312.148,
       "maximum": 1500,
       "passed": true
     },
@@ -91,27 +91,27 @@
       "passed": true
     },
     "merkleDiff": {
-      "actual": 0.189,
+      "actual": 0.059,
       "maximum": 20,
       "passed": true
     },
     "directChildBrowse": {
-      "actual": 4.296,
+      "actual": 1.988,
       "maximum": 20,
       "passed": true
     },
     "localRetrieval": {
-      "actual": 19.034,
+      "actual": 6.761,
       "maximum": 100,
       "passed": true
     },
     "twoHopGraphRetrieval": {
-      "actual": 21.016,
+      "actual": 7.537,
       "maximum": 50,
       "passed": true
     },
     "cachedResultPage": {
-      "actual": 0.725,
+      "actual": 0.053,
       "maximum": 10,
       "passed": true
     }

@@ -9,6 +9,7 @@ import {
   ReactAgent,
   ToolRegistry,
   createAgentSession,
+  isAgentToolResultEnvelope,
   type AgentRunResult,
 } from '@dbagent/core-agent';
 import {
@@ -122,8 +123,8 @@ describe('progressive Skill tools', () => {
     const context = { session: session() };
 
     const found = (await registry
-      .get('skill_search')!
-      .handler({ query: 'Kafka JSON cleaning' }, context)) as {
+      .get('skill')!
+      .handler({ action: 'search', query: 'Kafka JSON cleaning' }, context)) as {
       skills: Array<Record<string, unknown>>;
     };
     expect(found.skills).toEqual([
@@ -137,13 +138,16 @@ describe('progressive Skill tools', () => {
 
     await expect(
       registry
-        .get('skill_resource_read')!
-        .handler({ name: 'clean-events', path: 'patterns.md' }, context),
-    ).rejects.toThrow('must be activated with skill_load');
+        .get('skill')!
+        .handler(
+          { action: 'read_resource', name: 'clean-events', path: 'patterns.md' },
+          context,
+        ),
+    ).rejects.toThrow('must be activated before reading resources');
 
     const loaded = (await registry
-      .get('skill_load')!
-      .handler({ name: 'clean-events' }, context)) as { instructions: string };
+      .get('skill')!
+      .handler({ action: 'load', name: 'clean-events' }, context)) as { instructions: string };
     expect(loaded.instructions).toContain('performs cleaning in the database');
     expect(context.session.activeSkills).toMatchObject([
       {
@@ -154,16 +158,22 @@ describe('progressive Skill tools', () => {
 
     await expect(
       registry
-        .get('skill_resource_read')!
-        .handler({ name: 'clean-events', path: 'patterns.md' }, context),
+        .get('skill')!
+        .handler(
+          { action: 'read_resource', name: 'clean-events', path: 'patterns.md' },
+          context,
+        ),
     ).resolves.toMatchObject({
       name: 'clean-events',
       content: 'Use jsonb_to_record for stable objects.',
     });
     await expect(
       registry
-        .get('skill_resource_read')!
-        .handler({ name: 'clean-events', path: '../../outside.md' }, context),
+        .get('skill')!
+        .handler(
+          { action: 'read_resource', name: 'clean-events', path: '../../outside.md' },
+          context,
+        ),
     ).rejects.toThrow();
   });
 });
@@ -195,9 +205,12 @@ describe('subagent tools', () => {
       id: string;
       status: string;
     };
-    const completed = (await registry
+    const completedEnvelope = await registry
       .get('subagent_wait')!
-      .handler({ id: spawned.id, timeoutMs: 2_000 }, context)) as Record<string, unknown>;
+      .handler({ id: spawned.id, timeoutMs: 2_000 }, context);
+    expect(isAgentToolResultEnvelope(completedEnvelope)).toBe(true);
+    if (!isAgentToolResultEnvelope(completedEnvelope)) throw new Error('Expected result envelope.');
+    const completed = completedEnvelope.modelProjection as Record<string, unknown>;
     const listed = (await registry.get('subagent_list')!.handler({}, context)) as {
       subagents: Array<Record<string, unknown>>;
     };

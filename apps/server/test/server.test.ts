@@ -134,6 +134,10 @@ describe('SchemaNaut local server', () => {
       message: '继续分析订单',
       mode: 'read',
       sessionId: 'api-session',
+      systemPrompt: { mode: 'append', content: 'Use concise answers.' },
+      capabilityInstructions: ['Use the active database when the task needs it.'],
+      allowedTools: ['knowledge_search', 'sql_execute'],
+      pinnedTools: ['knowledge_search'],
     });
     expect(agent).toMatchObject({
       activatedSkills: ['query-and-answer'],
@@ -150,6 +154,10 @@ describe('SchemaNaut local server', () => {
       message: '继续分析订单',
       mode: 'read',
       sessionId: 'api-session',
+      systemPrompt: { mode: 'append', content: 'Use concise answers.' },
+      capabilityInstructions: ['Use the active database when the task needs it.'],
+      allowedTools: ['knowledge_search', 'sql_execute'],
+      pinnedTools: ['knowledge_search'],
     });
 
     const agentRuns = await getJson(

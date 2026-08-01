@@ -169,6 +169,101 @@ describe('Agent runtime tools', () => {
     ).toThrow('unavailable for this run');
     expect(session.activeTools).toEqual(['database_read_orders']);
   });
+
+  it('never discovers or describes hidden and disabled runtime tools', async () => {
+    const registry = new ToolRegistry();
+    for (const exposure of ['hidden', 'disabled'] as const) {
+      registry.register(
+        {
+          name: `${exposure}_internal_tool`,
+          description: 'Internal catalog maintenance capability',
+          inputSchema: { type: 'object', properties: {} },
+          dangerLevel: 'safe',
+          readonly: true,
+          exposure,
+        },
+        () => ({}),
+      );
+    }
+    registerAgentRuntimeTools(registry);
+    const session = createAgentSession({
+      id: 'session-hidden-tools',
+      title: 'Hidden tools',
+      mode: 'read',
+      now: fixedNow,
+    });
+
+    const result = (await registry.get('tool_search')!.handler(
+      { query: 'internal catalog maintenance' },
+      { session },
+    )) as { tools: Array<{ name: string }> };
+
+    expect(result.tools).toEqual([]);
+    expect(session.activeTools).toEqual([]);
+    expect(() =>
+      registry
+        .get('tool_describe')!
+        .handler({ name: 'hidden_internal_tool' }, { session }),
+    ).toThrow('unavailable for this run');
+  });
+
+  it('uses the bilingual catalog index and scopes activations without returning catalog internals', async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        namespace: 'database.kafka',
+        name: 'inspect_event_payload',
+        title: '检查事件 JSON 结构',
+        description: 'Inspect Kafka payload fields',
+        aliases: ['解析消息结构'],
+        tags: ['Kafka', '数据清洗'],
+        inputSchema: {
+          type: 'object',
+          properties: {
+            eventType: { type: 'string', description: '事件类型过滤条件' },
+          },
+        },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => ({}),
+    );
+    registerAgentRuntimeTools(registry);
+    const session = createAgentSession({
+      id: 'session-bilingual',
+      title: 'Discovery',
+      mode: 'read',
+      now: fixedNow,
+    });
+
+    const rawResult: unknown = await registry.get('tool_search')!.handler(
+      { query: '按 eventType 解析 Kafka 消息结构' },
+      {
+        session,
+        toolActivationScope: {
+          catalogRevision: registry.catalogRevision,
+          checkpointSequence: 2,
+          taskPhase: 'act',
+          activatedAt: fixedNow(),
+        },
+      },
+    );
+    const result = rawResult as { tools: Array<{ name: string; inputSchema: unknown }> };
+
+    expect(result.tools).toHaveLength(1);
+    expect(result.tools[0]?.name).toBe('inspect_event_payload');
+    expect(result.tools[0]?.inputSchema).toMatchObject({ type: 'object' });
+    expect(session.toolActivations).toEqual([
+      {
+        toolName: 'inspect_event_payload',
+        catalogRevision: registry.catalogRevision,
+        checkpointSequence: 2,
+        taskPhase: 'act',
+        activatedAt: '2026-07-25T00:00:00.000Z',
+      },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(/catalogRevision|matchedTerms|score|hash|nodeId/i);
+  });
 });
 
 function fixedNow(): string {

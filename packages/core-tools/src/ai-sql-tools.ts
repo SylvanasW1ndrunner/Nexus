@@ -336,8 +336,16 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
         'Primary fast path for database metadata: list resources inside an optional database, schema, or table scope before querying system catalogs.',
       inputSchema: objectSchema(
         {
-          scope: { type: 'string' },
-          kinds: { type: 'array', items: { type: 'string' } },
+          scope: {
+            type: 'string',
+            description:
+              'Exact resource reference such as commerce or commerce.orders. Omit it when filtering globally by kind.',
+          },
+          kinds: {
+            type: 'array',
+            description: 'Resource kind filters such as schema, table, view, or column.',
+            items: { type: 'string' },
+          },
           limit: { type: 'integer', minimum: 1, maximum: 500 },
         },
         [],
@@ -349,33 +357,53 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
     },
     async (args, context) => {
       const active = await requireActiveConnection(dependencies.getActiveConnection);
-      const parentReference = optionalString(args, 'scope');
-      const kinds = optionalStringArray(args, 'kinds');
+      let parentReference = optionalString(args, 'scope');
+      let kinds = optionalStringArray(args, 'kinds');
       const limit = optionalPositiveInteger(args, 'limit', 200);
       let catalog = rag.getCatalog(active.connectionId);
       let parentId: string | undefined;
+      const useCommonKindShorthand = () => {
+        if (
+          parentReference === undefined ||
+          kinds !== undefined ||
+          !Object.values(catalog.nodes).some((node) => node.kind === parentReference)
+        ) {
+          return false;
+        }
+        kinds = [parentReference];
+        parentReference = undefined;
+        parentId = undefined;
+        return true;
+      };
       try {
         parentId =
           parentReference === undefined
             ? undefined
             : resolveAgentResourceReference(catalog, parentReference);
       } catch (error) {
-        if (!dependencies.ensureSchemaFresh) throw error;
-        await dependencies.ensureSchemaFresh({
-          connectionId: active.connectionId,
-          force: true,
-          ...(context.signal === undefined ? {} : { signal: context.signal }),
-        });
-        catalog = rag.getCatalog(active.connectionId);
-        parentId =
-          parentReference === undefined
-            ? undefined
-            : resolveAgentResourceReference(catalog, parentReference);
+        if (!useCommonKindShorthand()) {
+          if (!dependencies.ensureSchemaFresh) throw error;
+          await dependencies.ensureSchemaFresh({
+            connectionId: active.connectionId,
+            force: true,
+            ...(context.signal === undefined ? {} : { signal: context.signal }),
+          });
+          catalog = rag.getCatalog(active.connectionId);
+          try {
+            parentId =
+              parentReference === undefined
+                ? undefined
+                : resolveAgentResourceReference(catalog, parentReference);
+          } catch (refreshedError) {
+            if (!useCommonKindShorthand()) throw refreshedError;
+          }
+        }
       }
+      const resolvedKinds = kinds;
       const nodes =
-        parentReference === undefined && kinds !== undefined && kinds.length > 0
+        parentReference === undefined && resolvedKinds !== undefined && resolvedKinds.length > 0
           ? Object.values(catalog.nodes)
-              .filter((node) => kinds.includes(node.kind))
+              .filter((node) => resolvedKinds.includes(node.kind))
               .sort(
                 (left, right) =>
                   left.kind.localeCompare(right.kind) ||
@@ -386,7 +414,7 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
           : rag.listResources({
               connectionId: active.connectionId,
               ...(parentId === undefined ? {} : { parentId }),
-              ...(kinds === undefined ? {} : { kinds }),
+              ...(resolvedKinds === undefined ? {} : { kinds: resolvedKinds }),
               ...(limit === undefined ? {} : { limit }),
             });
       return {
@@ -499,6 +527,10 @@ export function registerAiSqlTools(dependencies: AiSqlToolDependencies): AiSqlRe
       dangerLevel: 'high',
       readonly: false,
       source: 'database',
+      completion: {
+        role: 'deliverable',
+        group: 'database-execution',
+      },
       resolveRequiredPermission: (args) =>
         parseSql(typeof args.sql === 'string' ? args.sql : '', {
           dialect: 'postgresql',

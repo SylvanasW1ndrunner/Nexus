@@ -17,7 +17,9 @@ export class AgentUserEventProjector {
       type: draft.type,
       message: requireText(draft.message),
       createdAt: this.options.now?.() ?? new Date().toISOString(),
+      ...(draft.toolName === undefined ? {} : { toolName: draft.toolName }),
       ...(draft.sql === undefined ? {} : { sql: draft.sql }),
+      ...(draft.command === undefined ? {} : { command: draft.command }),
       ...(draft.artifact === undefined ? {} : { artifact: structuredClone(draft.artifact) }),
       ...(draft.metrics === undefined ? {} : { metrics: structuredClone(draft.metrics) }),
     };

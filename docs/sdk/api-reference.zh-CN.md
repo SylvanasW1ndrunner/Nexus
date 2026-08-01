@@ -4,7 +4,7 @@
 
 本文记录 `@nwlworkshop/schemanaut` v1 的公开 Node.js/TypeScript 接口和主要本地 REST API。
 
-SchemaNaut v1 提供 AI SQL 与共用 Agent 基础能力，不提供治理运维 Agent，也不是数据库 IDE。
+SchemaNaut v1 提供通用技术 Agent 内核与数据库专业能力包；当前数据库黄金链路是 PostgreSQL、Schema RAG 与 AI SQL。首版不提供治理运维能力包，也不是数据库 IDE。
 
 ## `DatabaseAgentRuntime`
 
@@ -31,6 +31,7 @@ const runtime = new DatabaseAgentRuntime(options);
 | `databaseAuditSink`    | `DatabaseAuditSink`                            | 接收底层数据库访问审计事件                                      |
 | `rag`                  | `SchemaRagEngine`                              | 注入知识与检索引擎                                              |
 | `schemaSnapshotDirectory` | `string`                                    | 启用持久 Schema RAG 快照；相对路径基于 Project 根目录           |
+| `schemaFreshnessIntervalMs` | `number`                                  | 后台检查外部 Schema 变化的最小间隔；测试可设为 `0`              |
 | `retrievalProfile`     | `SchemaRagRetrievalProfile`                    | 配置全文、Embedding、Reranker 和图检索                          |
 | `createRunId`          | `() => string`                                 | 自定义确定性 SQL Run ID                                         |
 | `createConnectionId`   | `() => string`                                 | 自定义快捷连接 ID                                               |
@@ -41,12 +42,19 @@ const runtime = new DatabaseAgentRuntime(options);
 | `agentDependencies`    | `AgentRunDependencies`                         | 注入 Agent 持久化、审计和检查点依赖                             |
 | `sessionStore`         | `AgentSessionStore`                            | 注入 Store；Runtime 会在其上创建 Project 绑定视图               |
 | `sessionDatabasePath`  | `string`                                       | 默认是 `defaultAgentStateDatabasePath()` 返回的系统用户数据路径 |
+| `sqlRunStore`          | `SqlRunStore`                                  | 注入持久的确定性 SQL Run Store                                  |
 | `resultStore`          | `AiSqlResultStore`                             | 注入有界、临时的交互结果缓存                                    |
 | `projectDirectory`     | `string`                                       | `process.cwd()`，选定的 Project 根目录                          |
 | `userSkillsDirectory`  | `string`                                       | `~/.schemanaut/skills`                                          |
 | `sessionSkills`        | `SkillOverlay[]`                               | 复制给新建 Session 的默认模板                                   |
+| `systemPrompt`         | `AgentSystemPrompt`                            | 默认用户角色说明；`append` 或 `replace`                         |
+| `capabilityInstructions` | `string[]`                                   | 默认能力包说明，不承担权限控制                                  |
+| `allowedTools`         | `string[]`                                     | Runtime 默认 Tool 硬允许列表                                    |
+| `pinnedTools`          | `string[]`                                     | 默认直接可见的已允许延迟 Tool                                   |
 | `webAdapter`           | `AgentWebAdapter`                              | 宿主提供的网络搜索/读取实现                                     |
-| `enableShellTool`      | `boolean`                                      | `false`；只有可信宿主才注册 `shell_run`                         |
+| `enableShellTool`      | `boolean`                                      | `false`；兼容字段，同时启用旧 `shell_run` 与 Process Tools      |
+| `enableProcessTools`   | `boolean`                                      | `false`；注册前台/后台 Process Tools                            |
+| `processRuntime`       | `ProcessRuntime`                               | 注入共享 Process Runtime；随 Runtime 关闭                       |
 | `dynamicToolDiscovery` | `boolean`                                      | `true`，先暴露发现工具，再按需激活                              |
 | `mcpSecretResolver`    | `(ref) => string \| undefined \| Promise<...>` | 解析 MCP 环境变量/Header 的 Secret 引用                         |
 | `autoStartMcp`         | `boolean`                                      | `false`；显式选择启动已审核的 `autoStart` MCP Server            |
@@ -203,7 +211,7 @@ type SchemaIndexSnapshot = {
 
 快照目录会以明文保存 Schema 名称、注释、业务 Glossary 文本和派生向量，SchemaNaut 不会加密该目录。嵌入宿主负责文件系统权限、备份、保留和安全删除。
 
-## AI SQL Agent
+## 通用 Agent 与 AI SQL 能力
 
 ### `runAgent(input): Promise<AiSqlAgentRun>`
 
@@ -217,6 +225,13 @@ type RunAiSqlAgentInput = {
   sessionSkills?: SkillOverlay[]; // 仅限新建 Session
   maxIterations?: number;
   maxToolExecutionMs?: number;
+  systemPrompt?: {
+    mode: 'append' | 'replace';
+    content: string;
+  };
+  capabilityInstructions?: string[];
+  allowedTools?: string[];
+  pinnedTools?: string[];
   onEvent?: (event: AgentUserEvent) => void | Promise<void>;
   signal?: AbortSignal;
 };
@@ -229,6 +244,8 @@ type AiSqlAgentRun = {
 ```
 
 `session` 与 `sessionId` 只能提供一个。加载的 Session 必须属于当前 Runtime 的 Project。`sessionSkills` 只为一个新 Session 覆盖构造参数中的默认模板，不能与 `session` 或 `sessionId` 同时提供。Overlay 随新 Session 持久化，恢复时不会重新应用后来变更的 Runtime 默认值。
+
+`systemPrompt`、`capabilityInstructions`、`allowedTools` 与 `pinnedTools` 会覆盖或追加构造参数中的默认值。`replace` 只替换默认角色，不替换 Runtime 工具协议和代码门禁。`allowedTools` 同时约束子 Agent；`pinnedTools` 不会越过该允许列表。无需数据库连接即可运行只包含 Project、Process、Web、MCP 或子 Agent 能力的任务。
 
 `AgentRunResult`：
 
@@ -329,20 +346,26 @@ type AgentUserEvent = {
     | 'plan-updated'
     | 'exploring'
     | 'sql-prepared'
+    | 'command-prepared'
     | 'approval-required'
     | 'sql-executed'
+    | 'command-executed'
+    | 'tool-failed'
     | 'correcting'
     | 'artifact-created'
     | 'completed'
     | 'needs-user-input';
   message: string;
   createdAt: string;
+  toolName?: string;
   sql?: string;
+  command?: string;
   artifact?: AgentArtifactReference;
   metrics?: {
     durationMs?: number;
     rowCount?: number;
     affectedRows?: number;
+    exitCode?: number | null;
   };
 };
 ```
@@ -590,12 +613,15 @@ type McpServerSummary = {
 
 ## `runtime.tools`
 
-| 方法                                 | 作用                                   |
-| ------------------------------------ | -------------------------------------- |
-| `register(definition, handler)`      | 注册 Tool；名称重复时抛错              |
-| `unregister(name)`                   | 删除 Tool                              |
-| `get(name)` / `list()` / `has(name)` | 读取注册项                             |
-| `llmTools(allowedTools?)`            | 投影模型可见的名称、描述与 JSON Schema |
+| 方法                                      | 作用                                               |
+| ----------------------------------------- | -------------------------------------------------- |
+| `register(definition, handler)`           | 注册 Tool；名称重复时抛错并提升目录 revision       |
+| `unregister(name)`                        | 删除 Tool 并提升目录 revision                      |
+| `get(name)` / `list()` / `has(name)`      | 读取注册项                                         |
+| `listDescriptors()` / `getRuntime(id)`    | 分别读取本地目录描述和执行 Runtime                 |
+| `subscribe(listener)`                     | 订阅注册/删除事件                                  |
+| `catalogRevision`                         | 当前目录版本                                       |
+| `llmTools(allowedTools?)`                 | 低层直接投影；Agent 正常运行由 Exposure Planner 控制 |
 
 Tool 定义包含危险等级、来源、只读元数据，以及静态或根据参数计算的所需权限。Handler 会接收 Session、取消信号和单次许可凭证。
 
@@ -606,15 +632,17 @@ Tool 定义包含危险等级、来源、只读元数据，以及静态或根据
 | `resource_list`、`resource_get`、`knowledge_search`、`sql_explain`                | `read`                                    |
 | `sql_execute`                                                                     | 根据 SQL 计算：`read`、`edit` 或 `full`   |
 | `task_plan_create`、`task_update`、`task_list`、`tool_search`、`tool_describe`    | `read`                                    |
-| `skill_search`、`skill_load`、`skill_resource_read`                               | `read`                                    |
+| `skill`                                                                          | `read`；统一搜索、加载和读取 Skill resource |
 | `workspace_list`、`workspace_read`、`workspace_search`                            | `read`                                    |
-| `workspace_write`、`workspace_edit`                                               | `edit`                                    |
-| `shell_run`                                                                       | `full`；只有设置 `enableShellTool` 才注册 |
+| `workspace_write`、`workspace_edit`、`workspace_patch`                            | `edit`                                    |
+| `process_poll`                                                                    | `read`；只有启用 Process Tools 才注册     |
+| `process_exec`、`process_write`、`process_terminate`                              | `full`；只有启用 Process Tools 才注册     |
+| `shell_run`                                                                       | `full`；仅兼容字段启用                     |
 | `subagent_spawn`、`subagent_list`、`subagent_wait`                                | `read`                                    |
-| `subagent_stop`                                                                   | `edit`                                    |
+| `subagent_message`、`subagent_stop`                                               | `edit`                                    |
 | `web_search`、`web_fetch`                                                         | `read`；只有提供 `webAdapter` 时存在      |
 
-Workspace 文件工具强制 Project 路径边界。启用后的 `shell_run` 会限制工作目录并使用精简环境变量，但不是操作系统沙箱。
+Workspace 文件工具强制 Project 路径边界。Process Handle 按 Session 隔离，输出增量、有界读取，终止会清理后代进程；启用后的命令仍不是操作系统沙箱。
 
 宿主提供的 `webAdapter` 负责目标地址策略、凭据、限流和 SSRF 防护。
 
@@ -732,7 +760,7 @@ await started.close();
 | `POST /v1/setup`                                         | `{ llm, database }`，配置 Provider 并连接 PostgreSQL                                                     |
 | `POST /v1/schema/index`                                  | `{ maxTables? }`，构建知识索引                                                                           |
 | `GET /v1/schema/status`                                  | 当前 `SchemaIndexSnapshot`                                                                               |
-| `POST /v1/agent/run`                                     | `{ message, userId?, mode?, sessionId?, maxIterations?, maxToolExecutionMs? }`，返回 `AiSqlAgentRunView` |
+| `POST /v1/agent/run`                                     | `{ message, userId?, mode?, sessionId?, maxIterations?, maxToolExecutionMs?, systemPrompt?, capabilityInstructions?, allowedTools?, pinnedTools? }`，返回 `AiSqlAgentRunView` |
 | `POST /v1/agent/run/stream`                              | 相同请求体；返回语义化 Server-Sent Events，最后发送投影后的 `result`                                     |
 | `GET /v1/agent/runs?sessionId=&limit=`                   | 返回持久、只含元数据的 Agent Run 记录                                                                      |
 | `GET /v1/agent/runs/:id`                                 | 返回单个持久 Agent Run 记录；不存在时为 `404`                                                             |

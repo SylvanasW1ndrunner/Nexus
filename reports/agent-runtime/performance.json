@@ -1,0 +1,1814 @@
+{
+  "kind": "agent-runtime-performance",
+  "generatedAt": "2026-07-31T21:03:56.024Z",
+  "environment": {
+    "node": "v24.14.0",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "logicalCpuCount": 32
+  },
+  "dataset": {
+    "toolCount": 1000,
+    "routerBatchSize": 20,
+    "projectFileCount": 1003,
+    "searchQualityCaseCount": 100
+  },
+  "sampleCounts": {
+    "toolIndexBuild": 30,
+    "toolSearch": 200,
+    "exposurePlan": 300,
+    "readonlyRouterBatch": 50,
+    "projectCompilation": 10
+  },
+  "metrics": {
+    "toolIndexBuildMs": {
+      "samples": [
+        22.13,
+        16.09,
+        13.93,
+        14.13,
+        14.6,
+        13.01,
+        14.33,
+        13.93,
+        13,
+        13.73,
+        13,
+        12.96,
+        13.33,
+        14.77,
+        13.45,
+        16.27,
+        13.18,
+        16.49,
+        15.24,
+        13.07,
+        14.12,
+        12.07,
+        14.03,
+        12.71,
+        13.32,
+        11.92,
+        12.48,
+        14.02,
+        13.17,
+        13.26
+      ],
+      "min": 11.92,
+      "p50": 13.45,
+      "p95": 16.49,
+      "max": 22.13
+    },
+    "toolSearchMs": {
+      "samples": [
+        1.52,
+        0.67,
+        0.58,
+        0.41,
+        0.49,
+        0.27,
+        0.19,
+        0.34,
+        0.27,
+        0.52,
+        0.3,
+        0.25,
+        0.27,
+        0.37,
+        0.39,
+        0.28,
+        0.15,
+        0.28,
+        0.2,
+        6.9,
+        0.75,
+        0.4,
+        0.25,
+        0.48,
+        0.28,
+        0.32,
+        0.23,
+        0.29,
+        0.13,
+        0.24,
+        0.27,
+        0.17,
+        0.29,
+        0.14,
+        0.17,
+        0.23,
+        0.15,
+        0.19,
+        0.34,
+        0.25,
+        0.31,
+        0.19,
+        0.2,
+        0.31,
+        0.24,
+        0.2,
+        0.13,
+        0.09,
+        0.24,
+        0.12,
+        0.19,
+        0.11,
+        0.19,
+        0.1,
+        0.19,
+        0.24,
+        1.63,
+        0.18,
+        0.1,
+        0.08,
+        0.12,
+        0.08,
+        0.15,
+        0.08,
+        0.12,
+        0.13,
+        0.09,
+        0.14,
+        0.06,
+        0.14,
+        0.13,
+        0.07,
+        0.13,
+        0.06,
+        0.09,
+        0.12,
+        0.06,
+        0.17,
+        0.1,
+        0.13,
+        0.12,
+        0.05,
+        0.14,
+        0.05,
+        0.13,
+        0.09,
+        0.07,
+        0.08,
+        0.11,
+        0.08,
+        0.13,
+        0.09,
+        0.12,
+        0.08,
+        0.15,
+        0.13,
+        0.25,
+        0.06,
+        0.14,
+        0.07,
+        0.1,
+        0.08,
+        0.11,
+        0.08,
+        0.16,
+        0.1,
+        0.09,
+        0.13,
+        0.11,
+        0.13,
+        0.13,
+        0.12,
+        0.15,
+        0.2,
+        0.2,
+        0.15,
+        0.09,
+        0.15,
+        0.11,
+        0.69,
+        0.14,
+        0.09,
+        0.11,
+        0.12,
+        0.09,
+        0.11,
+        0.09,
+        0.1,
+        0.07,
+        0.15,
+        0.11,
+        0.07,
+        0.16,
+        0.07,
+        0.09,
+        0.13,
+        0.08,
+        0.11,
+        0.25,
+        0.13,
+        0.15,
+        0.09,
+        0.09,
+        0.24,
+        0.14,
+        0.14,
+        0.07,
+        0.06,
+        0.15,
+        0.08,
+        0.14,
+        0.07,
+        0.13,
+        0.07,
+        0.13,
+        0.16,
+        0.08,
+        0.15,
+        0.1,
+        0.09,
+        0.13,
+        0.09,
+        0.17,
+        0.1,
+        0.21,
+        0.21,
+        0.13,
+        0.19,
+        0.08,
+        0.18,
+        0.17,
+        0.1,
+        0.17,
+        0.08,
+        0.15,
+        0.18,
+        0.08,
+        0.17,
+        0.09,
+        0.15,
+        0.17,
+        0.07,
+        0.18,
+        0.07,
+        0.17,
+        0.12,
+        0.09,
+        0.1,
+        0.46,
+        0.25,
+        0.18,
+        0.17,
+        0.15,
+        0.19,
+        0.24,
+        0.16,
+        0.34,
+        0.08,
+        0.16,
+        0.13
+      ],
+      "min": 0.05,
+      "p50": 0.14,
+      "p95": 0.46,
+      "max": 6.9
+    },
+    "exposurePlanMs": {
+      "samples": [
+        5.53,
+        5.12,
+        4.88,
+        5.27,
+        4.93,
+        5.21,
+        5.28,
+        4.94,
+        5.64,
+        4.87,
+        5.08,
+        5.25,
+        6.29,
+        5.25,
+        4.93,
+        4.99,
+        5.25,
+        5.08,
+        5.26,
+        5.02,
+        6.74,
+        7.61,
+        5.79,
+        4.88,
+        5.25,
+        5.08,
+        4.59,
+        4.67,
+        4.6,
+        4.41,
+        4.82,
+        4.56,
+        4.56,
+        4.62,
+        4.5,
+        4.76,
+        4.76,
+        4.74,
+        4.66,
+        5.06,
+        4.63,
+        4.65,
+        4.91,
+        5.18,
+        4.76,
+        4.85,
+        5.02,
+        5.71,
+        4.97,
+        4.69,
+        4.76,
+        4.9,
+        4.49,
+        4.66,
+        5.09,
+        4.93,
+        5.03,
+        5.02,
+        5.05,
+        5.39,
+        4.75,
+        4.87,
+        5.04,
+        5.05,
+        4.98,
+        5.11,
+        5.7,
+        5.32,
+        6.2,
+        6.03,
+        5.34,
+        5.07,
+        5.22,
+        6.02,
+        6.12,
+        5.4,
+        5.37,
+        5.73,
+        5.28,
+        5.04,
+        4.97,
+        5.17,
+        6.13,
+        5.75,
+        5.37,
+        4.95,
+        5.23,
+        5.51,
+        5.79,
+        5.87,
+        5.55,
+        5.7,
+        6.25,
+        6.01,
+        5.7,
+        5.9,
+        6.5,
+        5.27,
+        5.41,
+        4.88,
+        4.92,
+        4.86,
+        5.06,
+        6.13,
+        7.26,
+        5.55,
+        5.32,
+        4.99,
+        5.64,
+        5.37,
+        5.37,
+        5.43,
+        5.61,
+        5.77,
+        5.96,
+        6.21,
+        5.71,
+        5.26,
+        5.88,
+        6.31,
+        5.47,
+        6.03,
+        7.93,
+        7.63,
+        7.62,
+        7.07,
+        5.98,
+        6.2,
+        5.38,
+        6.28,
+        7.04,
+        5.53,
+        7.35,
+        8,
+        7.35,
+        6.71,
+        5.07,
+        5.35,
+        5.28,
+        5.25,
+        5.4,
+        5.58,
+        5.75,
+        5.94,
+        6.98,
+        6.51,
+        5.41,
+        5.93,
+        5.65,
+        5.86,
+        5.83,
+        6.35,
+        5.76,
+        6.14,
+        5.85,
+        5.45,
+        6.17,
+        5.3,
+        5.45,
+        5.35,
+        5.57,
+        6.18,
+        5.41,
+        6.01,
+        6.38,
+        5.53,
+        6.13,
+        5.87,
+        6.08,
+        5.34,
+        5.28,
+        5.2,
+        5.39,
+        5.49,
+        5.47,
+        5.31,
+        5.76,
+        5.97,
+        5.46,
+        5.92,
+        5.84,
+        5.41,
+        5.58,
+        5.61,
+        5.67,
+        5.9,
+        6.31,
+        6.36,
+        6.03,
+        5.61,
+        5.31,
+        5.07,
+        5.39,
+        5.13,
+        4.96,
+        5.29,
+        5.51,
+        4.65,
+        5.38,
+        5.23,
+        5.27,
+        5.43,
+        5.67,
+        5.98,
+        5.33,
+        5.01,
+        5.1,
+        4.73,
+        4.53,
+        4.56,
+        4.89,
+        5.09,
+        4.91,
+        4.87,
+        5.82,
+        4.81,
+        4.55,
+        4.72,
+        4.51,
+        4.75,
+        4.78,
+        4.52,
+        4.64,
+        4.91,
+        4.82,
+        4.76,
+        4.93,
+        5.46,
+        4.58,
+        4.67,
+        4.94,
+        5.1,
+        4.94,
+        4.71,
+        5.13,
+        4.91,
+        4.78,
+        5,
+        5.23,
+        4.94,
+        4.67,
+        4.56,
+        4.64,
+        5.14,
+        4.99,
+        4.8,
+        5.46,
+        5.13,
+        5.26,
+        4.91,
+        5.17,
+        4.97,
+        4.98,
+        4.89,
+        4.82,
+        5.12,
+        5.25,
+        4.88,
+        5.41,
+        5.07,
+        5.08,
+        6.01,
+        5.2,
+        5.08,
+        5.66,
+        5.56,
+        5.51,
+        5.82,
+        5.44,
+        5.59,
+        6.56,
+        6.97,
+        6.8,
+        5.6,
+        5.59,
+        5.44,
+        5.53,
+        5.12,
+        5.31,
+        5.56,
+        5.82,
+        6.23,
+        5.76,
+        5.38,
+        5.11,
+        5.5,
+        5.64,
+        5.33,
+        5.61,
+        5.28,
+        5.13,
+        5.24,
+        6.48,
+        5.14,
+        8.24,
+        6.03,
+        5.64,
+        5.45,
+        5.56,
+        5.53
+      ],
+      "min": 4.41,
+      "p50": 5.32,
+      "p95": 6.71,
+      "max": 8.24
+    },
+    "readonlyRouterBatchMs": {
+      "samples": [
+        25.48,
+        0.33,
+        0.2,
+        0.21,
+        0.2,
+        0.17,
+        0.21,
+        0.21,
+        0.19,
+        0.19,
+        0.18,
+        0.17,
+        0.19,
+        0.17,
+        0.17,
+        0.16,
+        0.16,
+        0.16,
+        0.15,
+        0.17,
+        0.32,
+        0.26,
+        0.16,
+        0.15,
+        0.15,
+        0.62,
+        0.34,
+        0.17,
+        0.19,
+        0.15,
+        0.16,
+        0.21,
+        0.26,
+        0.16,
+        0.18,
+        0.18,
+        0.14,
+        0.18,
+        0.22,
+        0.14,
+        0.15,
+        0.12,
+        0.12,
+        0.11,
+        0.12,
+        0.12,
+        0.11,
+        0.12,
+        0.12,
+        0.12
+      ],
+      "min": 0.11,
+      "p50": 0.17,
+      "p95": 0.34,
+      "max": 25.48
+    },
+    "projectCompilationMs": {
+      "samples": [
+        24.54,
+        18.33,
+        17.71,
+        13.78,
+        10.77,
+        11.72,
+        103.11,
+        7.44,
+        6.63,
+        6.99
+      ],
+      "min": 6.63,
+      "p50": 11.72,
+      "p95": 103.11,
+      "max": 103.11
+    },
+    "toolSearchQuality": {
+      "recallAt5": 1,
+      "recallAt8": 1,
+      "mrrAt5": 0.95
+    }
+  },
+  "thresholds": {
+    "toolIndexBuildP95Ms": 150,
+    "toolSearchP95Ms": 20,
+    "exposurePlanP95Ms": 100,
+    "readonlyRouterBatchP95Ms": 100,
+    "projectCompilationP95Ms": 1500,
+    "recallAt5": 0.95,
+    "recallAt8": 0.98,
+    "mrrAt5": 0.85
+  },
+  "gates": {
+    "toolIndexBuild": {
+      "observedMs": 16.49,
+      "thresholdMs": 150,
+      "passed": true
+    },
+    "toolSearch": {
+      "observedMs": 0.46,
+      "thresholdMs": 20,
+      "passed": true
+    },
+    "exposurePlan": {
+      "observedMs": 6.71,
+      "thresholdMs": 100,
+      "passed": true
+    },
+    "readonlyRouterBatch": {
+      "observedMs": 0.34,
+      "thresholdMs": 100,
+      "passed": true
+    },
+    "projectCompilation": {
+      "observedMs": 103.11,
+      "thresholdMs": 1500,
+      "passed": true
+    },
+    "toolSearchRecallAt5": {
+      "observed": 1,
+      "threshold": 0.95,
+      "passed": true
+    },
+    "toolSearchRecallAt8": {
+      "observed": 1,
+      "threshold": 0.98,
+      "passed": true
+    },
+    "toolSearchMrrAt5": {
+      "observed": 0.95,
+      "threshold": 0.85,
+      "passed": true
+    }
+  },
+  "searchQualityCases": [
+    {
+      "query": "解析 Kafka value 里的 JSON key",
+      "expected": "kafka_payload_inspect",
+      "rank": 1,
+      "top": [
+        "kafka_payload_inspect",
+        "kafka_topic_offsets",
+        "postgres_slow_query_analyze",
+        "data_quality_null_scan",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "inspect kafka payload fields",
+      "expected": "kafka_payload_inspect",
+      "rank": 1,
+      "top": [
+        "kafka_payload_inspect",
+        "index_bloat_inspect",
+        "kafka_topic_offsets",
+        "sql_explain_plan",
+        "mysql_replication_status"
+      ]
+    },
+    {
+      "query": "消息体结构探查",
+      "expected": "kafka_payload_inspect",
+      "rank": 1,
+      "top": [
+        "kafka_payload_inspect",
+        "kafka_topic_offsets",
+        "artifact_export_csv",
+        "index_bloat_inspect",
+        "postgres_slow_query_analyze"
+      ]
+    },
+    {
+      "query": "find event payload schema",
+      "expected": "kafka_payload_inspect",
+      "rank": 1,
+      "top": [
+        "kafka_payload_inspect",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "Kafka 事件有哪些字段",
+      "expected": "kafka_payload_inspect",
+      "rank": 2,
+      "top": [
+        "kafka_topic_offsets",
+        "kafka_payload_inspect",
+        "transaction_lock_graph",
+        "workspace_apply_patch",
+        "artifact_export_csv"
+      ]
+    },
+    {
+      "query": "分析 PG 慢查询",
+      "expected": "postgres_slow_query_analyze",
+      "rank": 1,
+      "top": [
+        "postgres_slow_query_analyze",
+        "sql_explain_plan",
+        "schema_relation_search",
+        "maxcompute_partition_list",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "postgres slow statement investigation",
+      "expected": "postgres_slow_query_analyze",
+      "rank": 1,
+      "top": [
+        "postgres_slow_query_analyze",
+        "index_bloat_inspect",
+        "transaction_lock_graph",
+        "sql_explain_plan"
+      ]
+    },
+    {
+      "query": "哪个 SQL 延迟最高",
+      "expected": "postgres_slow_query_analyze",
+      "rank": 3,
+      "top": [
+        "sql_explain_plan",
+        "mysql_replication_status",
+        "postgres_slow_query_analyze",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "inspect query latency in PostgreSQL",
+      "expected": "postgres_slow_query_analyze",
+      "rank": 1,
+      "top": [
+        "postgres_slow_query_analyze",
+        "index_bloat_inspect",
+        "sql_explain_plan",
+        "kafka_payload_inspect",
+        "mysql_replication_status"
+      ]
+    },
+    {
+      "query": "数据库慢 SQL 排查",
+      "expected": "postgres_slow_query_analyze",
+      "rank": 2,
+      "top": [
+        "database_user_grant",
+        "postgres_slow_query_analyze",
+        "table_lineage_trace",
+        "warehouse_job_status",
+        "data_quality_null_scan"
+      ]
+    },
+    {
+      "query": "看一下 K8s 容器日志",
+      "expected": "kubernetes_pod_logs",
+      "rank": 1,
+      "top": [
+        "kubernetes_pod_logs",
+        "subagent_delegate"
+      ]
+    },
+    {
+      "query": "read kubernetes pod logs",
+      "expected": "kubernetes_pod_logs",
+      "rank": 1,
+      "top": [
+        "kubernetes_pod_logs",
+        "mcp_resource_read",
+        "kafka_topic_offsets"
+      ]
+    },
+    {
+      "query": "kubectl logs for this pod",
+      "expected": "kubernetes_pod_logs",
+      "rank": 1,
+      "top": [
+        "kubernetes_pod_logs",
+        "transaction_lock_graph",
+        "table_lineage_trace",
+        "data_quality_null_scan",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "查看命名空间里的 Pod 输出",
+      "expected": "kubernetes_pod_logs",
+      "rank": 1,
+      "top": [
+        "kubernetes_pod_logs",
+        "artifact_export_csv",
+        "data_quality_null_scan",
+        "process_background_poll",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "容器为什么启动失败 看日志",
+      "expected": "kubernetes_pod_logs",
+      "rank": 1,
+      "top": [
+        "kubernetes_pod_logs"
+      ]
+    },
+    {
+      "query": "给这个文件应用补丁",
+      "expected": "workspace_apply_patch",
+      "rank": 1,
+      "top": [
+        "workspace_apply_patch",
+        "artifact_export_csv",
+        "database_user_grant",
+        "web_document_search",
+        "subagent_delegate"
+      ]
+    },
+    {
+      "query": "apply an atomic file patch",
+      "expected": "workspace_apply_patch",
+      "rank": 1,
+      "top": [
+        "workspace_apply_patch",
+        "artifact_export_csv",
+        "sql_explain_plan",
+        "subagent_delegate"
+      ]
+    },
+    {
+      "query": "做多个精确文本替换",
+      "expected": "workspace_apply_patch",
+      "rank": 2,
+      "top": [
+        "web_document_search",
+        "workspace_apply_patch",
+        "artifact_export_csv",
+        "subagent_delegate"
+      ]
+    },
+    {
+      "query": "edit file without partial writes",
+      "expected": "workspace_apply_patch",
+      "rank": 2,
+      "top": [
+        "sql_explain_plan",
+        "workspace_apply_patch",
+        "maxcompute_partition_list",
+        "artifact_export_csv"
+      ]
+    },
+    {
+      "query": "workspace exact replacement tool",
+      "expected": "workspace_apply_patch",
+      "rank": 1,
+      "top": [
+        "workspace_apply_patch",
+        "tool_0",
+        "tool_10",
+        "tool_100",
+        "tool_102"
+      ]
+    },
+    {
+      "query": "联网搜索最新文档",
+      "expected": "web_document_search",
+      "rank": 1,
+      "top": [
+        "web_document_search",
+        "index_bloat_inspect",
+        "schema_relation_search",
+        "workspace_apply_patch",
+        "artifact_export_csv"
+      ]
+    },
+    {
+      "query": "search online docs",
+      "expected": "web_document_search",
+      "rank": 1,
+      "top": [
+        "web_document_search",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "find this API on the web",
+      "expected": "web_document_search",
+      "rank": 1,
+      "top": [
+        "web_document_search",
+        "subagent_delegate",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "查一下官网说明",
+      "expected": "web_document_search",
+      "rank": 1,
+      "top": [
+        "web_document_search",
+        "subagent_delegate",
+        "index_bloat_inspect",
+        "postgres_slow_query_analyze",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "web search technical documentation",
+      "expected": "web_document_search",
+      "rank": 1,
+      "top": [
+        "web_document_search",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "查看 MySQL 主从延迟",
+      "expected": "mysql_replication_status",
+      "rank": 1,
+      "top": [
+        "mysql_replication_status",
+        "postgres_slow_query_analyze",
+        "index_bloat_inspect",
+        "sql_explain_plan",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "mysql replica lag status",
+      "expected": "mysql_replication_status",
+      "rank": 1,
+      "top": [
+        "mysql_replication_status",
+        "warehouse_job_status",
+        "process_background_poll",
+        "kafka_topic_offsets"
+      ]
+    },
+    {
+      "query": "binlog 复制健康吗",
+      "expected": "mysql_replication_status",
+      "rank": 1,
+      "top": [
+        "mysql_replication_status"
+      ]
+    },
+    {
+      "query": "inspect replication coordinates",
+      "expected": "mysql_replication_status",
+      "rank": 1,
+      "top": [
+        "mysql_replication_status",
+        "index_bloat_inspect",
+        "kafka_payload_inspect",
+        "sql_explain_plan",
+        "warehouse_job_status"
+      ]
+    },
+    {
+      "query": "数据库从库同步状态",
+      "expected": "mysql_replication_status",
+      "rank": 3,
+      "top": [
+        "warehouse_job_status",
+        "database_user_grant",
+        "mysql_replication_status",
+        "table_lineage_trace",
+        "data_quality_null_scan"
+      ]
+    },
+    {
+      "query": "列出 MaxCompute 表分区",
+      "expected": "maxcompute_partition_list",
+      "rank": 1,
+      "top": [
+        "maxcompute_partition_list",
+        "artifact_export_csv",
+        "table_lineage_trace",
+        "schema_relation_search",
+        "postgres_slow_query_analyze"
+      ]
+    },
+    {
+      "query": "show ODPS partitions",
+      "expected": "maxcompute_partition_list",
+      "rank": 1,
+      "top": [
+        "maxcompute_partition_list"
+      ]
+    },
+    {
+      "query": "数仓这张表有哪些分区",
+      "expected": "maxcompute_partition_list",
+      "rank": 1,
+      "top": [
+        "maxcompute_partition_list",
+        "warehouse_job_status",
+        "table_lineage_trace",
+        "schema_relation_search",
+        "postgres_slow_query_analyze"
+      ]
+    },
+    {
+      "query": "list partition metadata",
+      "expected": "maxcompute_partition_list",
+      "rank": 1,
+      "top": [
+        "maxcompute_partition_list"
+      ]
+    },
+    {
+      "query": "查询 maxcompute partition",
+      "expected": "maxcompute_partition_list",
+      "rank": 1,
+      "top": [
+        "maxcompute_partition_list",
+        "postgres_slow_query_analyze",
+        "schema_relation_search",
+        "index_bloat_inspect",
+        "kafka_payload_inspect"
+      ]
+    },
+    {
+      "query": "给数据库用户授权",
+      "expected": "database_user_grant",
+      "rank": 1,
+      "top": [
+        "database_user_grant",
+        "table_lineage_trace",
+        "warehouse_job_status",
+        "data_quality_null_scan",
+        "maxcompute_partition_list"
+      ]
+    },
+    {
+      "query": "grant a role to this user",
+      "expected": "database_user_grant",
+      "rank": 1,
+      "top": [
+        "database_user_grant",
+        "artifact_export_csv",
+        "sql_explain_plan",
+        "subagent_delegate",
+        "workspace_apply_patch"
+      ]
+    },
+    {
+      "query": "撤销表访问权限",
+      "expected": "database_user_grant",
+      "rank": 1,
+      "top": [
+        "database_user_grant",
+        "table_lineage_trace",
+        "maxcompute_partition_list",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "revoke database privileges",
+      "expected": "database_user_grant",
+      "rank": 1,
+      "top": [
+        "database_user_grant",
+        "schema_relation_search",
+        "tool_1",
+        "tool_101",
+        "tool_103"
+      ]
+    },
+    {
+      "query": "管理账号的对象权限",
+      "expected": "database_user_grant",
+      "rank": 1,
+      "top": [
+        "database_user_grant",
+        "artifact_export_csv"
+      ]
+    },
+    {
+      "query": "查这个表关联了哪些表",
+      "expected": "schema_relation_search",
+      "rank": 1,
+      "top": [
+        "schema_relation_search",
+        "web_document_search",
+        "table_lineage_trace",
+        "maxcompute_partition_list",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "search foreign key relations",
+      "expected": "schema_relation_search",
+      "rank": 1,
+      "top": [
+        "schema_relation_search",
+        "web_document_search",
+        "kafka_payload_inspect",
+        "workspace_apply_patch"
+      ]
+    },
+    {
+      "query": "Schema 关系图",
+      "expected": "schema_relation_search",
+      "rank": 1,
+      "top": [
+        "schema_relation_search",
+        "transaction_lock_graph"
+      ]
+    },
+    {
+      "query": "find related database tables",
+      "expected": "schema_relation_search",
+      "rank": 1,
+      "top": [
+        "schema_relation_search",
+        "table_lineage_trace",
+        "maxcompute_partition_list",
+        "workspace_apply_patch",
+        "database_user_grant"
+      ]
+    },
+    {
+      "query": "表之间的依赖关系",
+      "expected": "schema_relation_search",
+      "rank": 1,
+      "top": [
+        "schema_relation_search",
+        "table_lineage_trace",
+        "maxcompute_partition_list"
+      ]
+    },
+    {
+      "query": "看一下 SQL 执行计划",
+      "expected": "sql_explain_plan",
+      "rank": 1,
+      "top": [
+        "sql_explain_plan",
+        "subagent_delegate",
+        "mysql_replication_status",
+        "postgres_slow_query_analyze",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "explain this query",
+      "expected": "sql_explain_plan",
+      "rank": 1,
+      "top": [
+        "sql_explain_plan",
+        "postgres_slow_query_analyze",
+        "web_document_search"
+      ]
+    },
+    {
+      "query": "生成 query plan",
+      "expected": "sql_explain_plan",
+      "rank": 1,
+      "top": [
+        "sql_explain_plan",
+        "postgres_slow_query_analyze",
+        "web_document_search",
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "为什么这条 SQL 扫描很慢",
+      "expected": "sql_explain_plan",
+      "rank": 3,
+      "top": [
+        "data_quality_null_scan",
+        "postgres_slow_query_analyze",
+        "sql_explain_plan",
+        "mysql_replication_status",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "inspect EXPLAIN output",
+      "expected": "sql_explain_plan",
+      "rank": 1,
+      "top": [
+        "sql_explain_plan",
+        "process_background_poll",
+        "index_bloat_inspect",
+        "kafka_payload_inspect",
+        "mysql_replication_status"
+      ]
+    },
+    {
+      "query": "看看后台任务进度",
+      "expected": "process_background_poll",
+      "rank": 1,
+      "top": [
+        "process_background_poll",
+        "warehouse_job_status",
+        "subagent_delegate",
+        "transaction_lock_graph"
+      ]
+    },
+    {
+      "query": "poll process output",
+      "expected": "process_background_poll",
+      "rank": 1,
+      "top": [
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "命令运行完了吗",
+      "expected": "process_background_poll",
+      "rank": 1,
+      "top": [
+        "process_background_poll",
+        "warehouse_job_status",
+        "sql_explain_plan",
+        "subagent_delegate"
+      ]
+    },
+    {
+      "query": "read incremental stdout",
+      "expected": "process_background_poll",
+      "rank": 1,
+      "top": [
+        "process_background_poll",
+        "mcp_resource_read",
+        "kafka_topic_offsets",
+        "kubernetes_pod_logs"
+      ]
+    },
+    {
+      "query": "查询后台进程状态",
+      "expected": "process_background_poll",
+      "rank": 1,
+      "top": [
+        "process_background_poll",
+        "warehouse_job_status",
+        "mysql_replication_status",
+        "postgres_slow_query_analyze",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "把查询结果导出成 CSV",
+      "expected": "artifact_export_csv",
+      "rank": 1,
+      "top": [
+        "artifact_export_csv",
+        "postgres_slow_query_analyze",
+        "schema_relation_search",
+        "kafka_payload_inspect",
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "export result to csv",
+      "expected": "artifact_export_csv",
+      "rank": 1,
+      "top": [
+        "artifact_export_csv",
+        "subagent_delegate",
+        "sql_explain_plan",
+        "index_bloat_inspect",
+        "database_user_grant"
+      ]
+    },
+    {
+      "query": "生成逗号分隔文件",
+      "expected": "artifact_export_csv",
+      "rank": 1,
+      "top": [
+        "artifact_export_csv",
+        "workspace_apply_patch",
+        "maxcompute_partition_list",
+        "postgres_slow_query_analyze",
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "save these rows as an artifact",
+      "expected": "artifact_export_csv",
+      "rank": 1,
+      "top": [
+        "artifact_export_csv",
+        "sql_explain_plan",
+        "workspace_apply_patch",
+        "subagent_delegate"
+      ]
+    },
+    {
+      "query": "下载 CSV 结果",
+      "expected": "artifact_export_csv",
+      "rank": 1,
+      "top": [
+        "artifact_export_csv",
+        "kafka_payload_inspect",
+        "subagent_delegate"
+      ]
+    },
+    {
+      "query": "读取 MCP 服务的资源",
+      "expected": "mcp_resource_read",
+      "rank": 1,
+      "top": [
+        "mcp_resource_read",
+        "subagent_delegate",
+        "transaction_lock_graph",
+        "warehouse_job_status",
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "read this MCP resource URI",
+      "expected": "mcp_resource_read",
+      "rank": 1,
+      "top": [
+        "mcp_resource_read",
+        "kafka_topic_offsets",
+        "kubernetes_pod_logs"
+      ]
+    },
+    {
+      "query": "获取模型上下文协议资源",
+      "expected": "mcp_resource_read",
+      "rank": 2,
+      "top": [
+        "subagent_delegate",
+        "mcp_resource_read",
+        "web_document_search",
+        "workspace_apply_patch",
+        "artifact_export_csv"
+      ]
+    },
+    {
+      "query": "open resource from MCP server",
+      "expected": "mcp_resource_read",
+      "rank": 1,
+      "top": [
+        "mcp_resource_read"
+      ]
+    },
+    {
+      "query": "MCP resource 内容是什么",
+      "expected": "mcp_resource_read",
+      "rank": 1,
+      "top": [
+        "mcp_resource_read",
+        "kubernetes_pod_logs",
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "委派一个子 Agent 去调查",
+      "expected": "subagent_delegate",
+      "rank": 1,
+      "top": [
+        "subagent_delegate",
+        "workspace_apply_patch",
+        "index_bloat_inspect",
+        "postgres_slow_query_analyze",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "delegate this task to a child agent",
+      "expected": "subagent_delegate",
+      "rank": 1,
+      "top": [
+        "subagent_delegate",
+        "artifact_export_csv",
+        "sql_explain_plan",
+        "database_user_grant",
+        "workspace_apply_patch"
+      ]
+    },
+    {
+      "query": "并行开一个独立上下文",
+      "expected": "subagent_delegate",
+      "rank": 1,
+      "top": [
+        "subagent_delegate",
+        "warehouse_job_status",
+        "sql_explain_plan",
+        "web_document_search",
+        "workspace_apply_patch"
+      ]
+    },
+    {
+      "query": "spawn a research subagent",
+      "expected": "subagent_delegate",
+      "rank": 1,
+      "top": [
+        "subagent_delegate",
+        "mcp_resource_read",
+        "artifact_export_csv",
+        "sql_explain_plan",
+        "transaction_lock_graph"
+      ]
+    },
+    {
+      "query": "让另一个 Agent 处理子任务",
+      "expected": "subagent_delegate",
+      "rank": 1,
+      "top": [
+        "subagent_delegate",
+        "warehouse_job_status",
+        "process_background_poll",
+        "database_user_grant",
+        "workspace_apply_patch"
+      ]
+    },
+    {
+      "query": "追踪这张表的数据血缘",
+      "expected": "table_lineage_trace",
+      "rank": 1,
+      "top": [
+        "table_lineage_trace",
+        "warehouse_job_status",
+        "data_quality_null_scan",
+        "database_user_grant",
+        "maxcompute_partition_list"
+      ]
+    },
+    {
+      "query": "show upstream data lineage",
+      "expected": "table_lineage_trace",
+      "rank": 1,
+      "top": [
+        "table_lineage_trace",
+        "data_quality_null_scan"
+      ]
+    },
+    {
+      "query": "有哪些下游表依赖它",
+      "expected": "table_lineage_trace",
+      "rank": 1,
+      "top": [
+        "table_lineage_trace",
+        "maxcompute_partition_list",
+        "schema_relation_search",
+        "subagent_delegate"
+      ]
+    },
+    {
+      "query": "trace dataset dependencies",
+      "expected": "table_lineage_trace",
+      "rank": 1,
+      "top": [
+        "table_lineage_trace"
+      ]
+    },
+    {
+      "query": "查询表级 lineage",
+      "expected": "table_lineage_trace",
+      "rank": 1,
+      "top": [
+        "table_lineage_trace",
+        "schema_relation_search",
+        "postgres_slow_query_analyze",
+        "maxcompute_partition_list",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "检查字段空值比例",
+      "expected": "data_quality_null_scan",
+      "rank": 1,
+      "top": [
+        "data_quality_null_scan",
+        "index_bloat_inspect",
+        "schema_relation_search",
+        "postgres_slow_query_analyze",
+        "kafka_payload_inspect"
+      ]
+    },
+    {
+      "query": "run a null quality scan",
+      "expected": "data_quality_null_scan",
+      "rank": 1,
+      "top": [
+        "data_quality_null_scan",
+        "warehouse_job_status",
+        "mcp_resource_read",
+        "artifact_export_csv",
+        "sql_explain_plan"
+      ]
+    },
+    {
+      "query": "哪些列缺失数据很多",
+      "expected": "data_quality_null_scan",
+      "rank": 3,
+      "top": [
+        "table_lineage_trace",
+        "warehouse_job_status",
+        "data_quality_null_scan",
+        "database_user_grant",
+        "maxcompute_partition_list"
+      ]
+    },
+    {
+      "query": "calculate missing value ratio",
+      "expected": "data_quality_null_scan",
+      "rank": 1,
+      "top": [
+        "data_quality_null_scan",
+        "kafka_payload_inspect"
+      ]
+    },
+    {
+      "query": "数据质量空值检测",
+      "expected": "data_quality_null_scan",
+      "rank": 1,
+      "top": [
+        "data_quality_null_scan",
+        "table_lineage_trace",
+        "warehouse_job_status",
+        "database_user_grant",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "检查 PostgreSQL 索引膨胀",
+      "expected": "index_bloat_inspect",
+      "rank": 1,
+      "top": [
+        "index_bloat_inspect",
+        "postgres_slow_query_analyze",
+        "schema_relation_search",
+        "transaction_lock_graph",
+        "sql_explain_plan"
+      ]
+    },
+    {
+      "query": "inspect index bloat",
+      "expected": "index_bloat_inspect",
+      "rank": 1,
+      "top": [
+        "index_bloat_inspect",
+        "kafka_payload_inspect",
+        "sql_explain_plan",
+        "mysql_replication_status",
+        "warehouse_job_status"
+      ]
+    },
+    {
+      "query": "哪些索引有很多 dead tuples",
+      "expected": "index_bloat_inspect",
+      "rank": 1,
+      "top": [
+        "index_bloat_inspect",
+        "web_document_search",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "find reclaim candidates",
+      "expected": "index_bloat_inspect",
+      "rank": 1,
+      "top": [
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "PG 索引空间浪费情况",
+      "expected": "index_bloat_inspect",
+      "rank": 1,
+      "top": [
+        "index_bloat_inspect",
+        "kafka_topic_offsets",
+        "data_quality_null_scan",
+        "web_document_search",
+        "postgres_slow_query_analyze"
+      ]
+    },
+    {
+      "query": "看 Kafka 消费位点",
+      "expected": "kafka_topic_offsets",
+      "rank": 1,
+      "top": [
+        "kafka_topic_offsets",
+        "kafka_payload_inspect"
+      ]
+    },
+    {
+      "query": "show topic offsets",
+      "expected": "kafka_topic_offsets",
+      "rank": 1,
+      "top": [
+        "kafka_topic_offsets",
+        "kafka_payload_inspect"
+      ]
+    },
+    {
+      "query": "consumer group lag 多大",
+      "expected": "kafka_topic_offsets",
+      "rank": 1,
+      "top": [
+        "kafka_topic_offsets",
+        "mysql_replication_status"
+      ]
+    },
+    {
+      "query": "查询消费者积压",
+      "expected": "kafka_topic_offsets",
+      "rank": 1,
+      "top": [
+        "kafka_topic_offsets",
+        "postgres_slow_query_analyze",
+        "schema_relation_search",
+        "kafka_payload_inspect",
+        "index_bloat_inspect"
+      ]
+    },
+    {
+      "query": "inspect kafka consumer positions",
+      "expected": "kafka_topic_offsets",
+      "rank": 1,
+      "top": [
+        "kafka_topic_offsets",
+        "kafka_payload_inspect",
+        "index_bloat_inspect",
+        "sql_explain_plan",
+        "mysql_replication_status"
+      ]
+    },
+    {
+      "query": "查看数仓作业状态",
+      "expected": "warehouse_job_status",
+      "rank": 1,
+      "top": [
+        "warehouse_job_status",
+        "mysql_replication_status",
+        "maxcompute_partition_list",
+        "process_background_poll",
+        "workspace_apply_patch"
+      ]
+    },
+    {
+      "query": "is the ETL job still running",
+      "expected": "warehouse_job_status",
+      "rank": 1,
+      "top": [
+        "warehouse_job_status",
+        "kafka_topic_offsets",
+        "subagent_delegate",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "哪个 pipeline run 失败了",
+      "expected": "warehouse_job_status",
+      "rank": 1,
+      "top": [
+        "warehouse_job_status"
+      ]
+    },
+    {
+      "query": "inspect warehouse job failure",
+      "expected": "warehouse_job_status",
+      "rank": 1,
+      "top": [
+        "warehouse_job_status",
+        "index_bloat_inspect",
+        "kafka_payload_inspect",
+        "maxcompute_partition_list",
+        "sql_explain_plan"
+      ]
+    },
+    {
+      "query": "查询数据开发任务进度",
+      "expected": "warehouse_job_status",
+      "rank": 1,
+      "top": [
+        "warehouse_job_status",
+        "process_background_poll",
+        "subagent_delegate",
+        "postgres_slow_query_analyze",
+        "schema_relation_search"
+      ]
+    },
+    {
+      "query": "看一下事务锁等待",
+      "expected": "transaction_lock_graph",
+      "rank": 1,
+      "top": [
+        "transaction_lock_graph",
+        "subagent_delegate",
+        "warehouse_job_status",
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "find blocking database sessions",
+      "expected": "transaction_lock_graph",
+      "rank": 1,
+      "top": [
+        "transaction_lock_graph",
+        "database_user_grant",
+        "schema_relation_search",
+        "tool_1",
+        "tool_101"
+      ]
+    },
+    {
+      "query": "生成 deadlock graph",
+      "expected": "transaction_lock_graph",
+      "rank": 1,
+      "top": [
+        "transaction_lock_graph",
+        "schema_relation_search",
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "谁阻塞了这个事务",
+      "expected": "transaction_lock_graph",
+      "rank": 1,
+      "top": [
+        "transaction_lock_graph",
+        "subagent_delegate",
+        "warehouse_job_status",
+        "process_background_poll"
+      ]
+    },
+    {
+      "query": "diagnose lock contention",
+      "expected": "transaction_lock_graph",
+      "rank": 1,
+      "top": [
+        "transaction_lock_graph",
+        "mcp_resource_read",
+        "subagent_delegate"
+      ]
+    }
+  ],
+  "passed": true,
+  "notes": [
+    "Deterministic local benchmark; model, network, database and process execution time are excluded.",
+    "Raw samples are retained so regressions can be distinguished from percentile rounding."
+  ]
+}

@@ -72,6 +72,9 @@ export class CliTraceRenderer {
         .join('\n');
       value += `${paint(this.#output, 'cyan', '  SQL')}\n${sql}\n`;
     }
+    if (event.type === 'command-prepared' && event.command?.trim()) {
+      value += `${paint(this.#output, 'cyan', '  Command')}\n  ${event.command.trim()}\n`;
+    }
     this.writeTrace(value);
   }
 
@@ -161,6 +164,7 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
         : {}),
     }),
     model: config.model,
+    enableProcessTools: true,
     approvalProvider: async (request) =>
       await new Promise((resolveApproval) => {
         let settled = false;

@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   AgentToolApprovalBroker,
   AgentSubagentPool,
@@ -48,7 +47,12 @@ import {
   SchemaRagEngine,
   SchemaRagSnapshotStore,
 } from '@dbagent/core-rag';
-import { SkillRegistry, systemSkillSource, type SkillOverlay } from '@dbagent/core-skills';
+import {
+  SkillRegistry,
+  systemSkillSource,
+  type SkillDescriptor,
+  type SkillOverlay,
+} from '@dbagent/core-skills';
 import {
   registerAgentRuntimeTools,
   registerAiSqlTools,
@@ -56,11 +60,14 @@ import {
   registerSubagentTools,
   registerWebTools,
   registerWorkspaceTools,
+  registerProcessTools,
+  compileProjectContext,
   createMcpRuntimeLauncher,
   McpConfigStore,
   McpHealthManager,
   McpRuntimeManager,
   McpToolRegistrationManager,
+  ProcessRuntime,
   type AiSqlQueryExecutionInput,
   type AiSqlResultStore,
   type StoredAiSqlResult,
@@ -128,6 +135,7 @@ const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
 const DEFAULT_SCHEMA_FRESHNESS_INTERVAL_MS = 30_000;
 const MAX_SCHEMA_FRESHNESS_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const SCHEMA_MISS_REFRESH_DEBOUNCE_MS = 5_000;
+const DEFAULT_MODEL_METADATA_DISCOVERY_TIMEOUT_MS = 5_000;
 const EXECUTABLE_STATEMENT_KINDS = new Set(['SELECT', 'WITH', 'VALUES']);
 
 export class DatabaseAgentRuntime {
@@ -152,6 +160,10 @@ export class DatabaseAgentRuntime {
   >();
   private readonly skillsReady: Promise<unknown>;
   private readonly dynamicToolDiscovery: boolean;
+  private readonly defaultSystemPrompt: DatabaseAgentRuntimeOptions['systemPrompt'];
+  private readonly defaultCapabilityInstructions: string[];
+  private readonly defaultAllowedTools: string[] | undefined;
+  private readonly defaultPinnedTools: string[];
   private readonly autoStartMcp: boolean;
   private mcpAutoStartPromise: Promise<unknown> | undefined;
   private readonly activeAgentRuns = new Set<Promise<unknown>>();
@@ -159,6 +171,10 @@ export class DatabaseAgentRuntime {
   private readonly activeLlmOperations = new Set<Promise<unknown>>();
   private readonly activeLlmControllers = new Set<AbortController>();
   private readonly activeLlmStreamClosers = new Set<() => Promise<void>>();
+  private readonly modelMetadataDiscovery = new Map<
+    string,
+    Promise<'completed' | 'cancelled'>
+  >();
   private readonly agentRunRecovery: Promise<number>;
   private readonly agentRunStore: AgentRunStore;
   private readonly llmJobOwnerId = randomUUID();
@@ -169,6 +185,8 @@ export class DatabaseAgentRuntime {
   readonly sessions: AgentSessionStore;
   readonly mcpConfig: McpConfigStore;
   readonly mcp: McpRuntimeManager;
+  /** Session-isolated foreground/background process handles, when enabled. */
+  readonly processes: ProcessRuntime | undefined;
   /**
    * Unified database/warehouse/cluster access API. Connector registration,
    * resources, capabilities, query jobs, transactions and operations all live
@@ -358,6 +376,14 @@ export class DatabaseAgentRuntime {
     });
     this.skillsReady = this.skills.refresh();
     this.dynamicToolDiscovery = options.dynamicToolDiscovery ?? true;
+    this.defaultSystemPrompt =
+      options.systemPrompt === undefined ? undefined : structuredClone(options.systemPrompt);
+    this.defaultCapabilityInstructions = normalizeInstructionList(
+      options.capabilityInstructions,
+      'capabilityInstructions',
+    );
+    this.defaultAllowedTools = normalizeOptionalNameList(options.allowedTools, 'allowedTools');
+    this.defaultPinnedTools = normalizeNameList(options.pinnedTools, 'pinnedTools');
     this.sessions = (
       options.sessionStore ??
       new AgentSessionStore(stateDatabasePath)
@@ -365,11 +391,28 @@ export class DatabaseAgentRuntime {
     const agentRunStore = options.agentDependencies?.runStore ?? this.sessions;
     this.agentRunStore = agentRunStore;
     registerAgentRuntimeTools(this.tools);
-    registerSkillTools(this.tools, (session) => this.skillRegistryForSession(session));
+    registerSkillTools(this.tools, (session) => this.skillRegistryForSession(session), {
+      isAvailable: (descriptor) => this.isSkillAvailable(descriptor),
+    });
+    const processToolsEnabled = options.enableProcessTools ?? options.enableShellTool ?? false;
+    this.processes =
+      processToolsEnabled || options.processRuntime
+        ? options.processRuntime ??
+          new ProcessRuntime({
+            spoolDirectory: join(this.project.configDirectory, 'runtime', 'processes'),
+          })
+        : undefined;
     registerWorkspaceTools(this.tools, {
       rootPath: this.project.rootPath,
       ...(options.enableShellTool === undefined ? {} : { enableShell: options.enableShellTool }),
+      ...(this.processes === undefined ? {} : { processRuntime: this.processes }),
     });
+    if (processToolsEnabled && this.processes) {
+      registerProcessTools(this.tools, {
+        rootPath: this.project.rootPath,
+        runtime: this.processes,
+      });
+    }
     if (options.webAdapter) registerWebTools(this.tools, options.webAdapter);
     this.mcpConfig = new McpConfigStore(this.project.mcpConfigPath);
     this.mcp = new McpRuntimeManager({
@@ -426,6 +469,7 @@ export class DatabaseAgentRuntime {
     this.agentRunRecovery = this.reactAgent.waitForRunRecovery();
     this.subagents = new AgentSubagentPool((runOptions) => this.reactAgent.run(runOptions), {
       store: this.sessions,
+      steer: (childSessionId, message) => this.reactAgent.steer(childSessionId, message),
     });
     registerSubagentTools(this.tools, {
       pool: this.subagents,
@@ -433,8 +477,14 @@ export class DatabaseAgentRuntime {
         const { providerId, model } = this.requireModelConfiguration();
         await this.skillsReady;
         const effectiveSkills = this.skillRegistryForSession(context.session);
-        const projectInstructions = await readOptionalText(this.project.instructionsPath);
+        const projectInstructions = await this.compileProjectInstructions(effectiveSkills);
         const runSignal = context.runSignal ?? context.signal;
+        const allowedTools = this.availableToolNames(
+          context.allowedTools ?? this.defaultAllowedTools,
+        );
+        const pinnedTools = this.defaultPinnedTools.filter(
+          (name) => allowedTools === undefined || allowedTools.includes(name),
+        );
         return {
           providerId,
           model,
@@ -448,7 +498,17 @@ export class DatabaseAgentRuntime {
               }),
           project: agentProjectReference(this.project),
           ...(projectInstructions?.trim() ? { projectInstructions } : {}),
-          skillCatalog: effectiveSkills.catalogForModel(),
+          ...(this.defaultSystemPrompt === undefined
+            ? {}
+            : { systemPrompt: structuredClone(this.defaultSystemPrompt) }),
+          ...(this.defaultCapabilityInstructions.length === 0
+            ? {}
+            : { capabilityInstructions: [...this.defaultCapabilityInstructions] }),
+          ...(allowedTools === undefined ? {} : { allowedTools }),
+          ...(pinnedTools.length === 0
+            ? {}
+            : { pinnedTools }),
+          skillCatalog: this.skillCatalogForModel(effectiveSkills),
           ...(context.session.sessionSkills === undefined
             ? {}
             : { sessionSkills: structuredClone(context.session.sessionSkills) }),
@@ -467,6 +527,7 @@ export class DatabaseAgentRuntime {
 
   configureProvider(provider: LlmProvider, model: string): void {
     const normalizedModel = requireText(model, 'model', 300);
+    this.modelMetadataDiscovery.delete(`${provider.id}\u0000${normalizedModel}`);
     this.llmGateway.registerProvider(provider);
     if (this.llmGateway !== this.llmRouter.gateway) {
       this.llmRouter.registerProvider(provider);
@@ -612,6 +673,13 @@ export class DatabaseAgentRuntime {
     } catch (error) {
       failures.push(error);
     }
+    if (this.processes) {
+      try {
+        await this.processes.close();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
     if (this.connection) {
       try {
         await this.disconnect();
@@ -748,14 +816,12 @@ export class DatabaseAgentRuntime {
 
   private async runAgentInternal(input: RunAiSqlAgentInput): Promise<AiSqlAgentRun> {
     const { providerId, model } = this.requireModelConfiguration();
+    await this.ensureSelectedModelMetadata(providerId, model, input.signal);
     await this.skillsReady;
     await this.skills.refresh();
     await this.ensureMcpAutoStarted();
-    const connection = this.requireConnection();
-    this.scheduleSchemaFreshness(connection);
-    if (!this.rag.hasIndex(connection.id)) {
-      throw new DatabaseAgentError('SCHEMA_NOT_INDEXED', '请先索引当前数据库的知识目录。', true);
-    }
+    const connection = this.connection;
+    if (connection) this.scheduleSchemaFreshness(connection);
     const rawMessage = requireText(input.message, 'message', MAX_QUESTION_CHARS);
     if (input.session && input.sessionId?.trim()) {
       throw new DatabaseAgentError('INVALID_INPUT', 'session 与 sessionId 只能提供一个。', false);
@@ -767,7 +833,7 @@ export class DatabaseAgentRuntime {
         false,
       );
     }
-    const initialSession =
+    let initialSession =
       input.session ??
       (input.sessionId?.trim() ? await this.sessions.load(input.sessionId.trim()) : undefined);
     if (input.sessionId?.trim() && !initialSession) {
@@ -778,6 +844,15 @@ export class DatabaseAgentRuntime {
       );
     }
     if (initialSession) this.assertSessionProject(initialSession);
+    if (initialSession?.activeSkills?.length) {
+      const sessionRegistry = this.skills.createSessionView(initialSession.sessionSkills ?? []);
+      const activeSkills = initialSession.activeSkills;
+      initialSession = structuredClone(initialSession);
+      initialSession.activeSkills = activeSkills.filter((skill) => {
+        const descriptor = sessionRegistry.inspect({ name: skill.name, scope: skill.scope });
+        return descriptor !== undefined && this.isSkillAvailable(descriptor);
+      });
+    }
     const existingResultIds = new Set(
       initialSession === undefined
         ? []
@@ -786,32 +861,64 @@ export class DatabaseAgentRuntime {
     const sessionSkills =
       initialSession?.sessionSkills ?? input.sessionSkills ?? this.defaultSessionSkills;
     const effectiveSkills = this.skills.createSessionView(sessionSkills);
-    const catalog = this.rag.getCatalog(connection.id);
-    const manifest = this.rag.getIndexManifest(connection.id);
+    const knowledgeSnapshot =
+      connection && this.rag.hasIndex(connection.id)
+        ? (() => {
+            const catalog = this.rag.getCatalog(connection.id);
+            const manifest = this.rag.getIndexManifest(connection.id);
+            return {
+              connectionId: connection.id,
+              knowledgeSnapshotId: catalog.snapshotId,
+              catalogRootHash: catalog.catalogRootHash,
+              retrievalProfileId: manifest.retrievalProfileId,
+              indexVersion: manifest.indexVersion,
+            };
+          })()
+        : undefined;
     const invokedSkill = await effectiveSkills.invoke(rawMessage);
+    if (invokedSkill && !this.isSkillAvailable(invokedSkill.skill)) {
+      throw new DatabaseAgentError(
+        'NOT_CONFIGURED',
+        `Skill ${invokedSkill.skill.name} requires a capability that is not currently available.`,
+        true,
+      );
+    }
     const message =
       invokedSkill === undefined
         ? rawMessage
         : invokedSkill.arguments ||
-          `Follow the activated Skill "${invokedSkill.skill.name}" and complete its workflow for the current database.`;
-    const projectInstructions = await readOptionalText(this.project.instructionsPath);
+          `Follow the activated Skill "${invokedSkill.skill.name}" and complete its workflow using the available project capabilities.`;
+    const projectInstructions = await this.compileProjectInstructions(effectiveSkills);
+    const requestedAllowedTools =
+      input.allowedTools === undefined
+        ? this.defaultAllowedTools
+        : normalizeNameList(input.allowedTools, 'allowedTools');
+    const allowedTools = this.availableToolNames(requestedAllowedTools);
+    const pinnedTools = uniqueNames([
+      ...this.defaultPinnedTools,
+      ...normalizeNameList(input.pinnedTools, 'pinnedTools'),
+    ]).filter((name) => allowedTools === undefined || allowedTools.includes(name));
+    const capabilityInstructions = [
+      ...this.defaultCapabilityInstructions,
+      ...normalizeInstructionList(input.capabilityInstructions, 'capabilityInstructions'),
+    ];
     const runPromise = this.reactAgent.run({
       providerId,
       model,
       userMessage: message,
       ...(input.userId === undefined ? {} : { userId: input.userId }),
       mode: input.mode ?? 'read',
-      knowledgeSnapshot: {
-        connectionId: connection.id,
-        knowledgeSnapshotId: catalog.snapshotId,
-        catalogRootHash: catalog.catalogRootHash,
-        retrievalProfileId: manifest.retrievalProfileId,
-        indexVersion: manifest.indexVersion,
-      },
+      ...(knowledgeSnapshot === undefined ? {} : { knowledgeSnapshot }),
       ...(initialSession === undefined ? {} : { initialSession }),
       project: agentProjectReference(this.project),
       ...(projectInstructions?.trim() ? { projectInstructions } : {}),
-      skillCatalog: effectiveSkills.catalogForModel(),
+      ...((input.systemPrompt ?? this.defaultSystemPrompt) === undefined
+        ? {}
+        : { systemPrompt: structuredClone(input.systemPrompt ?? this.defaultSystemPrompt!) }),
+      ...(capabilityInstructions.length === 0 ? {} : { capabilityInstructions }),
+      ...(allowedTools === undefined ? {} : { allowedTools }),
+      ...(pinnedTools.length === 0 ? {} : { pinnedTools }),
+      skillCatalog: this.skillCatalogForModel(effectiveSkills),
       ...(invokedSkill === undefined
         ? {}
         : {
@@ -1404,6 +1511,60 @@ export class DatabaseAgentRuntime {
     return this.llmModels();
   }
 
+  private async ensureSelectedModelMetadata(
+    providerId: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const registered = this.llmGateway.registry.find(providerId, model);
+    if (!registered || registered.discovery?.source === 'provider-api') return;
+    const provider = this.llmGateway.registry.provider(providerId);
+    if (!provider?.getModelMetadata) return;
+
+    const key = `${providerId}\u0000${model}`;
+    let pending = this.modelMetadataDiscovery.get(key);
+    if (!pending) {
+      pending = this.fetchSelectedModelMetadata(provider, registered.id, model, signal);
+      this.modelMetadataDiscovery.set(key, pending);
+    }
+    const outcome = await pending;
+    if (outcome === 'cancelled' && this.modelMetadataDiscovery.get(key) === pending) {
+      this.modelMetadataDiscovery.delete(key);
+    }
+  }
+
+  private async fetchSelectedModelMetadata(
+    provider: LlmProvider,
+    registeredModelId: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<'completed' | 'cancelled'> {
+    const linked = createLinkedAbortController(signal);
+    const timer = setTimeout(
+      () => linked.controller.abort(new Error('Model metadata discovery timed out.')),
+      DEFAULT_MODEL_METADATA_DISCOVERY_TIMEOUT_MS,
+    );
+    timer.unref?.();
+    try {
+      this.llmGateway.registry.applyModelMetadata(
+        registeredModelId,
+        await provider.getModelMetadata!(model, linked.controller.signal),
+      );
+      return 'completed';
+    } catch (error) {
+      if (signal?.aborted) return 'cancelled';
+      this.llmGateway.registry.updateHealth(registeredModelId, {
+        state: 'unknown',
+        checkedAt: new Date().toISOString(),
+        detail: `Model metadata discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return 'completed';
+    } finally {
+      clearTimeout(timer);
+      linked.dispose();
+    }
+  }
+
   llmMetrics(): LlmMetricsSnapshot {
     return this.llmGateway.metricsSnapshot();
   }
@@ -1605,6 +1766,81 @@ export class DatabaseAgentRuntime {
     if (!this.autoStartMcp) return;
     this.mcpAutoStartPromise ??= this.mcp.startAutoStart();
     await this.mcpAutoStartPromise;
+  }
+
+  private async compileProjectInstructions(skills: SkillRegistry): Promise<string> {
+    const mcpServers = await this.listMcpServers();
+    const compilation = await compileProjectContext({
+      rootPath: this.project.rootPath,
+      ...(this.connection === undefined
+        ? {}
+        : {
+            databases: [
+              {
+                kind: this.connection.engine,
+                label: this.connection.name,
+              },
+            ],
+          }),
+      mcpServers: mcpServers.map((server) => ({
+        id: server.id,
+        status: !server.enabled
+          ? ('disabled' as const)
+          : server.running && server.healthy
+            ? ('ready' as const)
+            : ('unavailable' as const),
+        transport: server.transport,
+      })),
+      skills: this.skillCatalogForModel(skills),
+    });
+    return compilation.compiledInstructions;
+  }
+
+  /**
+   * Keep unavailable capability packages out of the model contract. A database
+   * connection enables execution tools; an indexed Schema additionally enables
+   * RAG tools. Other built-ins remain usable in a database-free project.
+   */
+  private availableToolNames(requested: readonly string[] | undefined): string[] | undefined {
+    const hasConnection = this.connection !== undefined;
+    const hasKnowledge = hasConnection && this.rag.hasIndex(this.connection!.id);
+    const available = this.tools
+      .listDescriptors()
+      .filter((tool) => tool.source !== 'database' || hasConnection)
+      .filter((tool) => tool.source !== 'schema-rag' || hasKnowledge)
+      .map((tool) => tool.flatName);
+    if (requested === undefined) {
+      return available.length === this.tools.listDescriptors().length ? undefined : available;
+    }
+    const availableSet = new Set(available);
+    return requested.filter((name) => availableSet.has(name));
+  }
+
+  private skillCatalogForModel(registry: SkillRegistry) {
+    return registry.catalogForModel().filter((skill) => {
+      const descriptor = registry.inspect(skill);
+      return descriptor !== undefined && this.isSkillAvailable(descriptor);
+    });
+  }
+
+  private isSkillAvailable(descriptor: SkillDescriptor): boolean {
+    const required = (descriptor.metadata.capabilities ?? '')
+      .split(/[,;\s]+/)
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    return required.every((capability) => {
+      if (capability === 'database') return this.connection !== undefined;
+      if (capability === 'schema-rag') {
+        return this.connection !== undefined && this.rag.hasIndex(this.connection.id);
+      }
+      if (capability === 'process') return this.processes !== undefined;
+      if (capability === 'web') return this.tools.has('web_search') || this.tools.has('web_fetch');
+      if (capability === 'mcp') {
+        return this.tools.listDescriptors().some((tool) => tool.source === 'user-mcp');
+      }
+      if (capability === 'workspace') return this.tools.has('workspace_read');
+      return false;
+    });
   }
 
   private skillRegistryForSession(session: AgentSession): SkillRegistry {
@@ -2176,7 +2412,7 @@ function mapLlmError(error: unknown): DatabaseAgentError {
   return new DatabaseAgentError('LLM_REQUEST_FAILED', normalized.message, true);
 }
 
-function requireText(value: string, name: string, maxLength: number): string {
+function requireText(value: unknown, name: string, maxLength: number): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new DatabaseAgentError('INVALID_INPUT', `${name} 不能为空。`, false);
   }
@@ -2189,6 +2425,44 @@ function requireText(value: string, name: string, maxLength: number): string {
     );
   }
   return trimmed;
+}
+
+function normalizeInstructionList(
+  values: readonly string[] | undefined,
+  name: string,
+): string[] {
+  if (values === undefined) return [];
+  if (!Array.isArray(values) || values.length > 100) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      `${name} 必须是最多包含 100 项的字符串数组。`,
+      false,
+    );
+  }
+  return values.map((value, index) => requireText(value, `${name}[${index}]`, 20_000));
+}
+
+function normalizeNameList(values: readonly string[] | undefined, name: string): string[] {
+  if (values === undefined) return [];
+  if (!Array.isArray(values) || values.length > 2_000) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      `${name} 必须是最多包含 2000 项的工具名称数组。`,
+      false,
+    );
+  }
+  return uniqueNames(values.map((value, index) => requireText(value, `${name}[${index}]`, 300)));
+}
+
+function normalizeOptionalNameList(
+  values: readonly string[] | undefined,
+  name: string,
+): string[] | undefined {
+  return values === undefined ? undefined : normalizeNameList(values, name);
+}
+
+function uniqueNames(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 function normalizeInteger(value: number, name: string, min: number, max: number): number {
@@ -2247,16 +2521,6 @@ function toRunError(error: DatabaseAgentError): {
   retryable: boolean;
 } {
   return { code: error.code, message: error.message, retryable: error.retryable };
-}
-
-async function readOptionalText(path: string): Promise<string | undefined> {
-  try {
-    const value = (await readFile(path, 'utf8')).trim();
-    return value || undefined;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
-  }
 }
 
 function createLinkedAbortController(signal?: AbortSignal): {

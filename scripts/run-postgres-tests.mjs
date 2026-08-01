@@ -42,6 +42,11 @@ await runVitest('packages/sdk/test/postgres.integration.test.ts', {
 await runVitest('packages/sdk/test/postgres-scenarios.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
+if (process.env.DBAGENT_RUN_SDK_LIVE === '1') {
+  await runVitest('packages/sdk/test/general-agent.live.integration.test.ts', {
+    DBAGENT_RUN_GENERAL_AGENT_LIVE: '1',
+  });
+}
 await runNodeScript('scripts/tests/postgres-scenario-performance.mjs', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
@@ -53,6 +58,9 @@ async function resetScenarioReports() {
   if (process.env.DBAGENT_RUN_SDK_LIVE === '1') reportNames.push('live.json');
   for (const name of reportNames) {
     await rm(join(scenarioReportDirectory, name), { force: true });
+  }
+  if (process.env.DBAGENT_RUN_SDK_LIVE === '1') {
+    await rm(join(root, 'reports', 'agent-runtime', 'live-project.json'), { force: true });
   }
 }
 
@@ -84,6 +92,7 @@ async function writeScenarioManifest() {
   }
   const git = gitState();
   let live;
+  let generalAgent;
   const livePath = join(scenarioReportDirectory, 'live.json');
   if (process.env.DBAGENT_RUN_SDK_LIVE === '1') {
     const liveText = await readFile(livePath, 'utf8');
@@ -96,6 +105,17 @@ async function writeScenarioManifest() {
       sha256: sha256(liveText),
       runCount: liveReport.actualRunCount,
       passed: liveReport.passed,
+    };
+    const generalAgentPath = join(root, 'reports', 'agent-runtime', 'live-project.json');
+    const generalAgentText = await readFile(generalAgentPath, 'utf8');
+    const generalAgentReport = JSON.parse(generalAgentText);
+    if (generalAgentReport.runId !== scenarioRunId || generalAgentReport.passed !== true) {
+      throw new Error('General Agent live report does not belong to this successful test run.');
+    }
+    generalAgent = {
+      path: '../agent-runtime/live-project.json',
+      sha256: sha256(generalAgentText),
+      passed: true,
     };
   }
   const manifest = {
@@ -121,6 +141,7 @@ async function writeScenarioManifest() {
         passed: performance.passed,
       },
       ...(live === undefined ? {} : { live }),
+      ...(generalAgent === undefined ? {} : { generalAgent }),
     },
     passed: true,
   };

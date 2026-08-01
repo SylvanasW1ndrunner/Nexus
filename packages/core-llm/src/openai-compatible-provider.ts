@@ -10,11 +10,14 @@ import {
   type LlmProviderAvailability,
   type LlmProviderCapabilities,
   type LlmProviderMode,
+  type LlmProviderProtocolProfile,
+  type LlmProviderProtocolProfileInput,
   type LlmRerankRequest,
   type LlmRerankResponse,
   type LlmToolCall,
   type LlmUsage,
 } from './types.js';
+import { resolveLlmProviderProtocolProfile } from './provider-protocol-profile.js';
 import { redactKnownSecrets, sanitizeKnownSecretError } from './known-secret-sanitizer.js';
 import {
   RETRYABLE_LLM_HTTP_STATUSES,
@@ -65,6 +68,7 @@ export type OpenAICompatibleProviderConfig = {
   modelsPath?: string;
   metadataSource?: 'openai-compatible' | 'ollama';
   capabilities?: Partial<LlmProviderCapabilities>;
+  protocolProfile?: LlmProviderProtocolProfileInput;
   defaultHeaders?: Record<string, string>;
   maxResponseBytes?: number;
   streamLimits?: LlmStreamLimitOptions;
@@ -170,6 +174,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
   readonly mode: LlmProviderMode;
   readonly protocol = 'openai-compatible';
   readonly capabilities: Partial<LlmProviderCapabilities>;
+  readonly protocolProfile: LlmProviderProtocolProfile;
 
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -225,6 +230,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
       rerank: 'unknown',
       ...config.capabilities,
     };
+    this.protocolProfile = resolveLlmProviderProtocolProfile(
+      config.protocolProfile ?? {
+        protocol: this.protocol,
+        source: 'provider-declaration',
+      },
+    );
     this.defaultHeaders = { ...(config.defaultHeaders ?? {}) };
     this.knownSecrets = collectKnownHeaderSecrets(this.apiKey, this.defaultHeaders);
     this.maxResponseBytes = resolveLlmMaxResponseBytes(config.maxResponseBytes);

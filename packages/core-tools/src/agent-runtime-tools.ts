@@ -1,7 +1,10 @@
 import {
   createAgentTaskPlan,
+  LexicalToolSearchIndex,
   updateAgentTask,
+  type AgentSession,
   type AgentTaskStatus,
+  type AgentToolContext,
   type ToolRegistry,
 } from '@dbagent/core-agent';
 import { optionalPositiveInteger, optionalString, requireString } from './validation.js';
@@ -15,6 +18,20 @@ const DISCOVERY_TOOL_NAMES = new Set([
 ]);
 
 export function registerAgentRuntimeTools(registry: ToolRegistry): void {
+  let indexedRevision = -1;
+  let searchIndex: LexicalToolSearchIndex | undefined;
+  const currentSearchIndex = () => {
+    if (!searchIndex || indexedRevision !== registry.catalogRevision) {
+      searchIndex = new LexicalToolSearchIndex(
+        registry
+          .listDescriptors()
+          .filter((tool) => tool.exposure !== 'hidden' && tool.exposure !== 'disabled'),
+      );
+      indexedRevision = registry.catalogRevision;
+    }
+    return searchIndex;
+  };
+
   registry.register(
     {
       name: 'task_plan_create',
@@ -45,6 +62,8 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
       dangerLevel: 'safe',
       readonly: true,
       source: 'builtin',
+      exposure: 'direct',
+      execution: { concurrency: 'write' },
     },
     (args, context) => {
       const tasks = requireObjectArray(args, 'tasks').map((task) => {
@@ -86,6 +105,8 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
       dangerLevel: 'safe',
       readonly: true,
       source: 'builtin',
+      exposure: 'direct',
+      execution: { concurrency: 'write' },
     },
     (args, context) => {
       if (!context.session.taskPlan) {
@@ -116,6 +137,8 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
       dangerLevel: 'safe',
       readonly: true,
       source: 'builtin',
+      exposure: 'direct',
+      execution: { concurrency: 'read' },
     },
     (_args, context) =>
       context.session.taskPlan ? projectTaskPlan(context.session.taskPlan) : { active: false },
@@ -138,36 +161,41 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
       dangerLevel: 'safe',
       readonly: true,
       source: 'builtin',
+      exposure: 'direct',
+      execution: { concurrency: 'write' },
     },
     (args, context) => {
-      const terms = tokenize(requireString(args, 'query'));
+      const query = requireString(args, 'query');
       const limit = Math.min(optionalPositiveInteger(args, 'limit', 8) ?? 8, 20);
-      const allowed =
-        context.allowedTools === undefined ? undefined : new Set(context.allowedTools);
-      const matches = registry
-        .list()
-        .filter(
-          (tool) =>
-            !DISCOVERY_TOOL_NAMES.has(tool.name) &&
-            (allowed === undefined || allowed.has(tool.name)),
-        )
-        .map((tool) => ({
-          tool,
-          score: scoreTool(terms, `${tool.name} ${tool.description}`),
-        }))
-        .filter((item) => item.score > 0)
-        .sort(
-          (left, right) =>
-            right.score - left.score || left.tool.name.localeCompare(right.tool.name),
-        )
+      const matches = currentSearchIndex()
+        .search(query, {
+          limit: Math.min(limit + DISCOVERY_TOOL_NAMES.size, 100),
+          ...(context.allowedTools === undefined
+            ? {}
+            : { allowedTools: context.allowedTools }),
+        })
+        .filter((item) => !DISCOVERY_TOOL_NAMES.has(item.tool.flatName))
         .slice(0, limit);
       const active = new Set(context.session.activeTools ?? []);
-      for (const { tool } of matches) active.add(tool.name);
+      for (const { tool } of matches) active.add(tool.flatName);
       context.session.activeTools = [...active].sort();
+      activateTools(
+        context.session,
+        matches.map((match) => match.tool.flatName),
+        context.toolActivationScope ?? {
+          catalogRevision: registry.catalogRevision,
+          ...(context.session.contextCheckpoint?.sequence === undefined
+            ? {}
+            : { checkpointSequence: context.session.contextCheckpoint.sequence }),
+          taskPhase: 'act',
+          activatedAt: new Date().toISOString(),
+        },
+      );
       return {
         tools: matches.map(({ tool }) => ({
-          name: tool.name,
+          name: tool.flatName,
           description: tool.description,
+          inputSchema: tool.inputSchema,
           readonly: tool.readonly === true,
           ...(tool.requiredPermission === undefined
             ? {}
@@ -190,18 +218,37 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
       dangerLevel: 'safe',
       readonly: true,
       source: 'builtin',
+      exposure: 'direct',
+      execution: { concurrency: 'write' },
     },
     (args, context) => {
       const name = requireString(args, 'name');
       const tool = registry.get(name);
       const allowed =
         context.allowedTools === undefined ? undefined : new Set(context.allowedTools);
-      if (!tool || (allowed !== undefined && !allowed.has(name))) {
+      if (
+        !tool ||
+        tool.descriptor.exposure === 'hidden' ||
+        tool.descriptor.exposure === 'disabled' ||
+        (allowed !== undefined && !allowed.has(name))
+      ) {
         throw new Error(`Tool is unavailable for this run: ${name}.`);
       }
       const active = new Set(context.session.activeTools ?? []);
       active.add(name);
       context.session.activeTools = [...active].sort();
+      activateTools(
+        context.session,
+        [name],
+        context.toolActivationScope ?? {
+          catalogRevision: registry.catalogRevision,
+          ...(context.session.contextCheckpoint?.sequence === undefined
+            ? {}
+            : { checkpointSequence: context.session.contextCheckpoint.sequence }),
+          taskPhase: 'act',
+          activatedAt: new Date().toISOString(),
+        },
+      );
       return {
         name: tool.name,
         description: tool.description,
@@ -213,6 +260,29 @@ export function registerAgentRuntimeTools(registry: ToolRegistry): void {
       };
     },
   );
+}
+
+function activateTools(
+  session: AgentSession,
+  toolNames: readonly string[],
+  scope: NonNullable<AgentToolContext['toolActivationScope']>,
+): void {
+  const activatedNames = new Set(toolNames);
+  const retained = (session.toolActivations ?? []).filter(
+    (activation) => !activatedNames.has(activation.toolName),
+  );
+  session.toolActivations = [
+    ...retained,
+    ...toolNames.map((toolName) => ({
+      toolName,
+      catalogRevision: scope.catalogRevision,
+      ...(scope.checkpointSequence === undefined
+        ? {}
+        : { checkpointSequence: scope.checkpointSequence }),
+      ...(scope.taskPhase === undefined ? {} : { taskPhase: scope.taskPhase }),
+      activatedAt: scope.activatedAt,
+    })),
+  ].sort((left, right) => left.toolName.localeCompare(right.toolName));
 }
 
 function projectTaskPlan(plan: NonNullable<Parameters<typeof updateAgentTask>[0]>) {
@@ -266,13 +336,4 @@ function optionalObjectString(value: Record<string, unknown>, key: string): stri
     throw new Error(`Object field "${key}" must be a string.`);
   }
   return item.trim() || undefined;
-}
-
-function tokenize(value: string): string[] {
-  return [...new Set(value.toLocaleLowerCase().split(/[^\p{L}\p{N}_]+/u))].filter(Boolean);
-}
-
-function scoreTool(terms: string[], value: string): number {
-  const normalized = value.toLocaleLowerCase();
-  return terms.reduce((score, term) => score + (normalized.includes(term) ? 1 : 0), 0);
 }

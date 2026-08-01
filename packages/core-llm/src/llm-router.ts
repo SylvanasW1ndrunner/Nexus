@@ -1,6 +1,14 @@
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
 import { LlmGateway } from './llm-gateway.js';
-import type { LlmChatRequest, LlmChatResponse, LlmChatStreamEvent, LlmProvider, LlmProviderCapabilities } from './types.js';
+import { resolveLlmProviderProtocolProfile } from './provider-protocol-profile.js';
+import type {
+  LlmChatRequest,
+  LlmChatResponse,
+  LlmChatStreamEvent,
+  LlmProvider,
+  LlmProviderCapabilities,
+  LlmProviderProtocolProfile,
+} from './types.js';
 
 export type LlmRouteMode = 'byok' | 'managed';
 
@@ -38,6 +46,18 @@ export class LlmRouter {
 
   registerProvider(provider: LlmProvider): void {
     this.gateway.registerProvider(provider);
+  }
+
+  providerProtocolProfile(providerId: string): LlmProviderProtocolProfile {
+    const provider = this.gateway.registry.provider(providerId);
+    if (!provider) return resolveLlmProviderProtocolProfile();
+    return (
+      provider.protocolProfile ??
+      resolveLlmProviderProtocolProfile({
+        protocol: provider.protocol ?? 'unknown',
+        source: 'provider-declaration',
+      })
+    );
   }
 
   async chat(providerId: string, request: LlmChatRequest, options: LlmChatOptions = {}): Promise<LlmChatResponse> {

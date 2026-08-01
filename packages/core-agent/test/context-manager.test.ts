@@ -289,9 +289,22 @@ describe('Agent context management', () => {
     const summary = buildDeterministicContextSummary(plan);
 
     expect(summary).toContain('Goal and user requirements');
-    expect(summary).toContain('Actions, SQL/tool results, and errors');
+    expect(summary).toContain('Actions, tool results, and errors');
     expect(summary).toContain('query_database');
     expect(summary).not.toContain('call_internal_');
+  });
+
+  it('uses a domain-neutral compaction protocol with optional capability preservation guidance', () => {
+    const request = buildAgentContextCompactionRequest({
+      sourceMessages: [],
+      preserveInstructions: ['Keep exact database object names and committed transaction outcomes.'],
+    });
+
+    expect(request[0]?.content).toContain('loss-aware context compactor for an Agent');
+    expect(request[0]?.content).not.toContain('database Agent');
+    expect(request[0]?.content).toContain(
+      'Keep exact database object names and committed transaction outcomes.',
+    );
   });
 
   it('reports a physical window overflow without calling it a spend budget', () => {

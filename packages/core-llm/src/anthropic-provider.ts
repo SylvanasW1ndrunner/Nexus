@@ -8,9 +8,12 @@ import {
   type LlmProviderAvailability,
   type LlmProviderCapabilities,
   type LlmProviderMode,
+  type LlmProviderProtocolProfile,
+  type LlmProviderProtocolProfileInput,
   type LlmToolCall,
   type LlmUsage,
 } from './types.js';
+import { resolveLlmProviderProtocolProfile } from './provider-protocol-profile.js';
 import { redactKnownSecrets, sanitizeKnownSecretError } from './known-secret-sanitizer.js';
 import {
   addStreamBytes,
@@ -32,6 +35,7 @@ export type AnthropicProviderConfig = {
   baseUrl?: string;
   apiVersion?: string;
   mode?: LlmProviderMode;
+  protocolProfile?: LlmProviderProtocolProfileInput;
   timeoutMs?: number;
   maxResponseBytes?: number;
   streamLimits?: LlmStreamLimitOptions;
@@ -60,6 +64,7 @@ export class AnthropicProvider implements LlmProvider {
   readonly name: string;
   readonly mode: LlmProviderMode;
   readonly protocol = 'anthropic-messages';
+  readonly protocolProfile: LlmProviderProtocolProfile;
   readonly capabilities: Partial<LlmProviderCapabilities> = {
     chat: 'supported',
     streaming: 'supported',
@@ -84,6 +89,12 @@ export class AnthropicProvider implements LlmProvider {
     this.id = config.id ?? 'anthropic';
     this.name = config.name ?? 'Anthropic';
     this.mode = config.mode ?? 'byok';
+    this.protocolProfile = resolveLlmProviderProtocolProfile(
+      config.protocolProfile ?? {
+        protocol: this.protocol,
+        source: config.baseUrl === undefined ? 'builtin' : 'provider-declaration',
+      },
+    );
     this.apiKey = config.apiKey;
     this.baseUrl = (config.baseUrl ?? 'https://api.anthropic.com/v1').replace(/\/+$/, '');
     this.apiVersion = config.apiVersion ?? '2023-06-01';

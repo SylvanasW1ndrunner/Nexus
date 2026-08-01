@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '@dbagent/core-agent';
+import { ToolRegistry, isAgentToolResultEnvelope } from '@dbagent/core-agent';
 import {
   createStdioMcpRuntimeLauncher,
   McpConfigStore,
@@ -53,9 +53,12 @@ describe('McpRuntimeManager', () => {
     await expect(harness.runtime.getPrompt('warehouse', 'empty')).resolves.toEqual({
       messages: [],
     });
-    await expect(
-      harness.registry.get('warehouse__list_tables')?.handler({ schema: 'public' }, toolContext()),
-    ).resolves.toEqual({
+    const toolResult = await harness.registry
+      .get('warehouse__list_tables')
+      ?.handler({ schema: 'public' }, toolContext());
+    expect(isAgentToolResultEnvelope(toolResult)).toBe(true);
+    if (!isAgentToolResultEnvelope(toolResult)) throw new Error('Expected MCP result envelope.');
+    expect(toolResult.modelProjection).toEqual({
       toolName: 'list_tables',
       args: { schema: 'public' },
     });

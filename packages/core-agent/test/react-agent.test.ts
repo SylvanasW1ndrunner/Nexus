@@ -23,6 +23,7 @@ import {
   ToolRegistry,
   createAgentToolResultEnvelope,
   type AgentToolApproval,
+  type AgentUserEvent,
 } from '../src/index.js';
 
 const tempDirs: string[] = [];
@@ -32,6 +33,133 @@ afterEach(async () => {
 });
 
 describe('ReactAgent', () => {
+  it('never exposes hidden or disabled tools when dynamic discovery is disabled', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    for (const [name, exposure] of [
+      ['direct_read', 'direct'],
+      ['deferred_read', 'deferred'],
+      ['hidden_runtime', 'hidden'],
+      ['disabled_tool', 'disabled'],
+    ] as const) {
+      registry.register(
+        {
+          name,
+          description: name,
+          inputSchema: { type: 'object' },
+          dangerLevel: 'safe',
+          readonly: true,
+          exposure,
+        },
+        () => ({ ok: true }),
+      );
+    }
+    const { provider, calls } = scriptedProviderWithCalls([
+      { text: 'Finished.', toolCalls: [] },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Inspect the available capabilities.',
+      mode: 'read',
+      dynamicToolDiscovery: false,
+    });
+
+    expect(calls[0]?.tools?.map((tool) => tool.name)).toEqual([
+      'direct_read',
+      'deferred_read',
+    ]);
+  });
+
+  it('expires dynamically discovered tools when a new user task starts in the same Session', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'catalog_search',
+        description: 'Discover one test capability.',
+        inputSchema: { type: 'object', properties: {} },
+        dangerLevel: 'safe',
+        readonly: true,
+        exposure: 'direct',
+        execution: { concurrency: 'write' },
+      },
+      (_args, context) => {
+        const scope = context.toolActivationScope;
+        if (!scope) throw new Error('Missing activation scope.');
+        context.session.toolActivations = [
+          {
+            toolName: 'deferred_project_edit',
+            catalogRevision: scope.catalogRevision,
+            ...(scope.checkpointSequence === undefined
+              ? {}
+              : { checkpointSequence: scope.checkpointSequence }),
+            ...(scope.taskPhase === undefined ? {} : { taskPhase: scope.taskPhase }),
+            activatedAt: scope.activatedAt,
+          },
+        ];
+        return { discovered: ['deferred_project_edit'] };
+      },
+    );
+    registry.register(
+      {
+        name: 'deferred_project_edit',
+        description: 'Edit one project artifact.',
+        inputSchema: { type: 'object', properties: {} },
+        dangerLevel: 'medium',
+        readonly: false,
+        exposure: 'deferred',
+      },
+      () => ({ ok: true }),
+    );
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: '',
+        toolCalls: [{ id: 'discover-1', name: 'catalog_search', arguments: {} }],
+      },
+      { text: 'First task complete.', toolCalls: [] },
+      { text: 'Second task complete.', toolCalls: [] },
+    ]);
+    let runIndex = 0;
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      {
+        ...fixedDependencies(),
+        createRunId: () => `run-${++runIndex}`,
+      },
+    );
+
+    const first = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Complete the first task.',
+      mode: 'edit',
+      dynamicToolDiscovery: true,
+    });
+    await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Start an unrelated second task.',
+      mode: 'edit',
+      initialSession: first.session,
+      dynamicToolDiscovery: true,
+    });
+
+    expect(calls[1]?.tools?.map((tool) => tool.name)).toContain('deferred_project_edit');
+    expect(calls[2]?.tools?.map((tool) => tool.name)).not.toContain('deferred_project_edit');
+  });
+
   it('keeps the global framework prompt neutral about concrete SQL operation choices', async () => {
     const usage = new UsageTracker(await usagePath());
     const { provider, calls } = scriptedProviderWithCalls([
@@ -62,6 +190,77 @@ describe('ReactAgent', () => {
     expect(frameworkPrompt).not.toMatch(
       /smallest database change|create-new-object|\bDROP\b|\bTRUNCATE\b/i,
     );
+  });
+
+  it('projects process commands and their terminal status as user-visible execution events', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'process_exec',
+        description: 'Run a project command.',
+        inputSchema: { type: 'object', properties: { command: { type: 'string' } } },
+        dangerLevel: 'critical',
+        readonly: false,
+        requiredPermission: 'full',
+        source: 'builtin',
+        completion: { role: 'deliverable', group: 'process-execution' },
+      },
+      () =>
+        createAgentToolResultEnvelope({
+          modelProjection: { status: 'exited', exitCode: 0 },
+          durableSummary: { status: 'exited', exitCode: 0 },
+          completionEvidence: {
+            kind: 'process',
+            deliveryReady: true,
+            outcome: 'succeeded',
+          },
+        }),
+    );
+    const provider = scriptedProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'process-1',
+            name: 'process_exec',
+            arguments: { command: 'pnpm test --filter core-agent' },
+          },
+        ],
+      },
+      { text: 'Tests passed.', toolCalls: [] },
+    ]);
+    const events: AgentUserEvent[] = [];
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Run the tests.',
+      mode: 'full',
+      eventSink: (event) => {
+        events.push(event);
+      },
+    });
+
+    expect(result.status).toBe('done');
+    expect(events.find((event) => event.type === 'command-prepared')).toMatchObject({
+      type: 'command-prepared',
+      command: 'pnpm test --filter core-agent',
+      toolName: 'process_exec',
+    });
+    expect(events.find((event) => event.type === 'command-executed')).toMatchObject({
+      type: 'command-executed',
+      command: 'pnpm test --filter core-agent',
+      toolName: 'process_exec',
+      metrics: { exitCode: 0 },
+    });
   });
 
   it('treats a process-only response as a completion proposal and explicitly finalizes', async () => {
@@ -136,6 +335,64 @@ describe('ReactAgent', () => {
     ).toBe(true);
   });
 
+  it('uses a minimal generic delivery after repeated process-only final responses', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'process_exec',
+        description: 'Run project tests',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'critical',
+        readonly: false,
+        completion: { role: 'deliverable', group: 'process-execution' },
+      },
+      () =>
+        createAgentToolResultEnvelope({
+          modelProjection: { status: 'exited', exitCode: 0 },
+          durableSummary: { status: 'exited', exitCode: 0 },
+          completionEvidence: {
+            kind: 'process',
+            deliveryReady: true,
+            outcome: 'succeeded',
+          },
+        }),
+    );
+    const provider = scriptedProvider([
+      {
+        text: '',
+        toolCalls: [{ id: 'process-fallback', name: 'process_exec', arguments: {} }],
+      },
+      { text: 'Let me verify the test output.', toolCalls: [] },
+      { text: 'I will continue checking the result.', toolCalls: [] },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Run the project tests and report completion.',
+      mode: 'full',
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.iterations).toBe(3);
+    expect(result.finalText).toBe(
+      'The task completed; related execution results and artifacts are returned separately.',
+    );
+    expect(result.completion).toMatchObject({
+      verified: true,
+      finalResponseReady: true,
+      evidenceKinds: ['process'],
+    });
+  });
+
   it('runs a readonly database tool and returns a final business answer', async () => {
     const usage = new UsageTracker(await usagePath());
     const provider = scriptedProvider([
@@ -187,6 +444,67 @@ describe('ReactAgent', () => {
       completedRounds: 1,
       totalTokens: 43,
     });
+  });
+
+  it('executes independent readonly tool calls from one model turn concurrently', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    let started = 0;
+    let release: (() => void) | undefined;
+    const bothStarted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    for (const name of ['read_project', 'read_metrics']) {
+      registry.register(
+        {
+          name,
+          description: name,
+          inputSchema: { type: 'object', additionalProperties: false },
+          dangerLevel: 'safe',
+          readonly: true,
+          execution: { concurrency: 'read' },
+        },
+        async () => {
+          started += 1;
+          if (started === 2) release?.();
+          await Promise.race([
+            bothStarted,
+            new Promise<never>((_resolve, reject) =>
+              setTimeout(() => reject(new Error('read tools were serialized')), 200),
+            ),
+          ]);
+          return { source: name };
+        },
+      );
+    }
+    const provider = scriptedProvider([
+      {
+        text: '',
+        toolCalls: [
+          { id: 'read-1', name: 'read_project', arguments: {} },
+          { id: 'read-2', name: 'read_metrics', arguments: {} },
+        ],
+      },
+      { text: 'Both independent observations are ready.', toolCalls: [] },
+    ]);
+    const result = await new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    ).run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Read both independent sources.',
+      mode: 'read',
+    });
+
+    expect(result.toolExecutions).toMatchObject([
+      { toolCallId: 'read-1', status: 'success' },
+      { toolCallId: 'read-2', status: 'success' },
+    ]);
+    expect(result.status).toBe('done');
   });
 
   it('does not mistake unparsed provider tool markup for a completed answer', async () => {
@@ -884,6 +1202,61 @@ describe('ReactAgent', () => {
     });
   });
 
+  it('retains approval provenance when the approved tool fails at a harder runtime boundary', async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'execute_write',
+        description: 'Execute a write behind a physical runtime boundary',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'high',
+        readonly: false,
+        requiredPermission: 'edit',
+      },
+      () => {
+        throw new Error('The physical runtime boundary rejected the write.');
+      },
+    );
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [{ id: 'approved-failure', name: 'execute_write', arguments: {} }],
+          },
+          { text: 'The physical boundary rejected the approved write.', toolCalls: [] },
+        ]),
+      ]),
+      registry,
+      usage,
+      () => ({
+        approved: true,
+        requestId: 'approval_failure_1',
+        approvedBy: 'tester',
+      }),
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Attempt the write after approval.',
+      mode: 'read',
+      maxIterations: 2,
+    });
+
+    expect(result.toolExecutions[0]).toMatchObject({
+      toolCallId: 'approved-failure',
+      status: 'failed',
+      approval: {
+        source: 'approval-provider',
+        requestId: 'approval_failure_1',
+        approvedBy: 'tester',
+      },
+    });
+  });
+
   it('scopes an approval to one Tool Call and asks again for the next call in the same Session', async () => {
     const executedCalls: string[] = [];
     const registry = new ToolRegistry();
@@ -962,6 +1335,66 @@ describe('ReactAgent', () => {
       },
     ]);
     expect(result.toolExecutions[1]).not.toHaveProperty('approval');
+  });
+
+  it('validates a mutating Tool Call before asking the user for approval', async () => {
+    const registry = new ToolRegistry();
+    let executed = false;
+    registry.register(
+      {
+        name: 'write_file',
+        description: 'Write one file.',
+        inputSchema: {
+          type: 'object',
+          properties: { path: { type: 'string' }, content: { type: 'string' } },
+          required: ['path', 'content'],
+          additionalProperties: false,
+        },
+        dangerLevel: 'medium',
+        readonly: false,
+        requiredPermission: 'edit',
+      },
+      () => {
+        executed = true;
+        return { written: true };
+      },
+    );
+    let approvalCount = 0;
+    const usage = new UsageTracker(await usagePath());
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [
+        scriptedProvider([
+          {
+            text: '',
+            toolCalls: [{ id: 'invalid-write', name: 'write_file', arguments: { path: 'x' } }],
+          },
+          { text: 'The write was not run because the arguments were incomplete.', toolCalls: [] },
+        ]),
+      ]),
+      registry,
+      usage,
+      () => {
+        approvalCount += 1;
+        return true;
+      },
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Write the file.',
+      mode: 'read',
+      maxIterations: 2,
+    });
+
+    expect(approvalCount).toBe(0);
+    expect(executed).toBe(false);
+    expect(result.toolExecutions[0]).toMatchObject({
+      toolCallId: 'invalid-write',
+      status: 'failed',
+    });
+    expect(result.toolExecutions[0]?.resultPreview).toContain('arguments are invalid');
   });
 
   it('waits for a broker approval request before executing read-mode tools', async () => {
@@ -1186,13 +1619,13 @@ describe('ReactAgent', () => {
         status: 'failed',
         failureKind: 'timeout',
         retryable: true,
-        resultPreview: '工具 query_database 执行超时（5ms）。',
+        resultPreview: 'Tool query_database timed out after 5ms.',
       },
     ]);
     expect(result.finalText).toBe('原查询超时，已建议缩小时间范围后重试。');
     expect(result.session.messages.at(2)).toMatchObject({
       role: 'tool',
-      content: JSON.stringify({ error: '工具 query_database 执行超时（5ms）。' }),
+      content: JSON.stringify({ error: 'Tool query_database timed out after 5ms.' }),
     });
   });
 
@@ -1713,13 +2146,19 @@ describe('ReactAgent', () => {
       model: 'fake-model',
       limits: { contextTokens: 2_000, maxOutputTokens: 300 },
     });
-    const agent = new ReactAgent(
-      router,
-      registryWithQueryTool(),
-      usage,
-      undefined,
-      fixedDependencies(),
+    const registry = registryWithQueryTool();
+    registry.register(
+      {
+        name: 'hidden_compaction_runtime',
+        description: 'Internal compaction runtime helper.',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+        exposure: 'hidden',
+      },
+      () => ({ ok: true }),
     );
+    const agent = new ReactAgent(router, registry, usage, undefined, fixedDependencies());
     const session = longRestoredSession();
     const originalMessages = structuredClone(session.messages);
 
@@ -1739,6 +2178,7 @@ describe('ReactAgent', () => {
       focus: '重点保留已执行 SQL 和精确金额。',
     });
     expect(result.session.messages).toEqual(originalMessages);
+    expect(result.report.toolCount).toBe(1);
     expect(calls.length).toBeGreaterThan(0);
     expect(calls[0]?.messages[1]?.content).toContain('<manual_focus>');
     expect(calls.every((call) => !JSON.stringify(call.messages).includes('call_internal_'))).toBe(
@@ -2141,6 +2581,124 @@ describe('ReactAgent', () => {
     await expect(usage.roundHistory()).resolves.toMatchObject([
       { sessionId: result.session.id, status: 'failed' },
     ]);
+  });
+
+  it('reserves a tool-free finalization phase when the last exploration turn produced delivery evidence', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Return the requested aggregate.',
+        inputSchema: { type: 'object' },
+        dangerLevel: 'safe',
+        readonly: true,
+        completion: { role: 'deliverable', group: 'database-query' },
+      },
+      () =>
+        createAgentToolResultEnvelope({
+          modelProjection: { rows: [{ total: 42 }], rowCount: 1 },
+          durableSummary: { rowCount: 1 },
+          completionEvidence: {
+            kind: 'database-result',
+            deliveryReady: true,
+          },
+        }),
+    );
+    const { provider, calls } = scriptedProviderWithCalls([
+      {
+        text: '',
+        toolCalls: [{ id: 'last-turn-result', name: 'query_database', arguments: {} }],
+      },
+      { text: 'The verified total is 42.', toolCalls: [] },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registry,
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Return the total.',
+      mode: 'read',
+      maxIterations: 1,
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.iterations).toBe(1);
+    expect(result.finalText).toBe('The verified total is 42.');
+    expect(result.completion).toMatchObject({
+      verified: true,
+      deliveryReady: true,
+      finalResponseReady: true,
+      phase: 'done',
+      evidenceKinds: ['database-result'],
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.tools).toEqual([]);
+    expect(
+      calls[1]?.messages.some(
+        (message) =>
+          message.role === 'system' && message.content.includes('finalization phase'),
+      ),
+    ).toBe(true);
+    expect(
+      result.session.messages.some(
+        (message) =>
+          message.role === 'system' && message.content.includes('finalization phase'),
+      ),
+    ).toBe(false);
+  });
+
+  it('removes legacy run-scoped control messages when a durable Session is resumed', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const initialSession = createAgentSession({
+      id: 'legacy-run-instruction-session',
+      title: 'Legacy instruction cleanup',
+      mode: 'read',
+      now: fixedDependencies().now,
+    });
+    appendMessage(
+      initialSession,
+      createMessage(
+        {
+          role: 'system',
+          content:
+            'Runtime finalization phase: the exploration/action iteration budget is exhausted.',
+        },
+        fixedDependencies().now,
+      ),
+    );
+    const { provider, calls } = scriptedProviderWithCalls([
+      { text: 'The new request is complete.', toolCalls: [] },
+    ]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      new ToolRegistry(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'fake-model',
+      userMessage: 'Start a fresh request.',
+      mode: 'read',
+      initialSession,
+    });
+
+    expect(result.status).toBe('done');
+    expect(
+      calls[0]?.messages.some((message) => message.content.includes('finalization phase')),
+    ).toBe(false);
+    expect(
+      result.session.messages.some((message) => message.content.includes('finalization phase')),
+    ).toBe(false);
   });
 
   it('does not count provider infrastructure failures as completed Agent rounds', async () => {

@@ -1,32 +1,32 @@
 {
   "kind": "llm-live-performance",
   "status": "passed",
-  "generatedAt": "2026-07-23T06:52:46.011Z",
+  "generatedAt": "2026-07-31T20:45:10.693Z",
   "provider": "siliconflow",
   "model": "deepseek-ai/DeepSeek-V4-Pro",
   "sampleCount": 3,
   "sync": {
     "latencyMs": {
-      "min": 1813.82,
-      "p50": 4073.79,
-      "p95": 69924,
-      "max": 69924,
-      "mean": 25270.54
+      "min": 1474.92,
+      "p50": 1938.01,
+      "p95": 40967.74,
+      "max": 40967.74,
+      "mean": 14793.56
     },
     "usage": {
       "promptTokens": 284,
-      "completionTokens": 2030,
-      "totalTokens": 2314
+      "completionTokens": 2031,
+      "totalTokens": 2315
     },
     "allUsageReportedByProvider": true
   },
   "stream": {
-    "firstTokenMs": 93409.93,
-    "totalLatencyMs": 93484.22,
+    "firstTokenMs": 27834.37,
+    "totalLatencyMs": 27905.02,
     "usage": {
       "promptTokens": 97,
-      "completionTokens": 3363,
-      "totalTokens": 3460
+      "completionTokens": 1422,
+      "totalTokens": 1519
     }
   },
   "note": "真实 Endpoint 小样本，仅用于当前环境基线，不代表供应商 SLA 或并发容量。"

@@ -4,7 +4,7 @@
 
 ### Ask in natural language. Get SQL. Keep control.
 
-**An embeddable, open-source AI SQL Agent for PostgreSQL.**
+**An embeddable, open-source database Agent whose first complete capability package is PostgreSQL AI SQL.**
 
 [![Status: Alpha](https://img.shields.io/badge/status-alpha-f59e0b)](CHANGELOG.md)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
@@ -15,7 +15,7 @@
 
 </div>
 
-SchemaNaut turns a natural-language request into a database task: it retrieves the relevant Schema and business knowledge, plans the work, generates SQL, asks for permission when needed, executes through the database, and corrects itself from real errors.
+SchemaNaut combines a general technical-Agent kernel with professional database capability packages. Today it turns a natural-language request into a database task by retrieving Schema and business knowledge, planning work, generating SQL, requesting permission when needed, executing through the database, and correcting from real errors. The same kernel also supports project files, processes, web adapters, MCP, and subagents.
 
 It is built for embedding and automation. The primary surfaces are a TypeScript SDK and local REST API, with an interactive CLI and deliberately small WebUI. It is not a database IDE.
 
@@ -32,7 +32,7 @@ It is built for embedding and automation. The primary surfaces are a TypeScript 
 | Explicit authority     | `read`, `edit`, and `full` modes, plus a one-call approval callback for actions outside the current mode                                          |
 | Progressive Skills     | Standard Markdown `SKILL.md` bundles at system, user, project, and Session scope; only the catalog is shown until a Skill is activated            |
 | Standard MCP client    | Official MCP SDK with stdio, Streamable HTTP, and SSE compatibility, dynamic tool discovery, lifecycle, cancellation, and secret references       |
-| Project tools          | Project-scoped files, optional host web tools, bounded shell execution in `full` mode, and same-capability child Agents with independent context  |
+| Project tools          | Project-scoped files and atomic patches, optional web/background-process tools, and same-capability child Agents with independent context        |
 | Separated query results | The database performs aggregation and filtering; SDK/API callers receive at most 1,000 rows separately while the model sees at most 100 transient rows within 64 KiB |
 | Integration surfaces   | TypeScript SDK, local REST API, interactive CLI, and lightweight local WebUI                                                                      |
 
@@ -67,21 +67,27 @@ Requirements:
 - An OpenAI-compatible model endpoint or Anthropic Messages endpoint
 - Tool calling for Agent workflows
 
-The public npm package has not been published yet. Build the installable archive from this repository:
+Install the current public Alpha release:
+
+```bash
+npm install @nwlworkshop/schemanaut@alpha
+```
+
+Or build the exact installable archive from this repository:
 
 ```bash
 pnpm install
 pnpm package:npm
-npm install ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+npm install ./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
 ```
 
 `pnpm test:npm-package:functional` verifies `SHA256SUMS.txt`, release-version
 metadata, secret scanning, an isolated local install, SDK/REST/CLI behavior, and
 TypeScript declarations before the archive is accepted.
 
-The planned package name is `@nwlworkshop/schemanaut`.
+The package name is `@nwlworkshop/schemanaut`.
 Commands below use `npx schemanaut`, which resolves the CLI from this local installation.
-Use `npm install --global ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz` only when you explicitly want a global command.
+Use `npm install --global @nwlworkshop/schemanaut@alpha` only when you explicitly want a global command.
 
 ## Fastest path: interactive CLI
 
@@ -253,12 +259,13 @@ Live model tests are opt-in and may consume paid tokens:
 
 ```bash
 pnpm test:functional:live
+pnpm test:agent-runtime:live
 pnpm test:performance:live
 ```
 
 Credentials belong in ignored environment files or an external secret store and must never be committed.
 
-See the [test pipeline](docs/test-pipeline.md) for the three complex PostgreSQL scenarios, performance thresholds, evidence files, and complete release sequence.
+See the [test pipeline](docs/test-pipeline.md) for the three complex PostgreSQL scenarios, Schema-convergence check, database-free Project Agent scenario, performance thresholds, evidence files, and complete release sequence.
 
 ## Current boundaries
 
@@ -268,7 +275,7 @@ See the [test pipeline](docs/test-pipeline.md) for the three complex PostgreSQL 
 - The WebUI is a lightweight local setup and evaluation surface, not an IDE.
 - Interactive Agent results are capped at 1,000 rows and live only in the current response/in-process cache; restored Sessions contain no database rows. Re-run the SQL or use an explicit database export for later access.
 - The default Runtime supports MCP secret references, but does not configure MCP OAuth or provide a credential vault.
-- `shell_run` is not registered unless the host explicitly sets `enableShellTool: true`. It requires `full` mode, uses a Project-scoped working directory and a reduced environment, but still inherits the host process's OS permissions; it is not an operating-system sandbox.
+- Foreground/background process tools are not registered unless the host explicitly sets `enableProcessTools: true`. Execution, input, and termination require `full`; handles are Session-scoped and working directories stay inside the Project, but child processes still inherit the host's OS authority. `enableShellTool` remains only as a legacy `shell_run` compatibility switch.
 - MCP servers are configured but not started automatically by default. Start reviewed servers explicitly, or opt into `autoStartMcp` only in a trusted host.
 - Agent quality still depends on the selected model's reasoning and tool-calling behavior.
 - AI governance and operations remain roadmap work and are not part of v1.

@@ -339,7 +339,13 @@ describe('OpenAICompatibleProvider', () => {
     ],
   ] as const)(
     'reports the %s stream timeout phase',
-    async (phase, firstEventMs, firstOutputMs, totalMs, initialChunks) => {
+    async (
+      phase: 'first-event' | 'first-output' | 'total',
+      firstEventMs: number,
+      firstOutputMs: number,
+      totalMs: number,
+      initialChunks: readonly string[],
+    ) => {
       const fetchMock = vi.fn<TestFetch>(() =>
         Promise.resolve(stallingStreamResponse([...initialChunks])),
       );

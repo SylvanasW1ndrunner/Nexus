@@ -4,12 +4,13 @@
 
 本链路验证 SchemaNaut 的真实功能、性能、数据边界和发行包，不以服务启动或简单连通性作为完成标准。
 
-测试分为四层：
+测试分为五层：
 
 1. 确定性单元与组件测试：合同、权限、Session、计划、上下文压缩、Skills、MCP、工具和错误恢复。
 2. 真实 PostgreSQL 功能测试：Driver、Connector、SDK、Agent、权限、Schema 刷新和独立结果载荷。
-3. 业务场景与性能测试：电商、流量清洗与异常检测、大科学数据。
-4. 发行验收：npm 包安装、SDK、REST、CLI、WebUI、内置 Skills、文档链接和密钥扫描。
+3. 通用 Agent 场景：在无数据库 Project 中读取/修改代码、运行真实进程、验证产物和收敛。
+4. 业务场景与性能测试：电商、流量清洗与异常检测、大科学数据，以及 Schema 目录快速收敛。
+5. 发行验收：npm 包安装、SDK、REST、CLI、WebUI、内置 Skills、文档链接和密钥扫描。
 
 ```mermaid
 flowchart LR
@@ -18,7 +19,8 @@ flowchart LR
     Prepare --> Fixtures["加载三类复杂场景"]
     Fixtures --> DbTests["Driver / Connector / SDK / Agent"]
     DbTests --> Perf["场景性能与上下文性能"]
-    Perf --> Package["npm 打包与安装验收"]
+    Perf --> General["通用 Project Agent 真实模型验收"]
+    General --> Package["npm 打包与安装验收"]
     Package --> Review["用户视角 + 工程师视角复核"]
 ```
 
@@ -31,6 +33,7 @@ flowchart LR
 | 全仓功能    | `pnpm test`                                                                                                                                                       | 非外部依赖测试全部通过                                                           |
 | PostgreSQL  | `pnpm test:postgres`                                                                                                                                              | Driver、Connector、SDK 和三类场景全部通过                                        |
 | AI SQL 性能 | `pnpm test:ai-sql:performance`                                                                                                                                    | RAG、工具、结果投影和上下文压缩不超过阈值                                        |
+| Agent Runtime 性能 | `pnpm test:agent-runtime:performance`                                                                                                                       | 1,000 Tool 目录、搜索、暴露、执行路由和 1,000 文件 Project 编译通过门禁           |
 | 基础性能    | `pnpm test:llm-platform:performance`、`pnpm test:database-platform:performance`、`pnpm test:resource-state:performance`、`pnpm test:public-contracts:performance` | 对应报告按其合同记录 `status: "passed"` 或 `passed: true`                        |
 | 发行包      | `pnpm test:npm-package:functional`                                                                                                                                | SHA-256、版本元数据、密钥扫描、隔离安装、SDK、REST、CLI、Skills 和类型声明均通过 |
 
@@ -39,6 +42,7 @@ flowchart LR
 ```powershell
 pnpm test:ai-sql:live
 pnpm test:ai-sql:context-live
+pnpm test:agent-runtime:live
 pnpm test:performance:live
 ```
 
@@ -77,6 +81,14 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 
 场景功能测试位于 [`postgres-scenarios.integration.test.ts`](../packages/sdk/test/postgres-scenarios.integration.test.ts)，场景性能入口位于 [`postgres-scenario-performance.mjs`](../scripts/tests/postgres-scenario-performance.mjs)。
 
+### 3.4 Schema 目录快速收敛
+
+真实模型链路还包含一个简单目录问题：要求优先使用 `knowledge_search`，在最多 5 次迭代内交付多个中英文 Schema 名。它用于防止简单问题退化为重复查询系统目录，不替代前三个复杂业务场景。
+
+### 3.5 无数据库 Project Agent
+
+[`general-agent.live.integration.test.ts`](../packages/sdk/test/general-agent.live.integration.test.ts) 创建一个真实临时 TypeScript/JavaScript Project：Agent 必须读取项目说明、发现文件/进程工具、修复实际代码错误、执行真实测试并以 Runtime 文件与进程证据完成。该场景明确断言未调用 SQL/RAG 工具，并记录迭代、Token、Tool 顺序、耗时、Artifact 和完成状态。
+
 ## 4. 功能验收标准
 
 - Agent 调用的是公共 LLM Runtime、统一数据库 Runtime、RAG、权限和 Session 管线，不使用测试专用捷径。
@@ -91,8 +103,12 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 - MCP 还覆盖风险提示不降权、Secret/URL 校验、启动竞态、允许工具过滤，以及 REST 默认禁止进程型 stdio 管理。
 - CLI 覆盖项目初始化、Session、Skills、MCP、权限切换、任务追加、手动压缩和取消。
 - Agent 覆盖计划依赖与证据校验、并发 Session 串行化、转向时取消旧许可，以及文本化 Tool Call 的恢复门禁。
+- 动态 Tool 覆盖隐藏/禁用项不可见、目录 revision 失效、Run 级激活隔离、允许列表向子 Agent 传播和并发读/串行写屏障。
+- 通用 Project 场景必须用真实文件和真实进程完成，不使用 Hook 伪造工具结果；真实模型调用只由显式 live 命令开启。
 - 每个真实模型场景独立执行并独立记录成功或失败；筛选单场景时只验收被选场景，某一场景失败不会阻止其他场景运行。
-- 场景用例要把配置表、字典表、过滤和有效性口径写清楚；只验证承担最终交付的 SQL 结构化结果以及真正进入终态的最终答复，不扫描任意历史成功 SQL，也不使用隐藏假设或简单字符串包含判断。
+- 场景用例要把配置表、字典表、过滤和有效性口径写清楚；只验证最后一条同时满足验收值的 SQL 结构化结果以及真正进入终态的最终答复，不把之后的局部核验误当最终结果，也不扫描多条历史 SQL 拼凑成功。
+- PostgreSQL `date/timestamp` 结果按测试数据库的场景时区（默认 `Asia/Shanghai`，可用 `DBAGENT_TEST_TIME_ZONE` 指定）归一化后比较，不能把本地月份转成 UTC 字符串再做字面量断言。
+- 最终答复必须独立可读；“让我继续验证”和“结果如上表 / shown above”均作为非终态回归，不能依赖 CLI 未展示的中间 Assistant 消息通过验收。
 
 ### 4.1 真实模型失败归因
 
@@ -131,6 +147,8 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 - [`ai-sql/context-compaction-performance.json`](../reports/ai-sql/context-compaction-performance.json)：长会话压缩性能和信息保留。
 - [`llm-platform/performance.json`](../reports/llm-platform/performance.json)：模型 Runtime 性能。
 - [`database-access-performance.json`](../reports/database-access-performance.json)：统一数据库接入性能。
+- [`agent-runtime/performance.json`](../reports/agent-runtime/performance.json)：1,000 Tool 目录检索/暴露、执行路由和 Project Compiler 本地开销。
+- [`agent-runtime/live-project.json`](../reports/agent-runtime/live-project.json)：真实模型完成无数据库代码修复任务的脱敏证据。
 
 报告是工程验收证据，不是最终用户功能，也不通过公开 API 暴露内部评测轨迹。
 

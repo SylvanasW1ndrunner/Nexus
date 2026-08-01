@@ -15,24 +15,24 @@ Use it for human-guided database exploration, SQL generation and execution, and 
 
 ## 2. Install
 
-After the public npm release:
+Install the current public Alpha release:
 
 ```bash
-npm install @nwlworkshop/schemanaut
+npm install @nwlworkshop/schemanaut@alpha
 ```
 
-Until then, build and install the local release archive:
+Or build and install the local release archive:
 
 ```bash
 pnpm install
 pnpm package:npm
-npm install ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+npm install ./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
 ```
 
 This guide uses `npx schemanaut`, which resolves the locally installed version. A global installation is optional:
 
 ```bash
-npm install --global ./release/SchemaNaut-v0.1.0/schemanaut-v0.1.0.tgz
+npm install --global @nwlworkshop/schemanaut@alpha
 schemanaut --help
 ```
 
@@ -149,7 +149,7 @@ npx schemanaut --help
 - `/resume` restores a durable Session; use `/sessions` to find its ID.
 - `/skills` lists Skills; `/<skill> [task]` activates one explicitly.
 - `/compact` manually compacts the current Session context while preserving full history.
-- `/trace on|off` shows or hides the user-facing execution trace; it is on by default.
+- `/trace on|off` shows or hides the user-facing execution trace; it is on by default. The trace includes complete SQL/commands, execution state, duration, exit codes, important errors, and artifacts, but not hidden reasoning.
 - `/mcp` manages servers declared in `.schemanaut/mcp.json`.
 - `/exit` or `/quit` exits.
 
@@ -160,8 +160,8 @@ Ordinary input while the Agent is running steers the active task. `Ctrl+C` cance
 | Mode | Runs without approval | Outside the mode |
 | --- | --- | --- |
 | `read` | Schema inspection and read-only SQL | Row changes, DDL, and administrative actions request one-call approval |
-| `edit` | `read`, row changes, and Project file edits | DDL, destructive Schema changes, shell, and administrative actions request one-call approval |
-| `full` | Reads, writes, DDL, destructive operations, and enabled administration tools | Nothing requests approval solely because of the mode |
+| `edit` | `read`, row changes, and Project file edits | DDL, destructive Schema changes, process execution, and administrative actions request one-call approval |
+| `full` | Reads, writes, DDL, destructive operations, process execution, and enabled administration tools | Nothing requests approval solely because of the mode |
 
 At an approval prompt:
 

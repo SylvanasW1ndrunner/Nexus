@@ -171,7 +171,7 @@ order by total_amount desc`,
     "select nextval('orders_id_seq')",
     'select * from public.orders for update',
     'select * into temporary copied_orders from public.orders',
-  ])('blocks generated reads with database side effects: %s', async (sql) => {
+  ])('blocks generated reads with database side effects: %s', async (sql: string) => {
     const driver = new FakeDatabaseDriver();
     const runtime = createRuntime(
       driver,
@@ -824,6 +824,53 @@ order by total_amount desc`,
       limits: { contextTokens: 32_768 },
       discovery: { source: 'provider-api' },
     });
+  });
+
+  it('loads selected-model metadata once before the first Agent run', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'schemanaut-sdk-model-metadata-'));
+    tempDirs.push(directory);
+    let metadataCalls = 0;
+    let chatCalls = 0;
+    const provider: LlmProvider = {
+      id: 'metadata-provider',
+      name: 'Metadata Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported', toolCalling: 'supported' },
+      chat() {
+        chatCalls += 1;
+        return Promise.resolve({ text: 'Task complete.', toolCalls: [] });
+      },
+      getModelMetadata(model) {
+        metadataCalls += 1;
+        return Promise.resolve({
+          model,
+          source: 'provider-api',
+          capabilities: { toolCalling: 'supported' },
+          contextTokens: 131_072,
+          maxOutputTokens: 8_192,
+        });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      provider,
+      model: 'metadata-model',
+      projectDirectory: directory,
+      sessionDatabasePath: ':memory:',
+    });
+
+    await runtime.runAgent({ message: 'Answer directly.' });
+    await runtime.runAgent({ message: 'Answer directly again.' });
+
+    expect(metadataCalls).toBe(1);
+    expect(chatCalls).toBe(2);
+    expect(runtime.llmModels().find((item) => item.model === 'metadata-model')).toMatchObject({
+      limits: { contextTokens: 131_072, maxOutputTokens: 8_192 },
+      discovery: { source: 'provider-api' },
+    });
+    await runtime.close();
   });
 
   it('runs the main multi-step AI SQL Agent with knowledge lookup, complex SQL, execution, and persisted session evidence', async () => {
@@ -1820,8 +1867,8 @@ class SessionSkillProvider implements LlmProvider {
       toolCalls: [
         {
           id: `load-session-skill-${String(this.toolCallSequence)}`,
-          name: 'skill_load',
-          arguments: { name: 'private-workflow', scope: 'session' },
+          name: 'skill',
+          arguments: { action: 'load', name: 'private-workflow', scope: 'session' },
         },
       ],
       usage: { promptTokens: 30, completionTokens: 10, totalTokens: 40 },
@@ -1862,8 +1909,8 @@ class DelegatingSessionSkillProvider implements LlmProvider {
         toolCalls: [
           {
             id: `child-load-skill-${String(this.toolCallSequence)}`,
-            name: 'skill_load',
-            arguments: { name: 'private-workflow', scope: 'session' },
+            name: 'skill',
+            arguments: { action: 'load', name: 'private-workflow', scope: 'session' },
           },
         ],
       });
