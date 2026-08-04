@@ -8,10 +8,12 @@ import {
   type TableSummary,
 } from '@dbagent/core-db';
 import {
+  createProviderFromPreset,
   LlmGateway,
   type LlmChatRequest,
   type LlmChatResponse,
   type LlmChatStreamEvent,
+  type LlmModelMetadata,
   type LlmProvider,
   type LlmProviderAvailability,
 } from '@dbagent/core-llm';
@@ -870,6 +872,422 @@ order by total_amount desc`,
       limits: { contextTokens: 131_072, maxOutputTokens: 8_192 },
       discovery: { source: 'provider-api' },
     });
+    await runtime.close();
+  });
+
+  it('preserves resolved limits when reconfiguring the same model without new limits', async () => {
+    const provider: LlmProvider = {
+      id: 'reconfigured-provider',
+      name: 'Reconfigured Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported' },
+      chat() {
+        return Promise.resolve({ text: 'Task complete.', toolCalls: [] });
+      },
+      getModelMetadata(model) {
+        return Promise.resolve({
+          model,
+          source: 'provider-api',
+          capabilities: { chat: 'supported' },
+          contextTokens: 131_072,
+          maxOutputTokens: 8_192,
+        });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      provider,
+      model: 'reconfigured-model',
+      modelLimits: {
+        effectiveContextTokens: 100_000,
+        autoCompactTokenLimit: 90_000,
+      },
+      sessionDatabasePath: ':memory:',
+    });
+    const replacementProvider: LlmProvider = {
+      ...provider,
+      name: 'Replacement Provider',
+      getModelMetadata(model) {
+        return Promise.resolve({
+          model,
+          source: 'provider-api',
+          capabilities: { chat: 'supported' },
+          contextTokens: 262_144,
+          maxOutputTokens: 16_384,
+        });
+      },
+    };
+
+    await runtime.runAgent({ message: 'Answer directly.' });
+    runtime.configureProvider(replacementProvider, 'reconfigured-model');
+
+    expect(runtime.llmModels()[0]?.limits).toMatchObject({
+      contextTokens: 131_072,
+      maxOutputTokens: 8_192,
+      effectiveContextTokens: 100_000,
+      autoCompactTokenLimit: 90_000,
+    });
+
+    await runtime.runAgent({ message: 'Answer directly after reconfiguration.' });
+
+    expect(runtime.llmModels()[0]?.limits).toMatchObject({
+      contextTokens: 262_144,
+      maxOutputTokens: 16_384,
+      effectiveContextTokens: 100_000,
+      autoCompactTokenLimit: 90_000,
+    });
+    await runtime.close();
+  });
+
+  it('refreshes provider-derived model fields when replacing the same provider and model', async () => {
+    const originalProvider: LlmProvider = {
+      id: 'provider-refresh',
+      name: 'Original Provider',
+      mode: 'byok',
+      protocol: 'original-protocol',
+      capabilities: { chat: 'supported', toolCalling: 'supported' },
+      chat() {
+        return Promise.resolve({ text: 'original', toolCalls: [] });
+      },
+      getDeclaredModelMetadata(model) {
+        return {
+          model,
+          source: 'provider-declaration',
+          capabilities: {},
+          contextTokens: 131_072,
+          maxOutputTokens: 8_192,
+        };
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      provider: originalProvider,
+      model: 'provider-refresh-model',
+      modelLimits: {
+        effectiveContextTokens: 100_000,
+        autoCompactTokenLimit: 90_000,
+      },
+      sessionDatabasePath: ':memory:',
+    });
+    const replacementProvider: LlmProvider = {
+      id: originalProvider.id,
+      name: 'Replacement Provider',
+      mode: 'private',
+      protocol: 'replacement-protocol',
+      capabilities: { chat: 'supported', toolCalling: 'unsupported' },
+      chat() {
+        return Promise.resolve({ text: 'replacement', toolCalls: [] });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+
+    runtime.configureProvider(replacementProvider, 'provider-refresh-model');
+
+    expect(runtime.llmModels()[0]).toMatchObject({
+      mode: 'private',
+      protocol: 'replacement-protocol',
+      capabilities: { chat: 'supported', toolCalling: 'unsupported' },
+      limits: {
+        contextTokens: 131_072,
+        maxOutputTokens: 8_192,
+        effectiveContextTokens: 100_000,
+        autoCompactTokenLimit: 90_000,
+      },
+      dataPolicy: { deployment: 'private' },
+    });
+    await runtime.close();
+  });
+
+  it('ignores metadata returned by a replaced provider instance', async () => {
+    let markMetadataStarted: (() => void) | undefined;
+    const metadataStarted = new Promise<void>((resolve) => {
+      markMetadataStarted = resolve;
+    });
+    let resolveOldMetadata: ((metadata: LlmModelMetadata) => void) | undefined;
+    const oldMetadata = new Promise<LlmModelMetadata>((resolve) => {
+      resolveOldMetadata = resolve;
+    });
+    const oldProvider: LlmProvider = {
+      id: 'replaceable-provider',
+      name: 'Old Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported' },
+      chat() {
+        return Promise.resolve({ text: 'old', toolCalls: [] });
+      },
+      getModelMetadata() {
+        markMetadataStarted?.();
+        return oldMetadata;
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const newProvider: LlmProvider = {
+      id: oldProvider.id,
+      name: 'New Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported' },
+      chat() {
+        return Promise.resolve({ text: 'new', toolCalls: [] });
+      },
+      getDeclaredModelMetadata(model) {
+        return {
+          model,
+          source: 'provider-declaration',
+          capabilities: { chat: 'supported' },
+          contextTokens: 1_000_000,
+          maxOutputTokens: 384_000,
+        };
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      provider: oldProvider,
+      model: 'replaceable-model',
+      sessionDatabasePath: ':memory:',
+    });
+
+    const run = runtime.runAgent({ message: 'Answer directly.' });
+    await metadataStarted;
+    runtime.configureProvider(newProvider, 'replaceable-model');
+    resolveOldMetadata?.({
+      model: 'replaceable-model',
+      source: 'provider-api',
+      capabilities: { chat: 'supported' },
+      contextTokens: 64_000,
+      maxOutputTokens: 8_000,
+    });
+    await run;
+
+    expect(runtime.llmModels()[0]?.limits).toMatchObject({
+      contextTokens: 1_000_000,
+      maxOutputTokens: 384_000,
+    });
+    await runtime.close();
+  });
+
+  it('ignores catalog metadata returned by a replaced provider instance', async () => {
+    let markMetadataStarted: (() => void) | undefined;
+    const metadataStarted = new Promise<void>((resolve) => {
+      markMetadataStarted = resolve;
+    });
+    let resolveOldMetadata: ((metadata: LlmModelMetadata) => void) | undefined;
+    const oldMetadata = new Promise<LlmModelMetadata>((resolve) => {
+      resolveOldMetadata = resolve;
+    });
+    const oldProvider: LlmProvider = {
+      id: 'replaceable-catalog-provider',
+      name: 'Old Catalog Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported' },
+      listModels() {
+        return Promise.resolve(['replaceable-catalog-model']);
+      },
+      getModelMetadata() {
+        markMetadataStarted?.();
+        return oldMetadata;
+      },
+      chat() {
+        return Promise.resolve({ text: 'old', toolCalls: [] });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const newProvider: LlmProvider = {
+      id: oldProvider.id,
+      name: 'New Catalog Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported' },
+      getDeclaredModelMetadata(model) {
+        return {
+          model,
+          source: 'provider-declaration',
+          capabilities: { chat: 'supported' },
+          contextTokens: 1_000_000,
+          maxOutputTokens: 384_000,
+        };
+      },
+      chat() {
+        return Promise.resolve({ text: 'new', toolCalls: [] });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      provider: oldProvider,
+      model: 'replaceable-catalog-model',
+      sessionDatabasePath: ':memory:',
+    });
+
+    const discovery = runtime.discoverLlmModels();
+    await metadataStarted;
+    runtime.configureProvider(newProvider, 'replaceable-catalog-model');
+    resolveOldMetadata?.({
+      model: 'replaceable-catalog-model',
+      source: 'provider-api',
+      capabilities: { chat: 'supported' },
+      contextTokens: 64_000,
+      maxOutputTokens: 8_000,
+    });
+    await discovery;
+
+    expect(runtime.llmModels()[0]?.limits).toMatchObject({
+      contextTokens: 1_000_000,
+      maxOutputTokens: 384_000,
+    });
+    await runtime.close();
+  });
+
+  it('registers runtime-level effective context and auto-compaction limits', async () => {
+    const provider: LlmProvider = {
+      id: 'context-provider',
+      name: 'Context Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported' },
+      chat() {
+        return Promise.resolve({ text: 'ok', toolCalls: [] });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      provider,
+      model: 'large-context-model',
+      modelLimits: {
+        contextTokens: 1_000_000,
+        effectiveContextTokens: 128_000,
+        autoCompactTokenLimit: 100_000,
+        maxOutputTokens: 8_000,
+      },
+      sessionDatabasePath: ':memory:',
+    });
+
+    expect(runtime.llmModels()[0]?.limits).toMatchObject({
+      contextTokens: 1_000_000,
+      effectiveContextTokens: 128_000,
+      autoCompactTokenLimit: 100_000,
+      maxOutputTokens: 8_000,
+    });
+    await runtime.close();
+  });
+
+  it('applies declared DeepSeek model limits during runtime configuration', async () => {
+    const runtime = new DatabaseAgentRuntime({
+      provider: createProviderFromPreset('deepseek', {
+        apiKey: 'test-key',
+        fetch: () =>
+          Promise.reject(
+            new Error('Static DeepSeek metadata must not require discovery.'),
+          ),
+      }),
+      model: 'deepseek-v4-flash',
+      sessionDatabasePath: ':memory:',
+    });
+
+    expect(runtime.llmModels()[0]).toMatchObject({
+      model: 'deepseek-v4-flash',
+      limits: {
+        contextTokens: 1_000_000,
+        maxOutputTokens: 384_000,
+      },
+      discovery: { source: 'provider-declaration' },
+    });
+    await runtime.close();
+  });
+
+  it('replaces physical fallbacks while preserving operational context limits', async () => {
+    const provider: LlmProvider = {
+      id: 'declared-capacity-provider',
+      name: 'Declared Capacity Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported' },
+      getDeclaredModelMetadata(model) {
+        return {
+          model,
+          source: 'provider-declaration',
+          capabilities: { chat: 'supported' },
+          contextTokens: 1_000_000,
+          maxOutputTokens: 384_000,
+        };
+      },
+      chat() {
+        return Promise.resolve({ text: 'ok', toolCalls: [] });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      provider,
+      model: 'declared-capacity-model',
+      modelLimits: {
+        contextTokens: 64_000,
+        maxOutputTokens: 2_000,
+        effectiveContextTokens: 128_000,
+        autoCompactTokenLimit: 100_000,
+      },
+      sessionDatabasePath: ':memory:',
+    });
+
+    expect(runtime.llmModels()[0]?.limits).toMatchObject({
+      contextTokens: 1_000_000,
+      maxOutputTokens: 384_000,
+      effectiveContextTokens: 128_000,
+      autoCompactTokenLimit: 100_000,
+    });
+    await runtime.close();
+  });
+
+  it('shares configured model limits with the Agent when using an external gateway', async () => {
+    const calls: LlmChatRequest[] = [];
+    const provider: LlmProvider = {
+      id: 'external-gateway-provider',
+      name: 'External Gateway Provider',
+      mode: 'byok',
+      capabilities: { chat: 'supported' },
+      getDeclaredModelMetadata(model) {
+        return {
+          model,
+          source: 'provider-declaration',
+          capabilities: { chat: 'supported' },
+          contextTokens: 1_000_000,
+          maxOutputTokens: 6_000,
+        };
+      },
+      chat(request) {
+        calls.push(request);
+        return Promise.resolve({ text: 'Completed within the configured limits.', toolCalls: [] });
+      },
+      isAvailable() {
+        return Promise.resolve({ available: true });
+      },
+    };
+    const runtime = new DatabaseAgentRuntime({
+      gateway: new LlmGateway(),
+      provider,
+      model: 'external-gateway-model',
+      modelLimits: { effectiveContextTokens: 20_000 },
+      sessionDatabasePath: ':memory:',
+    });
+
+    await runtime.runAgent({
+      message: 'Answer directly.',
+      maxOutputTokens: 8_000,
+    });
+
+    expect(calls[0]?.maxTokens).toBe(6_000);
     await runtime.close();
   });
 

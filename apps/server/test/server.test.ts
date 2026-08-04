@@ -1735,6 +1735,7 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
         originalTokenEstimate: 20_000,
         finalTokenEstimate: 2_000,
         modelContextTokens: 32_768,
+        effectiveContextTokens: 32_768,
         reservedOutputTokens: 4_096,
         availablePromptTokens: 28_672,
         warningThresholdTokens: 20_070,

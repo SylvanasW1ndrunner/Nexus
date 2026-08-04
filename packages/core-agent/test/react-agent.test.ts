@@ -77,6 +77,37 @@ describe('ReactAgent', () => {
       'direct_read',
       'deferred_read',
     ]);
+    expect(calls[0]?.maxTokens).toBe(4_096);
+  });
+
+  it('clamps an explicit output budget to the model capability', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([
+      { text: 'Finished within the model output limit.', toolCalls: [] },
+    ]);
+    const router = new LlmRouter(usage, [provider]);
+    router.gateway.registerModel({
+      providerId: 'fake',
+      model: 'large-output-model',
+      limits: { contextTokens: 1_000_000, maxOutputTokens: 6_000 },
+    });
+    const agent = new ReactAgent(
+      router,
+      new ToolRegistry(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    await agent.run({
+      providerId: 'fake',
+      model: 'large-output-model',
+      userMessage: 'Answer directly.',
+      mode: 'read',
+      maxOutputTokens: 8_000,
+    });
+
+    expect(calls[0]?.maxTokens).toBe(6_000);
   });
 
   it('expires dynamically discovered tools when a new user task starts in the same Session', async () => {
@@ -2639,6 +2670,7 @@ describe('ReactAgent', () => {
       evidenceKinds: ['database-result'],
     });
     expect(calls).toHaveLength(2);
+    expect(calls.map((call) => call.maxTokens)).toEqual([4_096, 4_096]);
     expect(calls[1]?.tools).toEqual([]);
     expect(
       calls[1]?.messages.some(

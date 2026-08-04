@@ -73,6 +73,7 @@ const PREFERENCE_CONTEXT_PREFIX = '用户长期偏好（自动提炼，可由用
 const MAX_AUTO_COMPACTIONS_PER_ITERATION = 4;
 const MIN_COMPACTION_REDUCTION_RATIO = 0.05;
 const DEFAULT_AUTO_COMPACTION_RECENT_MESSAGES = 12;
+const DEFAULT_AGENT_OUTPUT_TOKENS = 4_096;
 const MAX_COMPACTION_OUTPUT_TOKENS = 4_096;
 const LEGACY_RUN_SCOPED_INSTRUCTION_PREFIXES = [
   'Runtime finalization phase:',
@@ -257,9 +258,39 @@ export class ReactAgent {
       );
       const allowedToolSet =
         options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
-      const modelContext = this.resolveModelContext(options.providerId, options.model);
+      const resolvedModelContext = this.resolveModelContext(
+        options.providerId,
+        options.model,
+      );
+      const {
+        modelMaxOutputTokens,
+        ...modelContext
+      } = resolvedModelContext;
+      const effectiveContextTokens = Math.min(
+        modelContext.modelContextTokens ?? 32_768,
+        normalizePositiveInteger(
+          options.effectiveContextTokens ?? modelContext.effectiveContextTokens,
+          modelContext.modelContextTokens ?? 32_768,
+        ),
+      );
+      modelContext.maxOutputTokens = Math.min(
+        modelMaxOutputTokens,
+        Math.max(1, effectiveContextTokens - 1),
+        normalizePositiveInteger(
+          options.maxOutputTokens,
+          modelContext.maxOutputTokens ?? DEFAULT_AGENT_OUTPUT_TOKENS,
+        ),
+      );
+      const pinnedMessageContextTokens =
+        effectiveContextTokens;
       const contextOptions: AgentContextManagerOptions = {
         ...modelContext,
+        ...(options.effectiveContextTokens === undefined
+          ? {}
+          : { effectiveContextTokens: options.effectiveContextTokens }),
+        ...(options.autoCompactTokenLimit === undefined
+          ? {}
+          : { autoCompactTokenLimit: options.autoCompactTokenLimit }),
         ...(options.keepRecentMessages === undefined
           ? {}
           : { keepRecentMessages: options.keepRecentMessages }),
@@ -270,10 +301,7 @@ export class ReactAgent {
           pinnedPreferenceMessages,
           session,
           options,
-          Math.max(
-            2_000,
-            Math.floor((modelContext.modelContextTokens ?? 32_768) * 0.08),
-          ),
+          Math.max(2_000, Math.floor(pinnedMessageContextTokens * 0.08)),
         ),
         activeTask: options.userMessage,
       };
@@ -283,10 +311,7 @@ export class ReactAgent {
             pinnedPreferenceMessages,
             session,
             options,
-            Math.max(
-              2_000,
-              Math.floor((modelContext.modelContextTokens ?? 32_768) * 0.08),
-            ),
+            Math.max(2_000, Math.floor(pinnedMessageContextTokens * 0.08)),
           ),
           ...[...runScopedInstructions.values()].map((message) => ({ ...message })),
         ];
@@ -438,6 +463,8 @@ export class ReactAgent {
               model: options.model,
               messages: context.messages,
               tools: [],
+              maxTokens:
+                contextOptions.maxOutputTokens ?? DEFAULT_AGENT_OUTPUT_TOKENS,
               ...(options.signal === undefined ? {} : { signal: options.signal }),
             },
             round,
@@ -630,6 +657,8 @@ export class ReactAgent {
             model: options.model,
             messages: context.messages,
             tools: context.tools,
+            maxTokens:
+              contextOptions.maxOutputTokens ?? DEFAULT_AGENT_OUTPUT_TOKENS,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           };
           await this.auditLog?.append({
@@ -1412,13 +1441,29 @@ export class ReactAgent {
   private resolveModelContext(
     providerId: string,
     model: string,
-  ): Pick<AgentContextManagerOptions, 'modelContextTokens' | 'maxOutputTokens'> {
+  ): Pick<
+    AgentContextManagerOptions,
+    | 'modelContextTokens'
+    | 'effectiveContextTokens'
+    | 'autoCompactTokenLimit'
+    | 'maxOutputTokens'
+  > & { modelMaxOutputTokens: number } {
     const registered =
       this.llmRouter.gateway.registry.find(providerId, model) ??
       this.llmRouter.gateway.registerModel({ providerId, model });
     return {
       modelContextTokens: registered.limits.contextTokens,
-      maxOutputTokens: registered.limits.maxOutputTokens,
+      ...(registered.limits.effectiveContextTokens === undefined
+        ? {}
+        : { effectiveContextTokens: registered.limits.effectiveContextTokens }),
+      ...(registered.limits.autoCompactTokenLimit === undefined
+        ? {}
+        : { autoCompactTokenLimit: registered.limits.autoCompactTokenLimit }),
+      maxOutputTokens: Math.min(
+        DEFAULT_AGENT_OUTPUT_TOKENS,
+        registered.limits.maxOutputTokens,
+      ),
+      modelMaxOutputTokens: registered.limits.maxOutputTokens,
     };
   }
 

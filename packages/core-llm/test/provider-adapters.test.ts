@@ -3,6 +3,31 @@ import { describe, expect, it } from 'vitest';
 import { AnthropicProvider, OpenAICompatibleProvider, createProviderFromPreset } from '../src/index.js';
 
 describe('provider adapters beyond basic connectivity', () => {
+  it('uses declared DeepSeek V4 context metadata without a discovery request', async () => {
+    const fetchMock = async (): Promise<Response> => {
+      throw new Error('DeepSeek model metadata must not require a network request.');
+    };
+    const provider = createProviderFromPreset('deepseek', {
+      apiKey: 'test-key',
+      fetch: fetchMock,
+    });
+
+    await expect(provider.getModelMetadata('deepseek-v4-flash')).resolves.toMatchObject({
+      model: 'deepseek-v4-flash',
+      source: 'provider-declaration',
+      contextTokens: 1_000_000,
+      maxOutputTokens: 384_000,
+      family: 'DeepSeek-V4',
+      capabilities: { toolCalling: 'supported' },
+    });
+    await expect(provider.getModelMetadata('deepseek-v4-pro')).resolves.toMatchObject({
+      contextTokens: 1_000_000,
+      maxOutputTokens: 384_000,
+    });
+    expect(provider.getDeclaredModelMetadata('deepseek-chat')).toBeUndefined();
+    expect(provider.getDeclaredModelMetadata('deepseek-reasoner')).toBeUndefined();
+  });
+
   it('maps structured chat, models, embedding and rerank on OpenAI-compatible endpoints', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const provider = new OpenAICompatibleProvider({

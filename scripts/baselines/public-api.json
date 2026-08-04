@@ -64,8 +64,8 @@
     },
     {
       "path": "packages/core-agent/dist/context-manager.d.ts",
-      "sha256": "e43349abb26ee1dd63815e32ec2a28ad5643b514f08cf450f0766e6dbe825694",
-      "bytes": 2532
+      "sha256": "17f4652d26b50b94a0c733ccd45521a9820d94ac4988b01595dfa1d52dcc1648",
+      "bytes": 2641
     },
     {
       "path": "packages/core-agent/dist/evaluation-report-store.d.ts",
@@ -169,8 +169,8 @@
     },
     {
       "path": "packages/core-agent/dist/types.d.ts",
-      "sha256": "cc54b660af059e8d86db6565722b9242d416672e05ed5ecc5f377aefedd86958",
-      "bytes": 22816
+      "sha256": "8ffa24033ceb5b263476d6960c72081ed2a0c7be7602f26a72e2acbbe27b6fda",
+      "bytes": 23044
     },
     {
       "path": "packages/core-agent/dist/user-events.d.ts",
@@ -319,13 +319,13 @@
     },
     {
       "path": "packages/core-llm/dist/model-registry.d.ts",
-      "sha256": "4f9d1f674c9197b2f45a20df6c689a1037b473b174f99065ec68aa59e32d040d",
-      "bytes": 3172
+      "sha256": "6adc0b7c148fda60326b1c2dedbd39fd01f39fdf55f204ba63eeb11556cd6fd1",
+      "bytes": 3613
     },
     {
       "path": "packages/core-llm/dist/openai-compatible-provider.d.ts",
-      "sha256": "b1425e122670967557b4dc29be8323ddd59265340f85b7dcb0a6bc7ab2516e6e",
-      "bytes": 3527
+      "sha256": "ee12d110c320140249b36dd562cf6ea1c937ab1cb17297a8975a08c6107c1996",
+      "bytes": 3695
     },
     {
       "path": "packages/core-llm/dist/prompt-runtime.d.ts",
@@ -334,8 +334,8 @@
     },
     {
       "path": "packages/core-llm/dist/provider-presets.d.ts",
-      "sha256": "4046628e247c95204fdde42bc98c38bd72f51312e9b92c1455a388bfd0e286b3",
-      "bytes": 988
+      "sha256": "07f939095b6ff0d76056f4cd5437ea8d8f68f15df1cce0c032f642aa71460945",
+      "bytes": 1064
     },
     {
       "path": "packages/core-llm/dist/provider-protocol-profile.d.ts",
@@ -384,8 +384,8 @@
     },
     {
       "path": "packages/core-llm/dist/types.d.ts",
-      "sha256": "1108788fc7abbe261587194666a67a8c7fc07edb75bcec83aae3942b6d40b01e",
-      "bytes": 6107
+      "sha256": "5e9fe606b0a4ae5df06c5410eaea97985b2d0afdcbac8b1d82085a7de8457283",
+      "bytes": 6214
     },
     {
       "path": "packages/core-rag/dist/async-schema-retriever.d.ts",
@@ -639,8 +639,8 @@
     },
     {
       "path": "packages/sdk/dist/runtime.d.ts",
-      "sha256": "af42e1d8d5009da88e7ca25901aa8b4bd2d7478be3e6450c1d934180cc5ab9ce",
-      "bytes": 7982
+      "sha256": "43b793e84cb62d1dfd7405efdb0fe1a069fd6a662fa35ed650a715591c198327",
+      "bytes": 8196
     },
     {
       "path": "packages/sdk/dist/sql-run-store.d.ts",
@@ -649,8 +649,8 @@
     },
     {
       "path": "packages/sdk/dist/types.d.ts",
-      "sha256": "28c3de457e0149fbbc7f9ee965f6a9f064639d88449acc8403d07c395507d84b",
-      "bytes": 11460
+      "sha256": "5b22e4d7a4a28f1f04528ed47abc271ba6b47cb0af7b7a8968edfbf050f31967",
+      "bytes": 11930
     },
     {
       "path": "packages/shared/dist/contracts/common.d.ts",
@@ -698,5 +698,5 @@
       "bytes": 38
     }
   ],
-  "digest": "00fe514dd581f05650abb97d8c0c697752b4bdd5381203e2e5c57dbfb6252898"
+  "digest": "ef5ddd06ae25fd9d2a90a1f50bd30b32cb4e742f2085dac6b17ae1e531362148"
 }

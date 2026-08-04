@@ -23,7 +23,13 @@ export type LlmModelPricing = {
 };
 
 export type LlmModelLimits = {
+  /** Provider-declared total input plus output context capacity. */
   contextTokens: number;
+  /** Runtime-selected working window, never larger than contextTokens after discovery. */
+  effectiveContextTokens?: number;
+  /** Prompt-token threshold that triggers automatic context compaction. */
+  autoCompactTokenLimit?: number;
+  /** Provider-declared maximum tokens that one response may generate. */
   maxOutputTokens: number;
   requestsPerMinute?: number;
   tokensPerMinute?: number;
@@ -99,6 +105,10 @@ const DEFAULT_DATA_POLICY: LlmDataPolicy = {
 export class LlmModelRegistry {
   private readonly providers = new Map<string, LlmProvider>();
   private readonly models = new Map<string, RegisteredLlmModel>();
+  private readonly configuredOperationalLimits = new Map<
+    string,
+    Pick<LlmModelLimits, 'effectiveContextTokens' | 'autoCompactTokenLimit'>
+  >();
 
   registerProvider(provider: LlmProvider): void {
     requireIdentifier(provider.id, 'provider.id');
@@ -110,6 +120,7 @@ export class LlmModelRegistry {
     for (const [id, model] of this.models) {
       if (model.providerId === providerId) {
         this.models.delete(id);
+        this.configuredOperationalLimits.delete(id);
       }
     }
     return removed;
@@ -129,31 +140,60 @@ export class LlmModelRegistry {
     requireIdentifier(input.model, 'model');
     const id = input.id?.trim() || `${input.providerId}:${input.model}`;
     requireIdentifier(id, 'model.id');
+    const previous = this.models.get(id);
+    const previousModel =
+      previous?.providerId === input.providerId && previous.model === input.model.trim()
+        ? previous
+        : undefined;
 
     const capabilities = mergeCapabilities(provider, input.capabilities);
-    const limits: LlmModelLimits = {
-      contextTokens: positiveInteger(input.limits?.contextTokens ?? DEFAULT_LIMITS.contextTokens, 'contextTokens'),
-      maxOutputTokens: positiveInteger(
-        input.limits?.maxOutputTokens ?? DEFAULT_LIMITS.maxOutputTokens,
-        'maxOutputTokens',
-      ),
-      ...(input.limits?.requestsPerMinute === undefined
-        ? {}
-        : { requestsPerMinute: positiveInteger(input.limits.requestsPerMinute, 'requestsPerMinute') }),
-      ...(input.limits?.tokensPerMinute === undefined
-        ? {}
-        : { tokensPerMinute: positiveInteger(input.limits.tokensPerMinute, 'tokensPerMinute') }),
-      ...(input.limits?.maxConcurrency === undefined
-        ? {}
-        : { maxConcurrency: positiveInteger(input.limits.maxConcurrency, 'maxConcurrency') }),
-    };
+    const limits: LlmModelLimits = input.limits === undefined && previousModel
+      ? { ...previousModel.limits }
+      : {
+          contextTokens: positiveInteger(
+            input.limits?.contextTokens ?? DEFAULT_LIMITS.contextTokens,
+            'contextTokens',
+          ),
+          maxOutputTokens: positiveInteger(
+            input.limits?.maxOutputTokens ?? DEFAULT_LIMITS.maxOutputTokens,
+            'maxOutputTokens',
+          ),
+          ...(input.limits?.requestsPerMinute === undefined
+            ? {}
+            : {
+                requestsPerMinute: positiveInteger(
+                  input.limits.requestsPerMinute,
+                  'requestsPerMinute',
+                ),
+              }),
+          ...(input.limits?.tokensPerMinute === undefined
+            ? {}
+            : {
+                tokensPerMinute: positiveInteger(
+                  input.limits.tokensPerMinute,
+                  'tokensPerMinute',
+                ),
+              }),
+          ...(input.limits?.maxConcurrency === undefined
+            ? {}
+            : {
+                maxConcurrency: positiveInteger(
+                  input.limits.maxConcurrency,
+                  'maxConcurrency',
+                ),
+              }),
+        };
+    const configuredOperationalLimits =
+      input.limits === undefined && previousModel
+        ? this.configuredOperationalLimits.get(id)
+        : selectOperationalLimits(input.limits);
+    applyEffectiveContextLimits(limits, configuredOperationalLimits, true);
     const dataPolicy: LlmDataPolicy = {
       deployment: input.dataPolicy?.deployment ?? deploymentFromMode(input.mode ?? provider.mode),
       regions: [...(input.dataPolicy?.regions ?? DEFAULT_DATA_POLICY.regions)],
       retainsPrompts: input.dataPolicy?.retainsPrompts ?? DEFAULT_DATA_POLICY.retainsPrompts,
       allowsSensitiveData: input.dataPolicy?.allowsSensitiveData ?? DEFAULT_DATA_POLICY.allowsSensitiveData,
     };
-    const previous = this.models.get(id);
     const profile: RegisteredLlmModel = {
       id,
       providerId: input.providerId,
@@ -168,10 +208,17 @@ export class LlmModelRegistry {
       quality: input.quality ?? 'balanced',
       ...(input.pricing === undefined ? {} : { pricing: normalizePricing(input.pricing) }),
       ...(input.tags === undefined ? {} : { tags: [...input.tags] }),
-      health: previous?.health ?? { state: 'unknown', consecutiveFailures: 0 },
-      ...(previous?.discovery === undefined ? {} : { discovery: { ...previous.discovery } }),
+      health: previousModel?.health ?? { state: 'unknown', consecutiveFailures: 0 },
+      ...(previousModel?.discovery === undefined
+        ? {}
+        : { discovery: { ...previousModel.discovery } }),
     };
     this.models.set(id, profile);
+    if (configuredOperationalLimits === undefined) {
+      this.configuredOperationalLimits.delete(id);
+    } else {
+      this.configuredOperationalLimits.set(id, configuredOperationalLimits);
+    }
     return cloneModel(profile);
   }
 
@@ -232,6 +279,11 @@ export class LlmModelRegistry {
         ? {}
         : { maxOutputTokens: positiveInteger(input.maxOutputTokens, 'maxOutputTokens') }),
     };
+    applyEffectiveContextLimits(
+      current.limits,
+      this.configuredOperationalLimits.get(id),
+      true,
+    );
     current.discovery = {
       source: input.source,
       discoveredAt: discoveredAt.toISOString(),
@@ -250,6 +302,58 @@ export class LlmModelRegistry {
     const model = this.models.get(id);
     if (!model) throw new Error(`LLM model is not registered: ${id}`);
     return model;
+  }
+}
+
+function selectOperationalLimits(
+  limits: Partial<LlmModelLimits> | undefined,
+): Pick<LlmModelLimits, 'effectiveContextTokens' | 'autoCompactTokenLimit'> | undefined {
+  if (
+    limits?.effectiveContextTokens === undefined &&
+    limits?.autoCompactTokenLimit === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(limits.effectiveContextTokens === undefined
+      ? {}
+      : { effectiveContextTokens: limits.effectiveContextTokens }),
+    ...(limits.autoCompactTokenLimit === undefined
+      ? {}
+      : { autoCompactTokenLimit: limits.autoCompactTokenLimit }),
+  };
+}
+
+function applyEffectiveContextLimits(
+  target: LlmModelLimits,
+  input:
+    | Pick<LlmModelLimits, 'effectiveContextTokens' | 'autoCompactTokenLimit'>
+    | undefined,
+  clampToPhysicalContext: boolean,
+): void {
+  const requestedEffective =
+    input?.effectiveContextTokens ?? target.effectiveContextTokens;
+  if (requestedEffective !== undefined) {
+    const normalizedEffective = positiveInteger(
+      requestedEffective,
+      'effectiveContextTokens',
+    );
+    target.effectiveContextTokens = clampToPhysicalContext
+      ? Math.min(target.contextTokens, normalizedEffective)
+      : normalizedEffective;
+  }
+  const effectiveContextTokens = target.effectiveContextTokens ?? target.contextTokens;
+  const requestedAutoCompact =
+    input?.autoCompactTokenLimit ?? target.autoCompactTokenLimit;
+  if (requestedAutoCompact !== undefined) {
+    const normalizedAutoCompact = positiveInteger(
+      requestedAutoCompact,
+      'autoCompactTokenLimit',
+    );
+    target.autoCompactTokenLimit =
+      clampToPhysicalContext || target.effectiveContextTokens !== undefined
+        ? Math.min(effectiveContextTokens, normalizedAutoCompact)
+        : normalizedAutoCompact;
   }
 }
 

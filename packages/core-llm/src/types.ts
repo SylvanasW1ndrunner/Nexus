@@ -213,6 +213,7 @@ export interface LlmProvider {
   embed?(request: LlmEmbeddingRequest): Promise<LlmEmbeddingResponse>;
   rerank?(request: LlmRerankRequest): Promise<LlmRerankResponse>;
   listModels?(signal?: AbortSignal): Promise<string[]>;
+  getDeclaredModelMetadata?(model: string): LlmModelMetadata | undefined;
   getModelMetadata?(model: string, signal?: AbortSignal): Promise<LlmModelMetadata>;
   isAvailable(model?: string, signal?: AbortSignal): Promise<LlmProviderAvailability>;
 }
