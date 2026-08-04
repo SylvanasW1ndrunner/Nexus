@@ -45,6 +45,30 @@ describe('Agent context management', () => {
     });
   });
 
+  it('preserves assistant tool calls as structured provider messages', () => {
+    const session = sessionWithToolRounds(1, 20);
+
+    const context = buildAgentContext(session, tools(), {
+      modelContextTokens: 2_000,
+      maxOutputTokens: 200,
+    });
+
+    expect(context.messages[1]).toMatchObject({
+      role: 'assistant',
+      toolCalls: [
+        {
+          id: 'call_internal_1',
+          name: 'query_database',
+          arguments: { sql: 'select 1 as round_no, sum(amount) from orders' },
+        },
+      ],
+    });
+    expect(context.messages[2]).toMatchObject({
+      role: 'tool',
+      toolCallId: 'call_internal_1',
+    });
+  });
+
   it('shortens old tool outputs before asking for conversation compaction', () => {
     const session = sessionWithToolRounds(3, 2_000);
     const originalMessages = structuredClone(session.messages);

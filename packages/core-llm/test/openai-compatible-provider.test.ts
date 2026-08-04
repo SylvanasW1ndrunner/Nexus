@@ -106,6 +106,67 @@ describe('OpenAICompatibleProvider', () => {
     });
   });
 
+  it('serializes assistant tool calls before matching tool results', async () => {
+    const fetchMock = vi.fn<TestFetch>(() =>
+      Promise.resolve(jsonResponse(200, { choices: [{ message: { content: 'done' } }] })),
+    );
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      fetch: fetchMock,
+    });
+
+    await provider.chat({
+      model: 'deepseek-chat',
+      messages: [
+        { role: 'user', content: 'Query orders.' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            {
+              id: 'call_1',
+              name: 'sql_execute',
+              arguments: { sql: 'select count(*) from orders' },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          content: '{"rows":[{"count":2}]}',
+          name: 'sql_execute',
+          toolCallId: 'call_1',
+        },
+      ],
+    });
+
+    expect(parseFetchBody(fetchMock).messages).toEqual([
+      { role: 'user', content: 'Query orders.' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: {
+              name: 'sql_execute',
+              arguments: '{"sql":"select count(*) from orders"}',
+            },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: '{"rows":[{"count":2}]}',
+        name: 'sql_execute',
+        tool_call_id: 'call_1',
+      },
+    ]);
+  });
+
   it('streams text deltas, usage, and final response from OpenAI-compatible SSE', async () => {
     const fetchMock = vi.fn<TestFetch>(() =>
       Promise.resolve(streamResponse([

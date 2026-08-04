@@ -7,6 +7,7 @@ export type LlmMessage = {
   content: string;
   name?: string;
   toolCallId?: string;
+  toolCalls?: LlmToolCall[];
 };
 
 export type JsonSchema = Record<string, unknown>;

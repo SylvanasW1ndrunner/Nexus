@@ -173,6 +173,19 @@ describe('provider adapters beyond basic connectivity', () => {
       messages: [
         { role: 'system', content: 'You are a DBA.' },
         { role: 'user', content: 'check' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            { id: 'previous_1', name: 'query', arguments: { sql: 'select 1' } },
+          ],
+        },
+        {
+          role: 'tool',
+          content: '{"rows":[{"value":1}]}',
+          name: 'query',
+          toolCallId: 'previous_1',
+        },
       ],
       tools: [
         {
@@ -190,6 +203,17 @@ describe('provider adapters beyond basic connectivity', () => {
       finishReason: 'tool_use',
     });
     expect(requestBody).toMatchObject({ system: 'You are a DBA.', max_tokens: 100, stream: false });
+    expect(requestBody?.messages).toEqual([
+      { role: 'user', content: 'check' },
+      {
+        role: 'assistant',
+        content: '<tool_calls>[{"name":"query","arguments":{"sql":"select 1"}}]</tool_calls>',
+      },
+      {
+        role: 'user',
+        content: 'Tool result (query): {"rows":[{"value":1}]}',
+      },
+    ]);
     expect(requestHeaders?.get('x-api-key')).toBe('anthropic-test-key');
     expect(requestHeaders?.get('anthropic-version')).toBe('2023-06-01');
   });

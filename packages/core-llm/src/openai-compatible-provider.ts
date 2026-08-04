@@ -80,6 +80,7 @@ type OpenAIChatMessage = {
   content: string | null;
   name?: string;
   tool_call_id?: string;
+  tool_calls?: OpenAIToolCall[];
 };
 
 type OpenAIChatTool = {
@@ -831,6 +832,18 @@ function buildChatPayload(request: LlmChatRequest): Record<string, unknown> {
       content: message.content,
       ...(message.name ? { name: message.name } : {}),
       ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+      ...(message.toolCalls?.length
+        ? {
+            tool_calls: message.toolCalls.map((call) => ({
+              id: call.id,
+              type: 'function',
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.arguments),
+              },
+            })),
+          }
+        : {}),
     })),
     ...(request.tools?.length
       ? {

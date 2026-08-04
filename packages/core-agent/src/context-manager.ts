@@ -434,18 +434,14 @@ function toLlmMessage(message: AgentMessage): LlmMessage {
     };
   }
   if (message.role === 'assistant' && message.toolCalls?.length) {
-    const calls = message.toolCalls.map((call) => ({
-      name: call.name,
-      arguments: redactPersistedAgentValue(call.arguments),
-    }));
     return {
       role: 'assistant',
-      content: [
-        message.content,
-        `<tool_calls>${JSON.stringify(calls)}</tool_calls>`,
-      ]
-        .filter(Boolean)
-        .join('\n'),
+      content: message.content,
+      toolCalls: message.toolCalls.map((call) => ({
+        id: call.id,
+        name: call.name,
+        arguments: redactPersistedAgentValue(call.arguments) as Record<string, unknown>,
+      })),
     };
   }
   return { role: message.role, content: message.content };
