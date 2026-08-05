@@ -39,6 +39,8 @@ import {
   type LlmChatStreamEvent,
   type LlmGatewayResult,
   type LlmMetricsSnapshot,
+  type LlmModelLimits,
+  type LlmModelMetadata,
   type LlmProvider,
   type RegisteredLlmModel,
 } from '@dbagent/core-llm';
@@ -521,20 +523,65 @@ export class DatabaseAgentRuntime {
       if (!options.provider || !options.model?.trim()) {
         throw new DatabaseAgentError('INVALID_INPUT', 'provider 和 model 必须同时配置。', false);
       }
-      this.configureProvider(options.provider, options.model);
+      this.configureProvider(options.provider, options.model, options.modelLimits);
     }
   }
 
-  configureProvider(provider: LlmProvider, model: string): void {
+  configureProvider(
+    provider: LlmProvider,
+    model: string,
+    limits?: Partial<LlmModelLimits>,
+  ): void {
     const normalizedModel = requireText(model, 'model', 300);
     this.modelMetadataDiscovery.delete(`${provider.id}\u0000${normalizedModel}`);
     this.llmGateway.registerProvider(provider);
     if (this.llmGateway !== this.llmRouter.gateway) {
       this.llmRouter.registerProvider(provider);
     }
-    this.llmGateway.registerModel({ providerId: provider.id, model: normalizedModel });
+    this.registerModelAcrossGateways(provider.id, normalizedModel, limits);
+    const declaredMetadata = provider.getDeclaredModelMetadata?.(normalizedModel);
+    if (declaredMetadata) {
+      this.applyModelMetadataAcrossGateways(
+        provider.id,
+        normalizedModel,
+        declaredMetadata,
+      );
+    }
     this.providerId = provider.id;
     this.model = normalizedModel;
+  }
+
+  private registerModelAcrossGateways(
+    providerId: string,
+    model: string,
+    limits?: Partial<LlmModelLimits>,
+  ): void {
+    for (const gateway of this.modelGateways()) {
+      gateway.registerModel({
+        providerId,
+        model,
+        ...(limits === undefined ? {} : { limits }),
+      });
+    }
+  }
+
+  private applyModelMetadataAcrossGateways(
+    providerId: string,
+    model: string,
+    metadata: LlmModelMetadata,
+  ): void {
+    for (const gateway of this.modelGateways()) {
+      const registered =
+        gateway.registry.find(providerId, model) ??
+        gateway.registerModel({ providerId, model });
+      gateway.registry.applyModelMetadata(registered.id, metadata);
+    }
+  }
+
+  private modelGateways(): readonly LlmGateway[] {
+    return this.llmGateway === this.llmRouter.gateway
+      ? [this.llmGateway]
+      : [this.llmGateway, this.llmRouter.gateway];
   }
 
   async testConnection(input: PostgresConnectionInput): Promise<ConnectionTestResult> {
@@ -937,6 +984,15 @@ export class DatabaseAgentRuntime {
       dynamicToolDiscovery: this.dynamicToolDiscovery,
       ...(input.onEvent === undefined ? {} : { eventSink: input.onEvent }),
       ...(input.maxIterations === undefined ? {} : { maxIterations: input.maxIterations }),
+      ...(input.effectiveContextTokens === undefined
+        ? {}
+        : { effectiveContextTokens: input.effectiveContextTokens }),
+      ...(input.autoCompactTokenLimit === undefined
+        ? {}
+        : { autoCompactTokenLimit: input.autoCompactTokenLimit }),
+      ...(input.maxOutputTokens === undefined
+        ? {}
+        : { maxOutputTokens: input.maxOutputTokens }),
       ...(input.maxToolExecutionMs === undefined
         ? {}
         : { maxToolExecutionMs: input.maxToolExecutionMs }),
@@ -1477,7 +1533,7 @@ export class DatabaseAgentRuntime {
     const selected = this.llmGateway.registry.find(providerId, model);
     if (!selected)
       throw new DatabaseAgentError('NOT_CONFIGURED', 'LLM model is not registered.', true);
-    this.llmGateway.registry.applyModelMetadata(selected.id, {
+    this.applyModelMetadataAcrossGateways(providerId, model, {
       model,
       source: 'provider-declaration',
       capabilities: { ...provider.capabilities },
@@ -1485,6 +1541,7 @@ export class DatabaseAgentRuntime {
     if (!provider.listModels) return this.llmModels();
     try {
       const remoteModels = await provider.listModels();
+      if (!this.isCurrentProviderAcrossGateways(provider)) return this.llmModels();
       for (const remoteModel of remoteModels) {
         const registered =
           this.llmGateway.registry.find(providerId, remoteModel) ??
@@ -1496,12 +1553,21 @@ export class DatabaseAgentRuntime {
         });
       }
       if (remoteModels.includes(model) && provider.getModelMetadata) {
-        this.llmGateway.registry.applyModelMetadata(
-          selected.id,
-          await provider.getModelMetadata(model),
+        const metadata = await provider.getModelMetadata(model);
+        if (!this.isCurrentProviderAcrossGateways(provider)) return this.llmModels();
+        this.applyModelMetadataAcrossGateways(
+          providerId,
+          model,
+          metadata,
         );
       }
     } catch (error) {
+      if (
+        !this.isCurrentProviderAcrossGateways(provider) ||
+        !this.llmGateway.registry.model(selected.id)
+      ) {
+        return this.llmModels();
+      }
       this.llmGateway.registry.updateHealth(selected.id, {
         state: 'unknown',
         checkedAt: new Date().toISOString(),
@@ -1517,7 +1583,7 @@ export class DatabaseAgentRuntime {
     signal?: AbortSignal,
   ): Promise<void> {
     const registered = this.llmGateway.registry.find(providerId, model);
-    if (!registered || registered.discovery?.source === 'provider-api') return;
+    if (!registered) return;
     const provider = this.llmGateway.registry.provider(providerId);
     if (!provider?.getModelMetadata) return;
 
@@ -1546,13 +1612,22 @@ export class DatabaseAgentRuntime {
     );
     timer.unref?.();
     try {
-      this.llmGateway.registry.applyModelMetadata(
-        registeredModelId,
-        await provider.getModelMetadata!(model, linked.controller.signal),
+      const metadata = await provider.getModelMetadata!(model, linked.controller.signal);
+      if (!this.isCurrentProviderAcrossGateways(provider)) return 'cancelled';
+      this.applyModelMetadataAcrossGateways(
+        provider.id,
+        model,
+        metadata,
       );
       return 'completed';
     } catch (error) {
-      if (signal?.aborted) return 'cancelled';
+      if (
+        signal?.aborted ||
+        !this.isCurrentProviderAcrossGateways(provider) ||
+        !this.llmGateway.registry.model(registeredModelId)
+      ) {
+        return 'cancelled';
+      }
       this.llmGateway.registry.updateHealth(registeredModelId, {
         state: 'unknown',
         checkedAt: new Date().toISOString(),
@@ -1563,6 +1638,12 @@ export class DatabaseAgentRuntime {
       clearTimeout(timer);
       linked.dispose();
     }
+  }
+
+  private isCurrentProviderAcrossGateways(provider: LlmProvider): boolean {
+    return this.modelGateways().every(
+      (gateway) => gateway.registry.provider(provider.id) === provider,
+    );
   }
 
   llmMetrics(): LlmMetricsSnapshot {

@@ -132,6 +132,10 @@ export type AgentRunOptions = {
   mode?: AgentMode;
   knowledgeSnapshot?: AgentKnowledgeSnapshotReference;
   maxIterations?: number;
+  effectiveContextTokens?: number;
+  autoCompactTokenLimit?: number;
+  /** Per-request output budget; clamped to the model and effective context limits. */
+  maxOutputTokens?: number;
   keepRecentMessages?: number;
   maxToolResultChars?: number;
   maxConsecutiveToolFailures?: number;
@@ -677,6 +681,7 @@ export type AgentContextCompressionReport = {
   originalTokenEstimate: number;
   finalTokenEstimate: number;
   modelContextTokens: number;
+  effectiveContextTokens: number;
   reservedOutputTokens: number;
   availablePromptTokens: number;
   warningThresholdTokens: number;

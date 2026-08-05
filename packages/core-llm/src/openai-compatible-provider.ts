@@ -67,6 +67,7 @@ export type OpenAICompatibleProviderConfig = {
   rerankPath?: string;
   modelsPath?: string;
   metadataSource?: 'openai-compatible' | 'ollama';
+  modelMetadata?: readonly LlmModelMetadata[];
   capabilities?: Partial<LlmProviderCapabilities>;
   protocolProfile?: LlmProviderProtocolProfileInput;
   defaultHeaders?: Record<string, string>;
@@ -80,6 +81,7 @@ type OpenAIChatMessage = {
   content: string | null;
   name?: string;
   tool_call_id?: string;
+  tool_calls?: OpenAIToolCall[];
 };
 
 type OpenAIChatTool = {
@@ -195,6 +197,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private readonly streamLimits: LlmStreamLimits;
   private readonly fetchImpl: FetchLike;
   private readonly modelCatalog = new Map<string, OpenAIModelCatalogEntry>();
+  private readonly declaredModelMetadata = new Map<string, LlmModelMetadata>();
 
   constructor(config: OpenAICompatibleProviderConfig) {
     if (!config.apiKey?.trim() && !config.allowUnauthenticated) {
@@ -220,6 +223,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
     this.rerankPath = normalizePath(config.rerankPath ?? '/rerank');
     this.modelsPath = normalizePath(config.modelsPath ?? '/models');
     this.metadataSource = config.metadataSource ?? 'openai-compatible';
+    for (const metadata of config.modelMetadata ?? []) {
+      this.declaredModelMetadata.set(metadata.model, structuredClone(metadata));
+    }
     this.capabilities = {
       chat: 'supported',
       streaming: 'supported',
@@ -342,6 +348,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 
   async getModelMetadata(model: string, signal?: AbortSignal): Promise<LlmModelMetadata> {
+    const declared = this.getDeclaredModelMetadata(model);
+    if (declared) return declared;
     if (this.metadataSource !== 'ollama') {
       if (!this.modelCatalog.has(model)) await this.listModels(signal);
       const entry = this.modelCatalog.get(model);
@@ -360,6 +368,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
       { maxRetries: 0 },
     );
     return parseOllamaModelMetadata(model, response, this.capabilities);
+  }
+
+  getDeclaredModelMetadata(model: string): LlmModelMetadata | undefined {
+    const metadata = this.declaredModelMetadata.get(model);
+    return metadata === undefined ? undefined : structuredClone(metadata);
   }
 
   async *stream(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent> {
@@ -831,6 +844,18 @@ function buildChatPayload(request: LlmChatRequest): Record<string, unknown> {
       content: message.content,
       ...(message.name ? { name: message.name } : {}),
       ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+      ...(message.toolCalls?.length
+        ? {
+            tool_calls: message.toolCalls.map((call) => ({
+              id: call.id,
+              type: 'function',
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.arguments),
+              },
+            })),
+          }
+        : {}),
     })),
     ...(request.tools?.length
       ? {

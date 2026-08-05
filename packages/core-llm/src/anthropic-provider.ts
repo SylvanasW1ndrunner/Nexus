@@ -3,6 +3,7 @@ import {
   type LlmChatRequest,
   type LlmChatResponse,
   type LlmChatStreamEvent,
+  type LlmMessage,
   type LlmModelMetadata,
   type LlmProvider,
   type LlmProviderAvailability,
@@ -443,10 +444,7 @@ function buildAnthropicPayload(request: LlmChatRequest, stream: boolean): Record
     .filter((message) => message.role !== 'system')
     .map((message) => ({
       role: message.role === 'assistant' ? 'assistant' : 'user',
-      content:
-        message.role === 'tool'
-          ? `Tool result (${message.name ?? message.toolCallId ?? 'tool'}): ${message.content}`
-          : message.content,
+      content: anthropicLegacyMessageContent(message),
     }));
   return {
     model: request.model,
@@ -466,6 +464,20 @@ function buildAnthropicPayload(request: LlmChatRequest, stream: boolean): Record
         }
       : {}),
   };
+}
+
+function anthropicLegacyMessageContent(message: LlmMessage): string {
+  if (message.role === 'tool') {
+    return `Tool result (${message.name ?? message.toolCallId ?? 'tool'}): ${message.content}`;
+  }
+  if (message.role !== 'assistant' || !message.toolCalls?.length) return message.content;
+  const calls = message.toolCalls.map((call) => ({
+    name: call.name,
+    arguments: call.arguments,
+  }));
+  return [message.content, `<tool_calls>${JSON.stringify(calls)}</tool_calls>`]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function parseAnthropicResponse(response: AnthropicMessageResponse): LlmChatResponse {

@@ -1,5 +1,9 @@
 import { OpenAICompatibleProvider, type OpenAICompatibleProviderConfig } from './openai-compatible-provider.js';
-import type { LlmProviderCapabilities, LlmProviderMode } from './types.js';
+import type {
+  LlmModelMetadata,
+  LlmProviderCapabilities,
+  LlmProviderMode,
+} from './types.js';
 
 export type LlmProviderPreset = {
   id: string;
@@ -10,6 +14,7 @@ export type LlmProviderPreset = {
   requiresApiKey: boolean;
   metadataSource?: 'openai-compatible' | 'ollama';
   capabilities: Partial<LlmProviderCapabilities>;
+  models?: readonly Omit<LlmModelMetadata, 'source'>[];
   documentationUrl?: string;
 };
 
@@ -42,6 +47,10 @@ export const LLM_PROVIDER_PRESETS: readonly LlmProviderPreset[] = Object.freeze(
     mode: 'byok',
     requiresApiKey: true,
     capabilities: { ...CLOUD_CAPABILITIES, reasoning: 'supported' },
+    models: [
+      deepSeekV4Model('deepseek-v4-flash'),
+      deepSeekV4Model('deepseek-v4-pro'),
+    ],
     documentationUrl: 'https://api-docs.deepseek.com/',
   },
   {
@@ -98,7 +107,13 @@ export const LLM_PROVIDER_PRESETS: readonly LlmProviderPreset[] = Object.freeze(
 export function getLlmProviderPreset(id: string): LlmProviderPreset | undefined {
   const preset = LLM_PROVIDER_PRESETS.find((candidate) => candidate.id === id);
   return preset
-    ? { ...preset, capabilities: { ...preset.capabilities } }
+    ? {
+        ...preset,
+        capabilities: { ...preset.capabilities },
+        ...(preset.models === undefined
+          ? {}
+          : { models: preset.models.map((model) => structuredClone(model)) }),
+      }
     : undefined;
 }
 
@@ -124,10 +139,34 @@ export function createProviderFromPreset(
     mode: options.mode ?? preset.mode,
     metadataSource: preset.metadataSource ?? 'openai-compatible',
     capabilities: preset.capabilities,
+    ...(preset.models === undefined
+      ? {}
+      : {
+          modelMetadata: preset.models.map((entry) => ({
+            ...structuredClone(entry),
+            source: 'provider-declaration' as const,
+          })),
+        }),
     ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
     ...(!preset.requiresApiKey && !options.apiKey ? { allowUnauthenticated: true } : {}),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
+}
+
+function deepSeekV4Model(model: string): Omit<LlmModelMetadata, 'source'> {
+  return {
+    model,
+    capabilities: {
+      chat: 'supported',
+      streaming: 'supported',
+      toolCalling: 'supported',
+      structuredOutput: 'supported',
+      reasoning: 'supported',
+    },
+    contextTokens: 1_000_000,
+    maxOutputTokens: 384_000,
+    family: 'DeepSeek-V4',
+  };
 }

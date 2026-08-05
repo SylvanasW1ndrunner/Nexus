@@ -13,6 +13,7 @@ import type {
   LlmPolicyLayers,
   LlmBudgetLimits,
   LlmMetricsSnapshot,
+  LlmModelLimits,
   LlmProvider,
   LlmUsage,
   RegisteredLlmModel,
@@ -54,6 +55,13 @@ export type DatabaseAgentRuntimeOptions = {
   provider?: LlmProvider;
   gateway?: LlmGateway;
   model?: string;
+  /**
+   * Physical-capacity fallbacks plus persistent operational context limits.
+   * Provider metadata replaces contextTokens/maxOutputTokens when available;
+   * effectiveContextTokens/autoCompactTokenLimit remain caller-selected and
+   * are clamped to the resolved physical capacity.
+   */
+  modelLimits?: Partial<LlmModelLimits>;
   tenantId?: string;
   driver?: IDatabaseDriver;
   databaseAccess?: DatabaseAccessRuntime;
@@ -169,6 +177,9 @@ export type RunAiSqlAgentInput = {
    */
   sessionSkills?: SkillOverlay[];
   maxIterations?: number;
+  effectiveContextTokens?: number;
+  autoCompactTokenLimit?: number;
+  maxOutputTokens?: number;
   maxToolExecutionMs?: number;
   systemPrompt?: AgentSystemPrompt;
   capabilityInstructions?: string[];

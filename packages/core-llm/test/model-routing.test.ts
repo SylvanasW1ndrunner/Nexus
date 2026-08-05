@@ -119,6 +119,162 @@ describe('model registry and policy routing', () => {
       },
     });
   });
+
+  it('does not preserve limits when a custom model id is rebound to another model identity', () => {
+    const registry = new LlmModelRegistry();
+    registry.registerProvider(provider('first', 'byok'));
+    registry.registerProvider(provider('second', 'private'));
+    registry.registerModel({
+      id: 'reused-model-id',
+      providerId: 'first',
+      model: 'first-model',
+      limits: {
+        contextTokens: 1_000_000,
+        maxOutputTokens: 384_000,
+        effectiveContextTokens: 128_000,
+        autoCompactTokenLimit: 100_000,
+      },
+    });
+
+    const differentModel = registry.registerModel({
+      id: 'reused-model-id',
+      providerId: 'first',
+      model: 'second-model',
+    });
+    expect(differentModel.limits).toEqual({
+      contextTokens: 32_768,
+      maxOutputTokens: 4_096,
+    });
+
+    registry.registerModel({
+      id: 'reused-provider-id',
+      providerId: 'first',
+      model: 'shared-model',
+      limits: { contextTokens: 1_000_000, maxOutputTokens: 384_000 },
+    });
+    const differentProvider = registry.registerModel({
+      id: 'reused-provider-id',
+      providerId: 'second',
+      model: 'shared-model',
+    });
+    expect(differentProvider.limits).toEqual({
+      contextTokens: 32_768,
+      maxOutputTokens: 4_096,
+    });
+  });
+
+  it('preserves operational context limits while applying provider metadata', () => {
+    const registry = new LlmModelRegistry();
+    registry.registerProvider(provider('deepseek', 'byok'));
+    const model = registry.registerModel({
+      providerId: 'deepseek',
+      model: 'deepseek-v4-flash',
+      limits: {
+        effectiveContextTokens: 128_000,
+        autoCompactTokenLimit: 100_000,
+      },
+    });
+
+    const updated = registry.applyModelMetadata(model.id, {
+      model: model.model,
+      source: 'provider-declaration',
+      capabilities: { toolCalling: 'supported' },
+      contextTokens: 1_000_000,
+    });
+
+    expect(updated.limits).toMatchObject({
+      contextTokens: 1_000_000,
+      effectiveContextTokens: 128_000,
+      autoCompactTokenLimit: 100_000,
+    });
+  });
+
+  it('restores a threshold-only configuration when authoritative context arrives', () => {
+    const registry = new LlmModelRegistry();
+    registry.registerProvider(provider('custom', 'byok'));
+    const model = registry.registerModel({
+      providerId: 'custom',
+      model: 'pending-context-model',
+      limits: { autoCompactTokenLimit: 100_000 },
+    });
+
+    expect(model.limits).toMatchObject({
+      contextTokens: 32_768,
+      autoCompactTokenLimit: 32_768,
+    });
+
+    const updated = registry.applyModelMetadata(model.id, {
+      model: model.model,
+      source: 'provider-api',
+      capabilities: {},
+      contextTokens: 1_000_000,
+    });
+
+    expect(updated.limits).toMatchObject({
+      contextTokens: 1_000_000,
+      autoCompactTokenLimit: 100_000,
+    });
+  });
+
+  it('restores configured operational limits after authoritative context expands', () => {
+    const registry = new LlmModelRegistry();
+    registry.registerProvider(provider('custom', 'byok'));
+    const model = registry.registerModel({
+      providerId: 'custom',
+      model: 'expanding-context-model',
+      limits: {
+        contextTokens: 64_000,
+        effectiveContextTokens: 128_000,
+        autoCompactTokenLimit: 100_000,
+      },
+    });
+
+    expect(model.limits).toMatchObject({
+      contextTokens: 64_000,
+      effectiveContextTokens: 64_000,
+      autoCompactTokenLimit: 64_000,
+    });
+
+    const updated = registry.applyModelMetadata(model.id, {
+      model: model.model,
+      source: 'provider-api',
+      capabilities: {},
+      contextTokens: 1_000_000,
+    });
+
+    expect(updated.limits).toMatchObject({
+      contextTokens: 1_000_000,
+      effectiveContextTokens: 128_000,
+      autoCompactTokenLimit: 100_000,
+    });
+  });
+
+  it('clamps operational limits when discovered model capacity is smaller', () => {
+    const registry = new LlmModelRegistry();
+    registry.registerProvider(provider('custom', 'byok'));
+    const model = registry.registerModel({
+      providerId: 'custom',
+      model: 'shrinking-context-model',
+      limits: {
+        contextTokens: 200_000,
+        effectiveContextTokens: 150_000,
+        autoCompactTokenLimit: 140_000,
+      },
+    });
+
+    const updated = registry.applyModelMetadata(model.id, {
+      model: model.model,
+      source: 'provider-api',
+      capabilities: {},
+      contextTokens: 100_000,
+    });
+
+    expect(updated.limits).toMatchObject({
+      contextTokens: 100_000,
+      effectiveContextTokens: 100_000,
+      autoCompactTokenLimit: 100_000,
+    });
+  });
 });
 
 function provider(id: string, mode: LlmProvider['mode']): LlmProvider {

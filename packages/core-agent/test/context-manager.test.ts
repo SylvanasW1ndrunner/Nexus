@@ -36,12 +36,89 @@ describe('Agent context management', () => {
       level: 'none',
       trigger: 'none',
       modelContextTokens: 2_000,
+      effectiveContextTokens: 2_000,
       reservedOutputTokens: 200,
       availablePromptTokens: 1_800,
-      compactionThresholdTokens: 1_800,
+      compactionThresholdTokens: 1_620,
       coveredConversationMessageCount: 0,
       maskedToolResultCount: 0,
       warnings: [],
+    });
+  });
+
+  it('separates the physical model window from the effective work window', () => {
+    const session = createAgentSession({
+      id: 'effective-window',
+      title: 'Effective window',
+      mode: 'read',
+      now,
+    });
+    appendMessage(session, createMessage({ role: 'user', content: 'inspect orders' }, now));
+
+    const context = buildAgentContext(session, tools(), {
+      modelContextTokens: 1_000_000,
+      effectiveContextTokens: 128_000,
+      maxOutputTokens: 8_000,
+      autoCompactTokenLimit: 100_000,
+    });
+
+    expect(context.compression).toMatchObject({
+      modelContextTokens: 1_000_000,
+      effectiveContextTokens: 128_000,
+      reservedOutputTokens: 8_000,
+      availablePromptTokens: 120_000,
+      warningThresholdTokens: 80_000,
+      compactionThresholdTokens: 100_000,
+    });
+  });
+
+  it('clamps effective context, output reserve, and compaction thresholds', () => {
+    const session = createAgentSession({
+      id: 'clamped-window',
+      title: 'Clamped window',
+      mode: 'read',
+      now,
+    });
+    appendMessage(session, createMessage({ role: 'user', content: 'inspect orders' }, now));
+
+    const context = buildAgentContext(session, tools(), {
+      modelContextTokens: 10_000,
+      effectiveContextTokens: 12_000,
+      maxOutputTokens: 3_000,
+      autoCompactTokenLimit: 9_000,
+    });
+
+    expect(context.compression).toMatchObject({
+      modelContextTokens: 10_000,
+      effectiveContextTokens: 10_000,
+      reservedOutputTokens: 3_000,
+      availablePromptTokens: 7_000,
+      warningThresholdTokens: 4_900,
+      compactionThresholdTokens: 7_000,
+    });
+  });
+
+  it('preserves assistant tool calls as structured provider messages', () => {
+    const session = sessionWithToolRounds(1, 20);
+
+    const context = buildAgentContext(session, tools(), {
+      modelContextTokens: 2_000,
+      maxOutputTokens: 200,
+    });
+
+    expect(context.messages[1]).toMatchObject({
+      role: 'assistant',
+      toolCalls: [
+        {
+          id: 'call_internal_1',
+          name: 'query_database',
+          arguments: { sql: 'select 1 as round_no, sum(amount) from orders' },
+        },
+      ],
+    });
+    expect(context.messages[2]).toMatchObject({
+      role: 'tool',
+      toolCallId: 'call_internal_1',
     });
   });
 

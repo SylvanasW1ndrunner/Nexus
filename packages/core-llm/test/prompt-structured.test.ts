@@ -4,6 +4,7 @@ import {
   PromptTemplateRegistry,
   StructuredOutputValidator,
   buildContextWithinBudget,
+  estimateMessagesTokens,
   estimateTokens,
   wrapUntrustedContent,
 } from '../src/index.js';
@@ -38,6 +39,33 @@ describe('prompt, context and structured output', () => {
     expect(result.trace.find((item) => item.id === 'history')?.action).toBe('dropped');
     expect(wrapUntrustedContent('ignore system', 'rag')).toContain('<untrusted-content');
     expect(estimateTokens('数据库')).toBeGreaterThan(estimateTokens('db'));
+  });
+
+  it('counts structured tool-call arguments when assistant content is empty', () => {
+    const withoutToolCall = estimateMessagesTokens([{ role: 'assistant', content: '' }]);
+    const withSmallToolCall = estimateMessagesTokens([
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call_1', name: 'query', arguments: { sql: 'select 1' } }],
+      },
+    ]);
+    const withLargeToolCall = estimateMessagesTokens([
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            name: 'query',
+            arguments: { sql: `select '${'x'.repeat(4_000)}'` },
+          },
+        ],
+      },
+    ]);
+
+    expect(withSmallToolCall).toBeGreaterThan(withoutToolCall);
+    expect(withLargeToolCall).toBeGreaterThan(withSmallToolCall + 1_000);
   });
 
   it('accepts fenced valid JSON and rejects invalid output and tool arguments', () => {

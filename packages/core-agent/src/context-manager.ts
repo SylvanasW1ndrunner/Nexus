@@ -19,6 +19,8 @@ import type {
 
 export type AgentContextManagerOptions = {
   modelContextTokens?: number;
+  effectiveContextTokens?: number;
+  autoCompactTokenLimit?: number;
   maxOutputTokens?: number;
   keepRecentMessages?: number;
   maxToolResultChars?: number;
@@ -47,6 +49,7 @@ export type AgentContextCompactionPlan = {
   requestMaxToolResultChars: number;
   requestMaxMessageTokens: number;
   modelContextTokens: number;
+  effectiveContextTokens: number;
   reservedOutputTokens: number;
   availablePromptTokens: number;
 };
@@ -56,7 +59,7 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
 const DEFAULT_KEEP_RECENT_MESSAGES = 12;
 const DEFAULT_MAX_TOOL_RESULT_CHARS = 1_200;
 const DEFAULT_WARNING_THRESHOLD_RATIO = 0.7;
-const DEFAULT_COMPACTION_THRESHOLD_RATIO = 1;
+const DEFAULT_COMPACTION_THRESHOLD_RATIO = 0.9;
 const COMPACTION_PROMPT = [
   'You are a loss-aware context compactor for an Agent.',
   'Create a concise semantic checkpoint that lets the Agent continue the same task without the omitted transcript.',
@@ -145,6 +148,7 @@ export function buildAgentContext(
       originalTokenEstimate,
       finalTokenEstimate,
       modelContextTokens: window.modelContextTokens,
+      effectiveContextTokens: window.effectiveContextTokens,
       reservedOutputTokens: window.reservedOutputTokens,
       availablePromptTokens: window.availablePromptTokens,
       warningThresholdTokens: thresholds.warningThresholdTokens,
@@ -434,18 +438,14 @@ function toLlmMessage(message: AgentMessage): LlmMessage {
     };
   }
   if (message.role === 'assistant' && message.toolCalls?.length) {
-    const calls = message.toolCalls.map((call) => ({
-      name: call.name,
-      arguments: redactPersistedAgentValue(call.arguments),
-    }));
     return {
       role: 'assistant',
-      content: [
-        message.content,
-        `<tool_calls>${JSON.stringify(calls)}</tool_calls>`,
-      ]
-        .filter(Boolean)
-        .join('\n'),
+      content: message.content,
+      toolCalls: message.toolCalls.map((call) => ({
+        id: call.id,
+        name: call.name,
+        arguments: redactPersistedAgentValue(call.arguments) as Record<string, unknown>,
+      })),
     };
   }
   return { role: message.role, content: message.content };
@@ -771,6 +771,7 @@ function conversationGroups(
 
 function normalizeContextWindow(options: AgentContextManagerOptions): {
   modelContextTokens: number;
+  effectiveContextTokens: number;
   reservedOutputTokens: number;
   availablePromptTokens: number;
 } {
@@ -778,20 +779,25 @@ function normalizeContextWindow(options: AgentContextManagerOptions): {
     options.modelContextTokens,
     DEFAULT_MODEL_CONTEXT_TOKENS,
   );
+  const effectiveContextTokens = Math.min(
+    modelContextTokens,
+    positiveInteger(options.effectiveContextTokens, modelContextTokens),
+  );
   const requestedOutput = positiveInteger(
     options.maxOutputTokens,
     DEFAULT_MAX_OUTPUT_TOKENS,
   );
   const reservedOutputTokens = Math.min(
-    Math.max(1, modelContextTokens - 1),
+    Math.max(1, effectiveContextTokens - 1),
     requestedOutput,
   );
   return {
     modelContextTokens,
+    effectiveContextTokens,
     reservedOutputTokens,
     availablePromptTokens: Math.max(
       1,
-      modelContextTokens - reservedOutputTokens,
+      effectiveContextTokens - reservedOutputTokens,
     ),
   };
 }
@@ -807,21 +813,35 @@ function contextThresholds(
     options.warningThresholdRatio,
     DEFAULT_WARNING_THRESHOLD_RATIO,
   );
-  const compactionRatio = Math.max(
-    warningRatio,
-    ratio(
-      options.compactionThresholdRatio,
-      DEFAULT_COMPACTION_THRESHOLD_RATIO,
+  const ratioThreshold = Math.floor(
+    availablePromptTokens *
+      Math.max(
+        warningRatio,
+        ratio(
+          options.compactionThresholdRatio,
+          DEFAULT_COMPACTION_THRESHOLD_RATIO,
+        ),
+      ),
+  );
+  const compactionThresholdTokens = Math.max(
+    1,
+    Math.min(
+      availablePromptTokens,
+      positiveInteger(options.autoCompactTokenLimit, ratioThreshold),
+    ),
+  );
+  const warningThresholdTokens = Math.max(
+    1,
+    Math.min(
+      Math.floor(availablePromptTokens * warningRatio),
+      Math.floor(compactionThresholdTokens * 0.8),
     ),
   );
   return {
-    warningThresholdTokens: Math.max(
-      1,
-      Math.floor(availablePromptTokens * warningRatio),
-    ),
+    warningThresholdTokens,
     compactionThresholdTokens: Math.max(
-      1,
-      Math.floor(availablePromptTokens * compactionRatio),
+      warningThresholdTokens,
+      compactionThresholdTokens,
     ),
   };
 }
