@@ -21,6 +21,8 @@ const runtime = new DatabaseAgentRuntime(options);
 | `provider`             | `LlmProvider`                                  | 初始模型 Provider；必须与 `model` 同时提供                      |
 | `gateway`              | `LlmGateway`                                   | 注入自定义模型 Gateway                                          |
 | `model`                | `string`                                       | 初始模型 ID；必须与 `provider` 同时提供                         |
+| `canonicalModel`       | `string`                                       | 可选的 `provider/model` 元数据身份，不改变实际请求模型名        |
+| `generation`           | `LlmGenerationConfig`                          | Runtime 级生成参数；省略的字段沿用模型默认值                    |
 | `tenantId`             | `string`                                       | `"local-default"`                                               |
 | `driver`               | `IDatabaseDriver`                              | PostgreSQL Driver 兼容边界                                      |
 | `databaseAccess`       | `DatabaseAccessRuntime`                        | 注入统一数据库 Runtime                                          |
@@ -94,9 +96,31 @@ type AgentWebAdapter = {
 
 ## Runtime 生命周期与状态
 
-### `configureProvider(provider, model): void`
+### `configureProvider(provider, model, options?): void`
 
-注册或替换当前 Provider 与模型。
+注册或替换当前 Provider 与模型。`canonicalModel` 可将中转站的自定义模型名映射到内置元数据，
+但不会改变发送给 Endpoint 的模型 ID；`generation` 会替换 Runtime 级对话默认参数。
+
+```ts
+runtime.configureProvider(provider, 'relay-model-name', {
+  canonicalModel: 'openai/gpt-4o',
+  generation: {
+    temperature: 0.2,
+    topP: 0.9,
+    maxOutputTokens: 4096,
+  },
+});
+```
+
+`generation` 是统一的模型对话配置，不按 Agent、NL2SQL 等任务拆分。支持字段为
+`temperature`、`topP`、`maxOutputTokens`、`seed`、`stop` 和 `reasoningEffort`。
+`generate`、`runAiSqlAgent`、`compactAiSqlAgentSession` 也接受同一对象作为单次覆盖；
+未填写的字段继续使用 Runtime 或 Endpoint/模型默认值。
+
+物理上下文窗口属于只读发现元数据，不能在这里配置。Endpoint 和内置目录均无法识别时，
+Runtime 会明确报告“未知”，并在获得可靠元数据前停止自动压缩。如果 Endpoint 元数据明确
+标记某个已配置生成参数不受支持，调用会在推理前以 `LLM_PARAMETER_UNSUPPORTED` 失败，
+并指出需要移除的参数。
 
 ### `status(): RuntimeStatus`
 

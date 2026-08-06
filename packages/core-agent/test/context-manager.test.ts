@@ -15,6 +15,42 @@ import {
 const now = () => '2026-07-24T00:00:00.000Z';
 
 describe('Agent context management', () => {
+  it('keeps an unknown model window unknown and disables automatic compaction', () => {
+    const session = sessionWithToolRounds(10, 2_000);
+
+    const context = buildAgentContext(session, tools());
+
+    expect(context.requiresCompaction).toBe(false);
+    expect(context.compression).toMatchObject({
+      phase: 'unknown_window',
+      level: 'none',
+      modelContextTokens: null,
+      reservedOutputTokens: null,
+      availablePromptTokens: null,
+      warningThresholdTokens: null,
+      compactionThresholdTokens: null,
+      maskedToolResultCount: 0,
+    });
+    expect(createAgentContextCompactionPlan(session, {}, 'auto')).toBeUndefined();
+  });
+
+  it('allows manual compaction when the physical model window is unknown without inventing one', () => {
+    const session = sessionWithToolRounds(10, 2_000);
+    const plan = createAgentContextCompactionPlan(session, {}, 'manual');
+
+    expect(plan).toBeDefined();
+    expect(plan?.modelContextTokens).toBeNull();
+    if (!plan) return;
+    const checkpoint = createAgentContextCheckpoint({
+      session,
+      plan,
+      method: 'deterministic-fallback',
+      summary: 'Keep the confirmed order facts.',
+      now: now(),
+    });
+    expect(checkpoint.modelContextTokens).toBeNull();
+  });
+
   it('keeps a small conversation unchanged within the model capacity', () => {
     const session = createAgentSession({
       id: 'small',
@@ -90,6 +126,70 @@ describe('Agent context management', () => {
     const lastCovered = covered.at(-1);
     expect(lastCovered?.role === 'assistant' && Boolean(lastCovered.toolCalls?.length)).toBe(false);
     expect(plan?.sourceMessages.length).toBeGreaterThan(0);
+  });
+
+  it('preserves assistant Tool Calls as typed messages without textual protocol markup', () => {
+    const session = createAgentSession({
+      id: 'typed-tool-history',
+      title: 'Typed Tool History',
+      mode: 'read',
+      now,
+    });
+    appendMessage(
+      session,
+      createMessage(
+        {
+          role: 'assistant',
+          content: '我先读取订单表结构。',
+          toolCalls: [
+            {
+              id: 'call-7',
+              name: 'query_database',
+              arguments: { sql: 'select count(*) from orders' },
+            },
+          ],
+        },
+        now,
+      ),
+    );
+    appendMessage(
+      session,
+      createMessage(
+        {
+          role: 'tool',
+          toolCallId: 'call-7',
+          toolName: 'query_database',
+          content: '{"count":42}',
+        },
+        now,
+      ),
+    );
+
+    const messages = buildAgentContext(session, tools(), {
+      modelContextTokens: 8_000,
+      maxOutputTokens: 1_000,
+    }).messages;
+
+    expect(messages).toEqual([
+      {
+        role: 'assistant',
+        content: '我先读取订单表结构。',
+        toolCalls: [
+          {
+            id: 'call-7',
+            name: 'query_database',
+            arguments: { sql: 'select count(*) from orders' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        name: 'query_database',
+        content: '{"count":42}',
+        toolCallId: 'call-7',
+      },
+    ]);
+    expect(JSON.stringify(messages)).not.toContain('<tool_calls>');
   });
 
   it('batches a long compaction source on complete tool interaction boundaries', () => {

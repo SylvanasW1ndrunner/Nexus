@@ -7,6 +7,12 @@ export type LlmMessage = {
   content: string;
   name?: string;
   toolCallId?: string;
+  /** Structured assistant calls. Provider adapters map these to their native wire format. */
+  toolCalls?: LlmToolCall[];
+  /** Provider-neutral metadata for a tool result message. */
+  toolResult?: {
+    isError?: boolean;
+  };
 };
 
 export type JsonSchema = Record<string, unknown>;
@@ -44,11 +50,34 @@ export type LlmReasoningOptions = {
   maxTokens?: number;
 };
 
+export type LlmGenerationConfig = {
+  temperature?: number;
+  topP?: number;
+  maxOutputTokens?: number;
+  seed?: number;
+  stop?: string[];
+  reasoningEffort?: 'low' | 'medium' | 'high';
+};
+
+export type LlmGenerationParameterName =
+  | 'temperature'
+  | 'topP'
+  | 'maxOutputTokens'
+  | 'seed'
+  | 'stop'
+  | 'reasoningEffort';
+
+export type LlmGenerationParameterSupport = Record<
+  LlmGenerationParameterName,
+  LlmCapabilityStatus
+>;
+
 export type LlmChatRequest = {
   model: string;
   messages: LlmMessage[];
   tools?: LlmTool[];
   temperature?: number;
+  topP?: number;
   maxTokens?: number;
   responseFormat?: LlmResponseFormat;
   reasoning?: LlmReasoningOptions;
@@ -113,14 +142,19 @@ export type LlmProviderAvailability = {
   detail?: string;
 };
 
-export type LlmModelMetadataSource = 'provider-api' | 'provider-declaration';
+export type LlmModelMetadataSource =
+  | 'provider-api'
+  | 'models-dev'
+  | 'provider-declaration';
 
 export type LlmModelMetadata = {
   model: string;
   source: LlmModelMetadataSource;
   capabilities: Partial<LlmProviderCapabilities>;
   contextTokens?: number;
+  maxInputTokens?: number;
   maxOutputTokens?: number;
+  generationParameters?: Partial<LlmGenerationParameterSupport>;
   family?: string;
   parameterSize?: string;
   quantization?: string;
@@ -188,6 +222,16 @@ export const UNKNOWN_LLM_CAPABILITIES: Readonly<LlmProviderCapabilities> = Objec
   rerank: 'unknown',
 });
 
+export const UNKNOWN_LLM_GENERATION_PARAMETERS: Readonly<LlmGenerationParameterSupport> =
+  Object.freeze({
+    temperature: 'unknown',
+    topP: 'unknown',
+    maxOutputTokens: 'unknown',
+    seed: 'unknown',
+    stop: 'unknown',
+    reasoningEffort: 'unknown',
+  });
+
 export const UNKNOWN_LLM_PROVIDER_PROTOCOL_CAPABILITIES: Readonly<LlmProviderProtocolCapabilities> =
   Object.freeze({
     nativeDeferredTools: 'unknown',
@@ -205,6 +249,7 @@ export interface LlmProvider {
   readonly mode: LlmProviderMode;
   readonly protocol?: string;
   readonly capabilities?: Partial<LlmProviderCapabilities>;
+  readonly generationParameters?: Partial<LlmGenerationParameterSupport>;
   readonly protocolProfile?: LlmProviderProtocolProfile;
 
   chat(request: LlmChatRequest): Promise<LlmChatResponse>;
@@ -225,6 +270,8 @@ export type LlmErrorCode =
   | 'LLM_BAD_RESPONSE'
   | 'LLM_PROVIDER_ERROR'
   | 'LLM_CAPABILITY_UNSUPPORTED'
+  | 'LLM_PARAMETER_UNSUPPORTED'
+  | 'TOOL_PROTOCOL_MISMATCH'
   | 'LLM_NO_ROUTE'
   | 'LLM_POLICY_VIOLATION'
   | 'LLM_BUDGET_EXCEEDED'

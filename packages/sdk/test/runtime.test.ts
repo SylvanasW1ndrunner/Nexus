@@ -48,6 +48,53 @@ afterEach(async () => {
 });
 
 describe('DatabaseAgentRuntime', () => {
+  it('uses an explicit canonical model identity for a custom endpoint without inventing limits', async () => {
+    const runtime = new DatabaseAgentRuntime({
+      provider: new ScriptedAgentProvider([]),
+      model: 'proxy-model-name',
+      canonicalModel: 'openai/gpt-4o',
+      sessionDatabasePath: ':memory:',
+    });
+
+    expect(runtime.llmModels()).toMatchObject([
+      {
+        model: 'proxy-model-name',
+        canonicalModel: 'openai/gpt-4o',
+        limits: { contextTokens: 128_000, maxInputTokens: null, maxOutputTokens: 16_384 },
+        discovery: { source: 'models-dev' },
+      },
+    ]);
+    await runtime.close();
+  });
+
+  it('merges one runtime generation config with per-run overrides', async () => {
+    const provider = new ScriptedAgentProvider([
+      { text: 'Configuration applied.', toolCalls: [] },
+    ]);
+    const runtime = new DatabaseAgentRuntime({
+      provider,
+      model: 'test-model',
+      sessionDatabasePath: ':memory:',
+      generation: {
+        temperature: 0.2,
+        topP: 0.9,
+        maxOutputTokens: 1_500,
+      },
+    });
+
+    await runtime.runAgent({
+      message: 'Confirm the active configuration.',
+      generation: { temperature: 0.4 },
+    });
+
+    expect(provider.requests[0]).toMatchObject({
+      temperature: 0.4,
+      topP: 0.9,
+      maxTokens: 1_500,
+    });
+    await runtime.close();
+  });
+
   it('projects task plans as user-facing progress without internal criteria, dependencies, or evidence', () => {
     const view = toAgentSessionView({
       id: 'session-plan-view',

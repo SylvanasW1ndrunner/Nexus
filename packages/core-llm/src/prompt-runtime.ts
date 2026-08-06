@@ -179,7 +179,12 @@ export function estimateTokens(text: string): number {
 }
 
 export function estimateMessagesTokens(messages: LlmMessage[]): number {
-  return messages.reduce((total, message) => total + 4 + estimateTokens(message.content), 2);
+  return messages.reduce((total, message) => {
+    const structuredToolTokens = message.toolCalls?.length
+      ? estimateTokens(JSON.stringify(message.toolCalls))
+      : 0;
+    return total + 4 + estimateTokens(message.content) + structuredToolTokens;
+  }, 2);
 }
 
 function wrapChunk(chunk: ContextChunk): string {

@@ -1,12 +1,19 @@
 import {
   UNKNOWN_LLM_CAPABILITIES,
+  UNKNOWN_LLM_GENERATION_PARAMETERS,
   type LlmCapabilityName,
   type LlmCapabilityStatus,
+  type LlmGenerationParameterSupport,
   type LlmModelMetadata,
   type LlmProvider,
   type LlmProviderCapabilities,
   type LlmProviderMode,
 } from './types.js';
+import {
+  DEFAULT_MODEL_CATALOG,
+  resolveModelCatalogMetadata,
+  type ModelCatalogSnapshot,
+} from './model-catalog.js';
 
 export type LlmDataPolicy = {
   deployment: 'public-cloud' | 'domestic-cloud' | 'private';
@@ -23,8 +30,9 @@ export type LlmModelPricing = {
 };
 
 export type LlmModelLimits = {
-  contextTokens: number;
-  maxOutputTokens: number;
+  contextTokens: number | null;
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
   requestsPerMinute?: number;
   tokensPerMinute?: number;
   maxConcurrency?: number;
@@ -41,11 +49,13 @@ export type LlmModelProfile = {
   mode: LlmProviderMode;
   protocol: string;
   capabilities: LlmProviderCapabilities;
+  generationParameters: LlmGenerationParameterSupport;
   limits: LlmModelLimits;
   dataPolicy: LlmDataPolicy;
   quality: LlmModelQuality;
   pricing?: LlmModelPricing;
   tags?: string[];
+  canonicalModel?: string;
 };
 
 export type LlmModelHealth = {
@@ -58,6 +68,7 @@ export type LlmModelHealth = {
 
 export type LlmModelDiscoveryRecord = {
   source: LlmModelMetadata['source'];
+  sources: LlmModelMetadata['source'][];
   discoveredAt: string;
   family?: string;
   parameterSize?: string;
@@ -71,7 +82,16 @@ export type RegisteredLlmModel = LlmModelProfile & {
 
 export type RegisterModelInput = Omit<
   LlmModelProfile,
-  'id' | 'displayName' | 'enabled' | 'mode' | 'protocol' | 'capabilities' | 'limits' | 'dataPolicy' | 'quality'
+  | 'id'
+  | 'displayName'
+  | 'enabled'
+  | 'mode'
+  | 'protocol'
+  | 'capabilities'
+  | 'generationParameters'
+  | 'limits'
+  | 'dataPolicy'
+  | 'quality'
 > & {
   id?: string;
   displayName?: string;
@@ -82,11 +102,14 @@ export type RegisterModelInput = Omit<
   limits?: Partial<LlmModelLimits>;
   dataPolicy?: Partial<LlmDataPolicy>;
   quality?: LlmModelQuality;
+  canonicalModel?: string;
+  generationParameters?: Partial<LlmGenerationParameterSupport>;
 };
 
 const DEFAULT_LIMITS: LlmModelLimits = {
-  contextTokens: 32_768,
-  maxOutputTokens: 4_096,
+  contextTokens: null,
+  maxInputTokens: null,
+  maxOutputTokens: null,
 };
 
 const DEFAULT_DATA_POLICY: LlmDataPolicy = {
@@ -99,6 +122,10 @@ const DEFAULT_DATA_POLICY: LlmDataPolicy = {
 export class LlmModelRegistry {
   private readonly providers = new Map<string, LlmProvider>();
   private readonly models = new Map<string, RegisteredLlmModel>();
+
+  constructor(
+    private readonly options: { catalog?: ModelCatalogSnapshot } = {},
+  ) {}
 
   registerProvider(provider: LlmProvider): void {
     requireIdentifier(provider.id, 'provider.id');
@@ -130,11 +157,42 @@ export class LlmModelRegistry {
     const id = input.id?.trim() || `${input.providerId}:${input.model}`;
     requireIdentifier(id, 'model.id');
 
-    const capabilities = mergeCapabilities(provider, input.capabilities);
+    const catalogMetadata = resolveModelCatalogMetadata({
+      catalog: this.options.catalog ?? DEFAULT_MODEL_CATALOG,
+      providerId: input.providerId,
+      model: input.model,
+      ...(input.canonicalModel?.trim()
+        ? { canonicalModel: input.canonicalModel.trim() }
+        : {}),
+    });
+    const capabilities = mergeCapabilities(
+      provider,
+      catalogMetadata?.metadata.capabilities,
+      input.capabilities,
+    );
+    const generationParameters: LlmGenerationParameterSupport = {
+      ...UNKNOWN_LLM_GENERATION_PARAMETERS,
+      ...provider.generationParameters,
+      ...catalogMetadata?.metadata.generationParameters,
+      ...input.generationParameters,
+    };
     const limits: LlmModelLimits = {
-      contextTokens: positiveInteger(input.limits?.contextTokens ?? DEFAULT_LIMITS.contextTokens, 'contextTokens'),
-      maxOutputTokens: positiveInteger(
-        input.limits?.maxOutputTokens ?? DEFAULT_LIMITS.maxOutputTokens,
+      contextTokens: nullablePositiveInteger(
+        input.limits?.contextTokens ??
+          catalogMetadata?.metadata.contextTokens ??
+          DEFAULT_LIMITS.contextTokens,
+        'contextTokens',
+      ),
+      maxInputTokens: nullablePositiveInteger(
+        input.limits?.maxInputTokens ??
+          catalogMetadata?.metadata.maxInputTokens ??
+          DEFAULT_LIMITS.maxInputTokens,
+        'maxInputTokens',
+      ),
+      maxOutputTokens: nullablePositiveInteger(
+        input.limits?.maxOutputTokens ??
+          catalogMetadata?.metadata.maxOutputTokens ??
+          DEFAULT_LIMITS.maxOutputTokens,
         'maxOutputTokens',
       ),
       ...(input.limits?.requestsPerMinute === undefined
@@ -163,13 +221,38 @@ export class LlmModelRegistry {
       mode: input.mode ?? provider.mode,
       protocol: input.protocol?.trim() || provider.protocol || 'custom',
       capabilities,
+      generationParameters,
       limits,
       dataPolicy,
       quality: input.quality ?? 'balanced',
-      ...(input.pricing === undefined ? {} : { pricing: normalizePricing(input.pricing) }),
+      ...(input.pricing === undefined && catalogMetadata?.pricing === undefined
+        ? {}
+        : {
+            pricing: normalizePricing(
+              input.pricing ?? catalogMetadata!.pricing!,
+            ),
+          }),
       ...(input.tags === undefined ? {} : { tags: [...input.tags] }),
+      ...(input.canonicalModel?.trim()
+        ? { canonicalModel: input.canonicalModel.trim() }
+        : catalogMetadata === undefined
+          ? {}
+          : { canonicalModel: catalogMetadata.canonicalModel }),
       health: previous?.health ?? { state: 'unknown', consecutiveFailures: 0 },
-      ...(previous?.discovery === undefined ? {} : { discovery: { ...previous.discovery } }),
+      ...(previous?.discovery !== undefined
+        ? { discovery: { ...previous.discovery, sources: [...previous.discovery.sources] } }
+        : catalogMetadata === undefined
+          ? {}
+          : {
+              discovery: {
+                source: 'models-dev',
+                sources: ['models-dev'],
+                discoveredAt: catalogMetadata.generatedAt,
+                ...(catalogMetadata.metadata.family === undefined
+                  ? {}
+                  : { family: catalogMetadata.metadata.family }),
+              },
+            }),
     };
     this.models.set(id, profile);
     return cloneModel(profile);
@@ -223,21 +306,38 @@ export class LlmModelRegistry {
   ): RegisteredLlmModel {
     const current = this.requireModel(id);
     current.capabilities = { ...current.capabilities, ...input.capabilities };
+    current.generationParameters = {
+      ...current.generationParameters,
+      ...input.generationParameters,
+    };
     current.limits = {
       ...current.limits,
       ...(input.contextTokens === undefined
         ? {}
         : { contextTokens: positiveInteger(input.contextTokens, 'contextTokens') }),
+      ...(input.maxInputTokens === undefined
+        ? {}
+        : { maxInputTokens: positiveInteger(input.maxInputTokens, 'maxInputTokens') }),
       ...(input.maxOutputTokens === undefined
         ? {}
         : { maxOutputTokens: positiveInteger(input.maxOutputTokens, 'maxOutputTokens') }),
     };
+    const previousSources = current.discovery?.sources ?? [];
+    const sources = [...new Set([...previousSources, input.source])];
+    const previousSource = current.discovery?.source;
+    const family = input.family ?? current.discovery?.family;
+    const parameterSize = input.parameterSize ?? current.discovery?.parameterSize;
+    const quantization = input.quantization ?? current.discovery?.quantization;
     current.discovery = {
-      source: input.source,
+      source:
+        previousSource === undefined || metadataSourceRank(input.source) >= metadataSourceRank(previousSource)
+          ? input.source
+          : previousSource,
+      sources,
       discoveredAt: discoveredAt.toISOString(),
-      ...(input.family === undefined ? {} : { family: input.family }),
-      ...(input.parameterSize === undefined ? {} : { parameterSize: input.parameterSize }),
-      ...(input.quantization === undefined ? {} : { quantization: input.quantization }),
+      ...(family === undefined ? {} : { family }),
+      ...(parameterSize === undefined ? {} : { parameterSize }),
+      ...(quantization === undefined ? {} : { quantization }),
     };
     return cloneModel(current);
   }
@@ -255,6 +355,7 @@ export class LlmModelRegistry {
 
 function mergeCapabilities(
   provider: LlmProvider,
+  catalog: Partial<LlmProviderCapabilities> | undefined,
   declared: Partial<LlmProviderCapabilities> | undefined,
 ): LlmProviderCapabilities {
   return {
@@ -264,6 +365,7 @@ function mergeCapabilities(
     embeddings: provider.embed ? 'unknown' : 'unsupported',
     rerank: provider.rerank ? 'unknown' : 'unsupported',
     ...provider.capabilities,
+    ...catalog,
     ...declared,
   };
 }
@@ -288,6 +390,16 @@ function positiveInteger(value: number, name: string): number {
   return value;
 }
 
+function nullablePositiveInteger(value: number | null, name: string): number | null {
+  return value === null ? null : positiveInteger(value, name);
+}
+
+function metadataSourceRank(source: LlmModelMetadata['source']): number {
+  if (source === 'provider-api') return 3;
+  if (source === 'models-dev') return 2;
+  return 1;
+}
+
 function requireIdentifier(value: string, name: string): void {
   if (!value.trim()) throw new Error(`${name} cannot be empty.`);
 }
@@ -296,11 +408,14 @@ function cloneModel(model: RegisteredLlmModel): RegisteredLlmModel {
   return {
     ...model,
     capabilities: { ...model.capabilities },
+    generationParameters: { ...model.generationParameters },
     limits: { ...model.limits },
     dataPolicy: { ...model.dataPolicy, regions: [...model.dataPolicy.regions] },
     ...(model.pricing === undefined ? {} : { pricing: { ...model.pricing } }),
     ...(model.tags === undefined ? {} : { tags: [...model.tags] }),
     health: { ...model.health },
-    ...(model.discovery === undefined ? {} : { discovery: { ...model.discovery } }),
+    ...(model.discovery === undefined
+      ? {}
+      : { discovery: { ...model.discovery, sources: [...model.discovery.sources] } }),
   };
 }

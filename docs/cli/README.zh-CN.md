@@ -62,10 +62,20 @@ my-data-project/
 在 `my-data-project/.env` 写入：
 
 ```dotenv
+SCHEMANAUT_LLM_PROTOCOL=openai-chat
 SCHEMANAUT_LLM_BASE_URL=https://api.siliconflow.cn/v1
 SCHEMANAUT_LLM_API_KEY=替换为你的密钥
 SCHEMANAUT_LLM_MODEL=替换为支持Tool-Calling的模型
 SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
+
+# 可选：第三方中转站使用自定义模型名时，指定其真实元数据身份
+# SCHEMANAUT_LLM_CANONICAL_MODEL=openai/gpt-4o
+
+# 可选：不设置时沿用 Endpoint/模型默认值
+# SCHEMANAUT_LLM_TEMPERATURE=0.2
+# SCHEMANAUT_LLM_TOP_P=0.9
+# SCHEMANAUT_LLM_MAX_OUTPUT_TOKENS=4096
+# SCHEMANAUT_LLM_REASONING_EFFORT=medium
 
 # 可选：Session、检查点和偏好的 SQLite 文件
 # SCHEMANAUT_STATE_DATABASE_PATH=.schemanaut/state.db
@@ -76,10 +86,32 @@ SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
 
 CLI 先加载 `<project>/.env`，再读取进程环境变量；进程中已经存在的变量优先。配置解析错误只报告行号和错误类型，不回显密钥值。
 
+`SCHEMANAUT_LLM_PROTOCOL` 支持 `openai-chat`、`openai-responses`、`anthropic`、`ollama` 和 `vllm`。相同配置也可写入 `.schemanaut/settings.json` 的单个 `llm.generation` 对象；不按 Agent/NL2SQL 等任务拆分参数。模型上下文窗口不可手工设置：运行时依次使用 Endpoint 元数据、内置 models.dev 目录，均未知时明确显示“未知”且不自动压缩。模型明确拒绝温度等参数时，CLI 会报告具体不支持的参数。
+
+项目配置示例（API Key 应保留在 `.env`，不要写入此文件）：
+
+```json
+{
+  "version": 1,
+  "llm": {
+    "protocol": "openai-chat",
+    "baseUrl": "https://api.siliconflow.cn/v1",
+    "model": "provider-model-id",
+    "canonicalModel": "openai/gpt-4o",
+    "generation": {
+      "temperature": 0.2,
+      "topP": 0.9,
+      "maxOutputTokens": 4096
+    }
+  }
+}
+```
+
 本地 Ollama 示例：
 
 ```dotenv
-SCHEMANAUT_LLM_BASE_URL=http://127.0.0.1:11434/v1
+SCHEMANAUT_LLM_PROTOCOL=ollama
+SCHEMANAUT_LLM_BASE_URL=http://127.0.0.1:11434
 SCHEMANAUT_LLM_MODEL=qwen2.5-coder:14b
 SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
 ```
@@ -89,9 +121,11 @@ Ollama 可省略 `SCHEMANAUT_LLM_API_KEY`。模型本身仍需正确支持 Ollam
 第三方中转站只要兼容 OpenAI API，填写它提供的 Base URL、API Key 和模型名即可：
 
 ```dotenv
+SCHEMANAUT_LLM_PROTOCOL=openai-chat
 SCHEMANAUT_LLM_BASE_URL=https://your-provider.example/v1
 SCHEMANAUT_LLM_API_KEY=...
 SCHEMANAUT_LLM_MODEL=provider-model-id
+# SCHEMANAUT_LLM_CANONICAL_MODEL=openai/gpt-4o
 ```
 
 ### 3.3 一条命令进入 CLI
@@ -138,6 +172,7 @@ npx schemanaut --help
 /<skill> [任务]
 /compact [关注点]
 /trace on|off
+/model
 /mcp list
 /mcp start <server-id>
 /mcp stop <server-id>
@@ -149,7 +184,8 @@ npx schemanaut --help
 - `/resume` 恢复一个持久 Session；可先用 `/sessions` 找到 ID。
 - `/skills` 列出可用 Skill；使用 `/<skill> [任务]` 显式激活。
 - `/compact` 手动触发当前 Session 的上下文压缩；完整历史仍保留。
-- `/trace on|off` 显示或隐藏面向用户的执行轨迹，默认开启；轨迹包含完整 SQL/命令、执行状态、耗时、退出码、重要错误与产物，不包含隐藏推理。
+- `/trace on|off` 显示或隐藏面向用户的执行轨迹，默认开启；轨迹包含完整 SQL/命令、执行状态、耗时、退出码、重要错误与产物，不包含隐藏推理。TTY 中最终答复出现时会折叠本轮轨迹，按 `Ctrl+O` 可随时展开或收起。
+- `/model` 显示当前协议、模型、物理上下文窗口、可输入容量和元数据来源；不会把未知模型伪装成 32K。
 - `/mcp` 管理当前 Project 在 `.schemanaut/mcp.json` 中声明的 MCP Server。
 - `/exit` 或 `/quit` 退出。
 

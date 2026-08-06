@@ -10,6 +10,7 @@ import type { ResourceRegistry } from '@dbagent/core-resource';
 import type {
   LlmGateway,
   LlmGatewayChatRequest,
+  LlmGenerationConfig,
   LlmPolicyLayers,
   LlmBudgetLimits,
   LlmMetricsSnapshot,
@@ -54,6 +55,10 @@ export type DatabaseAgentRuntimeOptions = {
   provider?: LlmProvider;
   gateway?: LlmGateway;
   model?: string;
+  /** Optional models.dev identity (`provider/model`) for custom or proxied model names. */
+  canonicalModel?: string;
+  /** Default generation parameters for every model conversation. Provider defaults apply when omitted. */
+  generation?: LlmGenerationConfig;
   tenantId?: string;
   driver?: IDatabaseDriver;
   databaseAccess?: DatabaseAccessRuntime;
@@ -114,6 +119,13 @@ export type DatabaseAgentRuntimeOptions = {
   autoStartMcp?: boolean;
 };
 
+export type ConfigureLlmProviderOptions = {
+  /** Optional models.dev identity (`provider/model`) for custom or proxied model names. */
+  canonicalModel?: string;
+  /** Replaces the Runtime-wide generation configuration. */
+  generation?: LlmGenerationConfig;
+};
+
 export type PostgresConnectionInput = {
   id?: string;
   name?: string;
@@ -154,6 +166,8 @@ export type SchemaIndexSnapshot = {
 export type GenerateSqlInput = {
   question: string;
   maxContextChars?: number;
+  /** Per-call overrides merged over the Runtime generation configuration. */
+  generation?: LlmGenerationConfig;
   signal?: AbortSignal;
 };
 
@@ -168,6 +182,8 @@ export type RunAiSqlAgentInput = {
    * Runtime default and cannot be supplied when resuming a Session.
    */
   sessionSkills?: SkillOverlay[];
+  /** Per-run overrides merged over the Runtime generation configuration. */
+  generation?: LlmGenerationConfig;
   maxIterations?: number;
   maxToolExecutionMs?: number;
   systemPrompt?: AgentSystemPrompt;
@@ -182,6 +198,8 @@ export type CompactAiSqlAgentSessionInput = {
   session?: AgentSession;
   sessionId?: string;
   focus?: string;
+  /** Per-call overrides merged over the Runtime generation configuration. */
+  generation?: LlmGenerationConfig;
   signal?: AbortSignal;
 };
 

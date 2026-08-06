@@ -182,8 +182,16 @@ function exclusionReasons(model: RegisteredLlmModel, input: LlmRouteInput, polic
   if (!regionsOverlap(model.dataPolicy.regions, policy.allowedRegions)) reasons.push('region is not allowed by policy');
   if (!regionsOverlap(model.dataPolicy.regions, requirements.allowedRegions)) reasons.push('region does not satisfy task');
   if (requirements.sensitiveData && model.dataPolicy.allowsSensitiveData !== true) reasons.push('sensitive data is not allowed');
-  if ((requirements.minContextTokens ?? 0) > model.limits.contextTokens) reasons.push('context limit is too small');
-  if ((requirements.minOutputTokens ?? 0) > model.limits.maxOutputTokens) reasons.push('output limit is too small');
+  if (
+    model.limits.contextTokens !== null &&
+    (requirements.minContextTokens ?? 0) > model.limits.contextTokens
+  )
+    reasons.push('context limit is too small');
+  if (
+    model.limits.maxOutputTokens !== null &&
+    (requirements.minOutputTokens ?? 0) > model.limits.maxOutputTokens
+  )
+    reasons.push('output limit is too small');
   for (const capability of requirements.capabilities ?? []) {
     if (model.capabilities[capability] !== 'supported') reasons.push(`${capability} is not confirmed supported`);
   }

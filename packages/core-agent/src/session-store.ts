@@ -130,7 +130,7 @@ type ContextCheckpointRow = {
   covered_message_count: number;
   source_token_estimate: number;
   summary_token_estimate: number;
-  model_context_tokens: number;
+  model_context_tokens: number | null;
   focus: string | null;
   created_at: string;
 };
@@ -856,7 +856,7 @@ function initializeDatabase(database: NodeDatabaseSync): void {
       covered_message_count INTEGER NOT NULL CHECK (covered_message_count >= 0),
       source_token_estimate INTEGER NOT NULL CHECK (source_token_estimate >= 0),
       summary_token_estimate INTEGER NOT NULL CHECK (summary_token_estimate >= 0),
-      model_context_tokens INTEGER NOT NULL CHECK (model_context_tokens > 0),
+      model_context_tokens INTEGER CHECK (model_context_tokens > 0),
       focus TEXT,
       created_at TEXT NOT NULL,
       PRIMARY KEY (session_id, sequence)
@@ -921,6 +921,7 @@ function initializeDatabase(database: NodeDatabaseSync): void {
     );
   `);
   migrateLegacySessionTable(database);
+  migrateNullableContextWindows(database);
   migrateLegacySessionProjects(database);
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_user_archive_updated
@@ -929,6 +930,57 @@ function initializeDatabase(database: NodeDatabaseSync): void {
   migrateLegacySessionPayloads(database);
   migrateLegacySubagentContextStrategy(database);
   migrateLegacySqlToolResults(database);
+}
+
+function migrateNullableContextWindows(database: NodeDatabaseSync): void {
+  const columns = database
+    .prepare('PRAGMA table_info(agent_context_checkpoints)')
+    .all() as unknown as Array<{ name: string; notnull: number }>;
+  const contextColumn = columns.find((column) => column.name === 'model_context_tokens');
+  if (!contextColumn || contextColumn.notnull === 0) return;
+
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    database.exec(`
+      ALTER TABLE agent_context_checkpoints RENAME TO agent_context_checkpoints_legacy_window;
+
+      CREATE TABLE agent_context_checkpoints (
+        session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        version INTEGER NOT NULL,
+        trigger TEXT NOT NULL,
+        method TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        covered_message_count INTEGER NOT NULL CHECK (covered_message_count >= 0),
+        source_token_estimate INTEGER NOT NULL CHECK (source_token_estimate >= 0),
+        summary_token_estimate INTEGER NOT NULL CHECK (summary_token_estimate >= 0),
+        model_context_tokens INTEGER CHECK (model_context_tokens > 0),
+        focus TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, sequence)
+      );
+
+      INSERT INTO agent_context_checkpoints (
+        session_id, sequence, version, trigger, method, summary,
+        covered_message_count, source_token_estimate, summary_token_estimate,
+        model_context_tokens, focus, created_at
+      )
+      SELECT
+        session_id, sequence, version, trigger, method, summary,
+        covered_message_count, source_token_estimate, summary_token_estimate,
+        model_context_tokens, focus, created_at
+      FROM agent_context_checkpoints_legacy_window;
+
+      DROP TABLE agent_context_checkpoints_legacy_window;
+
+      CREATE INDEX IF NOT EXISTS idx_agent_context_checkpoints_created
+        ON agent_context_checkpoints(session_id, created_at DESC);
+    `);
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function migrateLegacySessionTable(database: NodeDatabaseSync): void {

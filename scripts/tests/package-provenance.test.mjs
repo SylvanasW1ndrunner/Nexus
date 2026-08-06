@@ -82,6 +82,10 @@ test('package provenance binds dirty-workspace inputs, payload and archive bytes
       await writeFixtureFile(repositoryRoot, path, `output:${path}\n`);
     }
   }
+  const modelMetadataPath =
+    'packages/core-llm/dist/model_prices_and_context_window.json';
+  buildOutputPaths.push(modelMetadataPath);
+  await writeFixtureFile(repositoryRoot, modelMetadataPath, '{"schemaVersion":1}\n');
   const skillPath = 'packages/core-skills/skills/query-and-answer/SKILL.md';
   sourcePaths.push(skillPath);
   await writeFixtureFile(repositoryRoot, skillPath, '# Query and answer\n');

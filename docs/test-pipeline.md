@@ -44,9 +44,13 @@ pnpm test:ai-sql:live
 pnpm test:ai-sql:context-live
 pnpm test:agent-runtime:live
 pnpm test:performance:live
+pnpm test:llm-multi-model-live
+pnpm test:agent-multi-model-live
 ```
 
 这些命令从本地 `.env` 或进程环境读取凭据。测试代码、日志和报告不得记录 API Key、数据库密码或完整请求头。
+
+`test:llm-multi-model-live` 使用多个模型验证原生结构化 Tool Call、Tool Result 回传、最终答复和文本伪调用拦截。`test:agent-multi-model-live` 在同一套真实 PostgreSQL Fixture 上分别运行 Schema 目录、电商、Kafka 清洗和大科学任务；每个模型/场景独立落报告，单一模型失败不会阻止其余用例收集证据。两个入口都使用公共 Provider、Gateway、Agent、RAG 与数据库管线，不注入测试专用 Tool Hook。
 
 ## 3. PostgreSQL 场景
 
@@ -103,6 +107,8 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 - MCP 还覆盖风险提示不降权、Secret/URL 校验、启动竞态、允许工具过滤，以及 REST 默认禁止进程型 stdio 管理。
 - CLI 覆盖项目初始化、Session、Skills、MCP、权限切换、任务追加、手动压缩和取消。
 - Agent 覆盖计划依赖与证据校验、并发 Session 串行化、转向时取消旧许可，以及文本化 Tool Call 的恢复门禁。
+- Provider 覆盖 OpenAI Chat、OpenAI Responses、Anthropic、Ollama 和 vLLM 协议映射；结构化 Tool Call 跨协议归一化，严格 Endpoint 的 System 消息首位约束以及重复 Tool Call ID 的幂等回放均有回归断言。
+- 模型窗口优先读取 Endpoint 元数据，再使用内置 models.dev 快照；未知值不得回退为 32K。自动压缩只在已知物理窗口将满时触发，手动压缩不依赖窗口元数据。
 - 动态 Tool 覆盖隐藏/禁用项不可见、目录 revision 失效、Run 级激活隔离、允许列表向子 Agent 传播和并发读/串行写屏障。
 - 通用 Project 场景必须用真实文件和真实进程完成，不使用 Hook 伪造工具结果；真实模型调用只由显式 live 命令开启。
 - 每个真实模型场景独立执行并独立记录成功或失败；筛选单场景时只验收被选场景，某一场景失败不会阻止其他场景运行。
@@ -146,9 +152,11 @@ Fixture：[`big-science.sql`](../scripts/dev-db/scenarios/big-science.sql)
 - [`ai-sql/performance.json`](../reports/ai-sql/performance.json)：AI SQL 与检索性能。
 - [`ai-sql/context-compaction-performance.json`](../reports/ai-sql/context-compaction-performance.json)：长会话压缩性能和信息保留。
 - [`llm-platform/performance.json`](../reports/llm-platform/performance.json)：模型 Runtime 性能。
+- [`llm-platform/multi-model-tool-live.json`](../reports/llm-platform/multi-model-tool-live.json)：多模型原生 Tool Call 与结果回传证据。
 - [`database-access-performance.json`](../reports/database-access-performance.json)：统一数据库接入性能。
 - [`agent-runtime/performance.json`](../reports/agent-runtime/performance.json)：1,000 Tool 目录检索/暴露、执行路由和 Project Compiler 本地开销。
 - [`agent-runtime/live-project.json`](../reports/agent-runtime/live-project.json)：真实模型完成无数据库代码修复任务的脱敏证据。
+- [`postgres-scenarios/live-model-matrix.json`](../reports/postgres-scenarios/live-model-matrix.json)：多模型四场景汇总；单场景完整轨迹位于 `reports/postgres-scenarios/live-model-matrix/`。
 
 报告是工程验收证据，不是最终用户功能，也不通过公开 API 暴露内部评测轨迹。
 

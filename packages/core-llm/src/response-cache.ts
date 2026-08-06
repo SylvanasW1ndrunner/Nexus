@@ -126,6 +126,7 @@ export class LlmResponseCache {
       messages: request.messages,
       tools: request.tools ?? [],
       temperature: request.temperature,
+      topP: request.topP,
       maxTokens: request.maxTokens,
       responseFormat: request.responseFormat,
       reasoning: request.reasoning,

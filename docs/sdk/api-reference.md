@@ -21,6 +21,8 @@ const runtime = new DatabaseAgentRuntime(options);
 | `provider`             | `LlmProvider`                                  | Initial model provider; must be supplied together with `model`        |
 | `gateway`              | `LlmGateway`                                   | Inject a custom model gateway                                         |
 | `model`                | `string`                                       | Initial model ID; must be supplied together with `provider`           |
+| `canonicalModel`       | `string`                                       | Optional `provider/model` identity used only for bundled metadata     |
+| `generation`           | `LlmGenerationConfig`                          | Runtime-wide generation defaults; omitted fields use model defaults   |
 | `tenantId`             | `string`                                       | `"local-default"`                                                     |
 | `driver`               | `IDatabaseDriver`                              | PostgreSQL driver compatibility boundary                              |
 | `databaseAccess`       | `DatabaseAccessRuntime`                        | Inject the unified database runtime                                   |
@@ -94,9 +96,33 @@ type AgentWebAdapter = {
 
 ## Runtime lifecycle and status
 
-### `configureProvider(provider, model): void`
+### `configureProvider(provider, model, options?): void`
 
-Registers or replaces the active provider/model pair.
+Registers or replaces the active provider/model pair. `canonicalModel` maps a relay-specific
+model name to bundled metadata without changing the model ID sent to the endpoint. `generation`
+replaces the Runtime-wide conversation defaults.
+
+```ts
+runtime.configureProvider(provider, 'relay-model-name', {
+  canonicalModel: 'openai/gpt-4o',
+  generation: {
+    temperature: 0.2,
+    topP: 0.9,
+    maxOutputTokens: 4096,
+  },
+});
+```
+
+`generation` is one configuration object for model conversations, not a set of task-specific
+buckets. Supported fields are `temperature`, `topP`, `maxOutputTokens`, `seed`, `stop`, and
+`reasoningEffort`. `generate`, `runAiSqlAgent`, and `compactAiSqlAgentSession` accept the same
+object as a per-call override. Omitted fields retain the Runtime or endpoint/model defaults.
+
+The physical context window is read-only discovered metadata and cannot be configured here.
+When the endpoint and bundled catalog both lack it, Runtime status reports it as unknown and
+automatic context compaction is disabled until reliable metadata is available. If endpoint
+metadata explicitly marks a configured generation parameter unsupported, the call fails before
+inference with `LLM_PARAMETER_UNSUPPORTED` and names the parameter to remove.
 
 ### `status(): RuntimeStatus`
 

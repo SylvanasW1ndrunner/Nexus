@@ -8,5 +8,5 @@
     "declarationMap": true
   },
   "references": [{ "path": "../shared" }, { "path": "../core-usage" }],
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.json"]
 }

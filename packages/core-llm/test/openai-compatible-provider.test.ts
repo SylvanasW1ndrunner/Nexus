@@ -54,6 +54,35 @@ describe('OpenAICompatibleProvider', () => {
     });
   });
 
+  it('coalesces every system layer into one leading message for strict compatible endpoints', async () => {
+    const fetchMock = vi.fn<TestFetch>(() =>
+      Promise.resolve(jsonResponse(200, { choices: [{ message: { content: 'ok' } }] })),
+    );
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      fetch: fetchMock,
+    });
+
+    await provider.chat({
+      model: 'strict-model',
+      messages: [
+        { role: 'system', content: 'runtime policy' },
+        { role: 'user', content: 'question' },
+        { role: 'system', content: 'project policy' },
+        { role: 'assistant', content: 'prior answer' },
+      ],
+    });
+
+    expect(parseFetchBody(fetchMock).messages).toEqual([
+      { role: 'system', content: 'runtime policy\n\nproject policy' },
+      { role: 'user', content: 'question' },
+      { role: 'assistant', content: 'prior answer' },
+    ]);
+  });
+
   it('parses function tool calls with JSON arguments', async () => {
     const provider = new OpenAICompatibleProvider({
       id: 'test',
@@ -259,6 +288,62 @@ describe('OpenAICompatibleProvider', () => {
       code: 'LLM_AUTH_FAILED',
       retryable: false,
       statusCode: 401,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces safe top-level gateway error messages instead of hiding them behind HTTP status', async () => {
+    const fetchMock = vi.fn<TestFetch>(() =>
+      Promise.resolve(jsonResponse(400, { code: 20015, message: 'tools count exceeds model limit' })),
+    );
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      fetch: fetchMock,
+    });
+
+    await expect(
+      provider.chat({
+        model: 'gateway-model',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    ).rejects.toMatchObject({
+      code: 'LLM_PROVIDER_ERROR',
+      message: 'tools count exceeds model limit',
+      retryable: false,
+      statusCode: 400,
+    });
+  });
+
+  it('classifies an upstream unsupported generation parameter as a configuration error', async () => {
+    const fetchMock = vi.fn<TestFetch>(() =>
+      Promise.resolve(
+        jsonResponse(400, {
+          error: { message: "Unsupported parameter: 'temperature' is not supported with this model." },
+        }),
+      ),
+    );
+    const provider = new OpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      fetch: fetchMock,
+    });
+
+    await expect(
+      provider.chat({
+        model: 'reasoning-model',
+        messages: [{ role: 'user', content: 'ping' }],
+        temperature: 0.2,
+      }),
+    ).rejects.toMatchObject({
+      code: 'LLM_PARAMETER_UNSUPPORTED',
+      retryable: false,
+      statusCode: 400,
+      detail: { parameter: 'temperature' },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

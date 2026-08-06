@@ -57,6 +57,20 @@ describe('LlmResponseCache', () => {
     expect(cache.get('tenant-1', 'provider-b', request)?.text).toBe('from b');
   });
 
+  it('isolates otherwise-identical entries by top-p', () => {
+    const cache = new LlmResponseCache();
+    const request = (topP: number): LlmChatRequest => ({
+      model: 'shared-model',
+      messages: [{ role: 'user', content: 'same request' }],
+      topP,
+    });
+
+    cache.set('tenant-1', 'provider-a', request(0.7), { text: 'narrow', toolCalls: [] });
+
+    expect(cache.get('tenant-1', 'provider-a', request(0.7))?.text).toBe('narrow');
+    expect(cache.get('tenant-1', 'provider-a', request(0.9))).toBeUndefined();
+  });
+
   it('does not retain an oversized response or an older value for the same key', () => {
     const cache = new LlmResponseCache({
       maxEntryBytes: 128,

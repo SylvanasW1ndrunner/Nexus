@@ -3,6 +3,180 @@ import { describe, expect, it } from 'vitest';
 import { AnthropicProvider, OpenAICompatibleProvider, createProviderFromPreset } from '../src/index.js';
 
 describe('provider adapters beyond basic connectivity', () => {
+  it('preserves OpenAI assistant tool calls and tool results in native message fields', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const provider = new OpenAICompatibleProvider({
+      id: 'relay',
+      name: 'Compatible relay',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'test-key',
+      fetch: async (_input, init) => {
+        requestBody = JSON.parse(requireStringBody(init?.body)) as Record<string, unknown>;
+        return jsonResponse({
+          id: 'response-2',
+          choices: [{ message: { content: 'done' }, finish_reason: 'stop' }],
+        });
+      },
+    });
+
+    await provider.chat({
+      model: 'vendor/model',
+      messages: [
+        { role: 'user', content: 'count orders' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            {
+              id: 'call-17',
+              name: 'query_database',
+              arguments: { sql: 'select count(*) from orders' },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          name: 'query_database',
+          toolCallId: 'call-17',
+          content: '{"rows":[{"count":12}]}',
+        },
+      ],
+      topP: 0.8,
+    });
+
+    expect(requestBody).toMatchObject({
+      top_p: 0.8,
+      messages: [
+        { role: 'user', content: 'count orders' },
+        {
+          role: 'assistant',
+          tool_calls: [
+            {
+              id: 'call-17',
+              type: 'function',
+              function: {
+                name: 'query_database',
+                arguments: '{"sql":"select count(*) from orders"}',
+              },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          name: 'query_database',
+          tool_call_id: 'call-17',
+          content: '{"rows":[{"count":12}]}',
+        },
+      ],
+    });
+  });
+
+  it('maps Anthropic tool_use and consecutive tool_result blocks without flattening them to text', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const provider = new AnthropicProvider({
+      apiKey: 'anthropic-test-key',
+      fetch: async (_input, init) => {
+        requestBody = JSON.parse(requireStringBody(init?.body)) as Record<string, unknown>;
+        return jsonResponse({
+          id: 'msg_2',
+          content: [{ type: 'text', text: 'done' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 10, output_tokens: 2 },
+        });
+      },
+    });
+
+    await provider.chat({
+      model: 'claude-test',
+      messages: [
+        { role: 'user', content: 'inspect both tables' },
+        {
+          role: 'assistant',
+          content: 'I will inspect them.',
+          toolCalls: [
+            { id: 'tool-a', name: 'query', arguments: { sql: 'select 1' } },
+            { id: 'tool-b', name: 'query', arguments: { sql: 'select 2' } },
+          ],
+        },
+        { role: 'tool', toolCallId: 'tool-a', name: 'query', content: '{"value":1}' },
+        {
+          role: 'tool',
+          toolCallId: 'tool-b',
+          name: 'query',
+          content: 'permission denied',
+          toolResult: { isError: true },
+        },
+      ],
+      topP: 0.7,
+    });
+
+    expect(requestBody).toMatchObject({
+      top_p: 0.7,
+      messages: [
+        { role: 'user', content: 'inspect both tables' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'I will inspect them.' },
+            { type: 'tool_use', id: 'tool-a', name: 'query', input: { sql: 'select 1' } },
+            { type: 'tool_use', id: 'tool-b', name: 'query', input: { sql: 'select 2' } },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'tool-a', content: '{"value":1}' },
+            {
+              type: 'tool_result',
+              tool_use_id: 'tool-b',
+              content: 'permission denied',
+              is_error: true,
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('rejects textual pseudo tool calls once instead of accepting them as a final answer', async () => {
+    let fetchCount = 0;
+    const provider = new OpenAICompatibleProvider({
+      id: 'relay',
+      name: 'Compatible relay',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'test-key',
+      fetch: async () => {
+        fetchCount += 1;
+        return jsonResponse({
+          choices: [
+            {
+              message: {
+                content:
+                  '<tool_calls>[{"name":"query_database","arguments":{"sql":"select 1"}}]</tool_calls>',
+              },
+              finish_reason: 'stop',
+            },
+          ],
+        });
+      },
+    });
+
+    await expect(
+      provider.chat({
+        model: 'vendor/model',
+        messages: [{ role: 'user', content: 'run select 1' }],
+        tools: [
+          {
+            name: 'query_database',
+            description: 'Run SQL',
+            inputSchema: { type: 'object' },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'TOOL_PROTOCOL_MISMATCH', retryable: false });
+    expect(fetchCount).toBe(1);
+  });
+
   it('maps structured chat, models, embedding and rerank on OpenAI-compatible endpoints', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const provider = new OpenAICompatibleProvider({
@@ -69,8 +243,8 @@ describe('provider adapters beyond basic connectivity', () => {
       fetch: async (input, init) => {
         const url = String(input);
         calls.push({ url, method: init?.method ?? 'GET' });
-        if (url.endsWith('/v1/models')) {
-          return jsonResponse({ data: [{ id: 'qwen2.5-coder:14b' }] });
+        if (url.endsWith('/api/tags')) {
+          return jsonResponse({ models: [{ model: 'qwen2.5-coder:14b' }] });
         }
         if (url.endsWith('/api/show')) {
           return jsonResponse({
@@ -106,7 +280,7 @@ describe('provider adapters beyond basic connectivity', () => {
       quantization: 'Q4_K_M',
     });
     expect(calls).toEqual([
-      { url: 'http://127.0.0.1:11434/v1/models', method: 'GET' },
+      { url: 'http://127.0.0.1:11434/api/tags', method: 'GET' },
       { url: 'http://127.0.0.1:11434/api/show', method: 'POST' },
     ]);
     expect(calls.some((call) => call.url.includes('/chat/completions'))).toBe(false);
@@ -128,6 +302,7 @@ describe('provider adapters beyond basic connectivity', () => {
               context_length: 131_072,
               max_output_tokens: 8_192,
               capabilities: { tool_calling: true, reasoning: true },
+              supported_parameters: ['temperature', 'top_p', 'max_tokens', 'stop'],
             },
           ],
         });
@@ -143,6 +318,14 @@ describe('provider adapters beyond basic connectivity', () => {
       capabilities: {
         toolCalling: 'supported',
         reasoning: 'supported',
+      },
+      generationParameters: {
+        temperature: 'supported',
+        topP: 'supported',
+        maxOutputTokens: 'supported',
+        seed: 'unsupported',
+        stop: 'supported',
+        reasoningEffort: 'unsupported',
       },
     });
     expect(calls).toEqual(['https://relay.example/v1/models']);

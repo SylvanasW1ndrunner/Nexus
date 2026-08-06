@@ -4,12 +4,18 @@ import type { Readable, Writable } from 'node:stream';
 import { stripVTControlCharacters } from 'node:util';
 import {
   DatabaseAgentRuntime,
-  OpenAICompatibleProvider,
+  createLlmProvider,
   initializeAgentProject,
   type AgentMode,
   type AgentUserEvent,
+  type RegisteredLlmModel,
   type PostgresConnectionInput,
 } from '@dbagent/sdk';
+import {
+  inferEndpointProviderId,
+  loadProjectSettings,
+  resolveCliConfiguration,
+} from './project-settings.js';
 
 export type InteractiveCliOptions = {
   projectDirectory?: string;
@@ -34,6 +40,8 @@ export class CliTraceRenderer {
   readonly #output: Writable;
   #enabled: boolean;
   #transientLines = 0;
+  #expanded = true;
+  #history: string[] = [];
 
   constructor(output: Writable, options: { enabled?: boolean } = {}) {
     this.#output = output;
@@ -50,7 +58,10 @@ export class CliTraceRenderer {
 
   start(): void {
     if (!this.#enabled) return;
-    this.writeTrace(`${paint(this.#output, 'dim', '正在处理…')}\n`);
+    this.#history = [];
+    this.#transientLines = 0;
+    this.#expanded = true;
+    this.appendTrace(`${paint(this.#output, 'dim', '正在处理…')}\n`);
   }
 
   render(event: AgentUserEvent): void {
@@ -75,22 +86,45 @@ export class CliTraceRenderer {
     if (event.type === 'command-prepared' && event.command?.trim()) {
       value += `${paint(this.#output, 'cyan', '  Command')}\n  ${event.command.trim()}\n`;
     }
-    this.writeTrace(value);
+    if (event.toolName && event.type !== 'sql-prepared' && event.type !== 'command-prepared') {
+      value += `${paint(this.#output, 'cyan', `  Tool: ${event.toolName}`)}\n`;
+    }
+    this.appendTrace(value);
   }
 
   clearBeforeFinal(): void {
-    if (!isTtyOutput(this.#output) || this.#transientLines === 0) return;
+    if (!isTtyOutput(this.#output)) return;
+    this.clearVisibleTrace();
+    this.#expanded = false;
+  }
+
+  toggle(): boolean {
+    if (!this.#enabled || !isTtyOutput(this.#output) || this.#history.length === 0) return false;
+    if (this.#expanded) {
+      this.clearVisibleTrace();
+      this.#expanded = false;
+      return true;
+    }
+    this.#expanded = true;
+    for (const value of this.#history) this.writeVisibleTrace(value);
+    return true;
+  }
+
+  private clearVisibleTrace(): void {
     for (let index = 0; index < this.#transientLines; index += 1) {
       write(this.#output, '\u001B[1A\u001B[2K\r');
     }
     this.#transientLines = 0;
   }
 
-  private writeTrace(value: string): void {
+  private appendTrace(value: string): void {
+    this.#history.push(value);
+    if (this.#expanded) this.writeVisibleTrace(value);
+  }
+
+  private writeVisibleTrace(value: string): void {
     write(this.#output, value);
-    if (isTtyOutput(this.#output)) {
-      this.#transientLines += renderedTerminalLines(value, terminalColumns(this.#output));
-    }
+    this.#transientLines += renderedTerminalLines(value, terminalColumns(this.#output));
   }
 }
 
@@ -146,24 +180,31 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
   const output = options.output ?? process.stdout;
   const env = options.env ?? process.env;
   const projectDirectory = options.projectDirectory ?? process.cwd();
-  const config = cliConfigFromEnv(env);
+  const config = resolveCliConfiguration(env, await loadProjectSettings(projectDirectory));
 
   let pendingApproval: PendingCliApproval | undefined;
+  const providerId = inferEndpointProviderId(config.protocol, config.baseUrl);
   const runtime = new DatabaseAgentRuntime({
     projectDirectory,
     ...(env.SCHEMANAUT_STATE_DATABASE_PATH?.trim()
       ? { sessionDatabasePath: env.SCHEMANAUT_STATE_DATABASE_PATH.trim() }
       : {}),
-    provider: new OpenAICompatibleProvider({
-      id: 'cli-openai-compatible',
-      name: 'CLI OpenAI-compatible',
+    provider: createLlmProvider({
+      protocol: config.protocol,
+      id: providerId,
+      name: `CLI ${config.protocol}`,
       baseUrl: config.baseUrl,
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-      ...(isLocalModelUrl(config.baseUrl)
-        ? { allowUnauthenticated: true, metadataSource: 'ollama' as const }
+      ...(isLocalModelUrl(config.baseUrl) || config.protocol === 'ollama' || config.protocol === 'vllm'
+        ? { allowUnauthenticated: true }
+        : {}),
+      ...(env.SCHEMANAUT_LLM_API_VERSION?.trim()
+        ? { apiVersion: env.SCHEMANAUT_LLM_API_VERSION.trim() }
         : {}),
     }),
     model: config.model,
+    ...(config.canonicalModel === undefined ? {} : { canonicalModel: config.canonicalModel }),
+    generation: config.generation,
     enableProcessTools: true,
     approvalProvider: async (request) =>
       await new Promise((resolveApproval) => {
@@ -194,11 +235,15 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
       }),
   });
   let indexed: Awaited<ReturnType<DatabaseAgentRuntime['indexSchema']>>;
+  let selectedModel: RegisteredLlmModel | undefined;
   try {
-    await Promise.all([
+    const [, discoveredModels] = await Promise.all([
       runtime.connect(parseCliPostgresUrl(config.databaseUrl)),
       runtime.discoverLlmModels(),
     ]);
+    selectedModel = discoveredModels.find(
+      (candidate) => candidate.providerId === providerId && candidate.model === config.model,
+    );
     indexed = await runtime.indexSchema({ maxTables: config.maxTables });
   } catch (error) {
     await runtime.close().catch(() => undefined);
@@ -216,6 +261,7 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
     [
       `${paint(output, 'cyan', 'SchemaNaut Agent CLI')}`,
       `项目: ${projectDirectory}`,
+      modelSummary(config.protocol, config.model, selectedModel),
       `数据库知识目录: ${indexed.tableCount} 张表，${indexed.columnCount} 个字段`,
       '输入 /help 查看命令；普通输入会交给 Agent。',
       '',
@@ -233,6 +279,13 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
   const showPrompt = () => {
     if (!activeRun && !pendingApproval) cli.prompt();
   };
+
+  const keypressInput = input as NodeJS.ReadStream;
+  const onKeypress = (_value: string, key: { ctrl?: boolean; name?: string } | undefined) => {
+    if (!key?.ctrl || key.name !== 'o') return;
+    if (trace.toggle() && !activeRun && !pendingApproval) cli.prompt(true);
+  };
+  if (keypressInput.isTTY) keypressInput.on('keypress', onKeypress);
 
   cli.on('SIGINT', () => {
     if (activeRun) {
@@ -357,6 +410,11 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
         showPrompt();
         return;
       }
+      if (command === '/model') {
+        write(output, `${modelSummary(config.protocol, config.model, selectedModel)}\n`);
+        showPrompt();
+        return;
+      }
       if (command === '/compact') {
         if (!sessionId) throw new Error('当前还没有可压缩的会话。');
         const compacted = await runtime.compactAgentSession({
@@ -465,6 +523,7 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
 
   return await new Promise<void>((resolveDone) => {
     cli.once('close', () => {
+      if (keypressInput.isTTY) keypressInput.removeListener('keypress', onKeypress);
       void runtime
         .close()
         .catch(() => undefined)
@@ -472,38 +531,6 @@ export async function startInteractiveCli(options: InteractiveCliOptions = {}): 
     });
     showPrompt();
   });
-}
-
-function cliConfigFromEnv(env: NodeJS.ProcessEnv): {
-  baseUrl: string;
-  apiKey?: string;
-  model: string;
-  databaseUrl: string;
-  maxTables: number;
-} {
-  const baseUrl = env.SCHEMANAUT_LLM_BASE_URL?.trim();
-  const model = env.SCHEMANAUT_LLM_MODEL?.trim();
-  const databaseUrl = env.SCHEMANAUT_DATABASE_URL?.trim() || env.DATABASE_URL?.trim();
-  if (!baseUrl || !model || !databaseUrl) {
-    throw new Error(
-      [
-        'CLI 缺少连接配置。',
-        '请设置 SCHEMANAUT_LLM_BASE_URL、SCHEMANAUT_LLM_MODEL、SCHEMANAUT_DATABASE_URL，',
-        '远程模型另需 SCHEMANAUT_LLM_API_KEY；本地 Ollama 可不设置密钥。',
-      ].join(' '),
-    );
-  }
-  const maxTables = Number(env.SCHEMANAUT_MAX_SCHEMA_TABLES ?? '500');
-  if (!Number.isSafeInteger(maxTables) || maxTables < 1 || maxTables > 1_000) {
-    throw new Error('SCHEMANAUT_MAX_SCHEMA_TABLES 必须是 1 到 1000 的整数。');
-  }
-  return {
-    baseUrl,
-    ...(env.SCHEMANAUT_LLM_API_KEY?.trim() ? { apiKey: env.SCHEMANAUT_LLM_API_KEY.trim() } : {}),
-    model,
-    databaseUrl,
-    maxTables,
-  };
 }
 
 export function parseCliPostgresUrl(value: string): PostgresConnectionInput {
@@ -558,15 +585,33 @@ function cliHelp(): string {
     '  /resume <id>          恢复会话',
     '  /sessions             查看会话',
     '  /skills               查看可用 Skills',
+    '  /model                查看协议、上下文容量及元数据来源',
     '  /<skill> [任务]       显式执行 Skill',
     '  /compact [关注点]     手动压缩上下文',
     '  /trace on|off         显示或隐藏执行轨迹（默认开启）',
     '  /mcp [list|start|stop] 管理项目 MCP Server',
     '  /exit                 退出',
     '',
-    'Agent 工作时继续输入普通文字，会作为补充要求加入当前任务；Ctrl+C 取消当前执行。',
+    'Agent 工作时继续输入普通文字，会作为补充要求加入当前任务；Ctrl+O 展开/收起轨迹，Ctrl+C 取消当前执行。',
     '',
   ].join('\n');
+}
+
+function modelSummary(
+  protocol: string,
+  model: string,
+  metadata: RegisteredLlmModel | undefined,
+): string {
+  const context = metadata?.limits.contextTokens;
+  const maxInput = metadata?.limits.maxInputTokens;
+  const source = metadata?.discovery?.source ?? 'unknown';
+  return [
+    `模型: ${model}`,
+    `协议: ${protocol}`,
+    `上下文: ${context === null || context === undefined ? '未知' : `${context} tokens`}`,
+    ...(maxInput === null || maxInput === undefined ? [] : [`最大输入: ${maxInput} tokens`]),
+    `元数据: ${source}`,
+  ].join(' · ');
 }
 
 function isLocalModelUrl(value: string): boolean {

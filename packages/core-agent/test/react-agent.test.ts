@@ -192,6 +192,40 @@ describe('ReactAgent', () => {
     );
   });
 
+  it('does not reserve the model theoretical maximum output for every Agent request', async () => {
+    const usage = new UsageTracker(await usagePath());
+    const { provider, calls } = scriptedProviderWithCalls([
+      { text: 'The schema catalog is ready.', toolCalls: [] },
+    ]);
+    const router = new LlmRouter(usage, [provider]);
+    router.gateway.registerModel({
+      providerId: 'fake',
+      model: 'wide-output-model',
+      limits: { contextTokens: 131_000, maxOutputTokens: 131_000 },
+    });
+    const agent = new ReactAgent(
+      router,
+      new ToolRegistry(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    const result = await agent.run({
+      providerId: 'fake',
+      model: 'wide-output-model',
+      userMessage: 'List the available schemas.',
+      mode: 'read',
+      maxIterations: 1,
+    });
+
+    expect(result.status).toBe('done');
+    expect(calls).toHaveLength(1);
+    expect(result.contextCompression).toHaveLength(1);
+    expect(result.contextCompression?.[0]?.phase).toBe('healthy');
+    expect(result.contextCompression?.[0]?.reservedOutputTokens).toBe(8_192);
+  });
+
   it('projects process commands and their terminal status as user-visible execution events', async () => {
     const usage = new UsageTracker(await usagePath());
     const registry = new ToolRegistry();
@@ -507,37 +541,53 @@ describe('ReactAgent', () => {
     expect(result.status).toBe('done');
   });
 
-  it('does not mistake unparsed provider tool markup for a completed answer', async () => {
+  it('replays an identical tool call id without executing the side effect twice', async () => {
     const usage = new UsageTracker(await usagePath());
-    const provider = scriptedProvider([
+    const registry = new ToolRegistry();
+    let executions = 0;
+    registry.register(
       {
-        text: [
-          '<tool_calls>',
-          '<tool_call name="query_database">',
-          '{"sql":"select count(*) from orders"}',
-          '</tool_call>',
-          '</tool_calls>',
-        ].join('\n'),
-        toolCalls: [],
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: {
+          type: 'object',
+          properties: { sql: { type: 'string' } },
+          required: ['sql'],
+        },
+        dangerLevel: 'safe',
+        readonly: true,
       },
+      () => {
+        executions += 1;
+        return { rows: [{ order_count: 42 }] };
+      },
+    );
+    const { provider, calls } = scriptedProviderWithCalls([
       {
         text: '',
         toolCalls: [
           {
-            id: 'call_recovered',
+            id: 'stable-call-id',
             name: 'query_database',
             arguments: { sql: 'select count(*) from orders' },
           },
         ],
       },
       {
-        text: '订单总数是 42。',
-        toolCalls: [],
+        text: '',
+        toolCalls: [
+          {
+            id: 'stable-call-id',
+            name: 'query_database',
+            arguments: { sql: 'select count(*) from orders' },
+          },
+        ],
       },
+      { text: 'The order count is 42.', toolCalls: [] },
     ]);
     const agent = new ReactAgent(
       new LlmRouter(usage, [provider]),
-      registryWithQueryTool(),
+      registry,
       usage,
       undefined,
       fixedDependencies(),
@@ -546,52 +596,60 @@ describe('ReactAgent', () => {
     const result = await agent.run({
       providerId: 'fake',
       model: 'fake-model',
-      userMessage: '查询订单总数',
+      userMessage: 'Count the orders.',
       mode: 'read',
     });
 
     expect(result.status).toBe('done');
-    expect(result.iterations).toBe(3);
-    expect(result.finalText).toBe('订单总数是 42。');
-    expect(result.toolExecutions).toMatchObject([
-      { toolCallId: 'call_recovered', status: 'success' },
-    ]);
-    expect(result.events).toBeDefined();
-    if (!result.events) {
-      throw new Error('Expected a correcting event for malformed tool markup.');
-    }
-    const correction = result.events.find((event) => event.type === 'correcting');
-    expect(correction?.message).toContain('标准工具调用');
+    expect(executions).toBe(1);
+    expect(result.toolExecutions).toHaveLength(1);
+    expect(result.toolExecutions[0]).toMatchObject({
+      toolCallId: 'stable-call-id',
+      status: 'success',
+    });
+    expect(
+      calls[2]?.messages.filter(
+        (message) => message.role === 'tool' && message.toolCallId === 'stable-call-id',
+      ),
+    ).toHaveLength(2);
   });
 
-  it('recovers when a provider leaves a JSON tool-call array inside text markup', async () => {
+  it('executes semantically identical calls again when the provider supplies a new call id', async () => {
     const usage = new UsageTracker(await usagePath());
+    const registry = new ToolRegistry();
+    let executions = 0;
+    registry.register(
+      {
+        name: 'query_database',
+        description: 'Execute readonly SQL',
+        inputSchema: {
+          type: 'object',
+          properties: { sql: { type: 'string' } },
+          required: ['sql'],
+        },
+        dangerLevel: 'safe',
+        readonly: true,
+      },
+      () => ({ execution: ++executions }),
+    );
     const provider = scriptedProvider([
       {
-        text: [
-          'I need one more database check.',
-          '<tool_calls>[{"name":"query_database","arguments":{"sql":"select count(*) from orders"}}]</tool_calls>',
-        ].join('\n'),
-        toolCalls: [],
+        text: '',
+        toolCalls: [
+          { id: 'call-one', name: 'query_database', arguments: { sql: 'select 1' } },
+        ],
       },
       {
         text: '',
         toolCalls: [
-          {
-            id: 'call_json_markup_recovered',
-            name: 'query_database',
-            arguments: { sql: 'select count(*) from orders' },
-          },
+          { id: 'call-two', name: 'query_database', arguments: { sql: 'select 1' } },
         ],
       },
-      {
-        text: '订单总数是 42。',
-        toolCalls: [],
-      },
+      { text: 'Both requested executions completed.', toolCalls: [] },
     ]);
     const agent = new ReactAgent(
       new LlmRouter(usage, [provider]),
-      registryWithQueryTool(),
+      registry,
       usage,
       undefined,
       fixedDependencies(),
@@ -600,21 +658,37 @@ describe('ReactAgent', () => {
     const result = await agent.run({
       providerId: 'fake',
       model: 'fake-model',
-      userMessage: '查询订单总数',
+      userMessage: 'Run the query twice.',
       mode: 'read',
     });
 
     expect(result.status).toBe('done');
-    expect(result.iterations).toBe(3);
-    expect(result.finalText).toBe('订单总数是 42。');
-    expect(result.toolExecutions).toMatchObject([
-      { toolCallId: 'call_json_markup_recovered', status: 'success' },
-    ]);
-    expect(
-      result.events?.some(
-        (event) => event.type === 'correcting' && event.message.includes('标准工具调用'),
-      ),
-    ).toBe(true);
+    expect(executions).toBe(2);
+    expect(result.toolExecutions).toHaveLength(2);
+  });
+
+  it.each([
+    '<tool_calls><tool_call name="query_database">{}</tool_call></tool_calls>',
+    '<tool_calls>[{"name":"query_database","arguments":{}}]</tool_calls>',
+  ])('fails fast when a provider leaves tool calls in ordinary text', async (text) => {
+    const usage = new UsageTracker(await usagePath());
+    const provider = scriptedProvider([{ text, toolCalls: [] }]);
+    const agent = new ReactAgent(
+      new LlmRouter(usage, [provider]),
+      registryWithQueryTool(),
+      usage,
+      undefined,
+      fixedDependencies(),
+    );
+
+    await expect(
+      agent.run({
+        providerId: 'fake',
+        model: 'fake-model',
+        userMessage: '查询订单总数',
+        mode: 'read',
+      }),
+    ).rejects.toMatchObject({ code: 'TOOL_PROTOCOL_MISMATCH', retryable: false });
   });
 
   it('records redacted tool argument previews for user-level Agent evaluation', async () => {
@@ -2033,7 +2107,7 @@ describe('ReactAgent', () => {
     router.gateway.registerModel({
       providerId: 'fake',
       model: 'fake-model',
-      limits: { contextTokens: 8_000, maxOutputTokens: 4_096 },
+      limits: { contextTokens: 6_500, maxOutputTokens: 4_096 },
     });
     const registry = new ToolRegistry();
     registry.register(
@@ -2062,6 +2136,11 @@ describe('ReactAgent', () => {
       maxIterations: 2,
       keepRecentMessages: 4,
       maxToolResultChars: 240,
+      generation: {
+        temperature: 0.35,
+        topP: 0.8,
+        maxOutputTokens: 3_000,
+      },
     });
 
     expect(result.status).toBe('done');
@@ -2099,6 +2178,12 @@ describe('ReactAgent', () => {
       trigger: 'auto',
     });
     expect(compactionCalls[0]?.tools).toBeUndefined();
+    expect(compactionCalls.every((call) => call.temperature === 0.35)).toBe(true);
+    expect(compactionCalls.every((call) => call.topP === 0.8)).toBe(true);
+    expect(compactionCalls.every((call) => (call.maxTokens ?? 0) <= 3_000)).toBe(true);
+    expect(agentCalls.every((call) => call.temperature === 0.35)).toBe(true);
+    expect(agentCalls.every((call) => call.topP === 0.8)).toBe(true);
+    expect(agentCalls.every((call) => call.maxTokens === 3_000)).toBe(true);
     expect(
       agentCalls[0]?.messages.some((message) =>
         message.content.includes('<conversation_checkpoint>'),
@@ -2211,7 +2296,7 @@ describe('ReactAgent', () => {
     router.gateway.registerModel({
       providerId: 'fake',
       model: 'fake-model',
-      limits: { contextTokens: 8_000, maxOutputTokens: 4_096 },
+      limits: { contextTokens: 6_000, maxOutputTokens: 4_096 },
     });
     const agent = new ReactAgent(
       router,

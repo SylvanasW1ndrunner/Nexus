@@ -236,7 +236,8 @@ function captureBuildOutputs(root) {
       ...relativeFiles(
         root,
         `${workspace}/dist`,
-        (path) => path.endsWith('.js') || path.endsWith('.d.ts'),
+        (path) =>
+          path.endsWith('.js') || path.endsWith('.d.ts') || path.endsWith('.json'),
       ),
     );
   }
@@ -1039,6 +1040,19 @@ function assertExpectedRuntimeModulesExist(packageRoot) {
     if (!existsSync(join(packageRoot, 'dist', 'internal', name, 'index.js'))) {
       throw new Error(`Packaged runtime module is missing: ${name}`);
     }
+  }
+  if (
+    !existsSync(
+      join(
+        packageRoot,
+        'dist',
+        'internal',
+        'core-llm',
+        'model_prices_and_context_window.json',
+      ),
+    )
+  ) {
+    throw new Error('Packaged models.dev metadata snapshot is missing.');
   }
   for (const skillName of [
     'query-and-answer',

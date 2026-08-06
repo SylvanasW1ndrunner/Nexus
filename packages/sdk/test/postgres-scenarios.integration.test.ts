@@ -69,7 +69,7 @@ const LIVE_SCENARIOS: readonly LiveScenario[] = [
   {
     scenario: 'big-science-live',
     message:
-      '请查询 science 的分区观测数据，按实验返回样本数、观测数、净信号（signal-background）的样本均值均值，并验证两个实验各有 12000 条观测。必须执行 SQL。',
+      '请查询 science 的分区观测数据，按 experiment_code 返回样本数、观测数、净信号（signal-background）的样本均值，并验证两个实验各有 12000 条观测。必须执行 SQL。',
     expectedValues: ['EXP-PHOTON-001', 'EXP-GENOME-002', '12000'],
     resultMode: 'query',
     maxIterations: 10,
@@ -586,7 +586,7 @@ describe.skipIf(!runPostgresTests || !runLiveModel)(
           process.env.TEST_SILICONFLOW_MODEL ?? process.env.DBAGENT_LLM_MODEL ?? 'Qwen/Qwen3-32B';
         const runtime = await connectedRuntime(
           new OpenAICompatibleProvider({
-            id: 'scenario-live',
+            id: 'siliconflow',
             name: 'Scenario live provider',
             apiKey,
             baseUrl: process.env.DBAGENT_LLM_BASE_URL ?? 'https://api.siliconflow.cn/v1',

@@ -6,6 +6,7 @@ in the installed dependency tree.
 
 - ajv 8.20.0 — MIT — https://github.com/ajv-validator/ajv
 - @modelcontextprotocol/sdk 1.29.x — MIT — https://github.com/modelcontextprotocol/typescript-sdk
+- models.dev model metadata snapshot — MIT — https://github.com/anomalyco/models.dev
 - node-sql-parser 5.4.x — Apache-2.0 — https://github.com/taozhi8833998/node-sql-parser
 - pg 8.x — MIT — https://github.com/brianc/node-postgres
 - yaml 2.x — ISC — https://github.com/eemeli/yaml

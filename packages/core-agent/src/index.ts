@@ -17,6 +17,7 @@ export * from './stream-store.js';
 export * from './subagent-pool.js';
 export * from './task-plan.js';
 export * from './tool-failure-classifier.js';
+export * from './tool-call-ledger.js';
 export * from './tool-execution-authorization.js';
 export * from './tool-execution-router.js';
 export * from './tool-exposure-planner.js';

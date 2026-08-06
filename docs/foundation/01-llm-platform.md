@@ -11,7 +11,7 @@
 
 本模块提供：
 
-- 国内云、OpenAI-compatible、Anthropic 原生协议及本地私有模型的统一接入。
+- OpenAI Chat、OpenAI Responses、Anthropic、Ollama 原生协议及 vLLM/OpenAI-compatible Endpoint 的统一接入。
 - 同步、流式、异步批量、Tool Calling、结构化输出、Embedding 和 Rerank 合同。
 - 模型能力档案、策略路由、故障降级、预算、缓存和用量统计。
 - 超时、取消、限流、排队、熔断、审计事件和脱敏。
@@ -41,12 +41,14 @@
 
 **子模块设计**
 
-- `OpenAICompatibleProvider` 适配 OpenAI-compatible 接口，覆盖国内云平台、Ollama、vLLM 和企业模型网关。
-- `AnthropicProvider` 直接适配 Anthropic Messages 原生协议，不依赖 OpenAI 格式。
+- `OpenAICompatibleProvider` 适配 OpenAI Chat Completions，覆盖国内云平台、第三方中转站和企业模型网关；vLLM 复用该标准协议适配器。
+- `OpenAIResponsesProvider`、`AnthropicProvider` 与 `OllamaProvider` 分别适配 Responses、Anthropic Messages 和 Ollama `/api/chat` 原生协议。
 - Provider 统一返回消息、Tool Call、完成原因、用量和标准错误。
+- 各协议先转换为统一的结构化消息与 Tool Call 合同；多层 System 指令在协议边界稳定合并为首条消息，避免严格 Endpoint 拒绝请求。
+- `<tool_calls>` 等文本伪 Tool Call 不会被当作可执行调用；系统返回 `TOOL_PROTOCOL_MISMATCH`，避免工具标记泄漏或误执行。
 - Provider 声明能力；未知能力和不支持能力不得伪装为支持。
 - 接入时只读取模型目录和模型元数据，不发送验证 Prompt，也不产生推理 Token。
-- Ollama 使用 `/v1/models` 与 `/api/show`；其他 Provider 使用其模型目录、元数据接口或预设声明。
+- Ollama 使用 `/api/tags` 与 `/api/show`；其他 Provider 使用自身模型目录或元数据接口。Endpoint 没有提供的信息再由内置 models.dev 快照补齐，仍未知的字段保持 `unknown`。
 
 **达到的效果**
 
@@ -62,12 +64,15 @@
 - 记录数据地域、数据保留、敏感数据能力和健康状态。
 - 记录元数据来源、发现时间、模型家族、参数规模、量化方式和运行时健康状态。
 - 内置 SiliconFlow、DeepSeek、智谱、Moonshot、Ollama、vLLM 配置预设；预设不包含密钥。
+- 项目随包附带精简的 `model_prices_and_context_window.json`，由 `scripts/update-model-catalog.mjs` 从 models.dev 生成并通过结构校验；运行时不依赖远程目录可用性。
+- 第三方中转站的自定义模型名可通过 `canonicalModel=provider/model` 映射到目录身份，但发送给 Endpoint 的实际模型名不变。
 
 **达到的效果**
 
 - 路由前即可判断模型是否满足任务要求。
 - API 和 WebUI 可展示模型档案、元数据来源与运行时健康状态。
 - Provider 未提供的能力记为 `unknown`，由路由谨慎处理；元数据声明不等于实际效果承诺。
+- 上下文来源优先级固定为 Endpoint 元数据、`canonicalModel`/内置目录、未知；用户不能伪造物理上下文窗口。
 
 ### 2.3 统一调用网关
 
@@ -76,6 +81,7 @@
 - `LlmGateway` 是新业务调用模型的唯一入口。
 - 支持同步对话、流式事件、异步批量任务、Embedding 和 Rerank。
 - 每次请求生成 `requestId` 与 `traceId`，并统一错误、用量、成本和路由结果。
+- Runtime 使用单一 `LlmGenerationConfig` 接受 `temperature`、`topP`、`maxOutputTokens`、`seed`、`stop` 与 `reasoningEffort`；省略字段时沿用模型默认值，调用级配置可覆盖 Runtime 默认值。
 - SDK、REST API、NL2SQL 和 Agent Runtime 入口全部经过 Gateway。
 - 异步任务支持提交、进度查询、完成、失败和取消。
 
@@ -83,6 +89,7 @@
 
 - 路由、预算、安全和观测策略只需实现一次。
 - SDK、API、CLI 与 WebUI 看到一致的模型状态和错误。
+- Endpoint 明确拒绝的生成参数会以 `LLM_PARAMETER_UNSUPPORTED` 在调用前失败，并指出具体参数；未知支持状态交由 Endpoint 按原生语义处理。
 - 业务代码中不再存在绕过 Gateway 的正式模型调用路径；确定性的 Provider 工程合同测试除外。
 
 ### 2.4 Prompt 与上下文管理
@@ -92,13 +99,13 @@
 - Prompt 模板具备 ID、版本、必填变量、渲染和稳定指纹。
 - 系统指令、业务上下文、用户输入和不可信内容明确分隔。
 - 模型目录提供时，解析常见顶层或嵌套的上下文窗口、最大输出和能力字段；目录不完整时回退到注册表声明。
-- 调用前估算 Token，并按发现到的模型物理上下文与输出限制执行保留、压缩或拒绝。
+- 调用前估算 Token，并按发现到的模型物理上下文执行保留、压缩或拒绝；Agent 只为本次配置的输出上限预留空间，未配置时使用有界保留值，而不是永久占满模型理论最大输出。
 - 提供租户隔离的可选响应缓存，支持 TTL、命名空间和 LRU 淘汰。
 
 **达到的效果**
 
 - Prompt 可追踪、可复现，不以无版本字符串散落在业务代码中。
-- 上下文超限不会静默进入 Provider；消费金额预算与物理上下文窗口是两套独立机制。
+- 上下文超限不会静默进入 Provider；只有物理窗口已知时才自动压缩，未知时保留手动压缩能力而不虚构 32K 默认值。消费金额预算与物理上下文窗口是两套独立机制。
 - 重复的确定性请求可减少 Token 和网络消耗，租户之间不能互相命中缓存。
 
 ### 2.5 结构化输出与 Tool Calling

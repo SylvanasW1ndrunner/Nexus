@@ -73,13 +73,48 @@ Install the current public Alpha release:
 npm install @nwlworkshop/schemanaut@alpha
 ```
 
-Or build the exact installable archive from this repository:
+Repository maintainers can regenerate the local archive with:
 
 ```bash
 pnpm install
 pnpm package:npm
-npm install ./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
 ```
+
+The generated archive is `./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz`.
+Users who already have the `.tgz` **do not need pnpm**; they only need the `npm` and `npx` commands bundled with Node.js 22.13+.
+
+### Start from the local `.tgz` package
+
+Install the generated package in the directory where you want to use SchemaNaut. Replace the path below with the absolute path to your local `Nexus` checkout:
+
+```bash
+npm init -y
+npm install /absolute/path/to/Nexus/release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
+npx schemanaut init .
+```
+
+Create `.env` in that directory:
+
+```dotenv
+SCHEMANAUT_LLM_BASE_URL=https://api.siliconflow.cn/v1
+SCHEMANAUT_LLM_API_KEY=replace-with-your-key
+SCHEMANAUT_LLM_MODEL=replace-with-a-tool-calling-model
+SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
+```
+
+Start the interactive CLI:
+
+```bash
+npx schemanaut chat -C .
+```
+
+Or start the local REST API and WebUI:
+
+```bash
+npx schemanaut serve --host 127.0.0.1 --port 3721
+```
+
+Open <http://127.0.0.1:3721>, then enter the model and database connection in the page. Press `Ctrl+C` to stop the service. For local Ollama, use `http://127.0.0.1:11434/v1` as the Base URL and omit the API Key. The SDK does not require a separate service process; import it directly as shown below.
 
 `pnpm test:npm-package:functional` verifies `SHA256SUMS.txt`, release-version
 metadata, secret scanning, an isolated local install, SDK/REST/CLI behavior, and

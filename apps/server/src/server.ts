@@ -1,15 +1,17 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import {
-  AnthropicProvider,
   LLM_PROVIDER_PRESETS,
-  OpenAICompatibleProvider,
+  createLlmProvider,
   createProviderFromPreset,
   getLlmProviderPreset,
+  mergeLlmGenerationConfig,
   type LlmAsyncJob,
   type LlmChatResponse,
   type LlmChatStreamEvent,
   type LlmGatewayResult,
+  type LlmEndpointProtocol,
+  type LlmGenerationConfig,
   type LlmMetricsSnapshot,
   type LlmMessage,
   type LlmProvider,
@@ -48,6 +50,7 @@ import {
   type AiSqlAgentRun,
   type CompactAiSqlAgentSessionInput,
   type CompactAiSqlAgentSessionResult,
+  type ConfigureLlmProviderOptions,
   type DatabaseAccessRuntime,
   type DatabaseCredential,
   type DatabaseOperationRequest,
@@ -72,7 +75,7 @@ import {
 import { WEB_UI_HTML } from './web-ui.js';
 
 const MAX_BODY_BYTES = 1_048_576;
-const MAX_AGENT_ITERATIONS = 64;
+const MAX_AGENT_ITERATIONS = 200;
 const MAX_TOOL_EXECUTION_MS = 300_000;
 const RESOURCE_EVENT_TYPES = new Set<ResourceEventType>([
   'resource-created',
@@ -90,7 +93,7 @@ export const DEFAULT_SERVER_HOST = '127.0.0.1';
 export const DEFAULT_SERVER_PORT = 3721;
 
 export type LlmSetupInput = {
-  protocol: 'openai-compatible' | 'anthropic-messages';
+  protocol: LlmEndpointProtocol;
   baseUrl?: string;
   apiKey?: string;
   model: string;
@@ -98,12 +101,18 @@ export type LlmSetupInput = {
   presetId?: string;
   apiVersion?: string;
   allowUnauthenticated?: boolean;
+  canonicalModel?: string;
+  generation?: LlmGenerationConfig;
 };
 
 export type DatabaseAgentRuntimePort = {
   readonly database?: DatabaseAccessRuntime;
   close?(): Promise<void>;
-  configureProvider(provider: LlmProvider, model: string): void;
+  configureProvider(
+    provider: LlmProvider,
+    model: string,
+    options?: ConfigureLlmProviderOptions,
+  ): void;
   connect(input: PostgresConnectionInput): Promise<SavedConnection>;
   disconnect(): Promise<void>;
   indexSchema(options?: IndexSchemaOptions): Promise<SchemaIndexSnapshot>;
@@ -436,7 +445,10 @@ async function handleRequest(
       const body = requireRecord(await readJson(request), 'request');
       const llm = parseLlmSetup(body.llm === undefined ? body : requireRecord(body.llm, 'llm'));
       const provider = createProvider(llm);
-      runtime.configureProvider(provider, llm.model);
+      runtime.configureProvider(provider, llm.model, {
+        ...(llm.canonicalModel === undefined ? {} : { canonicalModel: llm.canonicalModel }),
+        ...(llm.generation === undefined ? {} : { generation: llm.generation }),
+      });
       const models = runtime.discoverLlmModels
         ? await runtime.discoverLlmModels()
         : (runtime.llmModels?.() ?? []);
@@ -915,7 +927,10 @@ async function handleRequest(
       const llm = parseLlmSetup(requireRecord(body.llm, 'llm'));
       const database = parseDatabaseSetup(requireRecord(body.database, 'database'));
       const provider = createProvider(llm);
-      runtime.configureProvider(provider, llm.model);
+      runtime.configureProvider(provider, llm.model, {
+        ...(llm.canonicalModel === undefined ? {} : { canonicalModel: llm.canonicalModel }),
+        ...(llm.generation === undefined ? {} : { generation: llm.generation }),
+      });
       await runtime.discoverLlmModels?.();
       const connection = await runtime.connect(database);
       sendJson(response, 200, {
@@ -1463,64 +1478,70 @@ function defaultProviderFactory(input: LlmSetupInput): LlmProvider {
       ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
       ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
       ...(input.providerId === undefined ? {} : { id: input.providerId }),
-    });
-  }
-  if (input.protocol === 'anthropic-messages') {
-    if (!input.apiKey)
-      throw new DatabaseAgentError('INVALID_INPUT', 'Anthropic 原生协议必须配置 apiKey。');
-    return new AnthropicProvider({
-      id: input.providerId ?? 'default-anthropic',
-      name: 'Anthropic',
-      apiKey: input.apiKey,
-      ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
       ...(input.apiVersion === undefined ? {} : { apiVersion: input.apiVersion }),
     });
   }
-  if (!input.baseUrl) throw new DatabaseAgentError('INVALID_INPUT', 'baseUrl 不能为空。');
-  return new OpenAICompatibleProvider({
-    id: input.providerId ?? 'default-openai-compatible',
-    name: 'OpenAI-compatible',
-    baseUrl: input.baseUrl,
-    metadataSource: isOllamaBaseUrl(input.baseUrl) ? 'ollama' : 'openai-compatible',
+  const baseUrl = input.baseUrl ?? (input.protocol === 'anthropic' ? 'https://api.anthropic.com' : undefined);
+  if (!baseUrl) throw new DatabaseAgentError('INVALID_INPUT', 'baseUrl 不能为空。');
+  return createLlmProvider({
+    protocol: input.protocol,
+    id: input.providerId ?? `default-${input.protocol}`,
+    name: input.protocol,
+    baseUrl,
     ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
-    ...(input.allowUnauthenticated === undefined
-      ? {}
-      : { allowUnauthenticated: input.allowUnauthenticated }),
+    ...((input.allowUnauthenticated ??
+    (input.protocol === 'ollama' ||
+      input.protocol === 'vllm' ||
+      isLocalLlmBaseUrl(baseUrl)))
+      ? { allowUnauthenticated: true }
+      : {}),
+    ...(input.apiVersion === undefined ? {} : { apiVersion: input.apiVersion }),
   });
 }
 
-function isOllamaBaseUrl(baseUrl: string): boolean {
+function isLocalLlmBaseUrl(baseUrl: string): boolean {
   try {
     const url = new URL(baseUrl);
-    return url.port === '11434';
+    return ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
   } catch {
     return false;
   }
 }
 
 function parseLlmSetup(input: Record<string, unknown>): LlmSetupInput {
+  if (
+    input.contextWindow !== undefined ||
+    input.contextTokens !== undefined ||
+    input.maxInputTokens !== undefined
+  ) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      '模型上下文窗口是只读元数据，由 Endpoint 或内置模型目录发现，不能手工配置。',
+    );
+  }
   const apiKey = optionalString(input, 'apiKey');
   const providerId = optionalString(input, 'providerId');
   const presetId = optionalString(input, 'presetId');
-  const protocolValue = optionalString(input, 'protocol') ?? 'openai-compatible';
-  if (protocolValue !== 'openai-compatible' && protocolValue !== 'anthropic-messages') {
-    throw new DatabaseAgentError(
-      'INVALID_INPUT',
-      'protocol 必须是 openai-compatible 或 anthropic-messages。',
-    );
-  }
   const preset = presetId ? getLlmProviderPreset(presetId) : undefined;
   if (presetId && !preset) {
     throw new DatabaseAgentError('INVALID_INPUT', `未知的 Provider 预设：${presetId}`);
   }
-  if (presetId && protocolValue !== 'openai-compatible') {
-    throw new DatabaseAgentError('INVALID_INPUT', 'Provider 预设仅适用于 openai-compatible 协议。');
+  const rawProtocol = optionalString(input, 'protocol');
+  const protocolValue =
+    rawProtocol === undefined
+      ? (preset?.protocol ?? 'openai-chat')
+      : normalizeLlmProtocol(rawProtocol);
+  if (preset && rawProtocol !== undefined && protocolValue !== preset.protocol) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      `Provider 预设 ${preset.id} 使用 ${preset.protocol} 协议，不能配置为 ${protocolValue}。`,
+    );
   }
   const baseUrl = optionalString(input, 'baseUrl');
-  if (!presetId && protocolValue === 'openai-compatible' && !baseUrl) {
+  if (!presetId && protocolValue !== 'anthropic' && !baseUrl) {
     throw new DatabaseAgentError('INVALID_INPUT', 'baseUrl 不能为空。');
   }
-  if (protocolValue === 'anthropic-messages' && !apiKey) {
+  if (protocolValue === 'anthropic' && !apiKey) {
     throw new DatabaseAgentError('INVALID_INPUT', 'Anthropic 原生协议必须配置 apiKey。');
   }
   if (preset?.requiresApiKey && !apiKey) {
@@ -1528,6 +1549,17 @@ function parseLlmSetup(input: Record<string, unknown>): LlmSetupInput {
   }
   const allowUnauthenticated = optionalBoolean(input, 'allowUnauthenticated');
   const apiVersion = optionalString(input, 'apiVersion');
+  const canonicalModel = optionalString(input, 'canonicalModel');
+  if (canonicalModel !== undefined && !canonicalModel.includes('/')) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      'canonicalModel 必须采用 provider/model 格式。',
+    );
+  }
+  const generation =
+    input.generation === undefined
+      ? undefined
+      : parseLlmGeneration(requireRecord(input.generation, 'generation'));
   return {
     protocol: protocolValue,
     model: requireString(input, 'model'),
@@ -1537,7 +1569,81 @@ function parseLlmSetup(input: Record<string, unknown>): LlmSetupInput {
     ...(presetId === undefined ? {} : { presetId }),
     ...(apiVersion === undefined ? {} : { apiVersion }),
     ...(allowUnauthenticated === undefined ? {} : { allowUnauthenticated }),
+    ...(canonicalModel === undefined ? {} : { canonicalModel }),
+    ...(generation === undefined ? {} : { generation }),
   };
+}
+
+function normalizeLlmProtocol(value: string): LlmEndpointProtocol {
+  if (value === 'openai-compatible') return 'openai-chat';
+  if (value === 'anthropic-messages') return 'anthropic';
+  if (
+    value === 'openai-chat' ||
+    value === 'openai-responses' ||
+    value === 'anthropic' ||
+    value === 'ollama' ||
+    value === 'vllm'
+  ) {
+    return value;
+  }
+  throw new DatabaseAgentError(
+    'INVALID_INPUT',
+    'protocol 必须是 openai-chat、openai-responses、anthropic、ollama 或 vllm。',
+  );
+}
+
+function parseLlmGeneration(input: Record<string, unknown>): LlmGenerationConfig {
+  const reasoningEffort = optionalString(input, 'reasoningEffort');
+  if (
+    reasoningEffort !== undefined &&
+    reasoningEffort !== 'low' &&
+    reasoningEffort !== 'medium' &&
+    reasoningEffort !== 'high'
+  ) {
+    throw new DatabaseAgentError('INVALID_INPUT', 'generation.reasoningEffort 必须是 low、medium 或 high。');
+  }
+  const stopValue = input.stop;
+  if (
+    stopValue !== undefined &&
+    (!Array.isArray(stopValue) || stopValue.some((item) => typeof item !== 'string' || !item))
+  ) {
+    throw new DatabaseAgentError('INVALID_INPUT', 'generation.stop 必须是非空字符串数组。');
+  }
+  try {
+    return mergeLlmGenerationConfig(undefined, {
+      ...(input.temperature === undefined
+        ? {}
+        : { temperature: requireFiniteNumber(input.temperature, 'generation.temperature') }),
+      ...(input.topP === undefined
+        ? {}
+        : { topP: requireFiniteNumber(input.topP, 'generation.topP') }),
+      ...(input.maxOutputTokens === undefined
+        ? {}
+        : {
+            maxOutputTokens: requireFiniteNumber(
+              input.maxOutputTokens,
+              'generation.maxOutputTokens',
+            ),
+          }),
+      ...(input.seed === undefined
+        ? {}
+        : { seed: requireFiniteNumber(input.seed, 'generation.seed') }),
+      ...(stopValue === undefined ? {} : { stop: [...(stopValue as string[])] }),
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    });
+  } catch (error) {
+    throw new DatabaseAgentError(
+      'INVALID_INPUT',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function requireFiniteNumber(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new DatabaseAgentError('INVALID_INPUT', `${name} 必须是有限数字。`);
+  }
+  return value;
 }
 
 function parseDatabaseSetup(input: Record<string, unknown>): PostgresConnectionInput {

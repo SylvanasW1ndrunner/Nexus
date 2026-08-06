@@ -14,6 +14,7 @@ import type {
   AiSqlAgentRun,
   CompactAiSqlAgentSessionInput,
   CompactAiSqlAgentSessionResult,
+  ConfigureLlmProviderOptions,
   DatabaseConnector,
   ExecutedSqlRun,
   GeneratedSqlRun,
@@ -76,6 +77,8 @@ describe('SchemaNaut local server', () => {
           baseUrl: 'https://llm.example.test/v1',
           apiKey: 'secret-llm-key',
           model: 'test-model',
+          canonicalModel: 'openai/gpt-4o',
+          generation: { temperature: 0.3, topP: 0.8, maxOutputTokens: 2048 },
         },
         database: {
           host: '127.0.0.1',
@@ -93,6 +96,10 @@ describe('SchemaNaut local server', () => {
     expect(JSON.parse(setupText)).toMatchObject({
       provider: { model: 'test-model' },
       connection: { readOnly: true, status: 'connected' },
+    });
+    expect(runtime.lastLlmConfiguration).toEqual({
+      canonicalModel: 'openai/gpt-4o',
+      generation: { temperature: 0.3, topP: 0.8, maxOutputTokens: 2048 },
     });
 
     const indexed = await postJson(started.url, '/v1/schema/index', {});
@@ -722,13 +729,13 @@ describe('SchemaNaut local server', () => {
     const capabilities = await getJson(started.url, '/v1/capabilities');
     expect(capabilities).toMatchObject({
       limits: {
-        maxAgentIterations: 64,
+        maxAgentIterations: 200,
         maxToolExecutionMs: 300_000,
       },
     });
 
     for (const body of [
-      { message: 'too many rounds', maxIterations: 65 },
+      { message: 'too many rounds', maxIterations: 201 },
       { message: 'no rounds', maxIterations: 0 },
       { message: 'tool timeout too large', maxToolExecutionMs: 300_001 },
       { message: 'tool timeout must be positive', maxToolExecutionMs: 0 },
@@ -832,7 +839,7 @@ describe('SchemaNaut local server', () => {
       presetId: 'ollama',
       model: 'local-model',
     });
-    expect(ollama).toMatchObject({ providerId: 'ollama', protocol: 'openai-compatible' });
+    expect(ollama).toMatchObject({ providerId: 'ollama', protocol: 'ollama-chat' });
 
     const invalid = await fetch(`${started.url}/v1/llm/setup`, {
       method: 'POST',
@@ -1453,9 +1460,15 @@ class FakeRuntime implements DatabaseAgentRuntimePort {
   generateError?: Error;
   mcpUpsertCalls = 0;
   mcpStartCalls = 0;
+  lastLlmConfiguration: ConfigureLlmProviderOptions | undefined;
 
-  configureProvider(): void {
+  configureProvider(
+    _provider: LlmProvider,
+    _model: string,
+    options?: ConfigureLlmProviderOptions,
+  ): void {
     this.configured = true;
+    this.lastLlmConfiguration = options === undefined ? undefined : structuredClone(options);
   }
 
   connect(input: PostgresConnectionInput): Promise<SavedConnection> {

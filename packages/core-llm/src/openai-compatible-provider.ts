@@ -5,6 +5,8 @@ import {
   type LlmChatStreamEvent,
   type LlmEmbeddingRequest,
   type LlmEmbeddingResponse,
+  type LlmGenerationParameterSupport,
+  type LlmGenerationParameterName,
   type LlmModelMetadata,
   type LlmProvider,
   type LlmProviderAvailability,
@@ -34,6 +36,7 @@ import {
   type LlmStreamLimitOptions,
   type LlmStreamLimits,
 } from './stream-safety.js';
+import { assertNoTextualToolInvocation, coalesceSystemMessages } from './tool-protocol.js';
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -68,6 +71,7 @@ export type OpenAICompatibleProviderConfig = {
   modelsPath?: string;
   metadataSource?: 'openai-compatible' | 'ollama';
   capabilities?: Partial<LlmProviderCapabilities>;
+  generationParameters?: Partial<LlmGenerationParameterSupport>;
   protocolProfile?: LlmProviderProtocolProfileInput;
   defaultHeaders?: Record<string, string>;
   maxResponseBytes?: number;
@@ -80,6 +84,11 @@ type OpenAIChatMessage = {
   content: string | null;
   name?: string;
   tool_call_id?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
 };
 
 type OpenAIChatTool = {
@@ -174,6 +183,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
   readonly mode: LlmProviderMode;
   readonly protocol = 'openai-compatible';
   readonly capabilities: Partial<LlmProviderCapabilities>;
+  readonly generationParameters: Partial<LlmGenerationParameterSupport>;
   readonly protocolProfile: LlmProviderProtocolProfile;
 
   private readonly apiKey: string;
@@ -230,6 +240,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       rerank: 'unknown',
       ...config.capabilities,
     };
+    this.generationParameters = { ...(config.generationParameters ?? {}) };
     this.protocolProfile = resolveLlmProviderProtocolProfile(
       config.protocolProfile ?? {
         protocol: this.protocol,
@@ -247,7 +258,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
     const payload = buildChatPayload(request);
 
     const response = await this.requestJson('/chat/completions', payload, request.signal);
-    return parseChatResponse(response);
+    const parsed = parseChatResponse(response);
+    assertNoTextualToolInvocation({
+      text: parsed.text,
+      toolCalls: parsed.toolCalls,
+      toolsRequested: Boolean(request.tools?.length),
+      protocol: 'OpenAI-compatible',
+    });
+    return parsed;
   }
 
   async embed(request: LlmEmbeddingRequest): Promise<LlmEmbeddingResponse> {
@@ -396,6 +414,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
         receivedEvent = true;
         if (event === '[DONE]') {
           const response = streamStateToResponse(state);
+          assertNoTextualToolInvocation({
+            text: response.text,
+            toolCalls: response.toolCalls,
+            toolsRequested: Boolean(request.tools?.length),
+            protocol: 'OpenAI-compatible',
+          });
           yield finishEvent(response, state.finishReason);
           return;
         }
@@ -481,6 +505,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
     }
 
     const response = streamStateToResponse(state);
+    assertNoTextualToolInvocation({
+      text: response.text,
+      toolCalls: response.toolCalls,
+      toolsRequested: Boolean(request.tools?.length),
+      protocol: 'OpenAI-compatible',
+    });
     yield finishEvent(response, state.finishReason);
   }
 
@@ -826,11 +856,23 @@ function parseChatResponse(response: OpenAIChatResponse): LlmChatResponse {
 function buildChatPayload(request: LlmChatRequest): Record<string, unknown> {
   return {
     model: request.model,
-    messages: request.messages.map<OpenAIChatMessage>((message) => ({
+    messages: coalesceSystemMessages(request.messages).map<OpenAIChatMessage>((message) => ({
       role: message.role,
       content: message.content,
       ...(message.name ? { name: message.name } : {}),
       ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+      ...(message.toolCalls?.length
+        ? {
+            tool_calls: message.toolCalls.map((call) => ({
+              id: call.id,
+              type: 'function' as const,
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.arguments),
+              },
+            })),
+          }
+        : {}),
     })),
     ...(request.tools?.length
       ? {
@@ -845,6 +887,7 @@ function buildChatPayload(request: LlmChatRequest): Record<string, unknown> {
         }
       : {}),
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+    ...(request.topP === undefined ? {} : { top_p: request.topP }),
     ...(request.maxTokens === undefined ? {} : { max_tokens: request.maxTokens }),
     ...(request.stop === undefined ? {} : { stop: request.stop }),
     ...(request.seed === undefined ? {} : { seed: request.seed }),
@@ -1034,6 +1077,7 @@ function parseOpenAiCatalogMetadata(
     'maxcompletiontokens',
     'maxnewtokens',
   ]);
+  const generationParameters = catalogGenerationParameters(entry);
   return {
     model,
     source: 'provider-api',
@@ -1043,6 +1087,34 @@ function parseOpenAiCatalogMetadata(
     },
     ...(contextTokens === undefined ? {} : { contextTokens }),
     ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+    ...(generationParameters === undefined ? {} : { generationParameters }),
+  };
+}
+
+function catalogGenerationParameters(
+  entry: OpenAIModelCatalogEntry,
+): LlmModelMetadata['generationParameters'] | undefined {
+  const raw = entry.supported_parameters ?? entry.supportedParameters;
+  if (!Array.isArray(raw)) return undefined;
+  const advertised = new Set(
+    raw.filter((value): value is string => typeof value === 'string').map(normalizedCatalogKey),
+  );
+  const supportsAny = (...names: string[]) =>
+    names.some((name) => advertised.has(normalizedCatalogKey(name)))
+      ? 'supported' as const
+      : 'unsupported' as const;
+  return {
+    temperature: supportsAny('temperature'),
+    topP: supportsAny('top_p', 'topP'),
+    maxOutputTokens: supportsAny(
+      'max_tokens',
+      'max_completion_tokens',
+      'max_output_tokens',
+      'max_new_tokens',
+    ),
+    seed: supportsAny('seed'),
+    stop: supportsAny('stop', 'stop_sequences'),
+    reasoningEffort: supportsAny('reasoning_effort', 'reasoning'),
   };
 }
 
@@ -1154,15 +1226,66 @@ function httpError(status: number, body: unknown, headers?: Headers): LlmProvide
   const detail = retryAfterMs === undefined ? undefined : { retryAfterMs };
   if (status === 408 || status === 429)
     return new LlmProviderError('LLM_RATE_LIMITED', message, true, status, detail);
+  const unsupportedParameter =
+    status === 400 ? unsupportedGenerationParameter(message) : undefined;
+  if (unsupportedParameter !== undefined) {
+    return new LlmProviderError(
+      'LLM_PARAMETER_UNSUPPORTED',
+      message,
+      false,
+      status,
+      { parameter: unsupportedParameter },
+    );
+  }
   if (RETRYABLE_LLM_HTTP_STATUSES.has(status))
     return new LlmProviderError('LLM_PROVIDER_ERROR', message, true, status, detail);
   return new LlmProviderError('LLM_PROVIDER_ERROR', message, false, status);
 }
 
+function unsupportedGenerationParameter(message: string): LlmGenerationParameterName | undefined {
+  if (!/(?:unsupported|not\s+supported|does\s+not\s+support|unknown\s+parameter)/i.test(message)) {
+    return undefined;
+  }
+  const candidates: Array<[LlmGenerationParameterName, RegExp]> = [
+    ['temperature', /\btemperature\b/i],
+    ['topP', /\btop[_-]?p\b/i],
+    [
+      'maxOutputTokens',
+      /\b(?:max[_-]?(?:output|completion|new)?[_-]?tokens|num[_-]?predict)\b/i,
+    ],
+    ['seed', /\bseed\b/i],
+    ['stop', /\bstop(?:[_-]?sequences?)?\b/i],
+    ['reasoningEffort', /\breasoning[_-]?(?:effort)?\b/i],
+  ];
+  return candidates.find(([, pattern]) => pattern.test(message))?.[0];
+}
+
 function extractErrorMessage(body: unknown): string | undefined {
   if (!body || typeof body !== 'object') return undefined;
-  const error = (body as { error?: { message?: unknown } }).error;
-  return typeof error?.message === 'string' ? error.message : undefined;
+  const record = body as Record<string, unknown>;
+  const direct = firstNonEmptyString(record.message, record.detail);
+  if (direct) return direct;
+  if (typeof record.error === 'string' && record.error.trim()) return record.error.trim();
+  if (record.error && typeof record.error === 'object') {
+    const nested = record.error as Record<string, unknown>;
+    const nestedMessage = firstNonEmptyString(nested.message, nested.detail);
+    if (nestedMessage) return nestedMessage;
+  }
+  if (record.data && typeof record.data === 'object') {
+    const nested = record.data as Record<string, unknown>;
+    const nestedMessage = firstNonEmptyString(nested.message, nested.detail);
+    if (nestedMessage) return nestedMessage;
+  }
+  return undefined;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const normalized = value.trim();
+    return normalized.length <= 2_000 ? normalized : `${normalized.slice(0, 1_985)}...[truncated]`;
+  }
+  return undefined;
 }
 
 function collectKnownHeaderSecrets(

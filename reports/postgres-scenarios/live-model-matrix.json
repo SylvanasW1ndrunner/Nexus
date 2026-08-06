@@ -1,0 +1,71 @@
+{
+  "kind": "multi-model-postgres-agent-acceptance",
+  "generatedAt": "2026-08-06T12:55:00.162Z",
+  "provider": "siliconflow",
+  "protocol": "openai-chat",
+  "expectedRunCount": 4,
+  "actualRunCount": 4,
+  "passed": true,
+  "runs": [
+    {
+      "scenario": "schema-catalog-live",
+      "model": "Qwen/Qwen3.6-35B-A3B",
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 6282,
+      "iterations": 2,
+      "tokenUsage": {
+        "promptTokens": 4919,
+        "completionTokens": 254,
+        "totalTokens": 5173
+      },
+      "toolCount": 1,
+      "report": "live-model-matrix/schema-catalog-live--Qwen_Qwen3.6-35B-A3B.json"
+    },
+    {
+      "scenario": "ecommerce-live",
+      "model": "MiniMaxAI/MiniMax-M2.5",
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 41260,
+      "iterations": 5,
+      "tokenUsage": {
+        "promptTokens": 18273,
+        "completionTokens": 1417,
+        "totalTokens": 19690
+      },
+      "toolCount": 6,
+      "report": "live-model-matrix/ecommerce-live--MiniMaxAI_MiniMax-M2.5.json"
+    },
+    {
+      "scenario": "traffic-cleaning-live",
+      "model": "deepseek-ai/DeepSeek-V4-Pro",
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 242581,
+      "iterations": 12,
+      "tokenUsage": {
+        "promptTokens": 86846,
+        "completionTokens": 11862,
+        "totalTokens": 98708
+      },
+      "toolCount": 22,
+      "report": "live-model-matrix/traffic-cleaning-live--deepseek-ai_DeepSeek-V4-Pro.json"
+    },
+    {
+      "scenario": "big-science-live",
+      "model": "Qwen/Qwen3.6-35B-A3B",
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 155888,
+      "iterations": 7,
+      "tokenUsage": {
+        "promptTokens": 36029,
+        "completionTokens": 1511,
+        "totalTokens": 37540
+      },
+      "toolCount": 9,
+      "report": "live-model-matrix/big-science-live--Qwen_Qwen3.6-35B-A3B.json"
+    }
+  ]
+}

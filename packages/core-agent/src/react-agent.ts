@@ -1,10 +1,11 @@
-import type {
-  LlmChatRequest,
-  LlmChatResponse,
-  LlmMessage,
-  LlmRouter,
-  LlmTool,
-  LlmToolCall,
+import {
+  resolveLlmOutputReservation,
+  type LlmChatRequest,
+  type LlmChatResponse,
+  type LlmMessage,
+  type LlmRouter,
+  type LlmTool,
+  type LlmToolCall,
 } from '@dbagent/core-llm';
 import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
 import { stringifyPublicJson } from '@dbagent/shared';
@@ -42,6 +43,7 @@ import {
   verifyAgentCompletion,
 } from './completion-verifier.js';
 import { createSingleToolCallExecutionGrant } from './tool-execution-authorization.js';
+import { AgentToolCallLedger } from './tool-call-ledger.js';
 import { ToolExecutionRouter } from './tool-execution-router.js';
 import { ToolExposurePlanner } from './tool-exposure-planner.js';
 import { isAgentToolResultEnvelope } from './tool-result.js';
@@ -74,9 +76,9 @@ const MAX_AUTO_COMPACTIONS_PER_ITERATION = 4;
 const MIN_COMPACTION_REDUCTION_RATIO = 0.05;
 const DEFAULT_AUTO_COMPACTION_RECENT_MESSAGES = 12;
 const MAX_COMPACTION_OUTPUT_TOKENS = 4_096;
+const UNKNOWN_WINDOW_PINNED_INSTRUCTION_CHARS = 8_000;
 const LEGACY_RUN_SCOPED_INSTRUCTION_PREFIXES = [
   'Runtime finalization phase:',
-  'The previous response contained textual tool-call markup',
   'Completion verification failed.',
   'Finalize the task now.',
   'No-progress guard:',
@@ -202,7 +204,7 @@ export class ReactAgent {
       await this.saveSession(session);
 
       const usageMode = options.usageMode ?? 'byok';
-      const maxIterations = options.maxIterations ?? 25;
+      const maxIterations = options.maxIterations ?? 100;
       await this.auditLog?.append({
         type: 'run_started',
         timestamp: this.now(),
@@ -231,6 +233,7 @@ export class ReactAgent {
       };
       const toolExecutions: AgentToolExecutionRecord[] = [];
       const transientToolResults = new Map<string, string>();
+      const toolCallLedger = new AgentToolCallLedger();
       const runScopedInstructions = new Map<string, LlmMessage>();
       const contextCompression: AgentContextCompressionReport[] = [];
       let finalText = '';
@@ -257,7 +260,11 @@ export class ReactAgent {
       );
       const allowedToolSet =
         options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
-      const modelContext = this.resolveModelContext(options.providerId, options.model);
+      const modelContext = this.resolveModelContext(
+        options.providerId,
+        options.model,
+        options.generation?.maxOutputTokens,
+      );
       const contextOptions: AgentContextManagerOptions = {
         ...modelContext,
         ...(options.keepRecentMessages === undefined
@@ -270,10 +277,7 @@ export class ReactAgent {
           pinnedPreferenceMessages,
           session,
           options,
-          Math.max(
-            2_000,
-            Math.floor((modelContext.modelContextTokens ?? 32_768) * 0.08),
-          ),
+          pinnedInstructionCharLimit(modelContext.modelContextTokens),
         ),
         activeTask: options.userMessage,
       };
@@ -283,10 +287,7 @@ export class ReactAgent {
             pinnedPreferenceMessages,
             session,
             options,
-            Math.max(
-              2_000,
-              Math.floor((modelContext.modelContextTokens ?? 32_768) * 0.08),
-            ),
+            pinnedInstructionCharLimit(modelContext.modelContextTokens),
           ),
           ...[...runScopedInstructions.values()].map((message) => ({ ...message })),
         ];
@@ -409,13 +410,17 @@ export class ReactAgent {
             context,
             contextOptions,
             tools: [],
+            ...(options.generation === undefined ? {} : { generation: options.generation }),
             iteration: maxIterations,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           context = compacted.context;
           if (compacted.status === 'compacted') contextCompression.push(compacted.report);
         }
-        if (context.compression.finalTokenEstimate > context.compression.availablePromptTokens) {
+        if (
+          context.compression.availablePromptTokens !== null &&
+          context.compression.finalTokenEstimate > context.compression.availablePromptTokens
+        ) {
           return undefined;
         }
 
@@ -438,6 +443,7 @@ export class ReactAgent {
               model: options.model,
               messages: context.messages,
               tools: [],
+              ...generationRequest(options.generation),
               ...(options.signal === undefined ? {} : { signal: options.signal }),
             },
             round,
@@ -575,13 +581,15 @@ export class ReactAgent {
               context,
               contextOptions,
               tools: llmTools,
+              ...(options.generation === undefined ? {} : { generation: options.generation }),
               iteration,
               ...(options.signal === undefined ? {} : { signal: options.signal }),
             });
             context = compacted.context;
             const stillExceedsWindow =
+              context.compression.availablePromptTokens !== null &&
               context.compression.finalTokenEstimate >
-              context.compression.availablePromptTokens;
+                context.compression.availablePromptTokens;
             let reducedRecentMessages = false;
             if (stillExceedsWindow && adaptiveKeepRecentMessages > 1) {
               adaptiveKeepRecentMessages = Math.max(
@@ -612,7 +620,10 @@ export class ReactAgent {
           if (contextCompression.length === compressionReportCountBefore) {
             contextCompression.push(context.compression);
           }
-          if (context.compression.phase !== 'healthy') {
+          if (
+            context.compression.phase !== 'healthy' &&
+            context.compression.phase !== 'unknown_window'
+          ) {
             await this.auditLog?.append({
               type: 'context_compaction_observed',
               timestamp: this.now(),
@@ -621,7 +632,10 @@ export class ReactAgent {
               compression: context.compression,
             });
           }
-          if (context.compression.finalTokenEstimate > context.compression.availablePromptTokens) {
+          if (
+            context.compression.availablePromptTokens !== null &&
+            context.compression.finalTokenEstimate > context.compression.availablePromptTokens
+          ) {
             throw new Error(
               'The active Agent context still exceeds the model input capacity after compaction.',
             );
@@ -630,6 +644,7 @@ export class ReactAgent {
             model: options.model,
             messages: context.messages,
             tools: context.tools,
+            ...generationRequest(options.generation),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           };
           await this.auditLog?.append({
@@ -683,17 +698,6 @@ export class ReactAgent {
 
           if (response.toolCalls.length === 0) {
             finalText = persistedResponseText;
-            if (looksLikeUnparsedToolInvocation(finalText)) {
-              setRunScopedInstruction(
-                'provider-tool-protocol',
-                'The previous response contained textual tool-call markup that the provider did not expose as a standard tool call. Do not claim completion and do not repeat tool markup in text. Retry the needed action through the provider tool-calling API, or explain that the configured model/provider cannot call tools.',
-              );
-              await emitUserEvent({
-                type: 'correcting',
-                message: '模型返回的工具调用格式未被 Provider 识别，正在改用标准工具调用重试。',
-              });
-              continue;
-            }
             const verification = verifyAgentCompletion({
               ...(session.taskPlan === undefined ? {} : { taskPlan: session.taskPlan }),
               toolExecutions,
@@ -767,7 +771,11 @@ export class ReactAgent {
           }
 
           finalizeCorrectionCount = 0;
-          for (const toolCall of response.toolCalls) {
+          const toolCallClaims = response.toolCalls.map((toolCall) =>
+            toolCallLedger.claim(toolCall),
+          );
+          for (const [toolCallIndex, toolCall] of response.toolCalls.entries()) {
+            if (toolCallClaims[toolCallIndex]?.kind !== 'execute') continue;
             const command =
               isProcessExecutionTool(toolCall.name) &&
               typeof toolCall.arguments.command === 'string'
@@ -796,8 +804,10 @@ export class ReactAgent {
               argumentPreview: serializeToolArguments(toolCall.arguments),
             });
           }
-          const readonlyCalls = response.toolCalls.filter((toolCall) =>
-            canPreexecuteReadonlyCall(this.toolRegistry, toolCall),
+          const readonlyCalls = response.toolCalls.filter(
+            (toolCall, index) =>
+              toolCallClaims[index]?.kind === 'execute' &&
+              canPreexecuteReadonlyCall(this.toolRegistry, toolCall),
           );
           const readonlyOutcomes =
             readonlyCalls.length === 0
@@ -831,7 +841,52 @@ export class ReactAgent {
           const readonlyOutcomesByCall = new Map(
             readonlyOutcomes.map((outcome) => [outcome.call.id, outcome]),
           );
-          for (const toolCall of response.toolCalls) {
+          for (const [toolCallIndex, toolCall] of response.toolCalls.entries()) {
+            let claim = toolCallClaims[toolCallIndex]!;
+            if (claim.kind === 'pending') claim = toolCallLedger.claim(toolCall);
+            if (claim.kind === 'replay') {
+              transientToolResults.set(toolCall.id, claim.outcome.modelContent);
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'tool',
+                    toolCallId: toolCall.id,
+                    toolName: toolCall.name,
+                    content: claim.outcome.persistedContent,
+                  },
+                  this.now,
+                ),
+              );
+              await this.saveSession(session);
+              await saveCheckpoint(checkpointIteration, 'running');
+              continue;
+            }
+            if (claim.kind !== 'execute') {
+              const message =
+                claim.kind === 'conflict'
+                  ? claim.message
+                  : `Tool call id ${toolCall.id} is still pending and was not executed again.`;
+              appendMessage(
+                session,
+                createMessage(
+                  {
+                    role: 'tool',
+                    toolCallId: toolCall.id,
+                    toolName: toolCall.name,
+                    content: JSON.stringify({ error: message }),
+                  },
+                  this.now,
+                ),
+              );
+              await emitUserEvent({
+                type: 'correcting',
+                message: '模型重复使用了冲突的工具调用标识，重复操作已跳过。',
+              });
+              await this.saveSession(session);
+              await saveCheckpoint(checkpointIteration, 'running');
+              continue;
+            }
             const preexecuted = readonlyOutcomesByCall.get(toolCall.id);
             const startedAt = Date.now() - Math.ceil(preexecuted?.durationMs ?? 0);
             const tool = this.toolRegistry.get(toolCall.name);
@@ -854,6 +909,11 @@ export class ReactAgent {
                 },
               );
               toolExecutions.push(record);
+              toolCallLedger.complete(toolCall, {
+                record,
+                persistedContent: JSON.stringify({ error: 'Tool is not allowed for this run.' }),
+                modelContent: JSON.stringify({ error: 'Tool is not allowed for this run.' }),
+              });
               await this.auditLog?.append(
                 toolFinishedAuditEvent(session.id, iteration, record, this.now()),
               );
@@ -893,6 +953,11 @@ export class ReactAgent {
                 },
               );
               toolExecutions.push(record);
+              toolCallLedger.complete(toolCall, {
+                record,
+                persistedContent: JSON.stringify({ error: message }),
+                modelContent: JSON.stringify({ error: message }),
+              });
               consecutiveToolFailures += 1;
               await this.auditLog?.append(
                 toolFinishedAuditEvent(session.id, iteration, record, this.now()),
@@ -931,6 +996,11 @@ export class ReactAgent {
                 },
               );
               toolExecutions.push(record);
+              toolCallLedger.complete(toolCall, {
+                record,
+                persistedContent: JSON.stringify({ error: 'Tool is not registered.' }),
+                modelContent: JSON.stringify({ error: 'Tool is not registered.' }),
+              });
               await this.auditLog?.append(
                 toolFinishedAuditEvent(session.id, iteration, record, this.now()),
               );
@@ -1094,6 +1164,11 @@ export class ReactAgent {
                   },
                 );
                 toolExecutions.push(record);
+                toolCallLedger.complete(toolCall, {
+                  record,
+                  persistedContent: JSON.stringify({ error: denial }),
+                  modelContent: JSON.stringify({ error: denial }),
+                });
                 await this.auditLog?.append(
                   toolFinishedAuditEvent(session.id, iteration, record, this.now()),
                 );
@@ -1137,11 +1212,9 @@ export class ReactAgent {
                 envelope?.modelProjection ?? result,
               );
               const preview = serializeToolResult(persistedResult, maxToolResultChars);
+              const modelPreview = serializeToolResult(modelResult, maxToolResultChars);
               if (envelope) {
-                transientToolResults.set(
-                  toolCall.id,
-                  serializeToolResult(modelResult, maxToolResultChars),
-                );
+                transientToolResults.set(toolCall.id, modelPreview);
               }
               const record = executionRecord(
                 toolCall.id,
@@ -1159,13 +1232,17 @@ export class ReactAgent {
                 },
               );
               toolExecutions.push(record);
+              toolCallLedger.complete(toolCall, {
+                record,
+                persistedContent: preview,
+                modelContent: modelPreview,
+              });
               await this.auditLog?.append(
                 toolFinishedAuditEvent(session.id, iteration, record, this.now()),
               );
               consecutiveToolFailures = 0;
               clearRunScopedInstructions(
                 'completion',
-                'provider-tool-protocol',
                 'recovery',
                 'no-progress',
               );
@@ -1250,6 +1327,11 @@ export class ReactAgent {
                 },
               );
               toolExecutions.push(record);
+              toolCallLedger.complete(toolCall, {
+                record,
+                persistedContent: JSON.stringify({ error: message }),
+                modelContent: JSON.stringify({ error: message }),
+              });
               await this.auditLog?.append(
                 toolFinishedAuditEvent(session.id, iteration, record, this.now()),
               );
@@ -1361,7 +1443,11 @@ export class ReactAgent {
         .modelTools.map((tool) => tool.name);
       const tools = this.toolRegistry.llmTools(compactableToolNames);
       const contextOptions: AgentContextManagerOptions = {
-        ...this.resolveModelContext(options.providerId, options.model),
+        ...this.resolveModelContext(
+          options.providerId,
+          options.model,
+          options.generation?.maxOutputTokens,
+        ),
         ...(options.keepRecentMessages === undefined
           ? {}
           : { keepRecentMessages: options.keepRecentMessages }),
@@ -1385,6 +1471,7 @@ export class ReactAgent {
           context: before,
           contextOptions,
           tools,
+          ...(options.generation === undefined ? {} : { generation: options.generation }),
           ...(options.focus?.trim() ? { focus: options.focus.trim() } : {}),
           ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
@@ -1412,13 +1499,22 @@ export class ReactAgent {
   private resolveModelContext(
     providerId: string,
     model: string,
-  ): Pick<AgentContextManagerOptions, 'modelContextTokens' | 'maxOutputTokens'> {
+    configuredMaxOutputTokens?: number,
+  ): Pick<
+    AgentContextManagerOptions,
+    'modelContextTokens' | 'maxInputTokens' | 'maxOutputTokens'
+  > {
     const registered =
       this.llmRouter.gateway.registry.find(providerId, model) ??
       this.llmRouter.gateway.registerModel({ providerId, model });
     return {
       modelContextTokens: registered.limits.contextTokens,
-      maxOutputTokens: registered.limits.maxOutputTokens,
+      maxInputTokens: registered.limits.maxInputTokens,
+      maxOutputTokens: resolveLlmOutputReservation(
+        registered.limits.contextTokens,
+        registered.limits.maxOutputTokens,
+        configuredMaxOutputTokens,
+      ),
     };
   }
 
@@ -1443,7 +1539,8 @@ export class ReactAgent {
     let summary = '';
     let method: 'model' | 'deterministic-fallback' = 'model';
     try {
-      const configuredOutput = input.contextOptions.maxOutputTokens ?? 4_096;
+      const configuredOutput =
+        input.contextOptions.maxOutputTokens ?? MAX_COMPACTION_OUTPUT_TOKENS;
       const maxTokens = Math.max(
         1,
         Math.min(
@@ -1466,8 +1563,8 @@ export class ReactAgent {
               maxToolResultChars: plan.requestMaxToolResultChars,
               maxMessageTokens: plan.requestMaxMessageTokens,
             }),
+            ...generationRequest(input.generation),
             maxTokens,
-            temperature: 0,
             ...(input.signal === undefined ? {} : { signal: input.signal }),
             metadata: {
               purpose: 'context-compaction',
@@ -1577,6 +1674,7 @@ type InternalContextCompactionInput = {
   tools: LlmTool[];
   focus?: string;
   iteration?: number;
+  generation?: AgentRunOptions['generation'];
   signal?: AbortSignal;
 };
 
@@ -1681,6 +1779,32 @@ function runtimePinnedMessages(
     preferenceMessages: preferences,
     maxSkillCatalogChars,
   });
+}
+
+function pinnedInstructionCharLimit(modelContextTokens: number | null | undefined): number {
+  return modelContextTokens === null || modelContextTokens === undefined
+    ? UNKNOWN_WINDOW_PINNED_INSTRUCTION_CHARS
+    : Math.max(2_000, Math.floor(modelContextTokens * 0.08));
+}
+
+function generationRequest(
+  config: AgentRunOptions['generation'],
+): Pick<
+  LlmChatRequest,
+  'temperature' | 'topP' | 'maxTokens' | 'seed' | 'stop' | 'reasoning'
+> {
+  return {
+    ...(config?.temperature === undefined ? {} : { temperature: config.temperature }),
+    ...(config?.topP === undefined ? {} : { topP: config.topP }),
+    ...(config?.maxOutputTokens === undefined
+      ? {}
+      : { maxTokens: config.maxOutputTokens }),
+    ...(config?.seed === undefined ? {} : { seed: config.seed }),
+    ...(config?.stop === undefined ? {} : { stop: [...config.stop] }),
+    ...(config?.reasoningEffort === undefined
+      ? {}
+      : { reasoning: { effort: config.reasoningEffort } }),
+  };
 }
 
 const ALWAYS_VISIBLE_TOOL_NAMES = new Set([
@@ -1961,16 +2085,6 @@ function recoveryInstruction(failureCount: number, lastError: string): string {
 
 function stableActionSignature(toolName: string, args: Record<string, unknown>): string {
   return `${toolName}:${stableJson(args)}`;
-}
-
-function looksLikeUnparsedToolInvocation(value: string): boolean {
-  return (
-    /<tool_calls?\b[^>]*>[\s\S]*<\/tool_calls?>/i.test(value) ||
-    /<tool_call\b[^>]*>[\s\S]*<\/tool_call>/i.test(value) ||
-    /<tool_calls?>[\s\S]*<tool_call\b/i.test(value) ||
-    /<tool_calls?>[\s\S]*<(?:\|?DSML\|?|｜DSML｜)?invoke\b/i.test(value) ||
-    /<(?:\|?DSML\|?|｜DSML｜)invoke\b[\s\S]*<(?:\|?DSML\|?|｜DSML｜)parameter\b/i.test(value)
-  );
 }
 
 function stableJson(value: unknown): string {

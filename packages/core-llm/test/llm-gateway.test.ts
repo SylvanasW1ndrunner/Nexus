@@ -10,6 +10,49 @@ import {
 } from '../src/index.js';
 
 describe('LlmGateway', () => {
+  it('rejects textual tool markup at the canonical gateway boundary without retrying', async () => {
+    let calls = 0;
+    const provider: LlmProvider = {
+      id: 'broken-tools',
+      name: 'broken-tools',
+      mode: 'byok',
+      capabilities: { chat: 'supported', toolCalling: 'supported' },
+      async chat() {
+        calls += 1;
+        return {
+          text: '<tool_calls>[{"name":"lookup","arguments":{}}]</tool_calls>',
+          toolCalls: [],
+        };
+      },
+      async isAvailable() {
+        return { available: true };
+      },
+    };
+    const gateway = new LlmGateway();
+    gateway.registerProvider(provider, [model('m', 'balanced', { toolCalling: 'supported' })]);
+
+    await expect(
+      gateway.execute({
+        providerId: 'broken-tools',
+        request: {
+          model: 'm',
+          messages: [{ role: 'user', content: 'Use lookup.' }],
+          tools: [
+            {
+              name: 'lookup',
+              description: 'Lookup one fact.',
+              inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+            },
+          ],
+        },
+        context: { tenantId: 't', taskType: 'agent' },
+        maxRetries: 3,
+        maxFallbacks: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'TOOL_PROTOCOL_MISMATCH', retryable: false });
+    expect(calls).toBe(1);
+  });
+
   it('falls back, estimates missing usage, accounts budget and emits a complete event trail', async () => {
     const gateway = new LlmGateway();
     gateway.registerProvider(failingProvider('primary'), [model('primary-model', 'advanced')]);
@@ -348,6 +391,36 @@ describe('LlmGateway', () => {
     });
     expect(event.attributes).not.toHaveProperty('apiKey');
     expect(event.attributes?.detail).not.toContain('abc.def.ghi');
+  });
+
+  it('rejects a known unsupported generation parameter before invoking the provider', async () => {
+    let calls = 0;
+    const gateway = new LlmGateway();
+    gateway.registerProvider(textProvider('parameter-aware', 'unused', () => (calls += 1)), [
+      {
+        ...model('no-temperature', 'balanced'),
+        generationParameters: { temperature: 'unsupported' },
+      },
+    ]);
+
+    await expect(
+      gateway.chat({
+        providerId: 'parameter-aware',
+        request: {
+          model: 'no-temperature',
+          messages: [{ role: 'user', content: 'hello' }],
+          temperature: 0.2,
+        },
+        context: { tenantId: 'tenant-a', taskType: 'chat' },
+        maxRetries: 0,
+        maxFallbacks: 0,
+      }),
+    ).rejects.toMatchObject({
+      code: 'LLM_PARAMETER_UNSUPPORTED',
+      retryable: false,
+      detail: { parameter: 'temperature' },
+    });
+    expect(calls).toBe(0);
   });
 
   it('runs and reports asynchronous batch jobs', async () => {

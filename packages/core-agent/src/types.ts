@@ -1,5 +1,6 @@
 import type { LlmMessage, LlmTool, LlmToolCall, LlmUsage } from '@dbagent/core-llm';
 import type { UsageMode } from '@dbagent/shared';
+import type { LlmGenerationConfig } from '@dbagent/core-llm';
 import type { AgentAuditLogWriter } from './audit-log-store.js';
 import type { AgentCheckpointWriter } from './checkpoint-store.js';
 import type { AgentSessionWriter } from './session-store.js';
@@ -131,6 +132,8 @@ export type AgentRunOptions = {
   usageMode?: UsageMode;
   mode?: AgentMode;
   knowledgeSnapshot?: AgentKnowledgeSnapshotReference;
+  /** Provider-neutral generation options inherited by normal, finalization and compaction calls. */
+  generation?: LlmGenerationConfig;
   maxIterations?: number;
   keepRecentMessages?: number;
   maxToolResultChars?: number;
@@ -615,7 +618,7 @@ export type AgentContextCheckpoint = {
   coveredConversationMessageCount: number;
   sourceTokenEstimate: number;
   summaryTokenEstimate: number;
-  modelContextTokens: number;
+  modelContextTokens: number | null;
   createdAt: string;
   focus?: string;
 };
@@ -627,6 +630,7 @@ export type AgentManualContextCompactionOptions = {
   usageMode?: UsageMode;
   focus?: string;
   allowedTools?: string[];
+  generation?: LlmGenerationConfig;
   keepRecentMessages?: number;
   maxToolResultChars?: number;
   signal?: AbortSignal;
@@ -657,6 +661,7 @@ export type AgentContextCompressionLevel =
   | 'conversation-checkpoint';
 
 export type AgentContextCompressionPhase =
+  | 'unknown_window'
   | 'healthy'
   | 'approaching_limit'
   | 'tool_outputs_masked'
@@ -676,11 +681,11 @@ export type AgentContextCompressionReport = {
   trigger: AgentContextCompactionTrigger | 'none';
   originalTokenEstimate: number;
   finalTokenEstimate: number;
-  modelContextTokens: number;
-  reservedOutputTokens: number;
-  availablePromptTokens: number;
-  warningThresholdTokens: number;
-  compactionThresholdTokens: number;
+  modelContextTokens: number | null;
+  reservedOutputTokens: number | null;
+  availablePromptTokens: number | null;
+  warningThresholdTokens: number | null;
+  compactionThresholdTokens: number | null;
   retainedMessageCount: number;
   toolCount: number;
   coveredConversationMessageCount: number;

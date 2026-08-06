@@ -373,7 +373,12 @@ function copyRuntimeDirectory(source, target, distDirectory) {
       copyRuntimeDirectory(sourcePath, targetPath, distDirectory);
       continue;
     }
-    if (!entry.isFile() || (!entry.name.endsWith('.js') && !entry.name.endsWith('.d.ts'))) {
+    if (
+      !entry.isFile() ||
+      (!entry.name.endsWith('.js') &&
+        !entry.name.endsWith('.d.ts') &&
+        !entry.name.endsWith('.json'))
+    ) {
       continue;
     }
     const moduleSource = rewriteInternalImports(
@@ -465,7 +470,8 @@ function captureBuildOutputs() {
     paths.push(
       ...relativeFiles(
         `${workspace}/dist`,
-        (path) => path.endsWith('.js') || path.endsWith('.d.ts'),
+        (path) =>
+          path.endsWith('.js') || path.endsWith('.d.ts') || path.endsWith('.json'),
       ),
     );
   }

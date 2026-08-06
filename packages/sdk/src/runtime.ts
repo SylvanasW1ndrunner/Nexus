@@ -33,13 +33,16 @@ import { ResourceRegistry } from '@dbagent/core-resource';
 import {
   LlmRouter,
   LlmProviderError,
+  mergeLlmGenerationConfig,
   type LlmGateway,
   type LlmAsyncJob,
+  type LlmChatRequest,
   type LlmChatResponse,
   type LlmChatStreamEvent,
   type LlmGatewayResult,
   type LlmMetricsSnapshot,
   type LlmProvider,
+  type LlmGenerationConfig,
   type RegisteredLlmModel,
 } from '@dbagent/core-llm';
 import {
@@ -94,6 +97,7 @@ import type {
   ConnectionTestResult,
   CompactAiSqlAgentSessionInput,
   CompactAiSqlAgentSessionResult,
+  ConfigureLlmProviderOptions,
   DatabaseAgentRuntimeOptions,
   ExecuteGeneratedOptions,
   ExecutedSqlRun,
@@ -161,6 +165,7 @@ export class DatabaseAgentRuntime {
   private readonly skillsReady: Promise<unknown>;
   private readonly dynamicToolDiscovery: boolean;
   private readonly defaultSystemPrompt: DatabaseAgentRuntimeOptions['systemPrompt'];
+  private defaultGeneration: LlmGenerationConfig;
   private readonly defaultCapabilityInstructions: string[];
   private readonly defaultAllowedTools: string[] | undefined;
   private readonly defaultPinnedTools: string[];
@@ -378,6 +383,7 @@ export class DatabaseAgentRuntime {
     this.dynamicToolDiscovery = options.dynamicToolDiscovery ?? true;
     this.defaultSystemPrompt =
       options.systemPrompt === undefined ? undefined : structuredClone(options.systemPrompt);
+    this.defaultGeneration = mergeLlmGenerationConfig(undefined, options.generation);
     this.defaultCapabilityInstructions = normalizeInstructionList(
       options.capabilityInstructions,
       'capabilityInstructions',
@@ -513,6 +519,9 @@ export class DatabaseAgentRuntime {
             ? {}
             : { sessionSkills: structuredClone(context.session.sessionSkills) }),
           dynamicToolDiscovery: this.dynamicToolDiscovery,
+          ...(hasGenerationConfig(this.defaultGeneration)
+            ? { generation: structuredClone(this.defaultGeneration) }
+            : {}),
           ...(runSignal === undefined ? {} : { signal: runSignal }),
         };
       },
@@ -521,18 +530,33 @@ export class DatabaseAgentRuntime {
       if (!options.provider || !options.model?.trim()) {
         throw new DatabaseAgentError('INVALID_INPUT', 'provider 和 model 必须同时配置。', false);
       }
-      this.configureProvider(options.provider, options.model);
+      this.configureProvider(options.provider, options.model, {
+        ...(options.canonicalModel === undefined ? {} : { canonicalModel: options.canonicalModel }),
+      });
     }
   }
 
-  configureProvider(provider: LlmProvider, model: string): void {
+  configureProvider(
+    provider: LlmProvider,
+    model: string,
+    options: ConfigureLlmProviderOptions = {},
+  ): void {
     const normalizedModel = requireText(model, 'model', 300);
     this.modelMetadataDiscovery.delete(`${provider.id}\u0000${normalizedModel}`);
     this.llmGateway.registerProvider(provider);
     if (this.llmGateway !== this.llmRouter.gateway) {
       this.llmRouter.registerProvider(provider);
     }
-    this.llmGateway.registerModel({ providerId: provider.id, model: normalizedModel });
+    this.llmGateway.registerModel({
+      providerId: provider.id,
+      model: normalizedModel,
+      ...(options.canonicalModel?.trim()
+        ? { canonicalModel: options.canonicalModel.trim() }
+        : {}),
+    });
+    if (options.generation !== undefined) {
+      this.defaultGeneration = mergeLlmGenerationConfig(undefined, options.generation);
+    }
     this.providerId = provider.id;
     this.model = normalizedModel;
   }
@@ -902,6 +926,7 @@ export class DatabaseAgentRuntime {
       ...this.defaultCapabilityInstructions,
       ...normalizeInstructionList(input.capabilityInstructions, 'capabilityInstructions'),
     ];
+    const generation = mergeLlmGenerationConfig(this.defaultGeneration, input.generation);
     const runPromise = this.reactAgent.run({
       providerId,
       model,
@@ -935,6 +960,7 @@ export class DatabaseAgentRuntime {
         ? {}
         : { sessionSkills: structuredClone(sessionSkills) }),
       dynamicToolDiscovery: this.dynamicToolDiscovery,
+      ...(hasGenerationConfig(generation) ? { generation } : {}),
       ...(input.onEvent === undefined ? {} : { eventSink: input.onEvent }),
       ...(input.maxIterations === undefined ? {} : { maxIterations: input.maxIterations }),
       ...(input.maxToolExecutionMs === undefined
@@ -1107,10 +1133,12 @@ export class DatabaseAgentRuntime {
       throw new DatabaseAgentError('INVALID_INPUT', '请提供有效的 session 或 sessionId。', false);
     }
     this.assertSessionProject(session);
+    const generation = mergeLlmGenerationConfig(this.defaultGeneration, input.generation);
     return await this.reactAgent.compact({
       providerId,
       model,
       session,
+      ...(hasGenerationConfig(generation) ? { generation } : {}),
       ...(input.focus?.trim() ? { focus: input.focus.trim() } : {}),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
@@ -1134,6 +1162,7 @@ export class DatabaseAgentRuntime {
       throw new DatabaseAgentError('SCHEMA_NOT_INDEXED', '请先索引数据库 Schema。', true);
     }
     const question = requireText(input.question, 'question', MAX_QUESTION_CHARS);
+    const generation = mergeLlmGenerationConfig(this.defaultGeneration, input.generation);
     const maxContextChars = normalizeInteger(
       input.maxContextChars ?? DEFAULT_CONTEXT_CHARS,
       'maxContextChars',
@@ -1158,8 +1187,7 @@ export class DatabaseAgentRuntime {
         providerId,
         request: {
           model,
-          temperature: 0,
-          maxTokens: 1_200,
+          ...toLlmGenerationRequest(generation),
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           messages: [
             { role: 'system', content: buildSystemPrompt() },
@@ -2410,6 +2438,25 @@ function mapLlmError(error: unknown): DatabaseAgentError {
   const normalized = asDatabaseAgentError(error);
   if (normalized.code === 'ABORTED') return normalized;
   return new DatabaseAgentError('LLM_REQUEST_FAILED', normalized.message, true);
+}
+
+function hasGenerationConfig(config: LlmGenerationConfig): boolean {
+  return Object.values(config).some((value) => value !== undefined);
+}
+
+function toLlmGenerationRequest(
+  config: LlmGenerationConfig,
+): Pick<LlmChatRequest, 'temperature' | 'topP' | 'maxTokens' | 'seed' | 'stop' | 'reasoning'> {
+  return {
+    ...(config.temperature === undefined ? {} : { temperature: config.temperature }),
+    ...(config.topP === undefined ? {} : { topP: config.topP }),
+    ...(config.maxOutputTokens === undefined ? {} : { maxTokens: config.maxOutputTokens }),
+    ...(config.seed === undefined ? {} : { seed: config.seed }),
+    ...(config.stop === undefined ? {} : { stop: [...config.stop] }),
+    ...(config.reasoningEffort === undefined
+      ? {}
+      : { reasoning: { effort: config.reasoningEffort } }),
+  };
 }
 
 function requireText(value: unknown, name: string, maxLength: number): string {

@@ -73,13 +73,48 @@ flowchart LR
 npm install @nwlworkshop/schemanaut@alpha
 ```
 
-或者从仓库构建完全一致的可安装包：
+仓库维护者如需重新生成本地发行包，使用：
 
 ```bash
 pnpm install
 pnpm package:npm
-npm install ./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
 ```
+
+生成的归档位于 `./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz`。
+已经拿到该 `.tgz` 的使用者**不需要安装 pnpm**；只需要 Node.js 22.13+ 自带的 `npm` 和 `npx`。
+
+### 从本地 `.tgz` 包启动
+
+在准备使用 SchemaNaut 的目录中安装刚生成的包。请把下面的路径替换为本机 `Nexus` 仓库的实际绝对路径：
+
+```bash
+npm init -y
+npm install /absolute/path/to/Nexus/release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
+npx schemanaut init .
+```
+
+在当前目录创建 `.env`：
+
+```dotenv
+SCHEMANAUT_LLM_BASE_URL=https://api.siliconflow.cn/v1
+SCHEMANAUT_LLM_API_KEY=替换为你的密钥
+SCHEMANAUT_LLM_MODEL=替换为支持Tool-Calling的模型
+SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
+```
+
+启动交互式 CLI：
+
+```bash
+npx schemanaut chat -C .
+```
+
+或者启动本地 REST API 与 WebUI：
+
+```bash
+npx schemanaut serve --host 127.0.0.1 --port 3721
+```
+
+浏览器打开 <http://127.0.0.1:3721>，在页面中填写模型与数据库连接；使用 `Ctrl+C` 停止服务。本地 Ollama 可将 Base URL 设置为 `http://127.0.0.1:11434/v1` 并省略 API Key。SDK 无需单独启动，安装后可直接按下文方式导入。
 
 `pnpm test:npm-package:functional` 会在接受该归档前校验 `SHA256SUMS.txt`、
 发行版本元数据、密钥扫描、隔离本地安装、SDK/REST/CLI 行为和 TypeScript 声明。
@@ -291,6 +326,6 @@ pnpm test:performance:live
 - [安全策略](SECURITY.md)
 - [参与贡献](CONTRIBUTING.md)
 
-## 许可证
+## 许可证1
 
 SchemaNaut 使用 [Apache License 2.0](LICENSE)。

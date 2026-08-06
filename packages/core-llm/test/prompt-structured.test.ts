@@ -4,6 +4,7 @@ import {
   PromptTemplateRegistry,
   StructuredOutputValidator,
   buildContextWithinBudget,
+  estimateMessagesTokens,
   estimateTokens,
   wrapUntrustedContent,
 } from '../src/index.js';
@@ -71,5 +72,24 @@ describe('prompt, context and structured output', () => {
         ],
       ),
     ).toThrowError(expect.objectContaining({ code: 'LLM_STRUCTURED_OUTPUT_INVALID' }));
+  });
+
+  it('accounts for typed assistant tool calls when estimating prompt tokens', () => {
+    const plain = estimateMessagesTokens([{ role: 'assistant', content: '' }]);
+    const withToolCall = estimateMessagesTokens([
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          {
+            id: 'call-1',
+            name: 'query_database',
+            arguments: { sql: 'select * from orders where created_at >= current_date' },
+          },
+        ],
+      },
+    ]);
+
+    expect(withToolCall).toBeGreaterThan(plain);
   });
 });

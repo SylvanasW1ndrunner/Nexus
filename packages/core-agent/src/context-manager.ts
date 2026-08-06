@@ -18,8 +18,9 @@ import type {
 } from './types.js';
 
 export type AgentContextManagerOptions = {
-  modelContextTokens?: number;
-  maxOutputTokens?: number;
+  modelContextTokens?: number | null;
+  maxInputTokens?: number | null;
+  maxOutputTokens?: number | null;
   keepRecentMessages?: number;
   maxToolResultChars?: number;
   warningThresholdRatio?: number;
@@ -46,13 +47,12 @@ export type AgentContextCompactionPlan = {
   sourceTokenEstimate: number;
   requestMaxToolResultChars: number;
   requestMaxMessageTokens: number;
-  modelContextTokens: number;
-  reservedOutputTokens: number;
+  modelContextTokens: number | null;
+  reservedOutputTokens: number | null;
   availablePromptTokens: number;
 };
 
-const DEFAULT_MODEL_CONTEXT_TOKENS = 32_768;
-const DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
+const MANUAL_COMPACTION_INPUT_TOKENS = 16_384;
 const DEFAULT_KEEP_RECENT_MESSAGES = 12;
 const DEFAULT_MAX_TOOL_RESULT_CHARS = 1_200;
 const DEFAULT_WARNING_THRESHOLD_RATIO = 0.7;
@@ -95,7 +95,10 @@ export function buildAgentContext(
   let messages = originalMessages;
   let maskedToolResultCount = 0;
 
-  if (originalTokenEstimate >= thresholds.warningThresholdTokens) {
+  if (
+    thresholds.warningThresholdTokens !== null &&
+    originalTokenEstimate >= thresholds.warningThresholdTokens
+  ) {
     const masked = maskOldToolOutputs(
       messages,
       keepRecentMessages,
@@ -107,7 +110,10 @@ export function buildAgentContext(
 
   const finalTokenEstimate = estimatePromptTokens(messages, tools);
   const warnings: string[] = [];
-  if (finalTokenEstimate > window.availablePromptTokens) {
+  if (
+    window.availablePromptTokens !== null &&
+    finalTokenEstimate > window.availablePromptTokens
+  ) {
     warnings.push(
       'Context exceeds the model input capacity after old tool outputs were shortened; conversation compaction is required before the next model call.',
     );
@@ -129,14 +135,18 @@ export function buildAgentContext(
     messages,
     tools,
     requiresCompaction:
+      thresholds.compactionThresholdTokens !== null &&
       finalTokenEstimate >= thresholds.compactionThresholdTokens,
     compression: {
       phase:
-        finalTokenEstimate > window.availablePromptTokens
+        window.availablePromptTokens === null
+          ? 'unknown_window'
+          : finalTokenEstimate > window.availablePromptTokens
           ? 'window_exceeded'
           : maskedToolResultCount > 0
             ? 'tool_outputs_masked'
-            : originalTokenEstimate >= thresholds.warningThresholdTokens
+            : thresholds.warningThresholdTokens !== null &&
+                originalTokenEstimate >= thresholds.warningThresholdTokens
               ? 'approaching_limit'
               : 'healthy',
       level:
@@ -173,6 +183,9 @@ export function createAgentContextCompactionPlan(
   focus?: string,
 ): AgentContextCompactionPlan | undefined {
   const window = normalizeContextWindow(options);
+  if (trigger === 'auto' && window.availablePromptTokens === null) return undefined;
+  const availablePromptTokens =
+    window.availablePromptTokens ?? MANUAL_COMPACTION_INPUT_TOKENS;
   const conversation = session.messages.filter(
     (message) => message.role !== 'system',
   );
@@ -216,7 +229,7 @@ export function createAgentContextCompactionPlan(
       ? { previousSummary: previous.summary.trim() }
       : {}),
     ...(normalizedFocus ? { focus: normalizedFocus } : {}),
-    availablePromptTokens: window.availablePromptTokens,
+    availablePromptTokens,
   });
   const sourceBatches = sourceBatchPlan.batches;
   const requestMessages = buildAgentContextCompactionRequest({
@@ -226,10 +239,10 @@ export function createAgentContextCompactionPlan(
     sourceMessages: sourceBatches[0] ?? [],
     ...(normalizedFocus ? { focus: normalizedFocus } : {}),
     maxToolResultChars: compactionToolResultLimit(
-      window.availablePromptTokens,
+      availablePromptTokens,
     ),
     maxMessageTokens: compactionMessageTokenLimit(
-      window.availablePromptTokens,
+      availablePromptTokens,
     ),
   });
 
@@ -243,14 +256,16 @@ export function createAgentContextCompactionPlan(
     sourceBatches,
     requestMessages,
     requestMaxToolResultChars: compactionToolResultLimit(
-      window.availablePromptTokens,
+      availablePromptTokens,
     ),
     requestMaxMessageTokens: compactionMessageTokenLimit(
-      window.availablePromptTokens,
+      availablePromptTokens,
     ),
     coveredConversationMessageCount,
     sourceTokenEstimate: sourceBatchPlan.sourceTokenEstimate,
-    ...window,
+    modelContextTokens: window.modelContextTokens,
+    reservedOutputTokens: window.reservedOutputTokens,
+    availablePromptTokens,
   };
 }
 
@@ -342,8 +357,9 @@ export function compactionAppliedReport(input: {
   return {
     ...input.after.compression,
     phase:
+      input.after.compression.availablePromptTokens !== null &&
       input.after.compression.finalTokenEstimate >
-      input.after.compression.availablePromptTokens
+        input.after.compression.availablePromptTokens
         ? 'window_exceeded'
         : 'compacted',
     level: 'conversation-checkpoint',
@@ -434,18 +450,14 @@ function toLlmMessage(message: AgentMessage): LlmMessage {
     };
   }
   if (message.role === 'assistant' && message.toolCalls?.length) {
-    const calls = message.toolCalls.map((call) => ({
-      name: call.name,
-      arguments: redactPersistedAgentValue(call.arguments),
-    }));
     return {
       role: 'assistant',
-      content: [
-        message.content,
-        `<tool_calls>${JSON.stringify(calls)}</tool_calls>`,
-      ]
-        .filter(Boolean)
-        .join('\n'),
+      content: message.content,
+      toolCalls: message.toolCalls.map((call) => ({
+        id: call.id,
+        name: call.name,
+        arguments: redactPersistedAgentValue(call.arguments) as Record<string, unknown>,
+      })),
     };
   }
   return { role: message.role, content: message.content };
@@ -770,39 +782,46 @@ function conversationGroups(
 }
 
 function normalizeContextWindow(options: AgentContextManagerOptions): {
-  modelContextTokens: number;
-  reservedOutputTokens: number;
-  availablePromptTokens: number;
+  modelContextTokens: number | null;
+  reservedOutputTokens: number | null;
+  availablePromptTokens: number | null;
 } {
-  const modelContextTokens = positiveInteger(
-    options.modelContextTokens,
-    DEFAULT_MODEL_CONTEXT_TOKENS,
-  );
-  const requestedOutput = positiveInteger(
-    options.maxOutputTokens,
-    DEFAULT_MAX_OUTPUT_TOKENS,
-  );
-  const reservedOutputTokens = Math.min(
-    Math.max(1, modelContextTokens - 1),
-    requestedOutput,
-  );
+  const modelContextTokens = optionalPositiveInteger(options.modelContextTokens);
+  const maxInputTokens = optionalPositiveInteger(options.maxInputTokens);
+  const requestedOutput = optionalPositiveInteger(options.maxOutputTokens);
+  const reservedOutputTokens =
+    requestedOutput === null
+      ? null
+      : modelContextTokens === null
+        ? requestedOutput
+        : Math.min(Math.max(1, modelContextTokens - 1), requestedOutput);
+  const contextInputCapacity =
+    modelContextTokens === null
+      ? null
+      : Math.max(1, modelContextTokens - (reservedOutputTokens ?? 0));
+  const availablePromptTokens =
+    maxInputTokens === null
+      ? contextInputCapacity
+      : contextInputCapacity === null
+        ? maxInputTokens
+        : Math.min(maxInputTokens, contextInputCapacity);
   return {
     modelContextTokens,
     reservedOutputTokens,
-    availablePromptTokens: Math.max(
-      1,
-      modelContextTokens - reservedOutputTokens,
-    ),
+    availablePromptTokens,
   };
 }
 
 function contextThresholds(
-  availablePromptTokens: number,
+  availablePromptTokens: number | null,
   options: AgentContextManagerOptions,
 ): {
-  warningThresholdTokens: number;
-  compactionThresholdTokens: number;
+  warningThresholdTokens: number | null;
+  compactionThresholdTokens: number | null;
 } {
+  if (availablePromptTokens === null) {
+    return { warningThresholdTokens: null, compactionThresholdTokens: null };
+  }
   const warningRatio = ratio(
     options.warningThresholdRatio,
     DEFAULT_WARNING_THRESHOLD_RATIO,
@@ -824,6 +843,14 @@ function contextThresholds(
       Math.floor(availablePromptTokens * compactionRatio),
     ),
   };
+}
+
+function optionalPositiveInteger(value: number | null | undefined): number | null {
+  if (value === undefined || value === null) return null;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('Context window values must be positive safe integers when known.');
+  }
+  return value;
 }
 
 function validCheckpoint(

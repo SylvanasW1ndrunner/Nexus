@@ -13,6 +13,12 @@ import {
   type RegisteredLlmModel,
 } from './model-registry.js';
 import { estimateMessagesTokens } from './prompt-runtime.js';
+import {
+  assertGenerationParametersSupported,
+  generationConfigFromRequest,
+  resolveLlmOutputReservation,
+  validateLlmGenerationConfig,
+} from './generation-config.js';
 import { LlmReliabilityController, type LlmReliabilityConfig } from './reliability.js';
 import { LlmResponseCache } from './response-cache.js';
 import {
@@ -23,6 +29,7 @@ import {
   type LlmTaskProfile,
 } from './routing.js';
 import { StructuredOutputValidator } from './structured-output.js';
+import { assertNoTextualToolInvocation } from './tool-protocol.js';
 import {
   CompositeLlmTelemetrySink,
   InMemoryLlmTelemetrySink,
@@ -306,6 +313,15 @@ export class LlmGateway {
             };
           }
         }
+        try {
+          assertGenerationParametersSupported(
+            candidate.generationParameters,
+            validateLlmGenerationConfig(generationConfigFromRequest(candidateRequest)),
+          );
+        } catch (error) {
+          lastError = error;
+          continue;
+        }
         for (let retry = 0; retry <= execution.maxRetries; retry += 1) {
           attempts += 1;
           await this.emit(
@@ -476,6 +492,15 @@ export class LlmGateway {
               modelId: candidate.id,
             }),
           );
+        try {
+          assertGenerationParametersSupported(
+            candidate.generationParameters,
+            validateLlmGenerationConfig(generationConfigFromRequest(input.request as LlmChatRequest)),
+          );
+        } catch (error) {
+          lastError = error;
+          continue;
+        }
         for (let retry = 0; retry <= execution.maxRetries; retry += 1) {
           attempts += 1;
           await this.emit(
@@ -710,8 +735,12 @@ export class LlmGateway {
 
   private prepareExecution(input: LlmGatewayChatInput, streaming: boolean) {
     validateGatewayInput(input);
-    if (input.providerId && input.request.model)
-      this.ensureModel(input.providerId, input.request.model);
+    const exactModel =
+      input.providerId && input.request.model
+        ? this.ensureModel(input.providerId, input.request.model)
+        : input.modelId
+          ? this.registry.model(input.modelId)
+          : undefined;
     const requiredModelIds = input.modelId
       ? [input.modelId]
       : input.providerId && input.request.model
@@ -724,7 +753,14 @@ export class LlmGateway {
     if (input.request.responseFormat && input.request.responseFormat.type !== 'text')
       capabilities.add('structuredOutput');
     const estimatedInputTokens = estimateMessagesTokens(input.request.messages);
-    const requestedOutputTokens = input.request.maxTokens ?? 4_096;
+    const requestedOutputTokens =
+      input.request.maxTokens ??
+      (exactModel === undefined
+        ? 4_096
+        : (resolveLlmOutputReservation(
+            exactModel.limits.contextTokens,
+            exactModel.limits.maxOutputTokens,
+          ) ?? 4_096));
     const task: LlmTaskProfile = {
       taskType: input.context.taskType,
       ...(input.task?.preferences === undefined ? {} : { preferences: input.task.preferences }),
@@ -878,6 +914,12 @@ export class LlmGateway {
     request: LlmChatRequest,
     validateToolCalls: boolean,
   ): void {
+    assertNoTextualToolInvocation({
+      text: response.text,
+      toolCalls: response.toolCalls,
+      toolsRequested: Boolean(request.tools?.length),
+      protocol: 'the configured Provider protocol',
+    });
     if (validateToolCalls && request.tools)
       this.validator.validateToolCalls(response.toolCalls, request.tools);
     if (request.responseFormat?.type === 'json_schema') {

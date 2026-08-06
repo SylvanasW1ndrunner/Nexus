@@ -4,6 +4,7 @@ import {
   type LlmChatResponse,
   type LlmChatStreamEvent,
   type LlmModelMetadata,
+  type LlmGenerationParameterSupport,
   type LlmProvider,
   type LlmProviderAvailability,
   type LlmProviderCapabilities,
@@ -25,6 +26,7 @@ import {
   type LlmStreamLimitOptions,
   type LlmStreamLimits,
 } from './stream-safety.js';
+import { assertNoTextualToolInvocation } from './tool-protocol.js';
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -45,6 +47,16 @@ export type AnthropicProviderConfig = {
 type AnthropicContent =
   | { type: 'text'; text?: string }
   | { type: 'tool_use'; id?: string; name?: string; input?: unknown };
+
+type AnthropicRequestContent =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+
+type AnthropicRequestMessage = {
+  role: 'user' | 'assistant';
+  content: string | AnthropicRequestContent[];
+};
 
 type AnthropicMessageResponse = {
   id?: string;
@@ -73,6 +85,14 @@ export class AnthropicProvider implements LlmProvider {
     reasoning: 'unknown',
     embeddings: 'unsupported',
     rerank: 'unsupported',
+  };
+  readonly generationParameters: Partial<LlmGenerationParameterSupport> = {
+    temperature: 'supported',
+    topP: 'supported',
+    maxOutputTokens: 'supported',
+    seed: 'unsupported',
+    stop: 'supported',
+    reasoningEffort: 'unknown',
   };
 
   private readonly apiKey: string;
@@ -106,7 +126,14 @@ export class AnthropicProvider implements LlmProvider {
 
   async chat(request: LlmChatRequest): Promise<LlmChatResponse> {
     const response = await this.request(buildAnthropicPayload(request, false), request.signal);
-    return parseAnthropicResponse(response);
+    const parsed = parseAnthropicResponse(response);
+    assertNoTextualToolInvocation({
+      text: parsed.text,
+      toolCalls: parsed.toolCalls,
+      toolsRequested: Boolean(request.tools?.length),
+      protocol: 'Anthropic Messages',
+    });
+    return parsed;
   }
 
   async *stream(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent> {
@@ -230,6 +257,12 @@ export class AnthropicProvider implements LlmProvider {
       ...(responseModel === undefined ? {} : { model: responseModel }),
       ...(finishReason === undefined ? {} : { finishReason }),
     };
+    assertNoTextualToolInvocation({
+      text: final.text,
+      toolCalls: final.toolCalls,
+      toolsRequested: Boolean(request.tools?.length),
+      protocol: 'Anthropic Messages',
+    });
     yield {
       type: 'finish',
       response: final,
@@ -249,6 +282,7 @@ export class AnthropicProvider implements LlmProvider {
       model,
       source: 'provider-declaration',
       capabilities: { ...this.capabilities },
+      generationParameters: { ...this.generationParameters },
     });
   }
 
@@ -439,15 +473,48 @@ function buildAnthropicPayload(request: LlmChatRequest, stream: boolean): Record
     .filter((message) => message.role === 'system')
     .map((message) => message.content)
     .join('\n\n');
-  const messages = request.messages
-    .filter((message) => message.role !== 'system')
-    .map((message) => ({
+  const messages: AnthropicRequestMessage[] = [];
+  for (const message of request.messages) {
+    if (message.role === 'system') continue;
+    if (message.role === 'tool') {
+      const block: AnthropicRequestContent = {
+        type: 'tool_result',
+        tool_use_id: message.toolCallId ?? message.name ?? 'unknown_tool_call',
+        content: message.content,
+        ...(message.toolResult?.isError ? { is_error: true } : {}),
+      };
+      const previous = messages.at(-1);
+      if (previous?.role === 'user' && Array.isArray(previous.content)) {
+        const containsOnlyToolResults = previous.content.every(
+          (item) => item.type === 'tool_result',
+        );
+        if (containsOnlyToolResults) {
+          previous.content.push(block);
+          continue;
+        }
+      }
+      messages.push({ role: 'user', content: [block] });
+      continue;
+    }
+    if (message.role === 'assistant' && message.toolCalls?.length) {
+      const content: AnthropicRequestContent[] = [];
+      if (message.content) content.push({ type: 'text', text: message.content });
+      content.push(
+        ...message.toolCalls.map((call) => ({
+          type: 'tool_use' as const,
+          id: call.id,
+          name: call.name,
+          input: call.arguments,
+        })),
+      );
+      messages.push({ role: 'assistant', content });
+      continue;
+    }
+    messages.push({
       role: message.role === 'assistant' ? 'assistant' : 'user',
-      content:
-        message.role === 'tool'
-          ? `Tool result (${message.name ?? message.toolCallId ?? 'tool'}): ${message.content}`
-          : message.content,
-    }));
+      content: message.content,
+    });
+  }
   return {
     model: request.model,
     max_tokens: request.maxTokens ?? 4_096,
@@ -455,6 +522,7 @@ function buildAnthropicPayload(request: LlmChatRequest, stream: boolean): Record
     stream,
     ...(system ? { system } : {}),
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+    ...(request.topP === undefined ? {} : { top_p: request.topP }),
     ...(request.stop === undefined ? {} : { stop_sequences: request.stop }),
     ...(request.tools?.length
       ? {

@@ -12,6 +12,11 @@ import {
   parseCliPostgresUrl,
   startInteractiveCli,
 } from '../src/interactive-cli.js';
+import {
+  inferEndpointProviderId,
+  loadProjectSettings,
+  resolveCliConfiguration,
+} from '../src/project-settings.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -22,7 +27,69 @@ afterEach(async () => {
 });
 
 describe('SchemaNaut CLI', () => {
-  it('shows useful SQL actions by default and clears transient TTY progress before the answer', () => {
+  it('maps official endpoints to catalog provider identities and leaves relays explicit', () => {
+    expect(inferEndpointProviderId('openai-chat', 'https://api.siliconflow.cn/v1')).toBe(
+      'siliconflow',
+    );
+    expect(inferEndpointProviderId('openai-chat', 'https://relay.example/v1')).toBe(
+      'custom-endpoint',
+    );
+    expect(inferEndpointProviderId('ollama', 'http://127.0.0.1:11434')).toBe('ollama');
+  });
+
+  it('loads one project generation configuration and lets explicit environment values override it', async () => {
+    const directory = await temporaryDirectory();
+    await mkdir(join(directory, '.schemanaut'), { recursive: true });
+    await writeFile(
+      join(directory, '.schemanaut', 'settings.json'),
+      `${JSON.stringify(
+        {
+          version: 1,
+          llm: {
+            protocol: 'openai-chat',
+            baseUrl: 'https://proxy.example/v1',
+            model: 'proxy-model',
+            canonicalModel: 'openai/gpt-4o',
+            generation: { temperature: 0.2, topP: 0.9, maxOutputTokens: 2048 },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+
+    const settings = await loadProjectSettings(directory);
+    const config = resolveCliConfiguration(
+      {
+        SCHEMANAUT_LLM_TEMPERATURE: '0.4',
+        SCHEMANAUT_DATABASE_URL: 'postgresql://tester@127.0.0.1/demo',
+      },
+      settings,
+    );
+
+    expect(config).toMatchObject({
+      protocol: 'openai-chat',
+      baseUrl: 'https://proxy.example/v1',
+      model: 'proxy-model',
+      canonicalModel: 'openai/gpt-4o',
+      generation: { temperature: 0.4, topP: 0.9, maxOutputTokens: 2048 },
+    });
+  });
+
+  it('rejects configured context windows because model capacity is discovered metadata', async () => {
+    const directory = await temporaryDirectory();
+    await mkdir(join(directory, '.schemanaut'), { recursive: true });
+    await writeFile(
+      join(directory, '.schemanaut', 'settings.json'),
+      `${JSON.stringify({ version: 1, llm: { model: 'm', contextWindow: 32768 } })}\n`,
+      'utf8',
+    );
+
+    await expect(loadProjectSettings(directory)).rejects.toThrow(/context.*read-only|上下文.*只读/i);
+  });
+
+  it('shows useful SQL actions, collapses before the answer, and restores them on Ctrl+O toggle', () => {
     const capture = captureOutput(true);
     const trace = new CliTraceRenderer(capture.output);
 
@@ -43,6 +110,11 @@ describe('SchemaNaut CLI', () => {
     trace.clearBeforeFinal();
     expect(capture.text()).toContain('\u001B[1A');
     expect(capture.text()).toContain('\u001B[2K');
+    const beforeExpand = capture.text().length;
+    expect(trace.toggle()).toBe(true);
+    expect(capture.text().slice(beforeExpand)).toContain(
+      'SELECT schema_name FROM information_schema.schemata ORDER BY schema_name',
+    );
   });
 
   it('supports disabling action traces and keeps non-TTY logs durable', () => {

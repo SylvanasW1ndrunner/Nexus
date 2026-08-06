@@ -62,10 +62,20 @@ my-data-project/
 Create `my-data-project/.env`:
 
 ```dotenv
+SCHEMANAUT_LLM_PROTOCOL=openai-chat
 SCHEMANAUT_LLM_BASE_URL=https://api.siliconflow.cn/v1
 SCHEMANAUT_LLM_API_KEY=replace-with-your-key
 SCHEMANAUT_LLM_MODEL=replace-with-a-tool-calling-model
 SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
+
+# Optional: map a relay-specific model name to its real metadata identity
+# SCHEMANAUT_LLM_CANONICAL_MODEL=openai/gpt-4o
+
+# Optional: omit these to retain endpoint/model defaults
+# SCHEMANAUT_LLM_TEMPERATURE=0.2
+# SCHEMANAUT_LLM_TOP_P=0.9
+# SCHEMANAUT_LLM_MAX_OUTPUT_TOKENS=4096
+# SCHEMANAUT_LLM_REASONING_EFFORT=medium
 
 # Optional SQLite file for Sessions, checkpoints, and preferences
 # SCHEMANAUT_STATE_DATABASE_PATH=.schemanaut/state.db
@@ -76,10 +86,32 @@ SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
 
 The CLI loads `<project>/.env` first and then reads the process environment. Existing process variables take precedence. Parse errors report only the line number and error category, never a secret value.
 
+`SCHEMANAUT_LLM_PROTOCOL` accepts `openai-chat`, `openai-responses`, `anthropic`, `ollama`, or `vllm`. The same values can live in `.schemanaut/settings.json` under one `llm.generation` object; parameters are not split into Agent/NL2SQL task buckets. The model context window is read-only metadata: the runtime prefers endpoint metadata, then its bundled models.dev catalog, and otherwise reports it as unknown without automatic compaction. If a model rejects a configured parameter such as temperature, the CLI reports that parameter explicitly.
+
+Project settings example (keep the API key in `.env`, not in this file):
+
+```json
+{
+  "version": 1,
+  "llm": {
+    "protocol": "openai-chat",
+    "baseUrl": "https://api.siliconflow.cn/v1",
+    "model": "provider-model-id",
+    "canonicalModel": "openai/gpt-4o",
+    "generation": {
+      "temperature": 0.2,
+      "topP": 0.9,
+      "maxOutputTokens": 4096
+    }
+  }
+}
+```
+
 Local Ollama example:
 
 ```dotenv
-SCHEMANAUT_LLM_BASE_URL=http://127.0.0.1:11434/v1
+SCHEMANAUT_LLM_PROTOCOL=ollama
+SCHEMANAUT_LLM_BASE_URL=http://127.0.0.1:11434
 SCHEMANAUT_LLM_MODEL=qwen2.5-coder:14b
 SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
 ```
@@ -89,9 +121,11 @@ SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
 For an OpenAI-compatible relay, use its Base URL, API key, and model identifier:
 
 ```dotenv
+SCHEMANAUT_LLM_PROTOCOL=openai-chat
 SCHEMANAUT_LLM_BASE_URL=https://your-provider.example/v1
 SCHEMANAUT_LLM_API_KEY=...
 SCHEMANAUT_LLM_MODEL=provider-model-id
+# SCHEMANAUT_LLM_CANONICAL_MODEL=openai/gpt-4o
 ```
 
 ### 3.3 Start the CLI with one command
@@ -138,6 +172,7 @@ npx schemanaut --help
 /<skill> [task]
 /compact [focus]
 /trace on|off
+/model
 /mcp list
 /mcp start <server-id>
 /mcp stop <server-id>
@@ -149,7 +184,8 @@ npx schemanaut --help
 - `/resume` restores a durable Session; use `/sessions` to find its ID.
 - `/skills` lists Skills; `/<skill> [task]` activates one explicitly.
 - `/compact` manually compacts the current Session context while preserving full history.
-- `/trace on|off` shows or hides the user-facing execution trace; it is on by default. The trace includes complete SQL/commands, execution state, duration, exit codes, important errors, and artifacts, but not hidden reasoning.
+- `/trace on|off` shows or hides the user-facing execution trace; it is on by default. The trace includes complete SQL/commands, execution state, duration, exit codes, important errors, and artifacts, but not hidden reasoning. In a TTY, the trace collapses when the final answer appears; press `Ctrl+O` to expand or collapse it at any time.
+- `/model` shows the active protocol, model, physical context window, usable input capacity, and metadata source. Unknown models are never presented as a fabricated 32K window.
 - `/mcp` manages servers declared in `.schemanaut/mcp.json`.
 - `/exit` or `/quit` exits.
 
