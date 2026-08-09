@@ -6,8 +6,10 @@ import {
   readdir,
   rename,
   rm,
+  stat,
 } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import type { FileHandle } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { AgentEvent } from '../events/agent-event.js';
 import type { AgentJournal } from '../events/agent-journal.js';
 import {
@@ -32,6 +34,7 @@ export type ProjectArtifactStoreOptions = {
   journal: AgentJournal;
   now?: () => string;
   createId?: () => string;
+  writeChunk?: (file: FileHandle, chunk: Uint8Array, offset: number) => Promise<number>;
   crashAt?: ArtifactCrashPoint;
 };
 
@@ -47,6 +50,10 @@ type CommittedMetadata = ArtifactRef & {
 };
 
 type CreatedArtifactFact = Extract<AgentEvent, { type: 'artifact.created' }>;
+type ArtifactFactState = {
+  fact: CreatedArtifactFact;
+  lifecycle: 'available' | 'expired' | 'deleted';
+};
 
 export class ProjectArtifactStore implements AgentArtifactStore {
   readonly #projectId: string;
@@ -54,15 +61,18 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   readonly #journal: AgentJournal;
   readonly #now: () => string;
   readonly #createId: () => string;
+  readonly #writeChunk: (file: FileHandle, chunk: Uint8Array, offset: number) => Promise<number>;
   #crashAt: ArtifactCrashPoint | undefined;
 
   constructor(options: ProjectArtifactStoreOptions) {
     this.#projectId = requireText(options.projectId, 'projectId');
-    this.#rootDir = requireText(options.rootDir, 'rootDir');
+    this.#rootDir = resolve(requireText(options.rootDir, 'rootDir'));
     this.#journal = options.journal;
     this.#now = options.now ?? (() => new Date().toISOString());
     const createId = options.createId ?? randomUUID;
     this.#createId = () => requireOpaqueId(createId());
+    this.#writeChunk = options.writeChunk ?? (async (file, chunk, offset) =>
+      (await file.write(chunk, offset, chunk.byteLength - offset, null)).bytesWritten);
     this.#crashAt = options.crashAt;
   }
 
@@ -95,7 +105,15 @@ export class ProjectArtifactStore implements AgentArtifactStore {
             throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact is too large.');
           }
           hash.update(chunk);
-          await file.write(chunk);
+          let offset = 0;
+          while (offset < chunk.byteLength) {
+            const bytesWritten = await this.#writeChunk(file, chunk, offset);
+            if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0 ||
+              bytesWritten > chunk.byteLength - offset) {
+              throw new ArtifactStoreError('STAGE_FAILED', 'Artifact write made invalid progress.');
+            }
+            offset += bytesWritten;
+          }
         }
         await file.sync();
       } finally {
@@ -107,6 +125,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       throw new ArtifactStoreError('STAGE_FAILED', 'Artifact source failed during staging.');
     }
     const checksum = hash.digest('hex');
+    await verifyFile(temporaryPath, checksum, byteSize);
     if (input.expectedChecksum !== undefined && input.expectedChecksum !== checksum) {
       await rm(temporaryPath, { force: true });
       throw new ArtifactStoreError('CHECKSUM_MISMATCH', 'Staged bytes did not match checksum.');
@@ -115,7 +134,8 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       await rm(temporaryPath, { force: true });
       throw new ArtifactStoreError('SIZE_MISMATCH', 'Staged bytes did not match exact byte size.');
     }
-    const artifactId = `artifact_${sha256(`${this.#projectId}\0${checksum}`)}`;
+    const referenceNonce = this.#createId();
+    const artifactId = `artifact_${sha256(`${this.#projectId}\0${checksum}\0${referenceNonce}`)}`;
     const handle = `agent-artifact:${sha256(this.#projectId).slice(0, 24)}:${artifactId.slice(-40)}`;
     const blobName = `${artifactId}.blob`;
     const staged: StagedMetadata = {
@@ -132,13 +152,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
       blobName,
     };
-    const existing = await this.#readStagedMetadata(artifactId);
-    if (existing !== undefined) {
-      assertEquivalentStaged(existing, staged);
-      await rm(temporaryPath, { force: true });
-      return publicStaged(existing);
-    }
-    const blobPath = join(this.#stagedDir(), blobName);
+    const blobPath = containedPath(this.#stagedDir(), blobName);
     try {
       await rename(temporaryPath, blobPath);
     } catch (error) {
@@ -146,12 +160,14 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       await rm(temporaryPath, { force: true });
       await verifyFile(blobPath, checksum, byteSize);
     }
+    await verifyFile(blobPath, checksum, byteSize);
     await fsyncDirectory(this.#stagedDir());
     await writeAtomicJson(this.#stagedMetadataPath(artifactId), staged, this.#createId);
     return publicStaged(staged);
   }
 
   async commit(input: CommitArtifactInput): Promise<ArtifactRef> {
+    assertStagedArtifact(input.staged, this.#projectId);
     this.#assertProject(input.staged.projectId);
     const summary = requireText(input.summary, 'summary');
     const staged = await this.#readStagedMetadata(input.staged.artifactId);
@@ -160,33 +176,45 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     if (candidate === undefined) {
       throw new ArtifactStoreError('NOT_FOUND', 'Staged artifact metadata was not found.');
     }
+    assertPersistedArtifact(candidate, this.#projectId);
     assertArtifactInput(candidate, input.staged);
+    if (staged !== undefined) {
+      await verifyFile(containedPath(this.#stagedDir(), staged.blobName), staged.checksum, staged.byteSize);
+    } else {
+      await verifyFile(this.#objectPath(candidate.checksum), candidate.checksum, candidate.byteSize);
+    }
 
     let fact = await this.#findCreatedFact(input.staged.artifactId);
     if (fact !== undefined) assertMatchingFact(fact, input.staged, input.journal.runId);
     if (fact === undefined) {
-      await this.#journal.commit({
-        projectId: this.#projectId,
-        sessionId: input.journal.sessionId,
-        runId: input.journal.runId,
-        commandId: input.journal.commandId,
-        lease: input.journal.lease,
-        expectedRunRevision: input.journal.expectedRunRevision,
-        events: [
-          {
-            type: 'artifact.created',
-            payload: {
-              artifactId: input.staged.artifactId,
-              handle: input.staged.handle,
-              checksum: input.staged.checksum,
-              byteSize: input.staged.byteSize,
-              mediaType: input.staged.mediaType,
-              availability: 'available',
-              summary,
+      try {
+        await this.#journal.commit({
+          projectId: this.#projectId,
+          sessionId: input.journal.sessionId,
+          runId: input.journal.runId,
+          commandId: input.journal.commandId,
+          lease: input.journal.lease,
+          expectedRunRevision: input.journal.expectedRunRevision,
+          events: [
+            {
+              type: 'artifact.created',
+              payload: {
+                artifactId: input.staged.artifactId,
+                handle: input.staged.handle,
+                checksum: input.staged.checksum,
+                byteSize: input.staged.byteSize,
+                mediaType: input.staged.mediaType,
+                availability: 'available',
+                summary,
+                ...(candidate.expiresAt === undefined ? {} : { expiresAt: candidate.expiresAt }),
+              },
             },
-          },
-        ],
-      });
+          ],
+        });
+      } catch (error) {
+        fact = await this.#findCreatedFact(input.staged.artifactId);
+        if (fact === undefined) throw error;
+      }
       fact = await this.#findCreatedFact(input.staged.artifactId);
     }
     if (fact === undefined) {
@@ -204,8 +232,9 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async open(ref: ReadableArtifactRef): Promise<ReadableStream<Uint8Array>> {
+    assertReadableArtifact(ref, this.#projectId);
     this.#assertProject(ref.projectId);
-    const lifecycle = await this.#artifactLifecycle(ref.artifactId);
+    const lifecycle = await this.#artifactLifecycle(ref.artifactId, new Date(this.#now()));
     if (lifecycle === 'expired') throw new ArtifactStoreError('EXPIRED', 'Artifact has expired.');
     if (lifecycle === 'deleted') throw new ArtifactStoreError('DELETED', 'Artifact was deleted.');
     const fact = await this.#findCreatedFact(ref.artifactId);
@@ -227,6 +256,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       }
       await this.#promote(publicStaged(staged), fact.occurredAt);
     } else {
+      assertPersistedArtifact(metadata, this.#projectId);
       assertArtifactInput(metadata, ref);
     }
     const objectPath = this.#objectPath(ref.checksum);
@@ -275,17 +305,20 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       throw new ArtifactStoreError('INVALID_ARGUMENT', 'GC time must be valid.');
     }
     await this.#ensureDirectories();
+    const factStates = await this.#artifactStates(now);
     let stagedObjectsDeleted = 0;
     let committedObjectsDeleted = 0;
     let bytesDeleted = 0;
     for (const entry of await readdir(this.#metadataDir(), { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith('.staged.json')) continue;
       const artifactId = entry.name.slice(0, -'.staged.json'.length);
+      requireArtifactId(artifactId);
       const metadata = await this.#readStagedMetadata(artifactId);
       if (metadata === undefined || metadata.expiresAt === undefined) continue;
+      assertPersistedArtifact(metadata, this.#projectId);
       if (Date.parse(metadata.expiresAt) > now.getTime()) continue;
-      if ((await this.#findCreatedFact(artifactId)) !== undefined) continue;
-      await rm(join(this.#stagedDir(), metadata.blobName), { force: true });
+      if (factStates.has(artifactId)) continue;
+      await rm(containedPath(this.#stagedDir(), metadata.blobName), { force: true });
       await rm(this.#stagedMetadataPath(artifactId), { force: true });
       stagedObjectsDeleted += 1;
       bytesDeleted += metadata.byteSize;
@@ -293,14 +326,20 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     for (const entry of await readdir(this.#metadataDir(), { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith('.committed.json')) continue;
       const artifactId = entry.name.slice(0, -'.committed.json'.length);
-      const lifecycle = await this.#artifactLifecycle(artifactId);
-      if (lifecycle !== 'expired' && lifecycle !== 'deleted') continue;
+      requireArtifactId(artifactId);
+      const state = factStates.get(artifactId);
+      if (state === undefined || state.lifecycle === 'available') continue;
       const metadata = await this.#readCommittedMetadata(artifactId);
       if (metadata === undefined) continue;
-      await rm(this.#objectPath(metadata.checksum), { force: true });
+      assertPersistedArtifact(metadata, this.#projectId);
       await rm(this.#committedMetadataPath(artifactId), { force: true });
       committedObjectsDeleted += 1;
-      bytesDeleted += metadata.byteSize;
+      const hasAvailableReference = [...factStates.values()].some(({ fact, lifecycle }) =>
+        lifecycle === 'available' && fact.payload.availability === 'available' &&
+        fact.payload.checksum === metadata.checksum);
+      if (!hasAvailableReference && await removeFileIfExists(this.#objectPath(metadata.checksum))) {
+        bytesDeleted += metadata.byteSize;
+      }
     }
     return { stagedObjectsDeleted, committedObjectsDeleted, bytesDeleted };
   }
@@ -310,6 +349,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     ref: ArtifactRef,
     context: ArtifactJournalContext,
   ): Promise<void> {
+    assertReadableArtifact(ref, this.#projectId);
     this.#assertProject(ref.projectId);
     const created = await this.#findCreatedFact(ref.artifactId);
     if (created === undefined) throw new ArtifactStoreError('NOT_COMMITTED', 'Artifact is not committed.');
@@ -326,11 +366,14 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async #promote(staged: StagedArtifact, createdAt: string): Promise<ArtifactRef> {
+    assertStagedArtifact(staged, this.#projectId);
     const objectPath = this.#objectPath(staged.checksum);
     await mkdir(dirname(objectPath), { recursive: true });
     const stagedMetadata = await this.#readStagedMetadata(staged.artifactId);
     if (stagedMetadata !== undefined) {
-      const stagedPath = join(this.#stagedDir(), stagedMetadata.blobName);
+      assertPersistedArtifact(stagedMetadata, this.#projectId);
+      const stagedPath = containedPath(this.#stagedDir(), stagedMetadata.blobName);
+      await verifyFile(stagedPath, staged.checksum, staged.byteSize);
       try {
         await rename(stagedPath, objectPath);
       } catch (error) {
@@ -342,6 +385,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     } else {
       await verifyFile(objectPath, staged.checksum, staged.byteSize);
     }
+    await verifyFile(objectPath, staged.checksum, staged.byteSize);
     const ref: ArtifactRef = {
       schemaVersion: 1,
       artifactId: staged.artifactId,
@@ -366,6 +410,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async #findCreatedFact(artifactId: string): Promise<CreatedArtifactFact | undefined> {
+    requireArtifactId(artifactId);
     let cursor = 0;
     let match: CreatedArtifactFact | undefined;
     while (true) {
@@ -385,18 +430,34 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     }
   }
 
-  async #artifactLifecycle(artifactId: string): Promise<'available' | 'expired' | 'deleted'> {
+  async #artifactLifecycle(
+    artifactId: string,
+    now: Date,
+  ): Promise<'available' | 'expired' | 'deleted'> {
+    requireArtifactId(artifactId);
+    return (await this.#artifactStates(now)).get(artifactId)?.lifecycle ?? 'available';
+  }
+
+  async #artifactStates(now: Date): Promise<Map<string, ArtifactFactState>> {
+    const states = new Map<string, ArtifactFactState>();
     let cursor = 0;
-    let state: 'available' | 'expired' | 'deleted' = 'available';
     while (true) {
       const page = await this.#journal.readProject(this.#projectId, cursor, 1_000);
       for (const event of page) {
-        if (event.payload && 'artifactId' in event.payload && event.payload.artifactId === artifactId) {
-          if (event.type === 'artifact.expired') state = 'expired';
-          if (event.type === 'artifact.deleted') state = 'deleted';
+        if (event.type === 'artifact.created') {
+          states.set(event.payload.artifactId, {
+            fact: event,
+            lifecycle: event.payload.expiresAt !== undefined &&
+              Date.parse(event.payload.expiresAt) <= now.getTime() ? 'expired' : 'available',
+          });
+        } else if (event.type === 'artifact.expired' || event.type === 'artifact.deleted') {
+          const state = states.get(event.payload.artifactId);
+          if (state !== undefined) {
+            state.lifecycle = event.type === 'artifact.expired' ? 'expired' : 'deleted';
+          }
         }
       }
-      if (page.length < 1_000) return state;
+      if (page.length < 1_000) return states;
       cursor = page.at(-1)!.sequence;
     }
   }
@@ -423,17 +484,20 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     return await readJsonIfExists<CommittedMetadata>(this.#committedMetadataPath(artifactId));
   }
 
-  #stagedDir(): string { return join(this.#rootDir, 'staged'); }
-  #metadataDir(): string { return join(this.#rootDir, 'metadata'); }
-  #objectsDir(): string { return join(this.#rootDir, 'objects'); }
+  #stagedDir(): string { return containedPath(this.#rootDir, 'staged'); }
+  #metadataDir(): string { return containedPath(this.#rootDir, 'metadata'); }
+  #objectsDir(): string { return containedPath(this.#rootDir, 'objects'); }
   #stagedMetadataPath(artifactId: string): string {
-    return join(this.#metadataDir(), `${artifactId}.staged.json`);
+    requireArtifactId(artifactId);
+    return containedPath(this.#metadataDir(), `${artifactId}.staged.json`);
   }
   #committedMetadataPath(artifactId: string): string {
-    return join(this.#metadataDir(), `${artifactId}.committed.json`);
+    requireArtifactId(artifactId);
+    return containedPath(this.#metadataDir(), `${artifactId}.committed.json`);
   }
   #objectPath(checksum: string): string {
-    return join(this.#objectsDir(), checksum.slice(0, 2), checksum.slice(2));
+    requireChecksum(checksum);
+    return containedPath(this.#objectsDir(), checksum.slice(0, 2), checksum.slice(2));
   }
 }
 
@@ -462,6 +526,117 @@ function requireOpaqueId(value: string): string {
   return value;
 }
 
+function requireArtifactId(value: string): string {
+  if (typeof value !== 'string' || !/^artifact_[a-f0-9]{64}$/u.test(value)) {
+    throw new ArtifactStoreError('INVALID_ARGUMENT', 'artifactId has an invalid opaque format.');
+  }
+  return value;
+}
+
+function requireChecksum(value: string): string {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new ArtifactStoreError('INVALID_ARGUMENT', 'checksum must be lowercase SHA-256.');
+  }
+  return value;
+}
+
+function requireExactIso(value: string, name: string): string {
+  if (
+    typeof value !== 'string' ||
+    !Number.isFinite(Date.parse(value)) ||
+    new Date(value).toISOString() !== value
+  ) {
+    throw new ArtifactStoreError('INVALID_ARGUMENT', `${name} must be an exact ISO timestamp.`);
+  }
+  return value;
+}
+
+function assertStagedArtifact(ref: StagedArtifact, projectId: string): void {
+  assertArtifactCore(ref, projectId, 'staged');
+  requireExactIso(ref.stagedAt, 'stagedAt');
+}
+
+function assertReadableArtifact(ref: ReadableArtifactRef, projectId: string): void {
+  void projectId;
+  if (ref.availability === 'legacy-unavailable') {
+    requireArtifactId(ref.artifactId);
+    if (!/^legacy-agent-artifact:[a-f0-9]{64}$/u.test(ref.handle)) {
+      throw new ArtifactStoreError('INVALID_ARGUMENT', 'Legacy artifact handle is invalid.');
+    }
+    requireMediaType(ref.mediaType);
+    return;
+  }
+  assertArtifactCore(ref, projectId, 'available');
+  requireExactIso(ref.createdAt, 'createdAt');
+}
+
+function assertArtifactCore(
+  ref: {
+    schemaVersion: 1;
+    artifactId: string;
+    handle: string;
+    projectId: string;
+    checksum: string;
+    byteSize: number;
+    mediaType: string;
+    availability: 'staged' | 'available';
+    expiresAt?: string;
+  },
+  projectId: string,
+  availability: 'staged' | 'available',
+): void {
+  void projectId;
+  if (ref.schemaVersion !== 1 || ref.availability !== availability) {
+    throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact reference schema or availability is invalid.');
+  }
+  requireArtifactId(ref.artifactId);
+  requireChecksum(ref.checksum);
+  requireText(ref.projectId, 'projectId');
+  const expectedHandle = `agent-artifact:${sha256(ref.projectId).slice(0, 24)}:${ref.artifactId.slice(-40)}`;
+  if (ref.handle !== expectedHandle) {
+    throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact handle does not match its Project and ID.');
+  }
+  if (!Number.isSafeInteger(ref.byteSize) || ref.byteSize < 0) {
+    throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact byteSize is invalid.');
+  }
+  requireMediaType(ref.mediaType);
+  if (ref.expiresAt !== undefined) requireExactIso(ref.expiresAt, 'expiresAt');
+}
+
+function assertPersistedArtifact(
+  metadata: StagedMetadata | CommittedMetadata,
+  projectId: string,
+): void {
+  if (metadata.storageVersion !== 1) {
+    throw new ArtifactStoreError('CORRUPT', 'Artifact metadata storage version is invalid.');
+  }
+  try {
+    if (metadata.availability === 'staged') assertStagedArtifact(metadata, projectId);
+    else assertReadableArtifact(metadata, projectId);
+  } catch (error) {
+    if (error instanceof ArtifactStoreError) {
+      throw new ArtifactStoreError('CORRUPT', `Artifact metadata is invalid: ${error.message}`);
+    }
+    throw error;
+  }
+  if ('blobName' in metadata && metadata.blobName !== `${metadata.artifactId}.blob`) {
+    throw new ArtifactStoreError('CORRUPT', 'Staged artifact blob path is invalid.');
+  }
+  if ('objectName' in metadata && metadata.objectName !== metadata.checksum.slice(2)) {
+    throw new ArtifactStoreError('CORRUPT', 'Committed artifact object path is invalid.');
+  }
+}
+
+function containedPath(root: string, ...parts: string[]): string {
+  const absoluteRoot = resolve(root);
+  const candidate = resolve(absoluteRoot, ...parts);
+  const child = relative(absoluteRoot, candidate);
+  if (child === '..' || child.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(child)) {
+    throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact path escapes its project root.');
+  }
+  return candidate;
+}
+
 function publicStaged(metadata: StagedMetadata): StagedArtifact {
   return {
     schemaVersion: metadata.schemaVersion,
@@ -475,13 +650,6 @@ function publicStaged(metadata: StagedMetadata): StagedArtifact {
     stagedAt: metadata.stagedAt,
     ...(metadata.expiresAt === undefined ? {} : { expiresAt: metadata.expiresAt }),
   };
-}
-
-function assertEquivalentStaged(left: StagedMetadata, right: StagedMetadata): void {
-  assertArtifactInput(left, right);
-  if (left.expiresAt !== right.expiresAt) {
-    throw new ArtifactStoreError('METADATA_CONFLICT', 'Equivalent content has conflicting retention.');
-  }
 }
 
 function assertArtifactInput(
@@ -502,7 +670,7 @@ function assertArtifactInput(
 
 function assertMatchingFact(
   fact: CreatedArtifactFact,
-  ref: Pick<StagedArtifact, 'artifactId' | 'handle' | 'checksum' | 'byteSize' | 'mediaType'>,
+  ref: Pick<StagedArtifact, 'artifactId' | 'handle' | 'checksum' | 'byteSize' | 'mediaType' | 'expiresAt'>,
   runId: string,
 ): void {
   const payload = fact.payload;
@@ -513,7 +681,8 @@ function assertMatchingFact(
     payload.handle !== ref.handle ||
     payload.checksum !== ref.checksum ||
     payload.byteSize !== ref.byteSize ||
-    payload.mediaType !== ref.mediaType
+    payload.mediaType !== ref.mediaType ||
+    payload.expiresAt !== ref.expiresAt
   ) {
     throw new ArtifactStoreError(
       'JOURNAL_REFERENCE_CONFLICT',
@@ -567,6 +736,18 @@ async function verifyFile(path: string, checksum: string, byteSize: number): Pro
   }
 }
 
+async function removeFileIfExists(path: string): Promise<boolean> {
+  try {
+    const entry = await stat(path);
+    if (!entry.isFile()) throw new ArtifactStoreError('CORRUPT', 'Artifact object is not a file.');
+    await rm(path, { force: true });
+    return true;
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
+  }
+}
+
 async function writeAtomicJson(
   path: string,
   value: unknown,
@@ -581,7 +762,18 @@ async function writeAtomicJson(
   } finally {
     await file.close();
   }
-  await rename(temporaryPath, path);
+  try {
+    await rename(temporaryPath, path);
+  } catch (error) {
+    let existing: string;
+    try {
+      existing = await readFile(path, 'utf8');
+    } catch {
+      throw error;
+    }
+    if (existing !== `${JSON.stringify(value)}\n`) throw error;
+    await rm(temporaryPath, { force: true });
+  }
   await fsyncDirectory(dirname(path));
 }
 

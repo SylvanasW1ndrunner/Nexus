@@ -118,6 +118,43 @@ function requireNonNegativeInteger(record: Record<string, unknown>, key: string)
   }
 }
 
+function requireArtifactId(value: unknown): void {
+  if (typeof value !== 'string' || !/^artifact_[a-f0-9]{64}$/u.test(value)) {
+    throw new TypeError('Event payload artifactId has an invalid opaque format.');
+  }
+}
+
+function requireArtifactChecksum(value: unknown): void {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new TypeError('Event payload checksum must be lowercase SHA-256.');
+  }
+}
+
+function requireArtifactHandle(value: unknown, availability: unknown): void {
+  const pattern = availability === 'legacy-unavailable'
+    ? /^legacy-agent-artifact:[a-f0-9]{64}$/u
+    : /^agent-artifact:[a-f0-9]{24}:[a-f0-9]{40}$/u;
+  if (typeof value !== 'string' || !pattern.test(value)) {
+    throw new TypeError('Event payload handle has an invalid artifact format.');
+  }
+}
+
+function requireIsoTimestamp(value: unknown, key: string): void {
+  if (
+    typeof value !== 'string' ||
+    !Number.isFinite(Date.parse(value)) ||
+    new Date(value).toISOString() !== value
+  ) {
+    throw new TypeError(`Event payload ${key} must be an exact ISO timestamp.`);
+  }
+}
+
+function validateArtifactLifecycle(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['artifactId']);
+  requireArtifactId(record.artifactId);
+}
+
 function requireStringArray(record: Record<string, unknown>, key: string): void {
   const value = record[key];
   if (!Array.isArray(value) || value.length > 256) {
@@ -395,6 +432,70 @@ function validateToolTerminal(payload: unknown): void {
   );
 }
 
+function validateLegacyImported(payload: unknown): void {
+  const record = requireRecord(payload);
+  requireString(record, 'entityType');
+  requireBoundedString(record, 'legacyId', 512);
+  requireEnum(record, 'entityType', [
+    'session', 'message', 'run', 'preference', 'checkpoint', 'subagent', 'diagnostic', 'archive',
+  ]);
+  switch (record.entityType) {
+    case 'session':
+      exactKeys(record, ['entityType', 'legacyId', 'projectKey', 'projectRoot', 'title', 'userId', 'mode']);
+      ['projectKey', 'projectRoot', 'title', 'mode'].forEach((key) => requireString(record, key));
+      if (record.userId !== null) requireString(record, 'userId');
+      return;
+    case 'message':
+      exactKeys(record, ['entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt']);
+      requireNonNegativeInteger(record, 'messageIndex');
+      requireEnum(record, 'role', ['user', 'assistant']);
+      requireString(record, 'content');
+      requireIsoTimestamp(record.createdAt, 'createdAt');
+      return;
+    case 'run':
+      exactKeys(record, ['entityType', 'legacyId', 'sessionId', 'status', 'plan', 'createdAt', 'updatedAt']);
+      requireString(record, 'sessionId');
+      requireEnum(record, 'status', ['completed', 'interrupted_legacy']);
+      requireIsoTimestamp(record.createdAt, 'createdAt');
+      requireIsoTimestamp(record.updatedAt, 'updatedAt');
+      return;
+    case 'preference':
+      exactKeys(record, ['entityType', 'legacyId', 'userId', 'key', 'value', 'confidence', 'sourceSessionId']);
+      ['userId', 'key', 'value'].forEach((key) => requireString(record, key));
+      if (typeof record.confidence !== 'number' || !Number.isFinite(record.confidence)) {
+        throw new TypeError('Legacy preference confidence must be finite.');
+      }
+      if (record.sourceSessionId !== null) requireString(record, 'sourceSessionId');
+      return;
+    case 'checkpoint':
+      exactKeys(record, ['entityType', 'legacyId', 'sessionId', 'sequence', 'summary', 'createdAt']);
+      requireString(record, 'sessionId');
+      requireNonNegativeInteger(record, 'sequence');
+      requireString(record, 'summary');
+      requireIsoTimestamp(record.createdAt, 'createdAt');
+      return;
+    case 'subagent':
+      exactKeys(record, ['entityType', 'legacyId', 'parentSessionId', 'childSessionId', 'status', 'depth']);
+      ['parentSessionId', 'status'].forEach((key) => requireString(record, key));
+      if (record.childSessionId !== null) requireString(record, 'childSessionId');
+      requireNonNegativeInteger(record, 'depth');
+      return;
+    case 'diagnostic':
+      exactKeys(record, ['entityType', 'legacyId', 'code', 'evidence']);
+      requireString(record, 'code');
+      requireString(record, 'evidence');
+      return;
+    case 'archive':
+      exactKeys(record, ['entityType', 'legacyId', 'relativePath', 'archiveHandle', 'checksum', 'byteSize']);
+      ['relativePath', 'archiveHandle'].forEach((key) => requireString(record, key));
+      requireArtifactChecksum(record.checksum);
+      requireNonNegativeInteger(record, 'byteSize');
+      if (!/^legacy-archive:[a-f0-9]{64}$/u.test(String(record.archiveHandle))) {
+        throw new TypeError('Legacy archive handle has an invalid format.');
+      }
+  }
+}
+
 export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   'input.received': descriptor({ audience: USER, validate: validateInput }),
   'run.created': descriptor({ validate: validateRunCreated }),
@@ -441,26 +542,31 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   'context.compacted': descriptor({ validate: (p) => validateShape(p, ['checkpointId', 'summaryRef', 'coveredSequence'], ['checkpointId', 'summaryRef'], [], ['coveredSequence']) }),
   'context.compaction_failed': descriptor({ validate: (p) => validateShape(p, ['checkpointId', 'code'], ['checkpointId', 'code']) }),
   'artifact.created': descriptor({
-    schemaVersion: 2,
+    schemaVersion: 3,
     audience: USER,
     validate: (payload) => {
       const record = requireRecord(payload);
       validateShape(
         payload,
-        ['artifactId', 'handle', 'checksum', 'byteSize', 'mediaType', 'availability', 'summary'],
+        ['artifactId', 'handle', 'checksum', 'byteSize', 'mediaType', 'availability', 'summary', 'expiresAt'],
         ['artifactId', 'handle', 'mediaType', 'availability', 'summary'],
       );
       requireEnum(record, 'availability', ['available', 'legacy-unavailable']);
+      requireArtifactId(record.artifactId);
+      requireArtifactHandle(record.handle, record.availability);
+      if (Object.hasOwn(record, 'expiresAt')) requireIsoTimestamp(record.expiresAt, 'expiresAt');
       if (record.availability === 'available') {
         requireString(record, 'checksum');
+        requireArtifactChecksum(record.checksum);
         requireNonNegativeInteger(record, 'byteSize');
       } else if (record.checksum !== null || record.byteSize !== null) {
         throw new TypeError('Legacy unavailable artifacts cannot claim checksum or size.');
       }
     },
   }),
-  'artifact.expired': descriptor({ audience: USER, validate: (p) => validateShape(p, ['artifactId'], ['artifactId']) }),
-  'artifact.deleted': descriptor({ audience: USER, validate: (p) => validateShape(p, ['artifactId'], ['artifactId']) }),
+  'artifact.expired': descriptor({ audience: USER, validate: validateArtifactLifecycle }),
+  'artifact.deleted': descriptor({ audience: USER, validate: validateArtifactLifecycle }),
+  'legacy.imported': descriptor({ validate: validateLegacyImported, maxPayloadBytes: 16 * 1024 * 1024 }),
   'skill.activated': descriptor({ validate: (p) => validateShape(p, ['skillId', 'revision'], ['skillId', 'revision']) }),
   'capability.snapshot_captured': descriptor({ validate: (p) => validateShape(p, ['snapshotId', 'revision'], ['snapshotId', 'revision']) }),
   'subagent.started': descriptor({ audience: USER, validate: (p) => validateShape(p, ['subagentId', 'summary'], ['subagentId', 'summary']) }),

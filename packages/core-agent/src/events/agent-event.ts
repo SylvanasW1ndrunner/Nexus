@@ -47,6 +47,7 @@ export const AGENT_EVENT_TYPES = [
   'artifact.created',
   'artifact.expired',
   'artifact.deleted',
+  'legacy.imported',
   'skill.activated',
   'capability.snapshot_captured',
   'subagent.started',
@@ -171,6 +172,7 @@ export interface AgentEventPayloadMap {
         mediaType: string;
         availability: 'available';
         summary: string;
+        expiresAt?: string;
       }
     | {
         artifactId: string;
@@ -180,9 +182,41 @@ export interface AgentEventPayloadMap {
         mediaType: string;
         availability: 'legacy-unavailable';
         summary: string;
+        expiresAt?: string;
       };
   'artifact.expired': { artifactId: string };
   'artifact.deleted': { artifactId: string };
+  'legacy.imported':
+    | {
+        entityType: 'session'; legacyId: string; projectKey: string; projectRoot: string;
+        title: string; userId: string | null; mode: string;
+      }
+    | {
+        entityType: 'message'; legacyId: string; messageIndex: number;
+        role: 'user' | 'assistant'; content: string; createdAt: string;
+      }
+    | {
+        entityType: 'run'; legacyId: string; sessionId: string;
+        status: 'completed' | 'interrupted_legacy'; plan: PortableValue | null;
+        createdAt: string; updatedAt: string;
+      }
+    | {
+        entityType: 'preference'; legacyId: string; userId: string; key: string;
+        value: string; confidence: number; sourceSessionId: string | null;
+      }
+    | {
+        entityType: 'checkpoint'; legacyId: string; sessionId: string; sequence: number;
+        summary: string; createdAt: string;
+      }
+    | {
+        entityType: 'subagent'; legacyId: string; parentSessionId: string;
+        childSessionId: string | null; status: string; depth: number;
+      }
+    | { entityType: 'diagnostic'; legacyId: string; code: string; evidence: string }
+    | {
+        entityType: 'archive'; legacyId: string; relativePath: string;
+        archiveHandle: string; checksum: string; byteSize: number;
+      };
   'skill.activated': { skillId: string; revision: string };
   'capability.snapshot_captured': { snapshotId: string; revision: string };
   'subagent.started': { subagentId: string; summary: string };

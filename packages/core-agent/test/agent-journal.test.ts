@@ -379,8 +379,8 @@ describe('SqliteAgentJournal', () => {
       events: [{
         type: 'artifact.created',
         payload: {
-          artifactId: 'artifact-a',
-          handle: 'agent-artifact:artifact-a',
+          artifactId: `artifact_${'a'.repeat(64)}`,
+          handle: `agent-artifact:0e3ffbf31db2e5b45f9fe42a:${'a'.repeat(40)}`,
           checksum: 'a'.repeat(64),
           byteSize: 4,
           mediaType: 'text/plain',

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,8 @@ import {
   ProjectArtifactStore,
   type ArtifactJournalContext,
 } from '../src/artifacts/project-artifact-store.js';
+import type { AgentJournal, JournalCommand } from '../src/events/agent-journal.js';
+import type { AgentEvent } from '../src/events/agent-event.js';
 import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
 
 const temporaryDirectories: string[] = [];
@@ -66,7 +69,7 @@ describe('ProjectArtifactStore', () => {
       {
         projectId: 'project-a',
         runId: fixture.runId,
-        schemaVersion: 2,
+        schemaVersion: 3,
         payload: {
           artifactId: committed.artifactId,
           handle: committed.handle,
@@ -118,6 +121,184 @@ describe('ProjectArtifactStore', () => {
     expect(await readStream(await first.open(left))).toEqual(Buffer.from('same-content'));
   });
 
+  it('creates independent references for equal content across Runs and isolates lifecycle', async () => {
+    const fixture = await createFixture();
+    const other = await createRunContext(fixture.journal, 'artifact-second-run');
+    const content = Buffer.from('shared-content');
+    const firstStage = await fixture.store.stage({ mediaType: 'text/plain', source: chunks(content) });
+    const secondStage = await fixture.store.stage({ mediaType: 'text/plain', source: chunks(content) });
+
+    expect(secondStage.checksum).toBe(firstStage.checksum);
+    expect(secondStage.artifactId).not.toBe(firstStage.artifactId);
+    expect(secondStage.handle).not.toBe(firstStage.handle);
+
+    const first = await fixture.store.commit({
+      staged: firstStage,
+      journal: fixture.context('shared-first-commit'),
+      summary: 'first reference',
+    });
+    const second = await fixture.store.commit({
+      staged: secondStage,
+      journal: other.context('shared-second-commit'),
+      summary: 'second reference',
+    });
+    await fixture.store.expire(first, fixture.context('shared-first-expire'));
+
+    await expect(fixture.store.open(first)).rejects.toMatchObject({ code: 'EXPIRED' });
+    expect(await readStream(await fixture.store.open(second))).toEqual(content);
+  });
+
+  it('serializes distinct-command concurrent commits of one reference into one created fact', async () => {
+    const fixture = await createFixture();
+    const staged = await fixture.store.stage({
+      mediaType: 'application/octet-stream',
+      source: chunks(Buffer.from('one-reference')),
+    });
+    const journal = withArtifactCommitBarrier(fixture.journal);
+    const left = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal,
+    });
+    const right = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal,
+    });
+    const [first, second] = await Promise.all([
+      left.commit({
+        staged,
+        journal: fixture.context('distinct-command-left'),
+        summary: 'same reference',
+      }),
+      right.commit({
+        staged,
+        journal: fixture.context('distinct-command-right'),
+        summary: 'same reference',
+      }),
+    ]);
+
+    expect(second).toEqual(first);
+    const created = (await fixture.journal.readProject('project-a', 0, 100))
+      .filter(({ type, payload }) => type === 'artifact.created' &&
+        payload.artifactId === staged.artifactId);
+    expect(created).toHaveLength(1);
+  });
+
+  it('stops legacy duplicate artifact facts with a typed migration conflict', async () => {
+    const fixture = await createFixture();
+    const staged = await fixture.store.stage({
+      mediaType: 'text/plain', source: chunks(Buffer.from('legacy-duplicate')),
+    });
+    await fixture.store.commit({
+      staged, journal: fixture.context('legacy-duplicate-seed'), summary: 'seed',
+    });
+    const database = new DatabaseSync(fixture.journalPath);
+    try {
+      database.exec('DROP INDEX idx_agent_events_artifact_reference');
+      database.exec(`
+        INSERT INTO agent_events (
+          project_id, sequence, event_id, schema_version, session_id, run_id,
+          turn_id, parent_event_id, invocation_id, attempt_id, event_type,
+          occurred_at, payload_json, audience_json, persistence
+        )
+        SELECT project_id, sequence + 1000, event_id || '-duplicate', schema_version,
+          session_id, run_id, turn_id, parent_event_id, invocation_id, attempt_id,
+          event_type, occurred_at, payload_json, audience_json, persistence
+        FROM agent_events WHERE event_type = 'artifact.created'
+      `);
+    } finally {
+      database.close();
+    }
+
+    const reopened = new SqliteAgentJournal({ filePath: fixture.journalPath });
+    await expect(reopened.readProject('project-a', 0, 100))
+      .rejects.toMatchObject({ code: 'PROJECTION_CORRUPT' });
+  });
+
+  it('expires committed TTL references independently and retains shared blobs until unreferenced', async () => {
+    const fixture = await createFixture();
+    const other = await createRunContext(fixture.journal, 'artifact-ttl-run');
+    const content = Buffer.from('ttl-shared-content');
+    const firstStage = await fixture.store.stage({
+      mediaType: 'text/plain', source: chunks(content), expiresAt: '2026-08-09T13:00:00.000Z',
+    });
+    const secondStage = await fixture.store.stage({
+      mediaType: 'text/plain', source: chunks(content), expiresAt: '2026-08-09T15:00:00.000Z',
+    });
+    const first = await fixture.store.commit({
+      staged: firstStage, journal: fixture.context('ttl-first'), summary: 'short TTL',
+    });
+    const second = await fixture.store.commit({
+      staged: secondStage, journal: other.context('ttl-second'), summary: 'long TTL',
+    });
+    const atFourteen = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      now: () => '2026-08-09T14:00:00.000Z',
+    });
+
+    await expect(atFourteen.open(first)).rejects.toMatchObject({ code: 'EXPIRED' });
+    expect(await readStream(await atFourteen.open(second))).toEqual(content);
+    expect(await atFourteen.collectGarbage(new Date('2026-08-09T14:00:00.000Z')))
+      .toMatchObject({ committedObjectsDeleted: 1, bytesDeleted: 0 });
+    expect(await readStream(await atFourteen.open(second))).toEqual(content);
+
+    const atSixteen = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      now: () => '2026-08-09T16:00:00.000Z',
+    });
+    expect(await atSixteen.collectGarbage(new Date('2026-08-09T16:00:00.000Z')))
+      .toMatchObject({ committedObjectsDeleted: 1, bytesDeleted: content.byteLength });
+    await expect(atSixteen.open(second)).rejects.toMatchObject({ code: 'EXPIRED' });
+
+    const facts = (await fixture.journal.readProject('project-a', 0, 100))
+      .filter((event): event is Extract<AgentEvent, { type: 'artifact.created' }> =>
+        event.type === 'artifact.created');
+    const firstFact = facts.find(({ payload }) => payload.artifactId === first.artifactId);
+    const secondFact = facts.find(({ payload }) => payload.artifactId === second.artifactId);
+    expect(firstFact?.payload.expiresAt).toBe('2026-08-09T13:00:00.000Z');
+    expect(secondFact?.payload.expiresAt).toBe('2026-08-09T15:00:00.000Z');
+  });
+
+  it('loops partial file writes, rejects staged-byte tamper before Journal, and rejects forged paths', async () => {
+    const fixture = await createFixture();
+    let writes = 0;
+    const partialWriter = new ProjectArtifactStore({
+      projectId: 'project-a',
+      rootDir: fixture.artifactRoot,
+      journal: fixture.journal,
+      writeChunk: async (file: FileHandle, chunk: Uint8Array, offset: number) => {
+        writes += 1;
+        return (await file.write(chunk, offset, Math.min(3, chunk.byteLength - offset), null))
+          .bytesWritten;
+      },
+    });
+    const content = Buffer.from('partial-write-content');
+    const partial = await partialWriter.stage({
+      mediaType: 'application/octet-stream', source: chunks(content),
+    });
+    expect(writes).toBeGreaterThan(1);
+    const partialRef = await partialWriter.commit({
+      staged: partial, journal: fixture.context('partial-write-commit'), summary: 'partial writes',
+    });
+    expect(await readStream(await partialWriter.open(partialRef))).toEqual(content);
+
+    const tampered = await fixture.store.stage({
+      mediaType: 'text/plain', source: chunks(Buffer.from('before-journal')),
+    });
+    const stagedPath = await findFileContaining(fixture.artifactRoot, 'before-journal');
+    await writeFile(stagedPath, 'same-size-data');
+    await expect(fixture.store.commit({
+      staged: tampered, journal: fixture.context('tampered-before-journal'), summary: 'tampered',
+    })).rejects.toMatchObject({ code: 'CORRUPT' });
+    expect((await fixture.journal.readProject('project-a', 0, 100))
+      .filter(({ type, payload }) => type === 'artifact.created' &&
+        payload.artifactId === tampered.artifactId)).toHaveLength(0);
+
+    await expect(fixture.store.open({
+      ...partialRef,
+      artifactId: '../outside',
+      handle: 'agent-artifact:../outside',
+      checksum: '../outside',
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
   it('upcasts v1 artifact facts to explicit unavailable handles without fabricated bytes', async () => {
     const fixture = await createFixture();
     const staged = await fixture.store.stage({
@@ -147,19 +328,14 @@ describe('ProjectArtifactStore', () => {
 
     const fact = (await fixture.journal.readProject('project-a', 0, 100))
       .find(({ type }) => type === 'artifact.created');
-    expect(fact).toMatchObject({
-      schemaVersion: 2,
-      payload: {
-        artifactId: staged.artifactId,
-        handle: `legacy-agent-artifact:${staged.artifactId}`,
-        checksum: null,
-        byteSize: null,
-        availability: 'legacy-unavailable',
-      },
-    });
     if (fact?.type !== 'artifact.created' || fact.payload.availability !== 'legacy-unavailable') {
       throw new Error('Expected a legacy-unavailable artifact fact.');
     }
+    expect(fact.schemaVersion).toBe(3);
+    expect(fact.payload.artifactId).toMatch(/^artifact_[a-f0-9]{64}$/u);
+    expect(fact.payload.handle).toMatch(/^legacy-agent-artifact:[a-f0-9]{64}$/u);
+    expect(fact.payload.checksum).toBeNull();
+    expect(fact.payload.byteSize).toBeNull();
     await expect(fixture.store.open({
       schemaVersion: 1,
       artifactId: fact.payload.artifactId,
@@ -274,7 +450,6 @@ describe('ProjectArtifactStore', () => {
     const retainedStage = await fixture.store.stage({
       mediaType: 'text/plain',
       source: chunks(Buffer.from('retained')),
-      expiresAt: '2026-08-09T00:00:00.000Z',
     });
     const retained = await fixture.store.commit({
       staged: retainedStage,
@@ -323,7 +498,10 @@ async function createFixture() {
     lease: leaseRef,
     expectedRunRevision: 1,
   });
-  const store = new ProjectArtifactStore({ projectId: 'project-a', rootDir: artifactRoot, journal });
+  const store = new ProjectArtifactStore({
+    projectId: 'project-a', rootDir: artifactRoot, journal,
+    now: () => '2026-08-09T12:00:00.000Z',
+  });
   const context = (commandId: string): ArtifactJournalContext => ({
     sessionId: 'session-a',
     runId: created.runId,
@@ -339,6 +517,60 @@ async function createFixture() {
     runId: created.runId,
     store,
     context,
+  };
+}
+
+function withArtifactCommitBarrier(delegate: AgentJournal): AgentJournal {
+  let arrivals = 0;
+  let release = (): void => undefined;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  return {
+    createRun: async (command) => await delegate.createRun(command),
+    startRun: async (command) => await delegate.startRun(command),
+    startTurn: async (command) => await delegate.startTurn(command),
+    async commit(command: JournalCommand) {
+      if (command.events.some(({ type }) => type === 'artifact.created')) {
+        arrivals += 1;
+        if (arrivals === 2) release();
+        else await barrier;
+      }
+      return await delegate.commit(command);
+    },
+    readProject: async (projectId, afterSequence, limit) =>
+      await delegate.readProject(projectId, afterSequence, limit),
+    acquireRunLease: async (input) => await delegate.acquireRunLease(input),
+    renewRunLease: async (input) => await delegate.renewRunLease(input),
+    getRunProjection: async (runId) => await delegate.getRunProjection(runId),
+    countEvents: async (type, projectId) => await delegate.countEvents(type, projectId),
+    rebuildProjectProjections: async (projectId) =>
+      await delegate.rebuildProjectProjections(projectId),
+  };
+}
+
+async function createRunContext(journal: SqliteAgentJournal, suffix: string) {
+  const created = await journal.createRun({
+    projectId: 'project-a',
+    sessionId: `session-${suffix}`,
+    clientRequestId: suffix,
+    input: { text: suffix },
+  });
+  const lease = await journal.acquireRunLease({
+    projectId: 'project-a', runId: created.runId, ownerId: `worker-${suffix}`, ttlMs: 60_000,
+  });
+  const leaseRef = { ownerId: lease.ownerId, fencingToken: lease.fencingToken };
+  await journal.startRun({
+    projectId: 'project-a', sessionId: `session-${suffix}`, runId: created.runId,
+    commandId: `start-${suffix}`, lease: leaseRef, expectedRunRevision: 1,
+  });
+  return {
+    runId: created.runId,
+    context: (commandId: string): ArtifactJournalContext => ({
+      sessionId: `session-${suffix}`,
+      runId: created.runId,
+      commandId,
+      lease: leaseRef,
+      expectedRunRevision: 2,
+    }),
   };
 }
 

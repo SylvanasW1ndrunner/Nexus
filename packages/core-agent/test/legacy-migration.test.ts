@@ -1,7 +1,8 @@
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { spawn } from 'node:child_process';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -10,6 +11,8 @@ import {
   type MigrationCrashPoint,
   type MigrationInspection,
 } from '../src/session/state-migrations.js';
+import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
+import { JournalSessionStore } from '../src/journal-session-store.js';
 
 const temporaryDirectories: string[] = [];
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
@@ -92,6 +95,167 @@ describe('StateMigrationRunner', () => {
     expect(inspection.intentStatus).toBe('completed');
     expect(inspection.sourceBackupPath).toMatch(/state\.legacy\.[a-f0-9]+\.db$/u);
     expect(await readFile(inspection.sourceBackupPath)).not.toHaveLength(0);
+
+    const firstJournal = new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') });
+    expect(await firstJournal.countEvents(undefined, inspection.projectId)).toBeGreaterThan(0);
+    await firstJournal.rebuildProjectProjections(inspection.projectId);
+    const firstProjection = await new JournalSessionStore(firstJournal, inspection.projectId)
+      .load('session-a', { limit: 100 });
+    const secondJournal = new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') });
+    await secondJournal.rebuildProjectProjections(inspection.projectId);
+    const secondProjection = await new JournalSessionStore(secondJournal, inspection.projectId)
+      .load('session-a', { limit: 100 });
+    expect(secondProjection).toEqual(firstProjection);
+    expect(secondProjection.messages.map(({ role, content }) => ({ role, content }))).toEqual(
+      secondState.sessions[0]?.messages.map(({ role, content }) => ({ role, content })),
+    );
+
+    const persistedIntent = await readFile(join(projectDir, 'state.migration.json'), 'utf8');
+    expect(persistedIntent).not.toContain(projectDir);
+    expect(persistedIntent).not.toContain('sourcePath');
+    expect(withTestDatabase(join(projectDir, 'state.db'), (database) =>
+      database.prepare(`PRAGMA table_info(legacy_imports)`).all() as unknown as Array<{ name: string }>,
+    ).map(({ name }) => name)).not.toContain('imported_state_json');
+    const archives = withTestDatabase(join(projectDir, 'state.db'), (database) =>
+      database.prepare(`
+        SELECT relative_path, object_relative_path, checksum, byte_size
+        FROM legacy_archives ORDER BY relative_path
+      `).all() as unknown as Array<{
+        relative_path: string; object_relative_path: string; checksum: string; byte_size: number;
+      }>,
+    );
+    expect(archives).toHaveLength(4);
+    for (const archive of archives) {
+      const bytes = await readFile(join(projectDir, archive.object_relative_path));
+      expect(bytes).toHaveLength(archive.byte_size);
+      expect((await stat(join(projectDir, archive.object_relative_path))).isFile()).toBe(true);
+    }
+  });
+
+  it('takes over a stale owner lock but rejects a live owner lock', async () => {
+    const projectDir = await createLegacyProject();
+    const lockPath = join(projectDir, 'state.migration.lock');
+    await writeFile(lockPath, JSON.stringify({ schemaVersion: 1, pid: 2_147_483_647, nonce: 'dead' }));
+    await expect(StateMigrationRunner.open(projectDir)).resolves.toBeInstanceOf(StateMigrationRunner);
+
+    const otherProject = await createLegacyProject();
+    await writeFile(
+      join(otherProject, 'state.migration.lock'),
+      JSON.stringify({ schemaVersion: 1, pid: process.pid, nonce: 'live' }),
+    );
+    await expect(StateMigrationRunner.open(otherProject)).rejects.toMatchObject({
+      code: 'MIGRATION_LOCKED',
+    });
+  });
+
+  it.each(crashPoints)('recovers after an uncatchable child termination at %s', async (cut) => {
+    const projectDir = await createLegacyProject();
+    const viteNode = join(
+      process.cwd(), 'node_modules', '.pnpm', 'vite-node@2.1.9_@types+node@22.19.20',
+      'node_modules', 'vite-node', 'vite-node.mjs',
+    );
+    const helper = join(process.cwd(), 'packages', 'core-agent', 'test', 'fixtures',
+      'migration-hard-crash.ts');
+    const exitCode = await new Promise<number | null>((resolveExit, rejectExit) => {
+      const child = spawn(process.execPath, [viteNode, helper], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          DBAGENT_MIGRATION_CHILD_PROJECT: projectDir,
+          DBAGENT_MIGRATION_HARD_CRASH: cut,
+        },
+        stdio: 'ignore',
+      });
+      child.once('error', rejectExit);
+      child.once('exit', resolveExit);
+    });
+    expect(exitCode).not.toBe(0);
+    expect(await readFile(join(projectDir, 'state.migration.lock'), 'utf8')).toContain('"pid"');
+    const recovered = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
+    });
+    expect(await recovered.countLegacyImports()).toBe(1);
+    expect((await recovered.inspect()).intentStatus).toBe('completed');
+  });
+
+  it('rejects generic producer forgery of a reserved legacy fact', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dbagent-forged-legacy-fact-'));
+    temporaryDirectories.push(directory);
+    const journal = new SqliteAgentJournal({ filePath: join(directory, 'state.db') });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'forged', input: 'x',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'forger', ttlMs: 60_000,
+    });
+    await expect(journal.commit({
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      commandId: 'forged-legacy-import',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 1,
+      events: [{
+        type: 'legacy.imported',
+        payload: {
+          entityType: 'session', legacyId: 'session-a', projectKey: 'a', projectRoot: 'a',
+          title: 'forged', userId: null, mode: 'general',
+        },
+      }],
+    })).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
+  });
+
+  it('rechecks the live semantic source immediately before activation', async () => {
+    const projectDir = await createLegacyProject();
+    await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r1', crashAt: 'after-intent-fsync',
+    }).catch(() => undefined);
+    withTestDatabase(join(projectDir, 'state.db'), (database) => {
+      database.prepare('UPDATE agent_sessions SET title = ? WHERE id = ?')
+        .run('changed-after-validation', 'session-a');
+    });
+    await expect(StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
+    })).rejects.toMatchObject({ code: 'MIGRATION_STATE_CONFLICT' });
+  });
+
+  it('rejects path-bearing or non-strict migration intents', async () => {
+    const projectDir = await createLegacyProject();
+    await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r1', crashAt: 'after-intent-fsync',
+    }).catch(() => undefined);
+    const intentPath = join(projectDir, 'state.migration.json');
+    const intent = JSON.parse(await readFile(intentPath, 'utf8')) as Record<string, unknown>;
+    intent.sourcePath = '..\\forged.db';
+    await writeFile(intentPath, JSON.stringify(intent));
+    await expect(StateMigrationRunner.open(projectDir)).rejects.toMatchObject({
+      code: 'MIGRATION_STATE_CONFLICT',
+    });
+    delete intent.sourcePath;
+    intent.migrationId = '..\\not-a-digest';
+    await writeFile(intentPath, JSON.stringify(intent));
+    await expect(StateMigrationRunner.open(projectDir)).rejects.toMatchObject({
+      code: 'MIGRATION_STATE_CONFLICT',
+    });
+  });
+
+  it('preserves legacy Project isolation from projectKey and projectRoot', async () => {
+    const projectDir = await createLegacyProject();
+    withTestDatabase(join(projectDir, 'state.db'), (database) => {
+      database.prepare('UPDATE agent_sessions SET payload_json = ? WHERE id = ?')
+        .run(JSON.stringify({ projectKey: 'orders', projectRoot: 'C:/projects/orders' }), 'session-a');
+      database.prepare('UPDATE agent_sessions SET payload_json = ? WHERE id = ?')
+        .run(JSON.stringify({ projectKey: 'child', projectRoot: 'C:/projects/child' }), 'session-b');
+    });
+    const migrated = await StateMigrationRunner.open(projectDir);
+    const inspection = await migrated.inspect();
+    expect(inspection.projectIds).toHaveLength(2);
+    const journal = new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') });
+    const sessionSets = await Promise.all(inspection.projectIds.map(async (projectId) =>
+      new Set((await journal.readProject(projectId, 0, 1_000)).map(({ sessionId }) => sessionId)),
+    ));
+    expect(sessionSets.every((sessions) => sessions.size === 1)).toBe(true);
+    expect(new Set(sessionSets.flatMap((sessions) => [...sessions]))).toEqual(
+      new Set(['session-a', 'session-b']),
+    );
   });
 
   it('derives a deterministic id from a stable sorted immutable source manifest', async () => {
@@ -291,4 +455,13 @@ async function createLegacyProject(): Promise<string> {
   database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   database.close();
   return projectDir;
+}
+
+function withTestDatabase<T>(path: string, operation: (database: NodeDatabaseSync) => T): T {
+  const database = new DatabaseSync(path);
+  try {
+    return operation(database);
+  } finally {
+    database.close();
+  }
 }

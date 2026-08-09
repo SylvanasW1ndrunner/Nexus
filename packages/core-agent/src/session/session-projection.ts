@@ -1,6 +1,9 @@
 import type { PortableValue } from '@dbagent/shared';
 import type { AgentEvent, AgentEventType } from '../events/agent-event.js';
-import { AGENT_EVENT_SCHEMA_REGISTRY } from '../events/event-schema-registry.js';
+import {
+  AGENT_EVENT_SCHEMA_REGISTRY,
+  validateAndRedactEventPayload,
+} from '../events/event-schema-registry.js';
 
 export type ProjectionErrorCode =
   | 'PROJECT_MISMATCH'
@@ -69,6 +72,7 @@ export type UserActivityEvent = {
   detail?: PortableValue;
   replaceKey?: string;
   artifactRefs?: string[];
+  evidenceRefs?: string[];
   createdAt: string;
 };
 
@@ -134,62 +138,307 @@ export function projectSession(
   events: readonly AgentEvent[],
   options: ProjectionOptions,
 ): SessionProjection {
-  const selected = validateProjectionInput(events, options);
-  const messageCandidates: SessionProjectionMessage[] = [];
-  const artifacts = new Map<string, SessionProjectionArtifact>();
-  const runs = new Map<string, SessionProjectionRun>();
-  let lastSourceSequence = options.afterSequence;
+  const accumulator = new SessionProjectionAccumulator(options);
+  for (const event of events) {
+    if (!accumulator.accept(event)) break;
+  }
+  return accumulator.finish();
+}
 
-  for (const event of selected) {
-    lastSourceSequence = event.sequence;
+export class UserActivityProjector {
+  project(
+    events: readonly AgentEvent[],
+    options: ProjectionOptions,
+  ): ProjectionPage<UserActivityEvent> {
+    const accumulator = new UserActivityProjectionAccumulator(options);
+    for (const event of events) {
+      if (!accumulator.accept(event)) break;
+    }
+    return accumulator.finish();
+  }
+}
+
+export class AuditProjector {
+  project(
+    events: readonly AgentEvent[],
+    options: ProjectionOptions,
+  ): ProjectionPage<AuditProjectionEvent> {
+    const accumulator = new AuditProjectionAccumulator(options);
+    for (const event of events) {
+      if (!accumulator.accept(event)) break;
+    }
+    return accumulator.finish();
+  }
+}
+
+type Scope = { projectId: string; sessionId: string; runId: string; sequence: number };
+type RunScope = Scope & { clientRequestId?: string; createdAt?: string };
+type TurnScope = Scope & { turnId: string };
+type AttemptScope = TurnScope & { attemptId: string };
+type InvocationScope = AttemptScope & { invocationId: string };
+
+export class ProjectionEventValidator {
+  readonly #projectId: string;
+  readonly #targetSessionId: string | undefined;
+  readonly #trustedJournal: boolean;
+  readonly #events = new Map<string, Scope>();
+  readonly #runs = new Map<string, RunScope>();
+  readonly #turns = new Map<string, TurnScope>();
+  readonly #attempts = new Map<string, AttemptScope>();
+  readonly #invocations = new Map<string, InvocationScope>();
+  readonly #finalText = new Map<string, { runId: string; turnId: string; text: string }>();
+  #previousSequence = 0;
+
+  constructor(
+    projectId: string,
+    options: { targetSessionId?: string; trustedJournal?: boolean } = {},
+  ) {
+    if (!projectId.trim()) throw new ProjectionError('LIMIT_INVALID', 'Project is required.');
+    this.#projectId = projectId;
+    this.#targetSessionId = options.targetSessionId;
+    this.#trustedJournal = options.trustedJournal ?? false;
+  }
+
+  accept(event: AgentEvent): void {
+    if (event.projectId !== this.#projectId) {
+      throw new ProjectionError('PROJECT_MISMATCH', 'Projection input crossed Project boundary.');
+    }
+    if (!Number.isSafeInteger(event.sequence) || event.sequence <= this.#previousSequence) {
+      throw new ProjectionError('SEQUENCE_INVALID', 'Source sequence must be strictly monotonic.');
+    }
+    this.#previousSequence = event.sequence;
+    if (this.#trustedJournal && event.sessionId !== this.#targetSessionId) return;
+    const descriptor = AGENT_EVENT_SCHEMA_REGISTRY[event.type];
+    if (event.schemaVersion !== descriptor.schemaVersion) {
+      throw new ProjectionError('SCHEMA_INVALID', 'Projection input was not upcast to current schema.');
+    }
+    try {
+      validateAndRedactEventPayload(event.type, event.payload);
+    } catch (error) {
+      throw new ProjectionError(
+        'SCHEMA_INVALID',
+        `Projection payload is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!this.#trustedJournal && this.#events.has(event.eventId)) {
+      throw new ProjectionError('CAUSALITY_INVALID', 'Event identity is duplicated.');
+    }
+    if (!this.#trustedJournal && event.parentEventId !== undefined) {
+      const parent = this.#events.get(event.parentEventId);
+      if (!sameScope(parent, event) || parent.sequence >= event.sequence) {
+        throw new ProjectionError('CAUSALITY_INVALID', 'Event parent causality is invalid.');
+      }
+    }
+    if (event.type === 'input.received') {
+      if (this.#runs.has(event.runId)) {
+        throw new ProjectionError('RUN_CAUSALITY_INVALID', 'Run input is duplicated.');
+      }
+      this.#runs.set(event.runId, {
+        ...scopeOf(event),
+        clientRequestId: event.payload.clientRequestId,
+      });
+    } else {
+      const run = this.#runs.get(event.runId);
+      if (!sameScope(run, event)) {
+        throw new ProjectionError('RUN_CAUSALITY_INVALID', 'Event Run causality is invalid.');
+      }
+      if (event.type === 'run.created') {
+        if (run.clientRequestId !== event.payload.clientRequestId) {
+          throw new ProjectionError(
+            'RUN_CAUSALITY_INVALID',
+            'Run creation disagrees with the accepted input request.',
+          );
+        }
+        run.createdAt = event.occurredAt;
+      }
+    }
+    this.#validateTurnAttemptInvocation(event);
+    if (event.type === 'run.completed') this.resolveFinalText(event);
+    if (!this.#trustedJournal) this.#events.set(event.eventId, scopeOf(event));
+  }
+
+  run(runId: string): RunScope | undefined { return this.#runs.get(runId); }
+
+  resolveFinalText(event: Extract<AgentEvent, { type: 'run.completed' }>): string {
+    const parsed = /^turn:([^:]+):text:(\d+)$/u.exec(event.payload.finalContentRef);
+    const resolved = parsed === null ? undefined : this.#finalText.get(event.payload.finalContentRef);
+    if (parsed === null || resolved === undefined || resolved.runId !== event.runId ||
+      resolved.turnId !== parsed[1]) {
+      throw new ProjectionError('CAUSALITY_INVALID', 'Run finalContentRef does not resolve exactly.');
+    }
+    return resolved.text;
+  }
+
+  releaseTerminal(event: AgentEvent): void {
+    if (!this.#trustedJournal || !isTerminalRunEvent(event.type)) return;
+    this.#runs.delete(event.runId);
+    for (const [key, scope] of this.#turns) {
+      if (scope.runId === event.runId) this.#turns.delete(key);
+    }
+    for (const [key, scope] of this.#attempts) {
+      if (scope.runId === event.runId) this.#attempts.delete(key);
+    }
+    for (const [key, scope] of this.#invocations) {
+      if (scope.runId === event.runId) this.#invocations.delete(key);
+    }
+    for (const [key, scope] of this.#finalText) {
+      if (scope.runId === event.runId) this.#finalText.delete(key);
+    }
+  }
+
+  #validateTurnAttemptInvocation(event: AgentEvent): void {
+    if (event.type === 'turn.started') {
+      if (event.turnId === undefined || this.#turns.has(event.turnId)) {
+        throw new ProjectionError('CAUSALITY_INVALID', 'Turn identity is missing or duplicated.');
+      }
+      this.#turns.set(event.turnId, { ...scopeOf(event), turnId: event.turnId });
+    } else if (event.turnId !== undefined && !sameScope(this.#turns.get(event.turnId), event)) {
+      throw new ProjectionError('CAUSALITY_INVALID', 'Event Turn ownership is invalid.');
+    }
+
+    if (event.attemptId !== undefined) {
+      if (event.turnId === undefined) {
+        throw new ProjectionError('CAUSALITY_INVALID', 'Attempt is missing Turn ownership.');
+      }
+      if (event.type === 'model_attempt_started') {
+        if (this.#attempts.has(event.attemptId)) {
+          throw new ProjectionError('CAUSALITY_INVALID', 'Attempt identity is duplicated.');
+        }
+        this.#attempts.set(event.attemptId, {
+          ...scopeOf(event), turnId: event.turnId, attemptId: event.attemptId,
+        });
+      } else if (event.type === 'model_attempt_committed') {
+        if (event.payload.validatedAttempt.attemptId !== event.attemptId) {
+          throw new ProjectionError('CAUSALITY_INVALID', 'Committed Attempt outer identity disagrees.');
+        }
+        const existing = this.#attempts.get(event.attemptId);
+        if (existing !== undefined && (!sameScope(existing, event) || existing.turnId !== event.turnId)) {
+          throw new ProjectionError('CAUSALITY_INVALID', 'Committed Attempt ownership is invalid.');
+        }
+        if (existing === undefined) {
+          this.#attempts.set(event.attemptId, {
+            ...scopeOf(event), turnId: event.turnId, attemptId: event.attemptId,
+          });
+        }
+        event.payload.validatedAttempt.blocks.forEach((block, index) => {
+          if (block.type === 'text') {
+            this.#finalText.set(`turn:${event.turnId}:text:${index}`, {
+              runId: event.runId, turnId: event.turnId!, text: block.text,
+            });
+          }
+        });
+      } else {
+        const attempt = this.#attempts.get(event.attemptId);
+        if (!sameScope(attempt, event) || attempt.turnId !== event.turnId) {
+          throw new ProjectionError('CAUSALITY_INVALID', 'Event Attempt ownership is invalid.');
+        }
+      }
+    }
+
+    if (event.invocationId !== undefined) {
+      if (event.turnId === undefined || event.attemptId === undefined) {
+        throw new ProjectionError('CAUSALITY_INVALID', 'Invocation is missing Attempt ownership.');
+      }
+      if (event.type === 'tool.proposed') {
+        if (event.payload.invocationId !== event.invocationId || this.#invocations.has(event.invocationId)) {
+          throw new ProjectionError('CAUSALITY_INVALID', 'Tool proposal Invocation identity is invalid.');
+        }
+        this.#invocations.set(event.invocationId, {
+          ...scopeOf(event), turnId: event.turnId, attemptId: event.attemptId,
+          invocationId: event.invocationId,
+        });
+      } else {
+        const payloadInvocationId = invocationIdFromPayload(event.payload);
+        if (payloadInvocationId !== undefined && payloadInvocationId !== event.invocationId) {
+          throw new ProjectionError(
+            'CAUSALITY_INVALID',
+            'Tool payload Invocation identity disagrees with its outer identity.',
+          );
+        }
+        const invocation = this.#invocations.get(event.invocationId);
+        if (!sameScope(invocation, event) || invocation.turnId !== event.turnId ||
+          invocation.attemptId !== event.attemptId) {
+          throw new ProjectionError('CAUSALITY_INVALID', 'Event Invocation ownership is invalid.');
+        }
+      }
+    }
+  }
+}
+
+export class SessionProjectionAccumulator {
+  readonly #options: ProjectionOptions;
+  readonly #validator: ProjectionEventValidator;
+  readonly #messages: SessionProjectionMessage[] = [];
+  readonly #artifacts = new Map<string, SessionProjectionArtifact>();
+  readonly #runs = new Map<string, SessionProjectionRun>();
+  #cursor: number;
+
+  constructor(options: ProjectionOptions, trustedJournal = false) {
+    requireProjectionOptions(options);
+    this.#options = options;
+    this.#validator = new ProjectionEventValidator(options.projectId, {
+      targetSessionId: options.sessionId,
+      trustedJournal,
+    });
+    this.#cursor = options.afterSequence;
+  }
+
+  accept(event: AgentEvent): boolean {
+    this.#validator.accept(event);
+    if (event.sessionId !== this.#options.sessionId) {
+      this.#cursor = Math.max(this.#cursor, event.sequence);
+      return true;
+    }
+    if (event.sequence <= this.#options.afterSequence) return true;
+    if (wouldOverflowSessionPage(
+      event,
+      this.#messages,
+      this.#artifacts,
+      this.#runs,
+      this.#validator,
+      this.#options.limit,
+    )) {
+      return false;
+    }
+    this.#cursor = event.sequence;
+    this.#apply(event);
+    this.#validator.releaseTerminal(event);
+    return true;
+  }
+
+  finish(): SessionProjection {
+    return {
+      schemaVersion: 1,
+      projectId: this.#options.projectId,
+      sessionId: this.#options.sessionId,
+      messages: [...this.#messages],
+      artifacts: [...this.#artifacts.values()].sort((a, b) => a.sourceSequence - b.sourceSequence),
+      runs: [...this.#runs.values()].sort(
+        (left, right) => left.createdAt.localeCompare(right.createdAt) || left.runId.localeCompare(right.runId),
+      ),
+      lastSourceSequence: this.#cursor,
+      nextSourceSequence: this.#cursor,
+    };
+  }
+
+  #apply(event: AgentEvent): void {
     if (event.type === 'input.received') {
       const content = publicInputText(event.payload.content);
-      if (content !== undefined) {
-        messageCandidates.push({
-          sourceSequence: event.sequence,
-          role: 'user',
-          content,
-          createdAt: event.occurredAt,
-          runId: event.runId,
-        });
-      }
-      continue;
-    }
-    if (event.type === 'run.created') {
-      runs.set(event.runId, {
+      if (content !== undefined) this.#messages.push(sessionMessage(event, 'user', content));
+    } else if (event.type === 'model_attempt_committed') {
+      const content = committedText(event);
+      if (content.length > 0) this.#messages.push(sessionMessage(event, 'assistant', content));
+    } else if (event.type === 'legacy.imported' && event.payload.entityType === 'message') {
+      this.#messages.push({
+        sourceSequence: event.sequence,
+        role: event.payload.role,
+        content: event.payload.content,
+        createdAt: event.payload.createdAt,
         runId: event.runId,
-        clientRequestId: event.payload.clientRequestId,
-        state: 'created',
-        createdAt: event.occurredAt,
-        updatedAt: event.occurredAt,
       });
-      continue;
-    }
-    const runState = projectedRunState(event.type);
-    if (runState !== undefined) {
-      const run = runs.get(event.runId);
-      if (run !== undefined) {
-        run.state = runState;
-        run.updatedAt = event.occurredAt;
-      }
-    }
-    if (event.type === 'model_attempt_committed') {
-      const text = event.payload.validatedAttempt.blocks
-        .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
-        .map(({ text: blockText }) => blockText)
-        .join('');
-      if (text.length > 0) {
-        messageCandidates.push({
-          sourceSequence: event.sequence,
-          role: 'assistant',
-          content: text,
-          createdAt: event.occurredAt,
-          runId: event.runId,
-        });
-      }
     }
     if (event.type === 'artifact.created') {
-      artifacts.set(event.payload.artifactId, {
+      this.#artifacts.set(event.payload.artifactId, {
         sourceSequence: event.sequence,
         artifactId: event.payload.artifactId,
         handle: event.payload.handle,
@@ -199,143 +448,112 @@ export function projectSession(
         summary: event.payload.summary,
         createdAt: event.occurredAt,
       });
-    }
-    if (event.type === 'artifact.expired' || event.type === 'artifact.deleted') {
-      const artifact = artifacts.get(event.payload.artifactId);
+    } else if (event.type === 'artifact.expired' || event.type === 'artifact.deleted') {
+      const artifact = this.#artifacts.get(event.payload.artifactId);
       if (artifact !== undefined) {
         artifact.availability = event.type === 'artifact.expired' ? 'expired' : 'deleted';
         artifact.sourceSequence = event.sequence;
       }
     }
-  }
-
-  const messages = messageCandidates
-    .filter(({ sourceSequence }) => sourceSequence > options.afterSequence)
-    .slice(0, options.limit);
-  const nextSourceSequence = messages.at(-1)?.sourceSequence ?? options.afterSequence;
-  return {
-    schemaVersion: 1,
-    projectId: options.projectId,
-    sessionId: options.sessionId,
-    messages,
-    artifacts: [...artifacts.values()].sort((a, b) => a.sourceSequence - b.sourceSequence),
-    runs: [...runs.values()].sort(
-      (left, right) => left.createdAt.localeCompare(right.createdAt) || left.runId.localeCompare(right.runId),
-    ),
-    lastSourceSequence,
-    nextSourceSequence,
-  };
-}
-
-export class UserActivityProjector {
-  project(
-    events: readonly AgentEvent[],
-    options: ProjectionOptions,
-  ): ProjectionPage<UserActivityEvent> {
-    const selected = validateProjectionInput(events, options);
-    const committedText = latestCommittedTextByRun(selected);
-    const items = selected
-      .filter(({ sequence }) => sequence > options.afterSequence)
-      .flatMap((event) => {
-        const descriptor = EVENT_TO_ACTIVITY[event.type as keyof typeof EVENT_TO_ACTIVITY];
-        if (descriptor === undefined) return [];
-        return [toUserActivity(event, descriptor, committedText.get(event.runId))];
-      })
-      .slice(0, options.limit);
-    return {
-      items,
-      nextSourceSequence: items.at(-1)?.sourceSequence ?? options.afterSequence,
-    };
-  }
-}
-
-export class AuditProjector {
-  project(
-    events: readonly AgentEvent[],
-    options: ProjectionOptions,
-  ): ProjectionPage<AuditProjectionEvent> {
-    const items = validateProjectionInput(events, options)
-      .filter(({ sequence }) => sequence > options.afterSequence)
-      .slice(0, options.limit)
-      .map((event) => ({
-        sourceSequence: event.sequence,
-        eventId: event.eventId,
-        projectId: event.projectId,
-        sessionId: event.sessionId,
+    if (event.type === 'run.created') {
+      this.#runs.set(event.runId, {
         runId: event.runId,
-        type: event.type,
-        occurredAt: event.occurredAt,
-        payload: structuredClone(event.payload),
-        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
-        ...(event.attemptId === undefined ? {} : { attemptId: event.attemptId }),
-        ...(event.invocationId === undefined ? {} : { invocationId: event.invocationId }),
-        ...(event.parentEventId === undefined ? {} : { parentEventId: event.parentEventId }),
-      }));
-    return {
-      items,
-      nextSourceSequence: items.at(-1)?.sourceSequence ?? options.afterSequence,
-    };
-  }
-}
-
-function validateProjectionInput(
-  events: readonly AgentEvent[],
-  options: ProjectionOptions,
-): AgentEvent[] {
-  requireProjectionOptions(options);
-  const eventIds = new Map<string, AgentEvent>();
-  const runs = new Map<string, { projectId: string; sessionId: string; inputSeen: boolean }>();
-  let previousSequence = 0;
-  for (const event of events) {
-    if (event.projectId !== options.projectId) {
-      throw new ProjectionError('PROJECT_MISMATCH', 'Projection input crossed Project boundary.');
-    }
-    if (!Number.isSafeInteger(event.sequence) || event.sequence <= previousSequence) {
-      throw new ProjectionError('SEQUENCE_INVALID', 'Source sequence must be strictly monotonic.');
-    }
-    previousSequence = event.sequence;
-    if (event.schemaVersion !== AGENT_EVENT_SCHEMA_REGISTRY[event.type].schemaVersion) {
-      throw new ProjectionError('SCHEMA_INVALID', 'Projection input was not upcast to current schema.');
-    }
-    if (eventIds.has(event.eventId)) {
-      throw new ProjectionError('CAUSALITY_INVALID', 'Event identity is duplicated.');
-    }
-    if (event.parentEventId !== undefined) {
-      const parent = eventIds.get(event.parentEventId);
-      if (
-        parent === undefined ||
-        parent.projectId !== event.projectId ||
-        parent.sessionId !== event.sessionId ||
-        parent.runId !== event.runId ||
-        parent.sequence >= event.sequence
-      ) {
-        throw new ProjectionError('CAUSALITY_INVALID', 'Event parent causality is invalid.');
-      }
-    }
-    if (event.type === 'input.received') {
-      const existing = runs.get(event.runId);
-      if (existing !== undefined) {
-        throw new ProjectionError('RUN_CAUSALITY_INVALID', 'Run input is duplicated.');
-      }
-      runs.set(event.runId, {
-        projectId: event.projectId,
-        sessionId: event.sessionId,
-        inputSeen: true,
+        clientRequestId: event.payload.clientRequestId,
+        state: 'created',
+        createdAt: event.occurredAt,
+        updatedAt: event.occurredAt,
       });
     } else {
-      const run = runs.get(event.runId);
-      if (
-        run === undefined ||
-        run.projectId !== event.projectId ||
-        run.sessionId !== event.sessionId ||
-        !run.inputSeen
-      ) {
-        throw new ProjectionError('RUN_CAUSALITY_INVALID', 'Event Run causality is invalid.');
+      const state = projectedRunState(event.type);
+      if (state !== undefined) {
+        const existing = this.#runs.get(event.runId);
+        const run = this.#validator.run(event.runId);
+        if (existing !== undefined) {
+          existing.state = state;
+          existing.updatedAt = event.occurredAt;
+        } else if (run?.clientRequestId !== undefined && run.createdAt !== undefined) {
+          this.#runs.set(event.runId, {
+            runId: event.runId, clientRequestId: run.clientRequestId, state,
+            createdAt: run.createdAt, updatedAt: event.occurredAt,
+          });
+        }
       }
     }
-    eventIds.set(event.eventId, event);
   }
-  return events.filter(({ sessionId }) => sessionId === options.sessionId);
+}
+
+export class UserActivityProjectionAccumulator {
+  readonly #options: ProjectionOptions;
+  readonly #validator: ProjectionEventValidator;
+  readonly #items: UserActivityEvent[] = [];
+  #cursor: number;
+
+  constructor(options: ProjectionOptions, trustedJournal = false) {
+    requireProjectionOptions(options);
+    this.#options = options;
+    this.#validator = new ProjectionEventValidator(options.projectId, {
+      targetSessionId: options.sessionId,
+      trustedJournal,
+    });
+    this.#cursor = options.afterSequence;
+  }
+
+  accept(event: AgentEvent): boolean {
+    this.#validator.accept(event);
+    if (event.sessionId !== this.#options.sessionId || event.sequence <= this.#options.afterSequence) {
+      if (event.sessionId !== this.#options.sessionId) {
+        this.#cursor = Math.max(this.#cursor, event.sequence);
+      }
+      return true;
+    }
+    const descriptor = EVENT_TO_ACTIVITY[event.type as keyof typeof EVENT_TO_ACTIVITY];
+    if (descriptor !== undefined) {
+      if (this.#items.length >= this.#options.limit) return false;
+      const finalText = event.type === 'run.completed'
+        ? this.#validator.resolveFinalText(event)
+        : undefined;
+      this.#items.push(toUserActivity(event, descriptor, finalText));
+    }
+    this.#cursor = Math.max(this.#cursor, event.sequence);
+    this.#validator.releaseTerminal(event);
+    return true;
+  }
+
+  finish(): ProjectionPage<UserActivityEvent> {
+    return { items: [...this.#items], nextSourceSequence: this.#cursor };
+  }
+}
+
+export class AuditProjectionAccumulator {
+  readonly #options: ProjectionOptions;
+  readonly #validator: ProjectionEventValidator;
+  readonly #items: AuditProjectionEvent[] = [];
+  #cursor: number;
+
+  constructor(options: ProjectionOptions, trustedJournal = false) {
+    requireProjectionOptions(options);
+    this.#options = options;
+    this.#validator = new ProjectionEventValidator(options.projectId, {
+      targetSessionId: options.sessionId,
+      trustedJournal,
+    });
+    this.#cursor = options.afterSequence;
+  }
+
+  accept(event: AgentEvent): boolean {
+    this.#validator.accept(event);
+    if (event.sessionId === this.#options.sessionId && event.sequence > this.#options.afterSequence) {
+      if (this.#items.length >= this.#options.limit) return false;
+      this.#items.push(toAuditEvent(event));
+    }
+    this.#cursor = Math.max(this.#cursor, event.sequence);
+    if (event.sessionId === this.#options.sessionId) this.#validator.releaseTerminal(event);
+    return true;
+  }
+
+  finish(): ProjectionPage<AuditProjectionEvent> {
+    return { items: [...this.#items], nextSourceSequence: this.#cursor };
+  }
 }
 
 function requireProjectionOptions(options: ProjectionOptions): void {
@@ -397,7 +615,6 @@ function toUserActivity(
         ...base,
         summary: event.payload.summary,
         detail: {
-          artifactId: event.payload.artifactId,
           handle: event.payload.handle,
           mediaType: event.payload.mediaType,
           byteSize: event.payload.byteSize,
@@ -413,7 +630,7 @@ function toUserActivity(
       return {
         ...base,
         summary: finalText ?? 'Run completed.',
-        artifactRefs: [...event.payload.evidenceRefs],
+        evidenceRefs: [...event.payload.evidenceRefs],
       };
     case 'run.input_requested':
       return { ...base, summary: `Input required: ${event.payload.reason}` };
@@ -435,17 +652,93 @@ function toUserActivity(
   }
 }
 
-function latestCommittedTextByRun(events: readonly AgentEvent[]): Map<string, string> {
-  const result = new Map<string, string>();
-  for (const event of events) {
-    if (event.type !== 'model_attempt_committed') continue;
-    const text = event.payload.validatedAttempt.blocks
-      .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
-      .map((block) => block.text)
-      .join('');
-    if (text.length > 0) result.set(event.runId, text);
+function sameScope(scope: Scope | undefined, event: AgentEvent): scope is Scope {
+  return scope !== undefined &&
+    scope.projectId === event.projectId &&
+    scope.sessionId === event.sessionId &&
+    scope.runId === event.runId;
+}
+
+function scopeOf(event: AgentEvent): Scope {
+  return {
+    projectId: event.projectId,
+    sessionId: event.sessionId,
+    runId: event.runId,
+    sequence: event.sequence,
+  };
+}
+
+function invocationIdFromPayload(payload: PortableValue): string | undefined {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+  const invocationId = (payload as Record<string, PortableValue>).invocationId;
+  return typeof invocationId === 'string' ? invocationId : undefined;
+}
+
+function committedText(event: Extract<AgentEvent, { type: 'model_attempt_committed' }>): string {
+  return event.payload.validatedAttempt.blocks
+    .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+}
+
+function sessionMessage(
+  event: AgentEvent,
+  role: SessionProjectionMessage['role'],
+  content: string,
+): SessionProjectionMessage {
+  return {
+    sourceSequence: event.sequence,
+    role,
+    content,
+    createdAt: event.occurredAt,
+    runId: event.runId,
+  };
+}
+
+function toAuditEvent(event: AgentEvent): AuditProjectionEvent {
+  return {
+    sourceSequence: event.sequence,
+    eventId: event.eventId,
+    projectId: event.projectId,
+    sessionId: event.sessionId,
+    runId: event.runId,
+    type: event.type,
+    occurredAt: event.occurredAt,
+    payload: event.payload,
+    ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+    ...(event.attemptId === undefined ? {} : { attemptId: event.attemptId }),
+    ...(event.invocationId === undefined ? {} : { invocationId: event.invocationId }),
+    ...(event.parentEventId === undefined ? {} : { parentEventId: event.parentEventId }),
+  };
+}
+
+function wouldOverflowSessionPage(
+  event: AgentEvent,
+  messages: readonly SessionProjectionMessage[],
+  artifacts: ReadonlyMap<string, SessionProjectionArtifact>,
+  runs: ReadonlyMap<string, SessionProjectionRun>,
+  validator: ProjectionEventValidator,
+  limit: number,
+): boolean {
+  if (event.type === 'input.received' && publicInputText(event.payload.content) !== undefined) {
+    return messages.length >= limit;
   }
-  return result;
+  if (event.type === 'model_attempt_committed' && committedText(event).length > 0) {
+    return messages.length >= limit;
+  }
+  if (event.type === 'legacy.imported' && event.payload.entityType === 'message') {
+    return messages.length >= limit;
+  }
+  if (event.type === 'artifact.created' && !artifacts.has(event.payload.artifactId)) {
+    return artifacts.size >= limit;
+  }
+  const state = projectedRunState(event.type);
+  return state !== undefined && !runs.has(event.runId) &&
+    validator.run(event.runId)?.clientRequestId !== undefined && runs.size >= limit;
+}
+
+function isTerminalRunEvent(type: AgentEventType): boolean {
+  return type === 'run.completed' || type === 'run.failed' || type === 'run.cancelled';
 }
 
 function previewText(blocks: PortableValue[]): string {

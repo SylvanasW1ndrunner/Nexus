@@ -42,6 +42,8 @@ import type {
   CommitValidatedAttemptCommand,
   ModelTurnCommitResult,
 } from './run-event-committer.js';
+import type { LegacyMigrationWriterAuthority } from '../session/legacy-migration-writer.js';
+import { LEGACY_MIGRATION_WRITER_AUTHORITY } from '../session/legacy-migration-writer.js';
 
 type NodeDatabaseSyncConstructor = new (location: string) => NodeDatabaseSync;
 
@@ -174,6 +176,47 @@ export class SqliteAgentJournal implements AgentJournal {
   async commit(command: JournalCommand): Promise<JournalCommitResult> {
     await Promise.resolve();
     const normalized = validateJournalCommand(snapshotJournalCommand(command));
+    return this.#commitNormalized(normalized);
+  }
+
+  /** @internal StateMigrationRunner is the only package boundary allowed to call this. */
+  async commitLegacyImport(
+    authority: LegacyMigrationWriterAuthority,
+    command: JournalCommand,
+    identity: { migrationId: string; sourceDigest: string },
+  ): Promise<JournalCommitResult> {
+    await Promise.resolve();
+    if (authority !== LEGACY_MIGRATION_WRITER_AUTHORITY) {
+      throw new AgentJournalError('COMMITTER_REQUIRED', 'Legacy migration writer authority is required.');
+    }
+    if (!/^[a-f0-9]{64}$/u.test(identity.migrationId) || !/^[a-f0-9]{64}$/u.test(identity.sourceDigest)) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Validated legacy migration identity is required.');
+    }
+    const normalized = validateJournalCommand(snapshotJournalCommand(command), true);
+    if (normalized.events.some(({ type }) => type !== 'legacy.imported') ||
+      !normalized.commandId.includes(identity.migrationId)) {
+      throw new AgentJournalError(
+        'COMMITTER_REQUIRED',
+        'Legacy import boundary accepts only identity-bound legacy.imported facts.',
+      );
+    }
+    const contextMatches = this.#withDatabase((database) => {
+      const row = database.prepare(`
+        SELECT migration_id, source_digest FROM legacy_migration_build_context WHERE id = 1
+      `).get() as { migration_id: string; source_digest: string } | undefined;
+      return row !== undefined && row.migration_id === identity.migrationId &&
+        row.source_digest === identity.sourceDigest;
+    });
+    if (!contextMatches) {
+      throw new AgentJournalError(
+        'COMMITTER_REQUIRED',
+        'Shadow database does not contain the validated legacy migration build context.',
+      );
+    }
+    return this.#commitNormalized(normalized);
+  }
+
+  #commitNormalized(normalized: JournalCommand): JournalCommitResult {
     const requestDigest = digestValue({
       projectId: normalized.projectId,
       sessionId: normalized.sessionId,
@@ -1362,7 +1405,7 @@ function snapshotPortableData(
   }
 }
 
-function validateJournalCommand(command: JournalCommand): JournalCommand {
+function validateJournalCommand(command: JournalCommand, allowLegacyImport = false): JournalCommand {
   assertExactKeys(command, [
     'projectId', 'sessionId', 'runId', 'commandId', 'lease', 'expectedRunRevision', 'events',
   ], 'Journal command');
@@ -1398,6 +1441,7 @@ function validateJournalCommand(command: JournalCommand): JournalCommand {
       value.type.startsWith('turn.') ||
       value.type.startsWith('model_') ||
       value.type.startsWith('tool.')
+      || (value.type === 'legacy.imported' && !allowLegacyImport)
     ) {
       throw new AgentJournalError(
         'COMMITTER_REQUIRED',
@@ -1702,6 +1746,14 @@ function assertEventOuterPayloadConsistency(row: EventRow, payload: PortableValu
     throw new AgentJournalError(
       'CORRUPT_EVENT', 'Stored invocation outer and payload identifiers disagree.',
     );
+  }
+  if (row.event_type === 'artifact.created' && record.availability === 'available') {
+    const projectDigest = createHash('sha256').update(row.project_id).digest('hex').slice(0, 24);
+    if (typeof record.handle !== 'string' || !record.handle.startsWith(`agent-artifact:${projectDigest}:`)) {
+      throw new AgentJournalError(
+        'CORRUPT_EVENT', 'Stored artifact handle does not belong to the outer Project.',
+      );
+    }
   }
 }
 
@@ -2169,7 +2221,41 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
       FOREIGN KEY (project_id, run_id) REFERENCES agent_runs(project_id, run_id)
     );
   `);
+  migrateArtifactReferenceUniqueness(database);
   migrateLegacyRunLeaseForeignKey(database);
+}
+
+function migrateArtifactReferenceUniqueness(database: NodeDatabaseSync): void {
+  try {
+    const duplicate = database.prepare(`
+      SELECT project_id, json_extract(payload_json, '$.artifactId') AS artifact_id,
+        COUNT(*) AS fact_count
+      FROM agent_events
+      WHERE event_type = 'artifact.created'
+      GROUP BY project_id, artifact_id
+      HAVING fact_count > 1
+      LIMIT 1
+    `).get() as { project_id: string; artifact_id: string | null; fact_count: number } | undefined;
+    if (duplicate !== undefined) {
+      throw new AgentJournalError(
+        'PROJECTION_CORRUPT',
+        `Artifact reference ${duplicate.artifact_id ?? '<missing>'} has duplicate committed facts.`,
+      );
+    }
+    database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_artifact_reference
+        ON agent_events(project_id, json_extract(payload_json, '$.artifactId'))
+        WHERE event_type = 'artifact.created'
+    `);
+  } catch (error) {
+    if (error instanceof AgentJournalError) throw error;
+    throw new AgentJournalError(
+      'PROJECTION_CORRUPT',
+      `Artifact reference uniqueness migration failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 function migrateLegacyRunLeaseForeignKey(database: NodeDatabaseSync): void {

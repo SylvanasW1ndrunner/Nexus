@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../src/events/agent-event.js';
 import { RunEventCommitter } from '../src/events/run-event-committer.js';
 import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
+import { JournalSessionStore } from '../src/journal-session-store.js';
 import {
   AuditProjector,
   ProjectionError,
@@ -14,6 +15,9 @@ import {
 import { validatedAttemptFixture } from './validated-attempt-fixture.js';
 
 const temporaryDirectories: string[] = [];
+const GOLDEN_ARTIFACT_ID = `artifact_${'b'.repeat(64)}`;
+const GOLDEN_ARTIFACT_HANDLE = `agent-artifact:0e3ffbf31db2e5b45f9fe42a:${'b'.repeat(40)}`;
+const GOLDEN_ARTIFACT_CHECKSUM = 'c'.repeat(64);
 
 afterEach(async () => {
   await Promise.all(
@@ -43,7 +47,7 @@ describe('Journal event projections', () => {
       { role: 'assistant', content: 'I will inspect it.' },
     ]);
     expect(first.session.artifacts).toEqual([
-      expect.objectContaining({ artifactId: 'artifact-golden', availability: 'available' }),
+      expect.objectContaining({ artifactId: GOLDEN_ARTIFACT_ID, availability: 'available' }),
     ]);
     expect(first.session.lastSourceSequence).toBe(firstEvents.at(-1)?.sequence);
   });
@@ -85,7 +89,7 @@ describe('Journal event projections', () => {
     const serializedUser = JSON.stringify(all);
     expect(serializedUser).not.toContain('protocolEnvelopeRef');
     expect(serializedUser).not.toContain('draftCallKey');
-    expect(serializedUser).not.toContain('checksum-golden');
+    expect(serializedUser).not.toContain(GOLDEN_ARTIFACT_CHECKSUM);
     expect(serializedUser).not.toContain(fixture.directory);
     const audit = new AuditProjector().project(events, {
       projectId: 'project-a',
@@ -114,7 +118,7 @@ describe('Journal event projections', () => {
     expect(JSON.stringify(sessionA)).not.toContain('private second session');
     expect(JSON.stringify(sessionB)).not.toContain('请检查 orders');
     expect(sessionA.messages).toHaveLength(2);
-    expect(sessionA.nextSourceSequence).toBe(sessionA.messages.at(-1)?.sourceSequence);
+    expect(sessionA.nextSourceSequence).toBe(events.at(-1)?.sequence);
 
     const duplicateSequence = structuredClone(events);
     duplicateSequence[1] = { ...duplicateSequence[1]!, sequence: duplicateSequence[0]!.sequence };
@@ -129,7 +133,99 @@ describe('Journal event projections', () => {
       projectId: 'project-a', sessionId: 'session-a', afterSequence: 0, limit: 100,
     })).toThrowError(ProjectionError);
   });
+
+  it('streams past 10k source events and keeps causality for activity and Session page 2', async () => {
+    const fixture = await createLargeJournal();
+    const store = new JournalSessionStore(fixture.journal, 'project-a');
+    const first = await store.activities('session-large', {
+      afterSequence: fixture.beforeTailSequence,
+      limit: 1,
+    });
+    expect(first.items).toHaveLength(1);
+    expect(first.items[0]).toMatchObject({ kind: 'artifact', sourceSequence: fixture.artifactSequence });
+    expect(first.nextSourceSequence).toBe(fixture.artifactSequence);
+
+    const second = await store.activities('session-large', {
+      afterSequence: first.nextSourceSequence,
+      limit: 1,
+    });
+    expect(second.items).toHaveLength(1);
+    expect(second.items[0]).toMatchObject({
+      kind: 'artifact', phase: 'failed', sourceSequence: fixture.expiredSequence,
+    });
+    expect(second.nextSourceSequence).toBe(fixture.expiredSequence);
+
+    const session = await store.load('session-large', {
+      afterSequence: fixture.beforeTailSequence,
+      limit: 1,
+    });
+    expect(session.artifacts).toHaveLength(1);
+    expect(session.artifacts[0]?.sourceSequence).toBe(fixture.expiredSequence);
+    expect(session.messages.length).toBeLessThanOrEqual(1);
+    expect(session.runs.length).toBeLessThanOrEqual(1);
+    expect(session.nextSourceSequence).toBe(fixture.expiredSequence);
+  });
+
+  it('validates current payloads and Turn/Attempt ownership during pure projection', async () => {
+    const fixture = await createGoldenJournal();
+    const events = await readAll(fixture.journal, 'project-a', 100);
+    const badPayload = structuredClone(events);
+    const artifact = badPayload.find(({ type }) => type === 'artifact.created');
+    if (artifact?.type !== 'artifact.created') throw new Error('Artifact fixture is missing.');
+    artifact.payload.byteSize = 'seventeen' as never;
+    expectProjectionError(() => projectSession(badPayload, {
+      projectId: 'project-a', sessionId: 'session-a', afterSequence: 0, limit: 100,
+    }), 'SCHEMA_INVALID');
+
+    const badAttempt = structuredClone(events);
+    const committed = badAttempt.find(({ type }) => type === 'model_attempt_committed');
+    if (committed?.type !== 'model_attempt_committed') throw new Error('Attempt fixture is missing.');
+    committed.attemptId = 'attempt-owned-by-another-turn';
+    expectProjectionError(() => new AuditProjector().project(badAttempt, {
+      projectId: 'project-a', sessionId: 'session-a', afterSequence: 0, limit: 100,
+    }), 'CAUSALITY_INVALID');
+  });
+
+  it('resolves final content by exact finalContentRef and keeps evidence out of artifact refs', async () => {
+    const fixture = await createGoldenJournal();
+    const persisted = await readAll(fixture.journal, 'project-a', 100);
+    const events = withDiscardedPreview(persisted);
+    const user = new UserActivityProjector().project(events, {
+      projectId: 'project-a', sessionId: 'session-a', afterSequence: 0, limit: 100,
+    });
+    const artifact = user.items.find(({ kind }) => kind === 'artifact');
+    expect(artifact?.detail).toEqual({
+      handle: GOLDEN_ARTIFACT_HANDLE,
+      mediaType: 'text/plain',
+      byteSize: 17,
+      availability: 'available',
+    });
+    expect(JSON.stringify(artifact)).not.toContain(GOLDEN_ARTIFACT_ID);
+    const final = user.items.find(({ kind }) => kind === 'final');
+    expect(final?.summary).toBe('I will inspect it.');
+    expect(final?.artifactRefs).toBeUndefined();
+
+    const wrongRef = structuredClone(events);
+    const completed = wrongRef.find(({ type }) => type === 'run.completed');
+    if (completed?.type !== 'run.completed') throw new Error('Completion fixture is missing.');
+    completed.payload.finalContentRef = 'turn:turn-golden:text:99';
+    expectProjectionError(() => new UserActivityProjector().project(wrongRef, {
+      projectId: 'project-a', sessionId: 'session-a', afterSequence: 0, limit: 100,
+    }), 'CAUSALITY_INVALID');
+  });
 });
+
+function expectProjectionError(operation: () => unknown, code: ProjectionError['code']): void {
+  try {
+    operation();
+  } catch (error) {
+    expect(error).toBeInstanceOf(ProjectionError);
+    if (!(error instanceof ProjectionError)) throw error;
+    expect(error.code).toBe(code);
+    return;
+  }
+  throw new Error(`Expected ProjectionError ${code}.`);
+}
 
 async function createGoldenJournal() {
   const directory = await mkdtemp(join(tmpdir(), 'dbagent-projection-golden-'));
@@ -173,9 +269,9 @@ async function createGoldenJournal() {
       {
         type: 'artifact.created',
         payload: {
-          artifactId: 'artifact-golden',
-          handle: 'agent-artifact:artifact-golden',
-          checksum: 'checksum-golden',
+          artifactId: GOLDEN_ARTIFACT_ID,
+          handle: GOLDEN_ARTIFACT_HANDLE,
+          checksum: GOLDEN_ARTIFACT_CHECKSUM,
           byteSize: 17,
           mediaType: 'text/plain',
           availability: 'available',
@@ -185,6 +281,63 @@ async function createGoldenJournal() {
     ],
   });
   return { directory, filePath, journal };
+}
+
+async function createLargeJournal() {
+  const directory = await mkdtemp(join(tmpdir(), 'dbagent-projection-large-'));
+  temporaryDirectories.push(directory);
+  const filePath = join(directory, 'state.db');
+  const journal = new SqliteAgentJournal({
+    filePath,
+    now: () => '2026-08-09T12:00:00.000Z',
+  });
+  const created = await journal.createRun({
+    projectId: 'project-a', sessionId: 'session-large', clientRequestId: 'large-projection',
+    input: { text: 'large projection input' },
+  });
+  const lease = await journal.acquireRunLease({
+    projectId: 'project-a', runId: created.runId, ownerId: 'large-worker', ttlMs: 60_000,
+  });
+  const leaseRef = { ownerId: lease.ownerId, fencingToken: lease.fencingToken };
+  await journal.startRun({
+    projectId: 'project-a', sessionId: 'session-large', runId: created.runId,
+    commandId: 'large-start', lease: leaseRef, expectedRunRevision: 1,
+  });
+  const filler = Array.from({ length: 10_005 }, () => ({
+    type: 'usage.recorded' as const,
+    payload: { scope: 'run' as const, inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+  }));
+  const committed = await journal.commit({
+    projectId: 'project-a', sessionId: 'session-large', runId: created.runId,
+    commandId: 'large-tail', lease: leaseRef, expectedRunRevision: 2,
+    events: [
+      ...filler,
+      {
+        type: 'artifact.created',
+        payload: {
+          artifactId: GOLDEN_ARTIFACT_ID,
+          handle: GOLDEN_ARTIFACT_HANDLE,
+          checksum: GOLDEN_ARTIFACT_CHECKSUM,
+          byteSize: 17,
+          mediaType: 'text/plain',
+          availability: 'available',
+          summary: 'large tail artifact',
+        },
+      },
+      { type: 'artifact.expired', payload: { artifactId: GOLDEN_ARTIFACT_ID } },
+    ],
+  });
+  const artifact = committed.events.at(-2);
+  const expired = committed.events.at(-1);
+  if (artifact?.type !== 'artifact.created' || expired?.type !== 'artifact.expired') {
+    throw new Error('Large Journal tail was not committed.');
+  }
+  return {
+    journal,
+    beforeTailSequence: artifact.sequence - 1,
+    artifactSequence: artifact.sequence,
+    expiredSequence: expired.sequence,
+  };
 }
 
 function withDiscardedPreview(events: AgentEvent[]): AgentEvent[] {
@@ -200,21 +353,32 @@ function withDiscardedPreview(events: AgentEvent[]): AgentEvent[] {
       payload: {
         finalContentRef: 'turn:turn-golden:text:0',
         deliveryStatus: 'delivered',
-        evidenceRefs: ['artifact-golden'],
+        evidenceRefs: [GOLDEN_ARTIFACT_ID],
       },
     },
     {
-      eventId: 'event-preview', projectId: scope.projectId, sequence: sequence + 2,
+      eventId: 'event-preview-start', projectId: scope.projectId, sequence: sequence + 2,
+      schemaVersion: 1, sessionId: scope.sessionId, runId: scope.runId,
+      turnId: 'turn-golden', attemptId: 'attempt-preview', type: 'model_attempt_started',
+      occurredAt: '2026-08-09T12:01:00.000Z',
+      payload: {
+        origin: {
+          connectionId: 'preview-connection', model: 'preview', protocol: 'openai-responses',
+        },
+      },
+    },
+    {
+      eventId: 'event-preview', projectId: scope.projectId, sequence: sequence + 3,
       schemaVersion: 1, sessionId: scope.sessionId, runId: scope.runId,
       turnId: 'turn-golden', attemptId: 'attempt-preview', type: 'model_delta_batch',
-      occurredAt: '2026-08-09T12:01:00.000Z',
+      occurredAt: '2026-08-09T12:01:01.000Z',
       payload: { blocks: [{ type: 'text', text: 'tentative preview' }] },
     },
     {
-      eventId: 'event-preview-discard', projectId: scope.projectId, sequence: sequence + 3,
+      eventId: 'event-preview-discard', projectId: scope.projectId, sequence: sequence + 4,
       schemaVersion: 1, sessionId: scope.sessionId, runId: scope.runId,
       turnId: 'turn-golden', attemptId: 'attempt-preview', type: 'model_attempt_discarded',
-      occurredAt: '2026-08-09T12:01:01.000Z',
+      occurredAt: '2026-08-09T12:01:02.000Z',
       payload: { reason: 'STREAM_DISCONNECTED' },
     },
   ];
