@@ -80,6 +80,7 @@ export type ArtifactStoreErrorCode =
   | 'EXPIRED'
   | 'DELETED'
   | 'LEGACY_UNAVAILABLE'
+  | 'STORE_BUSY'
   | 'INJECTED_CRASH';
 
 export class ArtifactStoreError extends Error {

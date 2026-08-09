@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -154,12 +154,11 @@ describe('ProjectArtifactStore', () => {
       mediaType: 'application/octet-stream',
       source: chunks(Buffer.from('one-reference')),
     });
-    const journal = withArtifactCommitBarrier(fixture.journal);
     const left = new ProjectArtifactStore({
-      projectId: 'project-a', rootDir: fixture.artifactRoot, journal,
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
     });
     const right = new ProjectArtifactStore({
-      projectId: 'project-a', rootDir: fixture.artifactRoot, journal,
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
     });
     const [first, second] = await Promise.all([
       left.commit({
@@ -179,6 +178,101 @@ describe('ProjectArtifactStore', () => {
       .filter(({ type, payload }) => type === 'artifact.created' &&
         payload.artifactId === staged.artifactId);
     expect(created).toHaveLength(1);
+  });
+
+  it('includes summary in artifact fact idempotency and conflict comparison', async () => {
+    const fixture = await createFixture();
+    const staged = await fixture.store.stage({
+      mediaType: 'text/plain', source: chunks(Buffer.from('summary-sensitive')),
+    });
+    const first = await fixture.store.commit({
+      staged, journal: fixture.context('summary-first'), summary: 'exact summary',
+    });
+    await expect(fixture.store.commit({
+      staged, journal: fixture.context('summary-replay'), summary: 'exact summary',
+    })).resolves.toEqual(first);
+    await expect(fixture.store.commit({
+      staged, journal: fixture.context('summary-conflict'), summary: 'different summary',
+    })).rejects.toMatchObject({ code: 'JOURNAL_REFERENCE_CONFLICT' });
+  });
+
+  it('verifies and streams one file descriptor across deterministic pathname replacement', async () => {
+    const fixture = await createFixture();
+    const original = Buffer.from('descriptor-stable-original');
+    const replacement = Buffer.from('descriptor-stable-replaced');
+    const staged = await fixture.store.stage({ mediaType: 'text/plain', source: chunks(original) });
+    const committed = await fixture.store.commit({
+      staged, journal: fixture.context('descriptor-commit'), summary: 'descriptor stable',
+    });
+    const objectPath = await findFileContaining(fixture.artifactRoot, original.toString('utf8'));
+    let replaced = false;
+    const replacingStore = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      afterOpenVerified: async (verifiedPath) => {
+        expect(verifiedPath).toBe(objectPath);
+        if (replaced) return;
+        replaced = true;
+        await rename(objectPath, `${objectPath}.verified`);
+        await writeFile(objectPath, replacement);
+      },
+    });
+    expect(await readStream(await replacingStore.open(committed))).toEqual(original);
+    expect(replaced).toBe(true);
+    await expect(fixture.store.open(committed)).rejects.toMatchObject({ code: 'CORRUPT' });
+
+    await rm(objectPath, { force: true });
+    await mkdir(objectPath);
+    await expect(fixture.store.open(committed)).rejects.toMatchObject({ code: 'CORRUPT' });
+  });
+
+  it('holds a cross-process-safe mutation gate from verified commit bytes through promotion against GC', async () => {
+    const fixture = await createFixture();
+    const staged = await fixture.store.stage({
+      mediaType: 'text/plain',
+      source: chunks(Buffer.from('commit-gc-race')),
+      expiresAt: '2026-08-09T11:00:00.000Z',
+    });
+    let signalVerified = (): void => undefined;
+    const verified = new Promise<void>((resolve) => { signalVerified = resolve; });
+    let releaseCommit = (): void => undefined;
+    const release = new Promise<void>((resolve) => { releaseCommit = resolve; });
+    const committingStore = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      afterCommitBytesVerified: async () => {
+        signalVerified();
+        await release;
+      },
+    });
+    const commit = committingStore.commit({
+      staged, journal: fixture.context('commit-gc-race'), summary: 'commit vs gc',
+    });
+    const reachedBarrier = await Promise.race([
+      verified.then(() => true),
+      delay(500).then(() => false),
+    ]);
+    expect(reachedBarrier).toBe(true);
+
+    const impatientGc = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      mutationGateTimeoutMs: 100,
+    });
+    await expect(impatientGc.collectGarbage(new Date('2026-08-09T13:00:00.000Z')))
+      .rejects.toMatchObject({ code: 'STORE_BUSY' });
+
+    let gcSettled = false;
+    const gcStore = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+    });
+    const gc = gcStore.collectGarbage(new Date('2026-08-09T13:00:00.000Z'))
+      .finally(() => { gcSettled = true; });
+    await delay(100);
+    expect(gcSettled).toBe(false);
+    releaseCommit();
+    await expect(commit).resolves.toMatchObject({ artifactId: staged.artifactId });
+    await expect(gc).resolves.toMatchObject({ committedObjectsDeleted: 1 });
+    expect((await fixture.journal.readProject('project-a', 0, 100))
+      .filter(({ type, payload }) => type === 'artifact.created' &&
+        payload.artifactId === staged.artifactId)).toHaveLength(1);
   });
 
   it('stops legacy duplicate artifact facts with a typed migration conflict', async () => {
@@ -582,6 +676,10 @@ async function* chunks(content: Buffer, size = content.byteLength || 1): AsyncIt
 
 async function readStream(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
   return Buffer.from(await new Response(stream).arrayBuffer());
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
 function sha256(content: Uint8Array): string {

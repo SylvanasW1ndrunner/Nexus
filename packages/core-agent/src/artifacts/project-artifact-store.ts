@@ -23,6 +23,10 @@ import {
   type StageArtifactInput,
   type StagedArtifact,
 } from './artifact-store.js';
+import {
+  acquireArtifactMutationGate,
+  ArtifactMutationGateTimeoutError,
+} from './artifact-mutation-gate.js';
 
 export * from './artifact-store.js';
 
@@ -35,6 +39,9 @@ export type ProjectArtifactStoreOptions = {
   now?: () => string;
   createId?: () => string;
   writeChunk?: (file: FileHandle, chunk: Uint8Array, offset: number) => Promise<number>;
+  afterOpenVerified?: (objectPath: string) => Promise<void>;
+  afterCommitBytesVerified?: () => Promise<void>;
+  mutationGateTimeoutMs?: number;
   crashAt?: ArtifactCrashPoint;
 };
 
@@ -62,6 +69,9 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   readonly #now: () => string;
   readonly #createId: () => string;
   readonly #writeChunk: (file: FileHandle, chunk: Uint8Array, offset: number) => Promise<number>;
+  readonly #afterOpenVerified: ((objectPath: string) => Promise<void>) | undefined;
+  readonly #afterCommitBytesVerified: (() => Promise<void>) | undefined;
+  readonly #mutationGateTimeoutMs: number;
   #crashAt: ArtifactCrashPoint | undefined;
 
   constructor(options: ProjectArtifactStoreOptions) {
@@ -73,6 +83,16 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     this.#createId = () => requireOpaqueId(createId());
     this.#writeChunk = options.writeChunk ?? (async (file, chunk, offset) =>
       (await file.write(chunk, offset, chunk.byteLength - offset, null)).bytesWritten);
+    this.#afterOpenVerified = options.afterOpenVerified;
+    this.#afterCommitBytesVerified = options.afterCommitBytesVerified;
+    this.#mutationGateTimeoutMs = options.mutationGateTimeoutMs ?? 10_000;
+    if (!Number.isSafeInteger(this.#mutationGateTimeoutMs) ||
+      this.#mutationGateTimeoutMs < 100 || this.#mutationGateTimeoutMs > 60_000) {
+      throw new ArtifactStoreError(
+        'INVALID_ARGUMENT',
+        'mutationGateTimeoutMs must be between 100 and 60000.',
+      );
+    }
     this.#crashAt = options.crashAt;
   }
 
@@ -167,6 +187,15 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async commit(input: CommitArtifactInput): Promise<ArtifactRef> {
+    const gate = await this.#acquireMutationGate();
+    try {
+      return await this.#commitWithGate(input);
+    } finally {
+      gate.close();
+    }
+  }
+
+  async #commitWithGate(input: CommitArtifactInput): Promise<ArtifactRef> {
     assertStagedArtifact(input.staged, this.#projectId);
     this.#assertProject(input.staged.projectId);
     const summary = requireText(input.summary, 'summary');
@@ -183,9 +212,10 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     } else {
       await verifyFile(this.#objectPath(candidate.checksum), candidate.checksum, candidate.byteSize);
     }
+    await this.#afterCommitBytesVerified?.();
 
     let fact = await this.#findCreatedFact(input.staged.artifactId);
-    if (fact !== undefined) assertMatchingFact(fact, input.staged, input.journal.runId);
+    if (fact !== undefined) assertMatchingFact(fact, input.staged, input.journal.runId, summary);
     if (fact === undefined) {
       try {
         await this.#journal.commit({
@@ -223,7 +253,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
         'Journal did not expose the committed artifact reference.',
       );
     }
-    assertMatchingFact(fact, input.staged, input.journal.runId);
+    assertMatchingFact(fact, input.staged, input.journal.runId, summary);
     if (this.#crashAt === 'after-journal-before-promotion') {
       this.#crashAt = undefined;
       throw new ArtifactStoreError('INJECTED_CRASH', 'Injected artifact promotion crash.');
@@ -248,20 +278,38 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       throw new ArtifactStoreError('LEGACY_UNAVAILABLE', 'Legacy artifact content is unavailable.');
     }
     assertMatchingFact(fact, ref, fact.runId);
-    const metadata = await this.#readCommittedMetadata(ref.artifactId);
+    let metadata = await this.#readCommittedMetadata(ref.artifactId);
     if (metadata === undefined) {
-      const staged = await this.#readStagedMetadata(ref.artifactId);
-      if (staged === undefined) {
-        throw new ArtifactStoreError('CORRUPT', 'Committed artifact metadata is missing.');
+      const gate = await this.#acquireMutationGate();
+      try {
+        metadata = await this.#readCommittedMetadata(ref.artifactId);
+        if (metadata === undefined) {
+          const staged = await this.#readStagedMetadata(ref.artifactId);
+          if (staged === undefined) {
+            throw new ArtifactStoreError('CORRUPT', 'Committed artifact metadata is missing.');
+          }
+          await this.#promote(publicStaged(staged), fact.occurredAt);
+          metadata = await this.#readCommittedMetadata(ref.artifactId);
+        }
+      } finally {
+        gate.close();
       }
-      await this.#promote(publicStaged(staged), fact.occurredAt);
-    } else {
-      assertPersistedArtifact(metadata, this.#projectId);
-      assertArtifactInput(metadata, ref);
     }
+    if (metadata === undefined) {
+      throw new ArtifactStoreError('CORRUPT', 'Committed artifact metadata is missing after promotion.');
+    }
+    assertPersistedArtifact(metadata, this.#projectId);
+    assertArtifactInput(metadata, ref);
     const objectPath = this.#objectPath(ref.checksum);
-    await verifyFile(objectPath, ref.checksum, ref.byteSize);
-    const file = await open(objectPath, 'r');
+    let file: FileHandle | undefined;
+    try {
+      file = await open(objectPath, 'r');
+      await verifyOpenFile(file, ref.checksum, ref.byteSize);
+      await this.#afterOpenVerified?.(objectPath);
+    } catch (error) {
+      await file?.close().catch(() => undefined);
+      throw normalizeArtifactReadError(error);
+    }
     let position = 0;
     let closed = false;
     const closeFile = async (): Promise<void> => {
@@ -283,7 +331,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
           controller.enqueue(buffer.subarray(0, bytesRead));
         } catch (error) {
           await closeFile();
-          controller.error(error);
+          controller.error(normalizeArtifactReadError(error));
         }
       },
       async cancel() {
@@ -304,6 +352,15 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     if (!Number.isFinite(now.getTime())) {
       throw new ArtifactStoreError('INVALID_ARGUMENT', 'GC time must be valid.');
     }
+    const gate = await this.#acquireMutationGate();
+    try {
+      return await this.#collectGarbageWithGate(now);
+    } finally {
+      gate.close();
+    }
+  }
+
+  async #collectGarbageWithGate(now: Date): Promise<ArtifactGcReport> {
     await this.#ensureDirectories();
     const factStates = await this.#artifactStates(now);
     let stagedObjectsDeleted = 0;
@@ -342,6 +399,17 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       }
     }
     return { stagedObjectsDeleted, committedObjectsDeleted, bytesDeleted };
+  }
+
+  async #acquireMutationGate() {
+    try {
+      return await acquireArtifactMutationGate(this.#rootDir, this.#mutationGateTimeoutMs);
+    } catch (error) {
+      if (error instanceof ArtifactMutationGateTimeoutError) {
+        throw new ArtifactStoreError('STORE_BUSY', error.message);
+      }
+      throw error;
+    }
   }
 
   async #commitLifecycle(
@@ -672,6 +740,7 @@ function assertMatchingFact(
   fact: CreatedArtifactFact,
   ref: Pick<StagedArtifact, 'artifactId' | 'handle' | 'checksum' | 'byteSize' | 'mediaType' | 'expiresAt'>,
   runId: string,
+  summary?: string,
 ): void {
   const payload = fact.payload;
   if (
@@ -682,7 +751,8 @@ function assertMatchingFact(
     payload.checksum !== ref.checksum ||
     payload.byteSize !== ref.byteSize ||
     payload.mediaType !== ref.mediaType ||
-    payload.expiresAt !== ref.expiresAt
+    payload.expiresAt !== ref.expiresAt ||
+    (summary !== undefined && payload.summary !== summary)
   ) {
     throw new ArtifactStoreError(
       'JOURNAL_REFERENCE_CONFLICT',
@@ -711,29 +781,50 @@ async function* asAsyncIterable(
 }
 
 async function verifyFile(path: string, checksum: string, byteSize: number): Promise<void> {
-  let file;
+  let file: FileHandle | undefined;
   try {
     file = await open(path, 'r');
+    await verifyOpenFile(file, checksum, byteSize);
   } catch (error) {
-    if (isNotFound(error)) throw new ArtifactStoreError('NOT_FOUND', 'Artifact bytes are missing.');
-    throw error;
+    throw normalizeArtifactReadError(error);
+  } finally {
+    await file?.close().catch(() => undefined);
   }
+}
+
+async function verifyOpenFile(
+  file: FileHandle,
+  checksum: string,
+  byteSize: number,
+): Promise<void> {
+  const before = await file.stat();
+  if (!before.isFile()) throw new ArtifactStoreError('CORRUPT', 'Artifact object is not a file.');
   const hash = createHash('sha256');
   let actualSize = 0;
-  try {
-    const buffer = Buffer.allocUnsafe(64 * 1024);
-    while (true) {
-      const { bytesRead } = await file.read(buffer, 0, buffer.byteLength, null);
-      if (bytesRead === 0) break;
-      actualSize += bytesRead;
-      hash.update(buffer.subarray(0, bytesRead));
-    }
-  } finally {
-    await file.close();
+  let position = 0;
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  while (true) {
+    const { bytesRead } = await file.read(buffer, 0, buffer.byteLength, position);
+    if (bytesRead === 0) break;
+    position += bytesRead;
+    actualSize += bytesRead;
+    hash.update(buffer.subarray(0, bytesRead));
   }
-  if (actualSize !== byteSize || hash.digest('hex') !== checksum) {
+  const after = await file.stat();
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+    before.mtimeMs !== after.mtimeMs || actualSize !== byteSize || hash.digest('hex') !== checksum) {
     throw new ArtifactStoreError('CORRUPT', 'Artifact checksum or exact byte size is invalid.');
   }
+}
+
+function normalizeArtifactReadError(error: unknown): ArtifactStoreError {
+  if (error instanceof ArtifactStoreError) return error;
+  if (isNotFound(error)) return new ArtifactStoreError('NOT_FOUND', 'Artifact bytes are missing.');
+  const code = errorCode(error);
+  return new ArtifactStoreError(
+    'CORRUPT',
+    `Artifact bytes could not be read${code === undefined ? '' : ` (${code})`}.`,
+  );
 }
 
 async function removeFileIfExists(path: string): Promise<boolean> {
