@@ -9,6 +9,8 @@ import { JournalSessionStore } from '../src/journal-session-store.js';
 import {
   AuditProjector,
   ProjectionError,
+  SessionProjectionAccumulator,
+  UserActivityProjectionAccumulator,
   UserActivityProjector,
   projectSession,
 } from '../src/session/session-projection.js';
@@ -166,6 +168,29 @@ describe('Journal event projections', () => {
     expect(session.nextSourceSequence).toBe(fixture.expiredSequence);
   });
 
+  it('releases more than 10k terminal Run scopes before applying a late cursor', () => {
+    const events = terminalRunEvents(10_050);
+    const afterSequence = events.at(-1)!.sequence;
+    const session = new SessionProjectionAccumulator({
+      projectId: 'project-retention', sessionId: 'session-retention', afterSequence, limit: 1,
+    }, true);
+    const user = new UserActivityProjectionAccumulator({
+      projectId: 'project-retention', sessionId: 'session-retention', afterSequence, limit: 1,
+    }, true);
+    for (const event of events) {
+      expect(session.accept(event)).toBe(true);
+      expect(user.accept(event)).toBe(true);
+    }
+    expect(session.retainedScopes()).toEqual({
+      runs: 0, turns: 0, attempts: 0, invocations: 0, finalText: 0,
+    });
+    expect(user.retainedScopes()).toEqual({
+      runs: 0, turns: 0, attempts: 0, invocations: 0, finalText: 0,
+    });
+    expect(session.finish().runs).toEqual([]);
+    expect(user.finish().items).toEqual([]);
+  });
+
   it('validates current payloads and Turn/Attempt ownership during pure projection', async () => {
     const fixture = await createGoldenJournal();
     const events = await readAll(fixture.journal, 'project-a', 100);
@@ -225,6 +250,43 @@ function expectProjectionError(operation: () => unknown, code: ProjectionError['
     return;
   }
   throw new Error(`Expected ProjectionError ${code}.`);
+}
+
+function terminalRunEvents(count: number): AgentEvent[] {
+  const events: AgentEvent[] = [];
+  let sequence = 0;
+  for (let index = 0; index < count; index += 1) {
+    const runId = `run-retention-${index}`;
+    const base = {
+      projectId: 'project-retention',
+      sessionId: 'session-retention',
+      runId,
+      schemaVersion: 1,
+      occurredAt: '2026-08-10T00:00:00.000Z',
+    };
+    events.push({
+      ...base,
+      eventId: `event-retention-${++sequence}`,
+      sequence,
+      type: 'input.received',
+      payload: { clientRequestId: `request-${index}`, content: `input-${index}` },
+    });
+    events.push({
+      ...base,
+      eventId: `event-retention-${++sequence}`,
+      sequence,
+      type: 'run.created',
+      payload: { clientRequestId: `request-${index}` },
+    });
+    events.push({
+      ...base,
+      eventId: `event-retention-${++sequence}`,
+      sequence,
+      type: 'run.failed',
+      payload: { code: 'LEGACY_TERMINAL' },
+    });
+  }
+  return events;
 }
 
 async function createGoldenJournal() {

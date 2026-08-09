@@ -178,6 +178,18 @@ type RunScope = Scope & { clientRequestId?: string; createdAt?: string };
 type TurnScope = Scope & { turnId: string };
 type AttemptScope = TurnScope & { attemptId: string };
 type InvocationScope = AttemptScope & { invocationId: string };
+export type ProjectionRetainedScopes = {
+  runs: number;
+  turns: number;
+  attempts: number;
+  invocations: number;
+  finalText: number;
+};
+
+type TerminalProjectionSnapshot = {
+  run: RunScope | undefined;
+  finalText: string | undefined;
+};
 
 export class ProjectionEventValidator {
   readonly #projectId: string;
@@ -261,6 +273,16 @@ export class ProjectionEventValidator {
 
   run(runId: string): RunScope | undefined { return this.#runs.get(runId); }
 
+  retainedScopes(): ProjectionRetainedScopes {
+    return {
+      runs: this.#runs.size,
+      turns: this.#turns.size,
+      attempts: this.#attempts.size,
+      invocations: this.#invocations.size,
+      finalText: this.#finalText.size,
+    };
+  }
+
   resolveFinalText(event: Extract<AgentEvent, { type: 'run.completed' }>): string {
     const parsed = /^turn:([^:]+):text:(\d+)$/u.exec(event.payload.finalContentRef);
     const resolved = parsed === null ? undefined : this.#finalText.get(event.payload.finalContentRef);
@@ -271,8 +293,12 @@ export class ProjectionEventValidator {
     return resolved.text;
   }
 
-  releaseTerminal(event: AgentEvent): void {
-    if (!this.#trustedJournal || !isTerminalRunEvent(event.type)) return;
+  releaseTerminal(event: AgentEvent): TerminalProjectionSnapshot | undefined {
+    if (!this.#trustedJournal || !isTerminalRunEvent(event.type)) return undefined;
+    const snapshot: TerminalProjectionSnapshot = {
+      run: this.#runs.get(event.runId),
+      finalText: event.type === 'run.completed' ? this.resolveFinalText(event) : undefined,
+    };
     this.#runs.delete(event.runId);
     for (const [key, scope] of this.#turns) {
       if (scope.runId === event.runId) this.#turns.delete(key);
@@ -286,6 +312,7 @@ export class ProjectionEventValidator {
     for (const [key, scope] of this.#finalText) {
       if (scope.runId === event.runId) this.#finalText.delete(key);
     }
+    return snapshot;
   }
 
   #validateTurnAttemptInvocation(event: AgentEvent): void {
@@ -389,6 +416,9 @@ export class SessionProjectionAccumulator {
 
   accept(event: AgentEvent): boolean {
     this.#validator.accept(event);
+    const terminal = event.sessionId === this.#options.sessionId
+      ? this.#validator.releaseTerminal(event)
+      : undefined;
     if (event.sessionId !== this.#options.sessionId) {
       this.#cursor = Math.max(this.#cursor, event.sequence);
       return true;
@@ -399,15 +429,18 @@ export class SessionProjectionAccumulator {
       this.#messages,
       this.#artifacts,
       this.#runs,
-      this.#validator,
+      terminal?.run ?? this.#validator.run(event.runId),
       this.#options.limit,
     )) {
       return false;
     }
     this.#cursor = event.sequence;
-    this.#apply(event);
-    this.#validator.releaseTerminal(event);
+    this.#apply(event, terminal?.run);
     return true;
+  }
+
+  retainedScopes(): ProjectionRetainedScopes {
+    return this.#validator.retainedScopes();
   }
 
   finish(): SessionProjection {
@@ -426,7 +459,7 @@ export class SessionProjectionAccumulator {
     };
   }
 
-  #apply(event: AgentEvent): void {
+  #apply(event: AgentEvent, terminalRun?: RunScope): void {
     if (event.type === 'input.received') {
       const content = publicInputText(event.payload.content);
       if (content !== undefined) this.#messages.push(sessionMessage(event, 'user', content));
@@ -485,7 +518,7 @@ export class SessionProjectionAccumulator {
       const state = projectedRunState(event.type);
       if (state !== undefined) {
         const existing = this.#runs.get(event.runId);
-        const run = this.#validator.run(event.runId);
+        const run = terminalRun ?? this.#validator.run(event.runId);
         if (existing !== undefined) {
           existing.state = state;
           existing.updatedAt = event.occurredAt;
@@ -518,6 +551,9 @@ export class UserActivityProjectionAccumulator {
 
   accept(event: AgentEvent): boolean {
     this.#validator.accept(event);
+    const terminal = event.sessionId === this.#options.sessionId
+      ? this.#validator.releaseTerminal(event)
+      : undefined;
     if (event.sessionId !== this.#options.sessionId || event.sequence <= this.#options.afterSequence) {
       if (event.sessionId !== this.#options.sessionId) {
         this.#cursor = Math.max(this.#cursor, event.sequence);
@@ -528,13 +564,16 @@ export class UserActivityProjectionAccumulator {
     if (descriptor !== undefined) {
       if (this.#items.length >= this.#options.limit) return false;
       const finalText = event.type === 'run.completed'
-        ? this.#validator.resolveFinalText(event)
+        ? terminal?.finalText ?? this.#validator.resolveFinalText(event)
         : undefined;
       this.#items.push(toUserActivity(event, descriptor, finalText));
     }
     this.#cursor = Math.max(this.#cursor, event.sequence);
-    this.#validator.releaseTerminal(event);
     return true;
+  }
+
+  retainedScopes(): ProjectionRetainedScopes {
+    return this.#validator.retainedScopes();
   }
 
   finish(): ProjectionPage<UserActivityEvent> {
@@ -560,12 +599,12 @@ export class AuditProjectionAccumulator {
 
   accept(event: AgentEvent): boolean {
     this.#validator.accept(event);
+    if (event.sessionId === this.#options.sessionId) this.#validator.releaseTerminal(event);
     if (event.sessionId === this.#options.sessionId && event.sequence > this.#options.afterSequence) {
       if (this.#items.length >= this.#options.limit) return false;
       this.#items.push(toAuditEvent(event));
     }
     this.#cursor = Math.max(this.#cursor, event.sequence);
-    if (event.sessionId === this.#options.sessionId) this.#validator.releaseTerminal(event);
     return true;
   }
 
@@ -765,7 +804,7 @@ function wouldOverflowSessionPage(
   messages: readonly SessionProjectionMessage[],
   artifacts: ReadonlyMap<string, SessionProjectionArtifact>,
   runs: ReadonlyMap<string, SessionProjectionRun>,
-  validator: ProjectionEventValidator,
+  run: RunScope | undefined,
   limit: number,
 ): boolean {
   if (event.type === 'input.received' && publicInputText(event.payload.content) !== undefined) {
@@ -782,7 +821,7 @@ function wouldOverflowSessionPage(
   }
   const state = projectedRunState(event.type);
   return state !== undefined && !runs.has(event.runId) &&
-    validator.run(event.runId)?.clientRequestId !== undefined && runs.size >= limit;
+    run?.clientRequestId !== undefined && runs.size >= limit;
 }
 
 function isTerminalRunEvent(type: AgentEventType): boolean {
