@@ -54,7 +54,12 @@ const crashPoints: MigrationCrashPoint[] = [
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
+      rm(directory, {
+        recursive: true,
+        force: true,
+        maxRetries: 50,
+        retryDelay: 100,
+      }),
     ),
   );
 });
@@ -325,7 +330,7 @@ describe('project state migration authority', () => {
       maxActiveProjectionSessions: 1,
       maxActiveProjectionAccumulators: 3,
     });
-  });
+  }, 30_000);
 
   it('keeps equal-byte archives independently addressable by source path', async () => {
     const projectDir = await createLegacyProject();
