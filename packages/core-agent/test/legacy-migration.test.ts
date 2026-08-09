@@ -6,14 +6,21 @@ import { spawn } from 'node:child_process';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  AgentAuditLogStore,
+  AgentCheckpointStore,
+  AgentSessionStore,
+  AgentStreamStore,
+  JournalSessionStore,
+  ProjectArtifactStore,
+  SqliteAgentJournal,
   StateMigrationError,
   StateMigrationRunner,
+  type AgentRunRecord,
+  type AgentSession,
+  type AgentSubagentRecord,
   type MigrationCrashPoint,
   type MigrationInspection,
-} from '../src/session/state-migrations.js';
-import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
-import { JournalSessionStore } from '../src/journal-session-store.js';
-import { AgentSessionStore } from '../src/session-store.js';
+} from '../src/index.js';
 
 const temporaryDirectories: string[] = [];
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
@@ -35,6 +42,48 @@ afterEach(async () => {
 });
 
 describe('StateMigrationRunner', () => {
+  it('migrates the complete contract emitted only by public production stores', async () => {
+    const fixture = await createPublicLegacyProject();
+
+    const migrated = await StateMigrationRunner.open(fixture.projectDir, {
+      targetSchemaVersion: 2,
+      migratorRevision: 'task-4-r3-public-contract',
+    });
+    const inspection = await migrated.inspect();
+    const journal = new SqliteAgentJournal({ filePath: join(fixture.projectDir, 'state.db') });
+    const publicStore = new JournalSessionStore(journal, inspection.projectId);
+
+    await expect(publicStore.load(fixture.session.id, { limit: 100 })).resolves.toMatchObject({
+      title: fixture.session.title,
+      userId: fixture.session.userId,
+      mode: fixture.session.mode,
+      legacySession: {
+        session: fixture.session,
+        archived: false,
+        createdAt: '2026-08-08T01:00:00.000Z',
+        updatedAt: '2026-08-08T01:00:06.000Z',
+        lastMessageAt: '2026-08-08T01:00:04.000Z',
+      },
+      messages: fixture.session.messages.map((message) => expect.objectContaining(message)),
+      runs: [expect.objectContaining({
+        runId: fixture.run.runId,
+        state: 'Completed',
+        legacyRecord: fixture.run,
+      })],
+    });
+    await expect(publicStore.preferences(fixture.session.id)).resolves.toEqual([
+      fixture.preference,
+    ]);
+    await expect(publicStore.checkpoints(fixture.session.id)).resolves.toEqual([
+      fixture.session.contextCheckpoint,
+    ]);
+    await expect(publicStore.subagents(fixture.session.id)).resolves.toEqual([
+      fixture.subagent,
+    ]);
+    expect((await migrated.readImportedLegacyState()).runs).toEqual([fixture.run]);
+    expect((await migrated.listLegacyArchives()).length).toBeGreaterThanOrEqual(4);
+  });
+
   it.each(crashPoints)('recovers a real on-disk cut at %s without duplicate import', async (cut) => {
     const projectDir = await createLegacyProject();
     await expect(
@@ -250,7 +299,16 @@ describe('StateMigrationRunner', () => {
         type: 'legacy.imported',
         payload: {
           entityType: 'session', legacyId: 'session-a', projectKey: 'a', projectRoot: 'a',
-          title: 'forged', userId: null, mode: 'general',
+          record: {
+            session: {
+              id: 'session-a', title: 'forged', mode: 'full', messages: [],
+              tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, aborted: false,
+            },
+            archived: false,
+            createdAt: '2026-08-08T00:00:00.000Z',
+            updatedAt: '2026-08-08T00:00:00.000Z',
+            lastMessageAt: null,
+          },
         },
       }],
     })).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
@@ -610,6 +668,186 @@ async function createLegacyProject(): Promise<string> {
   database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   database.close();
   return projectDir;
+}
+
+async function createPublicLegacyProject(): Promise<{
+  projectDir: string;
+  session: AgentSession;
+  run: AgentRunRecord;
+  preference: {
+    id: string; userId: string; key: string; value: string; confidence: number;
+    sourceSessionId?: string; evidence?: string; createdAt: string; updatedAt: string;
+  };
+  subagent: AgentSubagentRecord;
+}> {
+  const projectDir = await mkdtemp(join(tmpdir(), 'dbagent-public-legacy-project-'));
+  temporaryDirectories.push(projectDir);
+  const project = { rootPath: projectDir, configDirectory: '.dbagent' };
+  const session: AgentSession = {
+    id: 'public-session-a',
+    title: 'Production legacy contract',
+    userId: 'public-user-a',
+    mode: 'edit',
+    project,
+    messages: [
+      { role: 'system', content: 'Use exact production state.', createdAt: '2026-08-08T01:00:00.000Z' },
+      { role: 'user', content: 'Inspect production facts.', createdAt: '2026-08-08T01:00:01.000Z' },
+      {
+        role: 'assistant',
+        content: 'Calling lookup.',
+        toolCalls: [{ id: 'public-call-1', name: 'lookup', arguments: { orderId: 7 } }],
+        createdAt: '2026-08-08T01:00:02.000Z',
+      },
+      {
+        role: 'tool', toolCallId: 'public-call-1', toolName: 'lookup',
+        content: '{"status":"paid"}', createdAt: '2026-08-08T01:00:03.000Z',
+      },
+      { role: 'assistant', content: 'Order is paid.', createdAt: '2026-08-08T01:00:04.000Z' },
+    ],
+    tokenUsage: { promptTokens: 123, completionTokens: 45, totalTokens: 168 },
+    modelBinding: {
+      connectionId: 'connection-public', modelId: 'model-public', routeRevision: 'route-v7',
+      parameters: { temperature: 0.2, maxOutputTokens: 512, seed: 42 },
+    },
+    taskPlan: {
+      version: 1,
+      goal: 'Inspect the exact legacy contract',
+      tasks: [{
+        id: 'task-public', title: 'Inspect', description: 'Read and verify production state',
+        status: 'completed', acceptanceCriteria: ['All facts preserved'], dependsOn: [],
+        evidence: [{
+          kind: 'query', summary: 'Order 7 is paid', reference: 'query:7',
+          createdAt: '2026-08-08T01:00:04.000Z',
+        }],
+        createdAt: '2026-08-08T01:00:00.000Z', updatedAt: '2026-08-08T01:00:04.000Z',
+      }],
+      createdAt: '2026-08-08T01:00:00.000Z', updatedAt: '2026-08-08T01:00:04.000Z',
+    },
+    artifacts: [{
+      id: 'legacy-session-artifact', path: 'legacy-artifacts/output.txt',
+      mediaType: 'text/plain', sizeBytes: 18, createdAt: '2026-08-08T01:00:04.000Z',
+      source: 'lookup',
+    }],
+    toolActivations: [{
+      toolName: 'lookup', toolRevision: 7, checkpointSequence: 9,
+      taskPhase: 'verification', activatedAt: '2026-08-08T01:00:01.000Z',
+    }],
+    activeSkills: [{ name: 'query-and-answer', scope: 'project' }],
+    subagentDepth: 2,
+    capabilityStates: [{
+      capabilityId: 'database', moduleId: 'postgres', instanceId: 'orders',
+      stateId: 'state-7', version: '7',
+    }],
+    contextCheckpoint: {
+      version: 1, sequence: 9, trigger: 'manual', method: 'model',
+      summary: 'Order state retained', coveredConversationMessageCount: 4,
+      sourceTokenEstimate: 900, summaryTokenEstimate: 90, modelContextTokens: 16_384,
+      focus: 'order 7', createdAt: '2026-08-08T01:00:05.000Z',
+    },
+    aborted: false,
+  };
+  const sessionStore = new AgentSessionStore(join(projectDir, 'state.db'), project);
+  await sessionStore.save({ session, now: '2026-08-08T01:00:06.000Z' });
+  await sessionStore.save({
+    session: {
+      id: 'public-child-a', title: 'Production child', userId: 'public-user-a', mode: 'read',
+      project, messages: [{
+        role: 'user', content: 'Verify the evidence.', createdAt: '2026-08-08T01:00:02.000Z',
+      }],
+      tokenUsage: { promptTokens: 5, completionTokens: 0, totalTokens: 5 }, aborted: false,
+    },
+    now: '2026-08-08T01:00:06.000Z',
+  });
+  const preference = await sessionStore.upsertPreference({
+    userId: 'public-user-a', key: 'language', value: 'English', confidence: 0.875,
+    sourceSessionId: session.id, evidence: 'User requested English.',
+    now: '2026-08-08T01:00:07.000Z',
+  });
+  const run: AgentRunRecord = {
+    runId: 'public-run-a', sessionId: session.id, status: 'done', phase: 'done', iteration: 3,
+    finalText: 'Order is paid.',
+    toolExecutions: [{
+      toolName: 'lookup', status: 'success', completionRole: 'supporting',
+      completionGroup: 'orders', completionEvidence: {
+        kind: 'query', deliveryReady: true, outcome: 'succeeded', source: 'runtime',
+        executionId: 'public-call-1', summary: 'Order 7 is paid', metrics: { rows: 1 },
+      },
+    }],
+    completion: {
+      verified: true, deliveryReady: true, finalResponseReady: true, phase: 'done',
+      unresolvedTaskIds: [], missing: [], evidenceKinds: ['query'],
+    },
+    createdAt: '2026-08-08T01:00:00.000Z', updatedAt: '2026-08-08T01:00:08.000Z',
+  };
+  await sessionStore.saveRun(run);
+  const subagent: AgentSubagentRecord = {
+    id: 'public-subagent-a', parentSessionId: session.id, childSessionId: 'public-child-a',
+    task: 'Verify order evidence', contextStrategy: 'fork', status: 'completed', depth: 3,
+    summary: 'Evidence verified', artifactReferences: ['legacy-session-artifact'],
+    createdAt: '2026-08-08T01:00:02.000Z', updatedAt: '2026-08-08T01:00:08.000Z',
+  };
+  sessionStore.saveSubagent(subagent);
+
+  const checkpointStore = new AgentCheckpointStore(
+    join(projectDir, 'legacy-checkpoints', `${session.id}.json`),
+  );
+  await checkpointStore.save({
+    session, iteration: 3, status: 'done', toolExecutions: [],
+    finalText: run.finalText, now: '2026-08-08T01:00:08.000Z',
+  });
+  const streamStore = new AgentStreamStore(
+    join(projectDir, 'legacy-streams', `${session.id}.json`),
+  );
+  await streamStore.start({
+    id: 'public-stream-a', sessionId: session.id, roundId: 'round-3',
+    providerId: 'provider-public', model: 'model-public', now: '2026-08-08T01:00:02.000Z',
+  });
+  await streamStore.appendEvent('public-stream-a', {
+    type: 'usage', usage: { promptTokens: 123, completionTokens: 45, totalTokens: 168 },
+  }, '2026-08-08T01:00:03.000Z');
+  await new AgentAuditLogStore(join(projectDir, 'legacy-audit.jsonl')).append({
+    type: 'run_finished', timestamp: '2026-08-08T01:00:08.000Z', sessionId: session.id,
+    status: 'done', iterations: 3, durationMs: 8_000, finalTextPreview: run.finalText,
+  });
+
+  const artifactJournal = new SqliteAgentJournal({
+    filePath: join(projectDir, 'legacy-artifacts', 'artifact-journal.db'),
+    now: () => '2026-08-08T01:00:04.000Z',
+    createId: (() => { let id = 0; return () => `public-artifact-id-${++id}`; })(),
+  });
+  const artifactRun = await artifactJournal.createRun({
+    projectId: 'legacy-artifact-project', sessionId: session.id,
+    clientRequestId: 'legacy-artifact-request', input: { source: 'public legacy producer' },
+  });
+  const artifactLease = await artifactJournal.acquireRunLease({
+    projectId: 'legacy-artifact-project', runId: artifactRun.runId,
+    ownerId: 'legacy-artifact-writer', ttlMs: 60_000,
+  });
+  await artifactJournal.startRun({
+    projectId: 'legacy-artifact-project', sessionId: session.id, runId: artifactRun.runId,
+    commandId: 'legacy-artifact-start',
+    lease: { ownerId: artifactLease.ownerId, fencingToken: artifactLease.fencingToken },
+    expectedRunRevision: 1,
+  });
+  const artifactStore = new ProjectArtifactStore({
+    projectId: 'legacy-artifact-project', rootDir: join(projectDir, 'legacy-artifacts'),
+    journal: artifactJournal, now: () => '2026-08-08T01:00:04.000Z',
+    createId: (() => { let id = 0; return () => `public-store-id-${++id}`; })(),
+  });
+  const staged = await artifactStore.stage({
+    mediaType: 'text/plain', source: (async function* () {
+      yield new TextEncoder().encode('legacy artifact\n');
+    })(),
+  });
+  await artifactStore.commit({
+    staged, summary: 'Public legacy artifact',
+    journal: {
+      sessionId: session.id, runId: artifactRun.runId, commandId: 'legacy-artifact-commit',
+      lease: { ownerId: artifactLease.ownerId, fencingToken: artifactLease.fencingToken },
+      expectedRunRevision: 2,
+    },
+  });
+  return { projectDir, session, run, preference, subagent };
 }
 
 async function createLegacyWriterProject(): Promise<string> {

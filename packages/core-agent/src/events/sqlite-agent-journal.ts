@@ -1522,7 +1522,9 @@ function assertExactKeys(
 
 function validateEventPayload(type: AgentEventType, payload: unknown): PortableValue {
   try {
-    return validateAndRedactEventPayload(type, payload);
+    const validated = validateAndRedactEventPayload(type, payload);
+    validatePortable(validated, `${type} payload`);
+    return validated;
   } catch (error) {
     throw new AgentJournalError(
       'INVALID_EVENT_PAYLOAD',
@@ -1715,7 +1717,8 @@ function assertStoredParentCausality(database: NodeDatabaseSync, row: EventRow):
   }
 }
 
-function assertEventOuterPayloadConsistency(row: EventRow, payload: PortableValue): void {
+function assertEventOuterPayloadConsistency(row: EventRow, payload: unknown): void {
+  validatePortable(payload, `${row.event_type} stored payload`);
   const record = payload as Record<string, PortableValue>;
   if (
     row.event_type === 'model_attempt_committed' &&
@@ -2484,7 +2487,7 @@ function requireText(value: unknown, name: string): string {
   return value;
 }
 
-function digestValue(value: PortableValue): string {
+function digestValue(value: unknown): string {
   validatePortable(value, 'Idempotency input');
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
 }

@@ -440,71 +440,83 @@ function validateLegacyImported(payload: unknown): void {
     'session', 'message', 'run', 'preference', 'checkpoint', 'subagent', 'diagnostic', 'archive',
   ]);
   switch (record.entityType) {
-    case 'session':
-      exactKeys(record, ['entityType', 'legacyId', 'projectKey', 'projectRoot', 'title', 'userId', 'mode']);
-      ['projectKey', 'projectRoot', 'title', 'mode'].forEach((key) => requireString(record, key));
-      if (record.userId !== null) requireString(record, 'userId');
-      return;
-    case 'message':
-      if (record.role === 'assistant') {
-        exactKeys(record, [
-          'entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt', 'toolCalls',
-        ]);
-      } else if (record.role === 'tool') {
-        exactKeys(record, [
-          'entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt',
-          'toolCallId', 'toolName',
-        ]);
-      } else {
-        exactKeys(record, ['entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt']);
+    case 'session': {
+      exactKeys(record, [
+        'entityType', 'legacyId', 'projectKey', 'projectRoot', 'record',
+      ]);
+      requireString(record, 'projectKey');
+      requireString(record, 'projectRoot');
+      const imported = requireRecord(record.record);
+      exactKeys(imported, ['session', 'archived', 'createdAt', 'updatedAt', 'lastMessageAt']);
+      if (typeof imported.archived !== 'boolean') {
+        throw new TypeError('Legacy Session archived must be boolean.');
       }
+      requireIsoTimestamp(imported.createdAt, 'createdAt');
+      requireIsoTimestamp(imported.updatedAt, 'updatedAt');
+      if (imported.lastMessageAt !== null) requireIsoTimestamp(imported.lastMessageAt, 'lastMessageAt');
+      const session = requireRecord(imported.session);
+      ['id', 'title', 'mode'].forEach((key) => requireString(session, key));
+      if (session.id !== record.legacyId) throw new TypeError('Legacy Session identity disagrees.');
+      if (!Array.isArray(session.messages)) throw new TypeError('Legacy Session messages must be an array.');
+      if (typeof session.aborted !== 'boolean') throw new TypeError('Legacy Session aborted must be boolean.');
+      requireRecord(session.tokenUsage);
+      return;
+    }
+    case 'message': {
+      exactKeys(record, [
+        'entityType', 'legacyId', 'messageIndex', 'sourceRunId', 'record',
+      ]);
       requireNonNegativeInteger(record, 'messageIndex');
-      requireEnum(record, 'role', ['user', 'assistant', 'tool', 'system']);
-      requireString(record, 'content');
-      requireIsoTimestamp(record.createdAt, 'createdAt');
-      if (record.role === 'assistant' && Object.hasOwn(record, 'toolCalls')) {
-        if (!Array.isArray(record.toolCalls)) throw new TypeError('Legacy assistant toolCalls must be an array.');
-        for (const call of record.toolCalls) {
-          const value = requireRecord(call);
-          exactKeys(value, ['id', 'name', 'arguments']);
-          requireString(value, 'id');
-          requireString(value, 'name');
-          if (!Object.hasOwn(value, 'arguments')) throw new TypeError('Legacy Tool arguments are required.');
-        }
-      }
-      if (record.role === 'tool') {
-        requireString(record, 'toolCallId');
-        requireString(record, 'toolName');
+      requireString(record, 'sourceRunId');
+      const message = requireRecord(record.record);
+      requireEnum(message, 'role', ['user', 'assistant', 'tool', 'system']);
+      requireString(message, 'content');
+      requireIsoTimestamp(message.createdAt, 'createdAt');
+      return;
+    }
+    case 'run': {
+      exactKeys(record, ['entityType', 'legacyId', 'record', 'sourceStatus', 'legacyPlan']);
+      requireString(record, 'sourceStatus');
+      const run = requireRecord(record.record);
+      ['runId', 'sessionId', 'status', 'phase', 'finalText'].forEach((key) => requireString(run, key));
+      if (run.runId !== record.legacyId) throw new TypeError('Legacy Run identity disagrees.');
+      requireNonNegativeInteger(run, 'iteration');
+      requireIsoTimestamp(run.createdAt, 'createdAt');
+      requireIsoTimestamp(run.updatedAt, 'updatedAt');
+      if (!Array.isArray(run.toolExecutions)) {
+        throw new TypeError('Legacy Run toolExecutions must be an array.');
       }
       return;
-    case 'run':
-      exactKeys(record, ['entityType', 'legacyId', 'sessionId', 'status', 'plan', 'createdAt', 'updatedAt']);
+    }
+    case 'preference': {
+      exactKeys(record, ['entityType', 'legacyId', 'record']);
+      const preference = requireRecord(record.record);
+      ['id', 'userId', 'key', 'value'].forEach((key) => requireString(preference, key));
+      if (preference.id !== record.legacyId) throw new TypeError('Legacy preference identity disagrees.');
+      requireIsoTimestamp(preference.createdAt, 'createdAt');
+      requireIsoTimestamp(preference.updatedAt, 'updatedAt');
+      return;
+    }
+    case 'checkpoint': {
+      exactKeys(record, ['entityType', 'legacyId', 'sessionId', 'record']);
       requireString(record, 'sessionId');
-      requireEnum(record, 'status', ['completed', 'interrupted_legacy']);
-      requireIsoTimestamp(record.createdAt, 'createdAt');
-      requireIsoTimestamp(record.updatedAt, 'updatedAt');
+      const checkpoint = requireRecord(record.record);
+      requireLiteral(checkpoint, 'version', 1);
+      requireNonNegativeInteger(checkpoint, 'sequence');
+      requireIsoTimestamp(checkpoint.createdAt, 'createdAt');
       return;
-    case 'preference':
-      exactKeys(record, ['entityType', 'legacyId', 'userId', 'key', 'value', 'confidence', 'sourceSessionId']);
-      ['userId', 'key', 'value'].forEach((key) => requireString(record, key));
-      if (typeof record.confidence !== 'number' || !Number.isFinite(record.confidence)) {
-        throw new TypeError('Legacy preference confidence must be finite.');
-      }
-      if (record.sourceSessionId !== null) requireString(record, 'sourceSessionId');
+    }
+    case 'subagent': {
+      exactKeys(record, ['entityType', 'legacyId', 'record']);
+      const subagent = requireRecord(record.record);
+      ['id', 'parentSessionId', 'task', 'contextStrategy', 'status'].forEach((key) =>
+        requireString(subagent, key));
+      if (subagent.id !== record.legacyId) throw new TypeError('Legacy subagent identity disagrees.');
+      requireNonNegativeInteger(subagent, 'depth');
+      requireIsoTimestamp(subagent.createdAt, 'createdAt');
+      requireIsoTimestamp(subagent.updatedAt, 'updatedAt');
       return;
-    case 'checkpoint':
-      exactKeys(record, ['entityType', 'legacyId', 'sessionId', 'sequence', 'summary', 'createdAt']);
-      requireString(record, 'sessionId');
-      requireNonNegativeInteger(record, 'sequence');
-      requireString(record, 'summary');
-      requireIsoTimestamp(record.createdAt, 'createdAt');
-      return;
-    case 'subagent':
-      exactKeys(record, ['entityType', 'legacyId', 'parentSessionId', 'childSessionId', 'status', 'depth']);
-      ['parentSessionId', 'status'].forEach((key) => requireString(record, key));
-      if (record.childSessionId !== null) requireString(record, 'childSessionId');
-      requireNonNegativeInteger(record, 'depth');
-      return;
+    }
     case 'diagnostic':
       exactKeys(record, ['entityType', 'legacyId', 'code', 'evidence']);
       requireString(record, 'code');
@@ -518,6 +530,7 @@ function validateLegacyImported(payload: unknown): void {
       if (!/^legacy-archive:[a-f0-9]{64}$/u.test(String(record.archiveHandle))) {
         throw new TypeError('Legacy archive handle has an invalid format.');
       }
+      return;
   }
 }
 
@@ -591,7 +604,11 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   }),
   'artifact.expired': descriptor({ audience: USER, validate: validateArtifactLifecycle }),
   'artifact.deleted': descriptor({ audience: USER, validate: validateArtifactLifecycle }),
-  'legacy.imported': descriptor({ validate: validateLegacyImported, maxPayloadBytes: 16 * 1024 * 1024 }),
+  'legacy.imported': descriptor({
+    schemaVersion: 2,
+    validate: validateLegacyImported,
+    maxPayloadBytes: 16 * 1024 * 1024,
+  }),
   'skill.activated': descriptor({ validate: (p) => validateShape(p, ['skillId', 'revision'], ['skillId', 'revision']) }),
   'capability.snapshot_captured': descriptor({ validate: (p) => validateShape(p, ['snapshotId', 'revision'], ['snapshotId', 'revision']) }),
   'subagent.started': descriptor({ audience: USER, validate: (p) => validateShape(p, ['subagentId', 'summary'], ['subagentId', 'summary']) }),

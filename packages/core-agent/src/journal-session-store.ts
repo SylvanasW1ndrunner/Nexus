@@ -1,5 +1,10 @@
 import type { AgentEvent } from './events/agent-event.js';
 import type { AgentJournal } from './events/agent-journal.js';
+import type {
+  AgentContextCheckpoint,
+  AgentSubagentRecord,
+  AgentUserPreference,
+} from './types.js';
 import {
   AuditProjectionAccumulator,
   SessionProjectionAccumulator,
@@ -63,14 +68,7 @@ export class JournalSessionStore {
     requireSessionId(sessionId);
     const facts = await this.#legacyFacts(sessionId);
     return facts.flatMap(({ payload }) => payload.entityType === 'preference'
-      ? [{
-          id: payload.legacyId,
-          userId: payload.userId,
-          key: payload.key,
-          value: payload.value,
-          confidence: payload.confidence,
-          sourceSessionId: payload.sourceSessionId,
-        }]
+      ? [structuredClone(payload.record)]
       : []);
   }
 
@@ -78,12 +76,7 @@ export class JournalSessionStore {
     requireSessionId(sessionId);
     const facts = await this.#legacyFacts(sessionId);
     return facts.flatMap(({ payload }) => payload.entityType === 'checkpoint'
-      ? [{
-          sessionId: payload.sessionId,
-          sequence: payload.sequence,
-          summary: payload.summary,
-          createdAt: payload.createdAt,
-        }]
+      ? [structuredClone(payload.record)]
       : []);
   }
 
@@ -91,13 +84,7 @@ export class JournalSessionStore {
     requireSessionId(sessionId);
     const facts = await this.#legacyFacts(sessionId);
     return facts.flatMap(({ payload }) => payload.entityType === 'subagent'
-      ? [{
-          id: payload.legacyId,
-          parentSessionId: payload.parentSessionId,
-          childSessionId: payload.childSessionId,
-          status: payload.status,
-          depth: payload.depth,
-        }]
+      ? [structuredClone(payload.record)]
       : []);
   }
 
@@ -117,29 +104,9 @@ export class JournalSessionStore {
   }
 }
 
-export type LegacyPreferenceProjection = {
-  id: string;
-  userId: string;
-  key: string;
-  value: string;
-  confidence: number;
-  sourceSessionId: string | null;
-};
-
-export type LegacyCheckpointProjection = {
-  sessionId: string;
-  sequence: number;
-  summary: string;
-  createdAt: string;
-};
-
-export type LegacySubagentProjection = {
-  id: string;
-  parentSessionId: string;
-  childSessionId: string | null;
-  status: string;
-  depth: number;
-};
+export type LegacyPreferenceProjection = AgentUserPreference;
+export type LegacyCheckpointProjection = AgentContextCheckpoint;
+export type LegacySubagentProjection = AgentSubagentRecord;
 
 function requireSessionId(sessionId: string): void {
   if (!sessionId.trim()) throw new TypeError('sessionId is required.');

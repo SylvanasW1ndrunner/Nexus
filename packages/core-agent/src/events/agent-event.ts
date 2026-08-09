@@ -2,6 +2,14 @@ import type {
   DecodedModelContentBlock, ModelFinishReason, ModelTokenUsage,
 } from '@dbagent/core-llm';
 import type { PortableValue } from '@dbagent/shared';
+import type {
+  AgentContextCheckpoint,
+  AgentMessage,
+  AgentRunRecord,
+  AgentSession,
+  AgentSubagentRecord,
+  AgentUserPreference,
+} from '../types.js';
 
 export const AGENT_EVENT_TYPES = [
   'input.received',
@@ -88,6 +96,14 @@ export type LegacyImportedToolCall = {
   id: string;
   name: string;
   arguments: Record<string, PortableValue>;
+};
+
+export type LegacyImportedSessionRecord = {
+  session: AgentSession;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
 };
 
 export type PersistedValidatedAttempt = {
@@ -194,33 +210,28 @@ export interface AgentEventPayloadMap {
   'artifact.deleted': { artifactId: string };
   'legacy.imported':
     | {
-        entityType: 'session'; legacyId: string; projectKey: string; projectRoot: string;
-        title: string; userId: string | null; mode: string;
-      }
-    | ({
-        entityType: 'message'; legacyId: string; messageIndex: number;
-        content: string; createdAt: string;
-      } & (
-        | { role: 'user' | 'system' }
-        | { role: 'assistant'; toolCalls?: LegacyImportedToolCall[] }
-        | { role: 'tool'; toolCallId: string; toolName: string }
-      ))
-    | {
-        entityType: 'run'; legacyId: string; sessionId: string;
-        status: 'completed' | 'interrupted_legacy'; plan: PortableValue | null;
-        createdAt: string; updatedAt: string;
+        entityType: 'session'; legacyId: string;
+        projectKey: string; projectRoot: string; record: LegacyImportedSessionRecord;
       }
     | {
-        entityType: 'preference'; legacyId: string; userId: string; key: string;
-        value: string; confidence: number; sourceSessionId: string | null;
+        entityType: 'message'; legacyId: string;
+        messageIndex: number; sourceRunId: string; record: AgentMessage;
       }
     | {
-        entityType: 'checkpoint'; legacyId: string; sessionId: string; sequence: number;
-        summary: string; createdAt: string;
+        entityType: 'run'; legacyId: string; record: AgentRunRecord;
+        sourceStatus: AgentRunRecord['status']; legacyPlan: PortableValue | null;
       }
     | {
-        entityType: 'subagent'; legacyId: string; parentSessionId: string;
-        childSessionId: string | null; status: string; depth: number;
+        entityType: 'preference'; legacyId: string;
+        record: AgentUserPreference;
+      }
+    | {
+        entityType: 'checkpoint'; legacyId: string; sessionId: string;
+        record: AgentContextCheckpoint;
+      }
+    | {
+        entityType: 'subagent'; legacyId: string;
+        record: AgentSubagentRecord;
       }
     | { entityType: 'diagnostic'; legacyId: string; code: string; evidence: string }
     | {

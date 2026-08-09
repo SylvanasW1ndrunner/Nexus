@@ -21,14 +21,20 @@ import type {
   AgentEvent,
   AgentEventDraft,
   AgentEventPayloadMap,
-  LegacyImportedToolCall,
 } from '../events/agent-event.js';
 import {
   AuditProjectionAccumulator,
   SessionProjectionAccumulator,
   UserActivityProjectionAccumulator,
 } from './session-projection.js';
-import type { AgentMessage } from '../types.js';
+import type {
+  AgentContextCheckpoint,
+  AgentMessage,
+  AgentRunRecord,
+  AgentSession,
+  AgentSubagentRecord,
+  AgentUserPreference,
+} from '../types.js';
 import {
   createLegacyMigrationWriter,
   type LegacyMigrationWriter,
@@ -140,9 +146,14 @@ export type ImportedLegacyState = {
     title: string;
     userId: string | null;
     mode: string;
-    messages: Array<AgentMessage & { messageIndex: number }>;
+    messages: Array<AgentMessage & { messageIndex: number; sourceRunId?: string }>;
+    record?: AgentSession;
+    archived?: boolean;
+    createdAt?: string;
+    updatedAt?: string;
+    lastMessageAt?: string | null;
   }>;
-  runs: Array<{
+  runs: Array<AgentRunRecord | {
     runId: string;
     sessionId: string;
     status: string;
@@ -158,14 +169,18 @@ export type ImportedLegacyState = {
     value: string;
     confidence: number;
     sourceSessionId: string | null;
+    evidence?: string;
+    createdAt?: string;
+    updatedAt?: string;
   }>;
   checkpoints: Array<{
     sessionId: string;
     sequence: number;
     summary: string;
     createdAt: string;
+    record?: AgentContextCheckpoint;
   }>;
-  subagents: Array<{
+  subagents: Array<AgentSubagentRecord | {
     id: string;
     parentSessionId: string;
     childSessionId: string | null;
@@ -258,7 +273,7 @@ export class StateMigrationRunner {
         }
       }
     }
-    imported.plan = imported.runs.find(({ plan }) => plan !== null)?.plan ?? null;
+    imported.plan ??= firstLegacyPlan(imported.runs);
     return imported;
   }
 
@@ -420,6 +435,7 @@ async function buildValidatedShadow(
 
   const importedState = readLegacyState(sourceSnapshotPath);
   bindFallbackProjectIdentity(importedState, sourceDigest);
+  normalizeLegacyContractState(importedState);
   const validationReport = validateLegacyState(importedState, manifest);
   const importedStateDigest = sha256(canonicalJson(importedState));
   const validationDigest = sha256(canonicalJson(validationReport));
@@ -629,13 +645,7 @@ async function activate(
 function readLegacyState(path: string): ImportedLegacyState {
   return withDatabase(path, (database) => {
     try {
-      const sessionRows = tableExists(database, 'agent_sessions')
-        ? (database.prepare(
-          'SELECT id, title, user_id, mode, payload_json FROM agent_sessions ORDER BY id',
-        ).all() as unknown as Array<{
-          id: string; title: string; user_id: string | null; mode: string; payload_json: string;
-        }>)
-        : [];
+      const runs = readLegacyRuns(database);
       const messages = tableExists(database, 'agent_session_messages')
         ? (database.prepare(`
           SELECT session_id, message_index, role, content, created_at,
@@ -647,60 +657,11 @@ function readLegacyState(path: string): ImportedLegacyState {
           tool_call_id: string | null; tool_name: string | null; tool_calls_json: string | null;
         }>)
         : [];
-      const sessions = sessionRows.map((session) => ({
-        id: session.id,
-        projectKey: legacyProjectIdentity(session.payload_json).projectKey,
-        projectRoot: legacyProjectIdentity(session.payload_json).projectRoot,
-        title: session.title,
-        userId: session.user_id,
-        mode: session.mode,
-        messages: messages
-          .filter(({ session_id: sessionId }) => sessionId === session.id)
-          .map(legacyMessageFromRow),
-      }));
-      const runRows = tableExists(database, 'agent_runs')
-        ? (database.prepare(`
-          SELECT run_id, session_id, status, plan_json, created_at, updated_at
-          FROM agent_runs ORDER BY run_id
-        `).all() as unknown as Array<{
-          run_id: string; session_id: string; status: string; plan_json: string | null;
-          created_at: string; updated_at: string;
-        }>)
-        : [];
-      const runs = runRows.map((run) => ({
-        runId: run.run_id,
-        sessionId: run.session_id,
-        status: run.status === 'completed' ? 'completed' : 'interrupted_legacy',
-        plan: parseNullableJson(run.plan_json),
-        createdAt: run.created_at,
-        updatedAt: run.updated_at,
-      }));
-      const preferenceRows = tableExists(database, 'agent_user_preferences')
-        ? (database.prepare(`
-          SELECT id, user_id, preference_key, value, confidence, source_session_id
-          FROM agent_user_preferences ORDER BY id
-        `).all() as unknown as Array<{
-          id: string; user_id: string; preference_key: string; value: string;
-          confidence: number; source_session_id: string | null;
-        }>)
-        : [];
-      const checkpointRows = tableExists(database, 'agent_context_checkpoints')
-        ? (database.prepare(`
-          SELECT session_id, sequence, summary, created_at
-          FROM agent_context_checkpoints ORDER BY session_id, sequence
-        `).all() as unknown as Array<{
-          session_id: string; sequence: number; summary: string; created_at: string;
-        }>)
-        : [];
-      const subagentRows = tableExists(database, 'agent_subagents')
-        ? (database.prepare(`
-          SELECT id, parent_session_id, child_session_id, status, depth
-          FROM agent_subagents ORDER BY id
-        `).all() as unknown as Array<{
-          id: string; parent_session_id: string; child_session_id: string | null;
-          status: string; depth: number;
-        }>)
-        : [];
+      const sessions = readLegacySessions(database, messages, runs);
+      validateLegacyToolCallLinks(sessions);
+      const preferences = readLegacyPreferences(database);
+      const checkpoints = readLegacyContextCheckpoints(database);
+      const subagents = readLegacySubagents(database);
       const diagnosticRows = tableExists(database, 'legacy_runtime_diagnostics')
         ? (database.prepare(`
           SELECT kind, durable_evidence FROM legacy_runtime_diagnostics ORDER BY kind
@@ -709,28 +670,10 @@ function readLegacyState(path: string): ImportedLegacyState {
       return {
         sessions,
         runs,
-        plan: runs.find(({ plan }) => plan !== null)?.plan ?? null,
-        preferences: preferenceRows.map((preference) => ({
-          id: preference.id,
-          userId: preference.user_id,
-          key: preference.preference_key,
-          value: preference.value,
-          confidence: preference.confidence,
-          sourceSessionId: preference.source_session_id,
-        })),
-        checkpoints: checkpointRows.map((checkpoint) => ({
-          sessionId: checkpoint.session_id,
-          sequence: checkpoint.sequence,
-          summary: checkpoint.summary,
-          createdAt: checkpoint.created_at,
-        })),
-        subagents: subagentRows.map((subagent) => ({
-          id: subagent.id,
-          parentSessionId: subagent.parent_session_id,
-          childSessionId: subagent.child_session_id,
-          status: subagent.status,
-          depth: subagent.depth,
-        })),
+        plan: firstLegacyPlan(runs),
+        preferences,
+        checkpoints,
+        subagents,
         diagnostics: diagnosticRows.map((diagnostic) => ({
           code: diagnostic.kind === 'approval'
             ? 'LEGACY_APPROVAL_EXPIRED'
@@ -747,6 +690,396 @@ function readLegacyState(path: string): ImportedLegacyState {
   });
 }
 
+type LegacyMessageRow = {
+  session_id: string;
+  message_index: number;
+  role: string;
+  content: string;
+  created_at: string;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  tool_calls_json: string | null;
+};
+
+function readLegacyRuns(database: NodeDatabaseSync): ImportedLegacyState['runs'] {
+  if (!tableExists(database, 'agent_runs')) return [];
+  const columns = tableColumnNames(database, 'agent_runs');
+  if (columns.has('payload_json')) {
+    const rows = database.prepare('SELECT * FROM agent_runs ORDER BY run_id').all() as unknown as
+      Array<Record<string, unknown>>;
+    return rows.map((row) => {
+      const record = parseLegacyRunRecord(requireLegacyText(row.payload_json, 'Run payload_json'));
+      if (
+        record.runId !== requireLegacyText(row.run_id, 'Run run_id') ||
+        record.sessionId !== requireLegacyText(row.session_id, 'Run session_id') ||
+        record.status !== requireLegacyText(row.status, 'Run status') ||
+        record.phase !== requireLegacyText(row.phase, 'Run phase') ||
+        record.iteration !== requireLegacyInteger(row.iteration, 'Run iteration') ||
+        record.createdAt !== requireLegacyIso(row.created_at, 'Run created_at') ||
+        record.updatedAt !== requireLegacyIso(row.updated_at, 'Run updated_at')
+      ) {
+        throw new TypeError(`Legacy Run ${record.runId} payload disagrees with its columns.`);
+      }
+      return record;
+    });
+  }
+  const required = ['run_id', 'session_id', 'status', 'created_at', 'updated_at'];
+  if (required.some((column) => !columns.has(column))) {
+    throw new TypeError('Legacy Run table has an unsupported historical layout.');
+  }
+  const planExpression = columns.has('plan_json') ? 'plan_json' : 'NULL AS plan_json';
+  const rows = database.prepare(`
+    SELECT run_id, session_id, status, ${planExpression}, created_at, updated_at
+    FROM agent_runs ORDER BY run_id
+  `).all() as unknown as Array<{
+    run_id: string; session_id: string; status: string; plan_json: string | null;
+    created_at: string; updated_at: string;
+  }>;
+  return rows.map((run) => ({
+    runId: requireLegacyText(run.run_id, 'Run run_id'),
+    sessionId: requireLegacyText(run.session_id, 'Run session_id'),
+    status: run.status === 'completed' ? 'completed' : 'interrupted_legacy',
+    plan: parseNullableJson(run.plan_json),
+    createdAt: requireLegacyIso(run.created_at, 'Run created_at'),
+    updatedAt: requireLegacyIso(run.updated_at, 'Run updated_at'),
+  }));
+}
+
+function readLegacySessions(
+  database: NodeDatabaseSync,
+  messages: LegacyMessageRow[],
+  runs: ImportedLegacyState['runs'],
+): ImportedLegacyState['sessions'] {
+  if (!tableExists(database, 'agent_sessions')) return [];
+  const columns = tableColumnNames(database, 'agent_sessions');
+  const rows = database.prepare('SELECT * FROM agent_sessions ORDER BY id').all() as unknown as
+    Array<Record<string, unknown>>;
+  return rows.map((row) => {
+    const id = requireLegacyText(row.id, 'Session id');
+    const sessionMessages = messages
+      .filter(({ session_id: sessionId }) => sessionId === id)
+      .map(legacyMessageFromRow);
+    const sourceRunId = latestLegacyRunId(runs, id) ?? `legacy-session:${id}`;
+    const indexedMessages = sessionMessages.map((message) => ({ ...message, sourceRunId }));
+    const payloadJson = requireLegacyText(row.payload_json, 'Session payload_json');
+    if (columns.has('message_count') && columns.has('prompt_tokens')) {
+      const metadata = parseLegacySessionRecord(payloadJson, indexedMessages);
+      const projectIdentity = legacyProjectIdentityFromRow(row, payloadJson);
+      const userId = row.user_id === null ? undefined : requireLegacyText(row.user_id, 'Session user_id');
+      if (
+        metadata.id !== id || metadata.title !== requireLegacyText(row.title, 'Session title') ||
+        metadata.mode !== requireLegacyText(row.mode, 'Session mode') || metadata.userId !== userId ||
+        metadata.messages.length !== requireLegacyInteger(row.message_count, 'Session message_count') ||
+        metadata.tokenUsage.promptTokens !== requireLegacyInteger(row.prompt_tokens, 'prompt_tokens') ||
+        metadata.tokenUsage.completionTokens !== requireLegacyInteger(row.completion_tokens, 'completion_tokens') ||
+        metadata.tokenUsage.totalTokens !== requireLegacyInteger(row.total_tokens, 'total_tokens')
+      ) {
+        throw new TypeError(`Legacy Session ${id} payload disagrees with its columns.`);
+      }
+      return {
+        id,
+        ...projectIdentity,
+        title: metadata.title,
+        userId: metadata.userId ?? null,
+        mode: metadata.mode,
+        messages: indexedMessages,
+        record: metadata,
+        archived: requireLegacyInteger(row.archived, 'Session archived') === 1,
+        createdAt: requireLegacyIso(row.created_at, 'Session created_at'),
+        updatedAt: requireLegacyIso(row.updated_at, 'Session updated_at'),
+        lastMessageAt: row.last_message_at === null
+          ? null
+          : requireLegacyIso(row.last_message_at, 'Session last_message_at'),
+      };
+    }
+    const identity = legacyProjectIdentity(payloadJson);
+    return {
+      id,
+      ...identity,
+      title: requireLegacyText(row.title, 'Session title'),
+      userId: row.user_id === null ? null : requireLegacyText(row.user_id, 'Session user_id'),
+      mode: requireLegacyText(row.mode, 'Session mode'),
+      messages: indexedMessages,
+    };
+  });
+}
+
+function readLegacyPreferences(database: NodeDatabaseSync): ImportedLegacyState['preferences'] {
+  if (!tableExists(database, 'agent_user_preferences')) return [];
+  const columns = tableColumnNames(database, 'agent_user_preferences');
+  const rows = database.prepare('SELECT * FROM agent_user_preferences ORDER BY id').all() as unknown as
+    Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: requireLegacyText(row.id, 'Preference id'),
+    userId: requireLegacyText(row.user_id, 'Preference user_id'),
+    key: requireLegacyText(row.preference_key, 'Preference key'),
+    value: requireLegacyText(row.value, 'Preference value'),
+    confidence: requireLegacyFinite(row.confidence, 'Preference confidence'),
+    sourceSessionId: row.source_session_id === null
+      ? null
+      : requireLegacyText(row.source_session_id, 'Preference source_session_id'),
+    ...(columns.has('evidence') && row.evidence !== null
+      ? { evidence: requireLegacyText(row.evidence, 'Preference evidence') }
+      : {}),
+    ...(columns.has('created_at')
+      ? { createdAt: requireLegacyIso(row.created_at, 'Preference created_at') }
+      : {}),
+    ...(columns.has('updated_at')
+      ? { updatedAt: requireLegacyIso(row.updated_at, 'Preference updated_at') }
+      : {}),
+  }));
+}
+
+function readLegacyContextCheckpoints(
+  database: NodeDatabaseSync,
+): ImportedLegacyState['checkpoints'] {
+  if (!tableExists(database, 'agent_context_checkpoints')) return [];
+  const columns = tableColumnNames(database, 'agent_context_checkpoints');
+  const rows = database.prepare(`
+    SELECT * FROM agent_context_checkpoints ORDER BY session_id, sequence
+  `).all() as unknown as Array<Record<string, unknown>>;
+  return rows.map((row) => {
+    const sessionId = requireLegacyText(row.session_id, 'Checkpoint session_id');
+    const sequence = requireLegacyInteger(row.sequence, 'Checkpoint sequence');
+    const summary = requireLegacyText(row.summary, 'Checkpoint summary');
+    const createdAt = requireLegacyIso(row.created_at, 'Checkpoint created_at');
+    if (!columns.has('trigger')) return { sessionId, sequence, summary, createdAt };
+    const record: AgentContextCheckpoint = {
+      version: requireLegacyInteger(row.version, 'Checkpoint version') as 1,
+      sequence,
+      trigger: requireLegacyEnum(row.trigger, ['auto', 'manual', 'automatic'], 'Checkpoint trigger') === 'automatic'
+        ? 'auto'
+        : requireLegacyEnum(row.trigger, ['auto', 'manual'], 'Checkpoint trigger') as AgentContextCheckpoint['trigger'],
+      method: requireLegacyEnum(
+        row.method, ['model', 'deterministic-fallback'], 'Checkpoint method',
+      ) as AgentContextCheckpoint['method'],
+      summary,
+      coveredConversationMessageCount: requireLegacyInteger(
+        row.covered_message_count, 'Checkpoint covered_message_count',
+      ),
+      sourceTokenEstimate: requireLegacyInteger(row.source_token_estimate, 'Checkpoint source_token_estimate'),
+      summaryTokenEstimate: requireLegacyInteger(row.summary_token_estimate, 'Checkpoint summary_token_estimate'),
+      modelContextTokens: row.model_context_tokens === null
+        ? null
+        : requireLegacyInteger(row.model_context_tokens, 'Checkpoint model_context_tokens'),
+      createdAt,
+      ...(row.focus === null ? {} : { focus: requireLegacyText(row.focus, 'Checkpoint focus') }),
+    };
+    if (record.version !== 1) throw new TypeError('Legacy Checkpoint version is unsupported.');
+    return { sessionId, sequence, summary, createdAt, record };
+  });
+}
+
+function readLegacySubagents(database: NodeDatabaseSync): ImportedLegacyState['subagents'] {
+  if (!tableExists(database, 'agent_subagents')) return [];
+  const columns = tableColumnNames(database, 'agent_subagents');
+  const rows = database.prepare('SELECT * FROM agent_subagents ORDER BY id').all() as unknown as
+    Array<Record<string, unknown>>;
+  return rows.map((row) => {
+    if (!columns.has('task')) {
+      return {
+        id: requireLegacyText(row.id, 'Subagent id'),
+        parentSessionId: requireLegacyText(row.parent_session_id, 'Subagent parent_session_id'),
+        childSessionId: row.child_session_id === null
+          ? null
+          : requireLegacyText(row.child_session_id, 'Subagent child_session_id'),
+        status: requireLegacyText(row.status, 'Subagent status'),
+        depth: requireLegacyInteger(row.depth, 'Subagent depth'),
+      };
+    }
+    const artifactReferences = parseStrictPortableJson(
+      requireLegacyText(row.artifact_references_json, 'Subagent artifact_references_json'),
+      'Subagent artifact references',
+    );
+    if (!Array.isArray(artifactReferences) ||
+      artifactReferences.some((reference) => typeof reference !== 'string')) {
+      throw new TypeError('Legacy Subagent artifact references are invalid.');
+    }
+    return {
+      id: requireLegacyText(row.id, 'Subagent id'),
+      parentSessionId: requireLegacyText(row.parent_session_id, 'Subagent parent_session_id'),
+      ...(row.child_session_id === null
+        ? {}
+        : { childSessionId: requireLegacyText(row.child_session_id, 'Subagent child_session_id') }),
+      task: requireLegacyText(row.task, 'Subagent task'),
+      contextStrategy: requireLegacyEnum(row.context_strategy, ['fresh', 'fork'], 'Subagent context_strategy') as
+        AgentSubagentRecord['contextStrategy'],
+      status: requireLegacyEnum(row.status, ['running', 'completed', 'failed', 'cancelled'], 'Subagent status') as
+        AgentSubagentRecord['status'],
+      depth: requireLegacyInteger(row.depth, 'Subagent depth'),
+      ...(row.summary === null ? {} : { summary: requireLegacyText(row.summary, 'Subagent summary') }),
+      ...(artifactReferences.length === 0 ? {} : { artifactReferences: artifactReferences as string[] }),
+      ...(row.error_message === null
+        ? {}
+        : { errorMessage: requireLegacyText(row.error_message, 'Subagent error_message') }),
+      createdAt: requireLegacyIso(row.created_at, 'Subagent created_at'),
+      updatedAt: requireLegacyIso(row.updated_at, 'Subagent updated_at'),
+    };
+  });
+}
+
+function parseLegacySessionRecord(payloadJson: string, messages: AgentMessage[]): AgentSession {
+  const value = parseStrictPortableJson(payloadJson, 'Session payload_json');
+  const record = requireLegacyRecord(value, 'Session payload_json');
+  const allowed = [
+    'id', 'title', 'userId', 'mode', 'messages', 'tokenUsage', 'modelBinding', 'project',
+    'taskPlan', 'artifacts', 'toolActivations', 'activeSkills', 'sessionSkills', 'subagentDepth',
+    'capabilityStates', 'contextCheckpoint', 'aborted',
+  ];
+  assertLegacyExactKeys(record, allowed, 'Session payload_json');
+  const result = { ...record, messages: structuredClone(messages) } as AgentSession;
+  requireLegacyText(result.id, 'Session payload id');
+  requireLegacyText(result.title, 'Session payload title');
+  requireLegacyText(result.mode, 'Session payload mode');
+  if (typeof result.aborted !== 'boolean') throw new TypeError('Session payload aborted must be boolean.');
+  const usage = requireLegacyRecord(result.tokenUsage, 'Session tokenUsage');
+  assertLegacyExactKeys(usage, ['promptTokens', 'completionTokens', 'totalTokens'], 'Session tokenUsage');
+  ['promptTokens', 'completionTokens', 'totalTokens'].forEach((key) =>
+    requireLegacyInteger(usage[key], `Session tokenUsage.${key}`));
+  return result;
+}
+
+function parseLegacyRunRecord(payloadJson: string): AgentRunRecord {
+  const value = parseStrictPortableJson(payloadJson, 'Run payload_json');
+  const record = requireLegacyRecord(value, 'Run payload_json');
+  assertLegacyExactKeys(record, [
+    'runId', 'sessionId', 'status', 'phase', 'iteration', 'finalText', 'toolExecutions',
+    'completion', 'errorMessage', 'createdAt', 'updatedAt',
+  ], 'Run payload_json');
+  requireLegacyText(record.runId, 'Run payload runId');
+  requireLegacyText(record.sessionId, 'Run payload sessionId');
+  requireLegacyEnum(record.status, [
+    'running', 'done', 'aborted', 'failed', 'interrupted', 'max_iterations_reached',
+  ], 'Run payload status');
+  requireLegacyEnum(record.phase, ['act', 'verify', 'finalize', 'done'], 'Run payload phase');
+  requireLegacyInteger(record.iteration, 'Run payload iteration');
+  if (typeof record.finalText !== 'string') throw new TypeError('Run payload finalText must be a string.');
+  if (!Array.isArray(record.toolExecutions)) throw new TypeError('Run payload toolExecutions must be an array.');
+  requireLegacyIso(record.createdAt, 'Run payload createdAt');
+  requireLegacyIso(record.updatedAt, 'Run payload updatedAt');
+  return record as AgentRunRecord;
+}
+
+function validateLegacyToolCallLinks(sessions: ImportedLegacyState['sessions']): void {
+  for (const session of sessions) {
+    const seen = new Set<string>();
+    const pending: Array<{ id: string; name: string }> = [];
+    const resolved = new Set<string>();
+    for (const message of session.messages) {
+      if (message.role === 'assistant') {
+        for (const call of message.toolCalls ?? []) {
+          if (seen.has(call.id)) throw new TypeError(`Legacy ToolCall id is duplicated: ${call.id}.`);
+          seen.add(call.id);
+          pending.push({ id: call.id, name: call.name });
+        }
+      } else if (message.role === 'tool') {
+        const expected = pending.shift();
+        if (expected === undefined || expected.id !== message.toolCallId ||
+          expected.name !== message.toolName || resolved.has(message.toolCallId)) {
+          throw new TypeError(`Legacy Tool result ordering or identity is invalid: ${message.toolCallId}.`);
+        }
+        resolved.add(message.toolCallId);
+      }
+    }
+    if (pending.length > 0) {
+      throw new TypeError(`Legacy ToolCall has no exact result: ${pending[0]!.id}.`);
+    }
+  }
+}
+
+function latestLegacyRunId(runs: ImportedLegacyState['runs'], sessionId: string): string | undefined {
+  return runs
+    .filter((run) => run.sessionId === sessionId)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) ||
+      left.runId.localeCompare(right.runId, 'en'))[0]?.runId;
+}
+
+function legacyProjectIdentityFromRow(
+  row: Record<string, unknown>,
+  payloadJson: string,
+): { projectKey: string; projectRoot: string } {
+  const fallback = legacyProjectIdentity(payloadJson);
+  return {
+    projectKey: typeof row.project_key === 'string' && row.project_key.length > 0
+      ? row.project_key
+      : fallback.projectKey,
+    projectRoot: typeof row.project_root === 'string' && row.project_root.length > 0
+      ? row.project_root
+      : fallback.projectRoot,
+  };
+}
+
+function tableColumnNames(database: NodeDatabaseSync, table: string): Set<string> {
+  if (!/^[a-z_]+$/u.test(table)) throw new TypeError('Legacy table name is invalid.');
+  return new Set((database.prepare(`PRAGMA table_info(${table})`).all() as unknown as
+    Array<{ name: string }>).map(({ name }) => name));
+}
+
+function parseStrictPortableJson(value: string, label: string): PortableValue {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+    assertPortableValue(parsed);
+  } catch (error) {
+    throw new TypeError(`${label} is invalid: ${errorMessage(error)}`);
+  }
+  return parsed;
+}
+
+function toPortableLegacyValue(value: unknown): PortableValue {
+  const snapshot = structuredClone(value) as unknown;
+  assertPortableValue(snapshot);
+  return snapshot;
+}
+
+function requireLegacyRecord(value: unknown, label: string): Record<string, PortableValue> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object.`);
+  }
+  return value as Record<string, PortableValue>;
+}
+
+function assertLegacyExactKeys(
+  record: Record<string, unknown>,
+  allowed: string[],
+  label: string,
+): void {
+  const unknown = Object.keys(record).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) throw new TypeError(`${label} has unknown fields: ${unknown.sort().join(', ')}.`);
+}
+
+function requireLegacyText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0) throw new TypeError(`${label} is required.`);
+  return value;
+}
+
+function requireLegacyInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new TypeError(`${label} must be a non-negative integer.`);
+  }
+  return Number(value);
+}
+
+function requireLegacyFinite(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new TypeError(`${label} must be finite.`);
+  return value;
+}
+
+function requireLegacyIso(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value)) ||
+    new Date(value).toISOString() !== value) {
+    throw new TypeError(`${label} must be an exact ISO timestamp.`);
+  }
+  return value;
+}
+
+function requireLegacyEnum(value: unknown, allowed: string[], label: string): string {
+  if (typeof value !== 'string' || !allowed.includes(value)) {
+    throw new TypeError(`${label} is unsupported.`);
+  }
+  return value;
+}
+
 function validateLegacyState(
   state: ImportedLegacyState,
   manifest: MigrationManifestEntry[],
@@ -756,7 +1089,7 @@ function validateLegacyState(
     state.runs.some(({ sessionId }) => !sessionIds.has(sessionId)) ||
     state.subagents.some(({ parentSessionId, childSessionId }) =>
       !sessionIds.has(parentSessionId) ||
-      (childSessionId !== null && !sessionIds.has(childSessionId)),
+      (childSessionId != null && !sessionIds.has(childSessionId)),
     )
   ) {
     throw new StateMigrationError(
@@ -938,7 +1271,7 @@ async function validateShadow(intent: MigrationIntent): Promise<void> {
       }
     }
     normalizeImportedLegacyState(reconstructed);
-    reconstructed.plan = reconstructed.runs.find(({ plan }) => plan !== null)?.plan ?? null;
+    reconstructed.plan ??= firstLegacyPlan(reconstructed.runs);
     if (sha256(canonicalJson(reconstructed)) !== intent.importedStateDigest) {
       throw new Error('Imported legacy state digest changed.');
     }
@@ -985,6 +1318,88 @@ function normalizeImportedLegacyState(state: ImportedLegacyState): void {
   state.checkpoints.sort((left, right) =>
     left.sessionId.localeCompare(right.sessionId, 'en') || left.sequence - right.sequence);
   state.subagents.sort((left, right) => left.id.localeCompare(right.id, 'en'));
+}
+
+function normalizeLegacyContractState(state: ImportedLegacyState): void {
+  const epoch = new Date(0).toISOString();
+  state.runs = state.runs.map((run): AgentRunRecord => {
+    if ('phase' in run) return structuredClone(run);
+    return {
+      runId: run.runId,
+      sessionId: run.sessionId,
+      status: run.status === 'completed' ? 'done' : 'interrupted',
+      phase: run.status === 'completed' ? 'done' : 'verify',
+      iteration: 0,
+      finalText: '',
+      toolExecutions: [],
+      ...(run.status === 'completed'
+        ? {}
+        : { errorMessage: 'Legacy Run was interrupted during migration.' }),
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+    };
+  });
+  for (const session of state.sessions) {
+    const sourceRunId = latestLegacyRunId(state.runs, session.id) ?? `legacy-session:${session.id}`;
+    for (const message of session.messages) message.sourceRunId = sourceRunId;
+    const messages = session.messages.map(legacyMessageRecord);
+    session.record ??= {
+      id: session.id,
+      title: session.title,
+      ...(session.userId === null ? {} : { userId: session.userId }),
+      mode: normalizeLegacyMode(session.mode),
+      messages,
+      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      aborted: false,
+    };
+    session.record.messages = messages;
+    session.archived ??= false;
+    session.createdAt ??= messages[0]?.createdAt ?? epoch;
+    session.updatedAt ??= messages.at(-1)?.createdAt ?? session.createdAt;
+    session.lastMessageAt ??= messages.at(-1)?.createdAt ?? null;
+  }
+  for (const preference of state.preferences) {
+    preference.createdAt ??= epoch;
+    preference.updatedAt ??= preference.createdAt;
+  }
+  for (const checkpoint of state.checkpoints) {
+    checkpoint.record ??= {
+      version: 1,
+      sequence: checkpoint.sequence,
+      trigger: 'auto',
+      method: 'deterministic-fallback',
+      summary: checkpoint.summary,
+      coveredConversationMessageCount: 0,
+      sourceTokenEstimate: 0,
+      summaryTokenEstimate: 0,
+      modelContextTokens: null,
+      createdAt: checkpoint.createdAt,
+    };
+  }
+  state.subagents = state.subagents.map((subagent): AgentSubagentRecord => {
+    if ('task' in subagent) return structuredClone(subagent);
+    return {
+      id: subagent.id,
+      parentSessionId: subagent.parentSessionId,
+      ...(subagent.childSessionId === null ? {} : { childSessionId: subagent.childSessionId }),
+      task: 'Legacy subagent task unavailable',
+      contextStrategy: 'fresh',
+      status: normalizeLegacySubagentStatus(subagent.status),
+      depth: subagent.depth,
+      createdAt: epoch,
+      updatedAt: epoch,
+    };
+  });
+}
+
+function normalizeLegacyMode(mode: string): AgentSession['mode'] {
+  return mode === 'edit' || mode === 'full' ? mode : 'read';
+}
+
+function normalizeLegacySubagentStatus(status: string): AgentSubagentRecord['status'] {
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
+    ? status
+    : 'running';
 }
 
 async function validateLegacyArchives(
@@ -1393,42 +1808,90 @@ async function importLegacyFacts(
         projectKey: `legacy-source:${input.sourceDigest}`,
         projectRoot: `legacy-source://${input.sourceDigest}`,
         title: 'Legacy import',
-        userId: null, mode: 'general', messages: [],
+        userId: null, mode: 'read', messages: [],
+        record: {
+          id: `legacy-session-${input.migrationId.slice(0, 16)}`,
+          title: 'Legacy import', mode: 'read', messages: [],
+          tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, aborted: false,
+        } satisfies AgentSession,
+        archived: false,
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+        lastMessageAt: null,
       }];
   const factsBySession = new Map<string, AgentEventPayloadMap['legacy.imported'][]>(
     sessions.map((session) => [session.id, []]),
   );
   for (const session of sessions) {
     const facts = factsBySession.get(session.id)!;
+    if (session.record === undefined || session.archived === undefined ||
+      session.createdAt === undefined || session.updatedAt === undefined ||
+      session.lastMessageAt === undefined) {
+      throw new StateMigrationError(
+        'MIGRATION_VALIDATION_FAILED',
+        `Legacy Session ${session.id} was not normalized to the current import schema.`,
+      );
+    }
     facts.push({
-      entityType: 'session', legacyId: session.id, projectKey: session.projectKey,
-      projectRoot: session.projectRoot, title: session.title, userId: session.userId,
-      mode: session.mode,
+      entityType: 'session',
+      legacyId: session.id,
+      projectKey: session.projectKey,
+      projectRoot: session.projectRoot,
+      record: {
+        session: { ...structuredClone(session.record), messages: [] },
+        archived: session.archived,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        lastMessageAt: session.lastMessageAt,
+      },
     });
-    session.messages.forEach((message) => facts.push(legacyMessageFact(session.id, message)));
+    session.messages.forEach((message) => facts.push({
+      entityType: 'message',
+      legacyId: `${session.id}:${message.messageIndex}`,
+      messageIndex: message.messageIndex,
+      sourceRunId: message.sourceRunId ?? `legacy-session:${session.id}`,
+      record: legacyMessageRecord(message),
+    }));
   }
   const firstSessionId = sessions[0]!.id;
   const target = (sessionId: string | null | undefined) =>
     factsBySession.get(sessionId ?? '') ?? factsBySession.get(firstSessionId)!;
-  for (const run of input.importedState.runs) target(run.sessionId).push({
-    entityType: 'run', legacyId: run.runId, sessionId: run.sessionId, status: run.status,
-    plan: run.plan,
-    createdAt: run.createdAt, updatedAt: run.updatedAt,
-  } as AgentEventPayloadMap['legacy.imported']);
-  for (const preference of input.importedState.preferences) target(preference.sourceSessionId).push({
-    entityType: 'preference', legacyId: preference.id, userId: preference.userId,
-    key: preference.key, value: preference.value, confidence: preference.confidence,
-    sourceSessionId: preference.sourceSessionId,
-  });
-  for (const checkpoint of input.importedState.checkpoints) target(checkpoint.sessionId).push({
-    entityType: 'checkpoint', legacyId: `${checkpoint.sessionId}:${checkpoint.sequence}`,
-    sessionId: checkpoint.sessionId, sequence: checkpoint.sequence, summary: checkpoint.summary,
-    createdAt: checkpoint.createdAt,
-  });
-  for (const subagent of input.importedState.subagents) target(subagent.parentSessionId).push({
-    entityType: 'subagent', legacyId: subagent.id, parentSessionId: subagent.parentSessionId,
-    childSessionId: subagent.childSessionId, status: subagent.status, depth: subagent.depth,
-  });
+  for (const run of input.importedState.runs) {
+    if (!('phase' in run)) throw new Error('Legacy Run was not normalized.');
+    target(run.sessionId).push({
+      entityType: 'run', legacyId: run.runId,
+      record: structuredClone(run), sourceStatus: run.status,
+      legacyPlan: input.importedState.plan,
+    });
+  }
+  for (const preference of input.importedState.preferences) {
+    if (preference.createdAt === undefined || preference.updatedAt === undefined) {
+      throw new Error('Legacy preference was not normalized.');
+    }
+    const record: AgentUserPreference = {
+      id: preference.id, userId: preference.userId, key: preference.key,
+      value: preference.value, confidence: preference.confidence,
+      ...(preference.sourceSessionId === null ? {} : { sourceSessionId: preference.sourceSessionId }),
+      ...(preference.evidence === undefined ? {} : { evidence: preference.evidence }),
+      createdAt: preference.createdAt, updatedAt: preference.updatedAt,
+    };
+    target(preference.sourceSessionId).push({
+      entityType: 'preference', legacyId: preference.id, record: structuredClone(record),
+    });
+  }
+  for (const checkpoint of input.importedState.checkpoints) {
+    if (checkpoint.record === undefined) throw new Error('Legacy Checkpoint was not normalized.');
+    target(checkpoint.sessionId).push({
+      entityType: 'checkpoint', legacyId: `${checkpoint.sessionId}:${checkpoint.sequence}`,
+      sessionId: checkpoint.sessionId, record: structuredClone(checkpoint.record),
+    });
+  }
+  for (const subagent of input.importedState.subagents) {
+    if (!('task' in subagent)) throw new Error('Legacy subagent was not normalized.');
+    target(subagent.parentSessionId).push({
+      entityType: 'subagent', legacyId: subagent.id, record: structuredClone(subagent),
+    });
+  }
   for (const [index, diagnostic] of input.importedState.diagnostics.entries()) {
     target(firstSessionId).push({
       entityType: 'diagnostic', legacyId: `diagnostic:${index}:${diagnostic.code}`,
@@ -1577,73 +2040,11 @@ function parseLegacyToolCalls(value: string): NonNullable<Extract<
   });
 }
 
-function legacyMessageFact(
-  sessionId: string,
-  message: AgentMessage & { messageIndex: number },
-): AgentEventPayloadMap['legacy.imported'] {
-  const base = {
-    entityType: 'message' as const,
-    legacyId: `${sessionId}:${message.messageIndex}`,
-    messageIndex: message.messageIndex,
-    content: message.content,
-    createdAt: message.createdAt,
-  };
-  if (message.role === 'assistant') {
-    return {
-      ...base,
-      role: message.role,
-      ...(message.toolCalls === undefined ? {} : { toolCalls: portableLegacyToolCalls(message.toolCalls) }),
-    };
-  }
-  if (message.role === 'tool') {
-    return {
-      ...base,
-      role: message.role,
-      toolCallId: message.toolCallId,
-      toolName: message.toolName,
-    };
-  }
-  return { ...base, role: message.role };
-}
-
-function portableLegacyToolCalls(
-  toolCalls: NonNullable<Extract<AgentMessage, { role: 'assistant' }>['toolCalls']>,
-): LegacyImportedToolCall[] {
-  try {
-    assertPortableValue(toolCalls);
-  } catch (error) {
-    throw new StateMigrationError(
-      'MIGRATION_VALIDATION_FAILED',
-      `Legacy assistant toolCalls are not portable: ${errorMessage(error)}`,
-    );
-  }
-  return structuredClone(toolCalls) as LegacyImportedToolCall[];
-}
-
-function legacyMessageFromFact(
-  payload: Extract<AgentEventPayloadMap['legacy.imported'], { entityType: 'message' }>,
-): AgentMessage & { messageIndex: number } {
-  const base = {
-    messageIndex: payload.messageIndex,
-    content: payload.content,
-    createdAt: payload.createdAt,
-  };
-  if (payload.role === 'assistant') {
-    return {
-      ...base,
-      role: payload.role,
-      ...(payload.toolCalls === undefined ? {} : { toolCalls: payload.toolCalls }),
-    };
-  }
-  if (payload.role === 'tool') {
-    return {
-      ...base,
-      role: payload.role,
-      toolCallId: payload.toolCallId,
-      toolName: payload.toolName,
-    };
-  }
-  return { ...base, role: payload.role };
+function legacyMessageRecord(
+  message: AgentMessage & { messageIndex: number; sourceRunId?: string },
+): AgentMessage {
+  const { messageIndex: _messageIndex, sourceRunId: _sourceRunId, ...record } = message;
+  return structuredClone(record);
 }
 
 function emptyImportedLegacyState(): ImportedLegacyState {
@@ -1657,47 +2058,204 @@ function applyLegacyImport(
   payload: AgentEventPayloadMap['legacy.imported'],
 ): void {
   switch (payload.entityType) {
-    case 'session':
+    case 'session': {
+      const record = parsePortableLegacySession(payload.record.session);
       state.sessions.push({
-        id: payload.legacyId, projectKey: payload.projectKey, projectRoot: payload.projectRoot,
-        title: payload.title, userId: payload.userId, mode: payload.mode, messages: [],
+        id: payload.legacyId,
+        projectKey: payload.projectKey,
+        projectRoot: payload.projectRoot,
+        title: record.title,
+        userId: record.userId ?? null,
+        mode: record.mode,
+        messages: [],
+        record,
+        archived: payload.record.archived,
+        createdAt: payload.record.createdAt,
+        updatedAt: payload.record.updatedAt,
+        lastMessageAt: payload.record.lastMessageAt,
       });
       return;
+    }
     case 'message': {
       const sessionId = payload.legacyId.slice(0, payload.legacyId.lastIndexOf(':'));
-      state.sessions.find(({ id }) => id === sessionId)?.messages.push(legacyMessageFromFact(payload));
+      const session = state.sessions.find(({ id }) => id === sessionId);
+      const record = parsePortableLegacyMessage(payload.record);
+      session?.messages.push({
+        ...record,
+        messageIndex: payload.messageIndex,
+        sourceRunId: payload.sourceRunId,
+      });
+      session?.record?.messages.push(structuredClone(record));
       return;
     }
     case 'run':
-      state.runs.push({
-        runId: payload.legacyId, sessionId: payload.sessionId, status: payload.status,
-        plan: payload.plan, createdAt: payload.createdAt, updatedAt: payload.updatedAt,
-      });
+      state.runs.push(parseLegacyRunRecord(canonicalJson(payload.record)));
+      state.plan ??= payload.legacyPlan;
       return;
-    case 'preference':
+    case 'preference': {
+      const record = parsePortableLegacyPreference(payload.record);
       state.preferences.push({
-        id: payload.legacyId, userId: payload.userId, key: payload.key, value: payload.value,
-        confidence: payload.confidence, sourceSessionId: payload.sourceSessionId,
+        ...record,
+        sourceSessionId: record.sourceSessionId ?? null,
       });
       return;
-    case 'checkpoint':
+    }
+    case 'checkpoint': {
+      const record = parsePortableLegacyCheckpoint(payload.record);
       state.checkpoints.push({
-        sessionId: payload.sessionId, sequence: payload.sequence, summary: payload.summary,
-        createdAt: payload.createdAt,
+        sessionId: payload.sessionId,
+        sequence: record.sequence,
+        summary: record.summary,
+        createdAt: record.createdAt,
+        record,
       });
       return;
+    }
     case 'subagent':
-      state.subagents.push({
-        id: payload.legacyId, parentSessionId: payload.parentSessionId,
-        childSessionId: payload.childSessionId, status: payload.status, depth: payload.depth,
-      });
+      state.subagents.push(parsePortableLegacySubagent(payload.record));
       return;
     case 'diagnostic':
       state.diagnostics.push({ code: payload.code, evidence: payload.evidence });
       return;
     case 'archive':
       return;
+    default:
+      return assertNever(payload);
   }
+}
+
+function firstLegacyPlan(runs: ImportedLegacyState['runs']): PortableValue | null {
+  const run = runs.find((candidate) => 'plan' in candidate && candidate.plan !== null);
+  return run !== undefined && 'plan' in run ? run.plan : null;
+}
+
+function parsePortableLegacySession(value: AgentSession): AgentSession {
+  return parseLegacySessionRecord(canonicalJson(value), []);
+}
+
+function parsePortableLegacyMessage(value: AgentMessage): AgentMessage {
+  const record = requireLegacyRecord(value, 'Legacy Message record');
+  const role = requireLegacyEnum(record.role, ['user', 'assistant', 'tool', 'system'], 'Message role');
+  const content = typeof record.content === 'string'
+    ? record.content
+    : (() => { throw new TypeError('Legacy Message content must be a string.'); })();
+  const createdAt = requireLegacyIso(record.createdAt, 'Message createdAt');
+  if (role === 'assistant') {
+    assertLegacyExactKeys(record, ['role', 'content', 'toolCalls', 'createdAt'], 'Assistant Message');
+    return {
+      role,
+      content,
+      ...(record.toolCalls === undefined
+        ? {}
+        : { toolCalls: parseLegacyToolCalls(canonicalJson(record.toolCalls)) }),
+      createdAt,
+    };
+  }
+  if (role === 'tool') {
+    assertLegacyExactKeys(
+      record, ['role', 'toolCallId', 'toolName', 'content', 'createdAt'], 'Tool Message',
+    );
+    return {
+      role,
+      toolCallId: requireLegacyText(record.toolCallId, 'Tool Message toolCallId'),
+      toolName: requireLegacyText(record.toolName, 'Tool Message toolName'),
+      content,
+      createdAt,
+    };
+  }
+  assertLegacyExactKeys(record, ['role', 'content', 'createdAt'], 'Legacy Message');
+  return { role, content, createdAt } as AgentMessage;
+}
+
+function parsePortableLegacyPreference(value: AgentUserPreference): AgentUserPreference {
+  const record = requireLegacyRecord(value, 'Legacy preference record');
+  assertLegacyExactKeys(record, [
+    'id', 'userId', 'key', 'value', 'confidence', 'sourceSessionId', 'evidence',
+    'createdAt', 'updatedAt',
+  ], 'Legacy preference record');
+  return {
+    id: requireLegacyText(record.id, 'Preference id'),
+    userId: requireLegacyText(record.userId, 'Preference userId'),
+    key: requireLegacyText(record.key, 'Preference key'),
+    value: requireLegacyText(record.value, 'Preference value'),
+    confidence: requireLegacyFinite(record.confidence, 'Preference confidence'),
+    ...(record.sourceSessionId === undefined
+      ? {}
+      : { sourceSessionId: requireLegacyText(record.sourceSessionId, 'Preference sourceSessionId') }),
+    ...(record.evidence === undefined
+      ? {}
+      : { evidence: requireLegacyText(record.evidence, 'Preference evidence') }),
+    createdAt: requireLegacyIso(record.createdAt, 'Preference createdAt'),
+    updatedAt: requireLegacyIso(record.updatedAt, 'Preference updatedAt'),
+  };
+}
+
+function parsePortableLegacyCheckpoint(value: AgentContextCheckpoint): AgentContextCheckpoint {
+  const record = requireLegacyRecord(value, 'Legacy Checkpoint record');
+  assertLegacyExactKeys(record, [
+    'version', 'sequence', 'trigger', 'method', 'summary', 'coveredConversationMessageCount',
+    'sourceTokenEstimate', 'summaryTokenEstimate', 'modelContextTokens', 'createdAt', 'focus',
+  ], 'Legacy Checkpoint record');
+  const version = requireLegacyInteger(record.version, 'Checkpoint version');
+  if (version !== 1) throw new TypeError('Legacy Checkpoint version is unsupported.');
+  const modelContextTokens = record.modelContextTokens === null
+    ? null
+    : requireLegacyInteger(record.modelContextTokens, 'Checkpoint modelContextTokens');
+  return {
+    version: 1,
+    sequence: requireLegacyInteger(record.sequence, 'Checkpoint sequence'),
+    trigger: requireLegacyEnum(record.trigger, ['auto', 'manual'], 'Checkpoint trigger') as
+      AgentContextCheckpoint['trigger'],
+    method: requireLegacyEnum(
+      record.method, ['model', 'deterministic-fallback'], 'Checkpoint method',
+    ) as AgentContextCheckpoint['method'],
+    summary: requireLegacyText(record.summary, 'Checkpoint summary'),
+    coveredConversationMessageCount: requireLegacyInteger(
+      record.coveredConversationMessageCount, 'Checkpoint coveredConversationMessageCount',
+    ),
+    sourceTokenEstimate: requireLegacyInteger(record.sourceTokenEstimate, 'Checkpoint sourceTokenEstimate'),
+    summaryTokenEstimate: requireLegacyInteger(record.summaryTokenEstimate, 'Checkpoint summaryTokenEstimate'),
+    modelContextTokens,
+    createdAt: requireLegacyIso(record.createdAt, 'Checkpoint createdAt'),
+    ...(record.focus === undefined ? {} : { focus: requireLegacyText(record.focus, 'Checkpoint focus') }),
+  };
+}
+
+function parsePortableLegacySubagent(value: AgentSubagentRecord): AgentSubagentRecord {
+  const record = requireLegacyRecord(value, 'Legacy subagent record');
+  assertLegacyExactKeys(record, [
+    'id', 'parentSessionId', 'childSessionId', 'task', 'contextStrategy', 'status', 'depth',
+    'summary', 'artifactReferences', 'errorMessage', 'createdAt', 'updatedAt',
+  ], 'Legacy subagent record');
+  const artifactReferences = record.artifactReferences;
+  if (artifactReferences !== undefined && (!Array.isArray(artifactReferences) ||
+    artifactReferences.some((reference) => typeof reference !== 'string'))) {
+    throw new TypeError('Legacy subagent artifactReferences are invalid.');
+  }
+  return {
+    id: requireLegacyText(record.id, 'Subagent id'),
+    parentSessionId: requireLegacyText(record.parentSessionId, 'Subagent parentSessionId'),
+    ...(record.childSessionId === undefined
+      ? {}
+      : { childSessionId: requireLegacyText(record.childSessionId, 'Subagent childSessionId') }),
+    task: requireLegacyText(record.task, 'Subagent task'),
+    contextStrategy: requireLegacyEnum(record.contextStrategy, ['fresh', 'fork'], 'Subagent contextStrategy') as
+      AgentSubagentRecord['contextStrategy'],
+    status: requireLegacyEnum(record.status, ['running', 'completed', 'failed', 'cancelled'], 'Subagent status') as
+      AgentSubagentRecord['status'],
+    depth: requireLegacyInteger(record.depth, 'Subagent depth'),
+    ...(record.summary === undefined ? {} : { summary: requireLegacyText(record.summary, 'Subagent summary') }),
+    ...(artifactReferences === undefined ? {} : { artifactReferences: [...artifactReferences] as string[] }),
+    ...(record.errorMessage === undefined
+      ? {}
+      : { errorMessage: requireLegacyText(record.errorMessage, 'Subagent errorMessage') }),
+    createdAt: requireLegacyIso(record.createdAt, 'Subagent createdAt'),
+    updatedAt: requireLegacyIso(record.updatedAt, 'Subagent updatedAt'),
+  };
+}
+
+function assertNever(value: never): never {
+  throw new TypeError(`Unhandled legacy import variant: ${String(value)}`);
 }
 
 async function assertLiveLegacyStillMatches(
@@ -1707,6 +2265,7 @@ async function assertLiveLegacyStillMatches(
   if (!(await pathExists(intent.sourcePath))) return;
   const liveState = readLegacyState(intent.sourcePath);
   bindFallbackProjectIdentity(liveState, intent.sourceDigest);
+  normalizeLegacyContractState(liveState);
   const currentManifest = await createSourceManifest(projectDir, intent.sourceSnapshotPath);
   const expectedSides = intent.manifest.filter(({ relativePath }) => relativePath !== 'state.source.db');
   const currentSides = currentManifest.filter(({ relativePath }) => relativePath !== 'state.source.db');

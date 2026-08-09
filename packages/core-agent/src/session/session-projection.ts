@@ -1,4 +1,4 @@
-import type { PortableValue } from '@dbagent/shared';
+import { assertPortableValue, type PortableValue } from '@dbagent/shared';
 import type { AgentMessage } from '../types.js';
 import type { AgentEvent, AgentEventType } from '../events/agent-event.js';
 import {
@@ -47,6 +47,15 @@ export type SessionProjectionRun = {
   createdAt: string;
   updatedAt: string;
   terminal?: boolean;
+  legacyRecord?: import('../types.js').AgentRunRecord;
+};
+
+export type SessionProjectionLegacySession = {
+  session: import('../types.js').AgentSession;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
 };
 
 export type SessionProjection = {
@@ -56,6 +65,7 @@ export type SessionProjection = {
   title?: string;
   userId?: string | null;
   mode?: string;
+  legacySession?: SessionProjectionLegacySession;
   messages: SessionProjectionMessage[];
   artifacts: SessionProjectionArtifact[];
   runs: SessionProjectionRun[];
@@ -401,7 +411,12 @@ export class SessionProjectionAccumulator {
   readonly #artifacts = new Map<string, SessionProjectionArtifact>();
   readonly #runs = new Map<string, SessionProjectionRun>();
   readonly #hiddenRuns = new Set<string>();
-  #legacyMetadata: { title: string; userId: string | null; mode: string } | undefined;
+  #legacyMetadata: {
+    title: string;
+    userId: string | null;
+    mode: string;
+    legacySession?: SessionProjectionLegacySession;
+  } | undefined;
   #cursor: number;
 
   constructor(options: ProjectionOptions, trustedJournal = false) {
@@ -467,13 +482,21 @@ export class SessionProjectionAccumulator {
       const content = committedText(event);
       if (content.length > 0) this.#messages.push(sessionMessage(event, 'assistant', content));
     } else if (event.type === 'legacy.imported' && event.payload.entityType === 'session') {
+      const imported = structuredClone(event.payload.record);
       this.#legacyMetadata = {
-        title: event.payload.title,
-        userId: event.payload.userId,
-        mode: event.payload.mode,
+        title: imported.session.title,
+        userId: imported.session.userId ?? null,
+        mode: imported.session.mode,
+        legacySession: imported,
       };
     } else if (event.type === 'legacy.imported' && event.payload.entityType === 'message') {
-      this.#messages.push(legacySessionMessage(event));
+      const message = legacySessionMessage(event);
+      this.#messages.push(message);
+      if (this.#legacyMetadata?.legacySession !== undefined) {
+        this.#legacyMetadata.legacySession.session.messages.push(
+          structuredClone(event.payload.record),
+        );
+      }
     }
     if (event.type === 'artifact.created') {
       this.#artifacts.set(event.payload.artifactId, {
@@ -494,10 +517,6 @@ export class SessionProjectionAccumulator {
       }
     }
     if (event.type === 'run.created') {
-      if (event.payload.clientRequestId.startsWith('legacy-import:')) {
-        this.#hiddenRuns.add(event.runId);
-        return;
-      }
       this.#runs.set(event.runId, {
         runId: event.runId,
         clientRequestId: event.payload.clientRequestId,
@@ -506,14 +525,22 @@ export class SessionProjectionAccumulator {
         updatedAt: event.occurredAt,
       });
     } else if (event.type === 'legacy.imported' && event.payload.entityType === 'run') {
-      this.#runs.set(event.payload.legacyId, {
-        runId: event.payload.legacyId,
-        clientRequestId: `legacy:${event.payload.legacyId}`,
-        state: event.payload.status === 'completed' ? 'Completed' : 'Interrupted',
-        createdAt: event.payload.createdAt,
-        updatedAt: event.payload.updatedAt,
+      this.#hiddenRuns.add(event.runId);
+      this.#runs.delete(event.runId);
+      const record = structuredClone(event.payload.record);
+      this.#runs.set(record.runId, {
+        runId: record.runId,
+        clientRequestId: `legacy:${record.runId}`,
+        state: legacyRunRecordState(record.status),
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
         terminal: true,
+        legacyRecord: record,
       });
+      return;
+    } else if (event.type === 'legacy.imported') {
+      this.#hiddenRuns.add(event.runId);
+      this.#runs.delete(event.runId);
     } else if (!this.#hiddenRuns.has(event.runId)) {
       const state = projectedRunState(event.type);
       if (state !== undefined) {
@@ -725,9 +752,9 @@ function scopeOf(event: AgentEvent): Scope {
   };
 }
 
-function invocationIdFromPayload(payload: PortableValue): string | undefined {
+function invocationIdFromPayload(payload: unknown): string | undefined {
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
-  const invocationId = (payload as Record<string, PortableValue>).invocationId;
+  const invocationId = 'invocationId' in payload ? payload.invocationId : undefined;
   return typeof invocationId === 'string' ? invocationId : undefined;
 }
 
@@ -758,28 +785,22 @@ function legacySessionMessage(
   if (event.payload.entityType !== 'message') {
     throw new ProjectionError('SCHEMA_INVALID', 'Expected a legacy message fact.');
   }
-  const base = {
+  return {
+    ...structuredClone(event.payload.record),
     sourceSequence: event.sequence,
-    content: event.payload.content,
-    createdAt: event.payload.createdAt,
-    runId: event.runId,
+    runId: event.payload.sourceRunId,
   };
-  if (event.payload.role === 'assistant') {
-    return {
-      ...base,
-      role: event.payload.role,
-      ...(event.payload.toolCalls === undefined ? {} : { toolCalls: event.payload.toolCalls }),
-    };
+}
+
+function legacyRunRecordState(status: import('../types.js').AgentRunRecordStatus): string {
+  switch (status) {
+    case 'done': return 'Completed';
+    case 'aborted': return 'Cancelled';
+    case 'failed': return 'Failed';
+    case 'running':
+    case 'interrupted': return 'Interrupted';
+    case 'max_iterations_reached': return 'Failed';
   }
-  if (event.payload.role === 'tool') {
-    return {
-      ...base,
-      role: event.payload.role,
-      toolCallId: event.payload.toolCallId,
-      toolName: event.payload.toolName,
-    };
-  }
-  return { ...base, role: event.payload.role };
 }
 
 function toAuditEvent(event: AgentEvent): AuditProjectionEvent {
@@ -791,12 +812,17 @@ function toAuditEvent(event: AgentEvent): AuditProjectionEvent {
     runId: event.runId,
     type: event.type,
     occurredAt: event.occurredAt,
-    payload: event.payload,
+    payload: portableProjectionPayload(event.payload),
     ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
     ...(event.attemptId === undefined ? {} : { attemptId: event.attemptId }),
     ...(event.invocationId === undefined ? {} : { invocationId: event.invocationId }),
     ...(event.parentEventId === undefined ? {} : { parentEventId: event.parentEventId }),
   };
+}
+
+function portableProjectionPayload(value: unknown): PortableValue {
+  assertPortableValue(value);
+  return value;
 }
 
 function wouldOverflowSessionPage(
