@@ -6,7 +6,6 @@ import {
   LlmConnectionManager,
   HttpJsonTransport,
   ModelExecutionGateway,
-  OpenAIChatCodec,
   createModelSession,
   estimateCanonicalRequestTokens,
   type CanonicalModelRequest,
@@ -17,6 +16,7 @@ import {
   type LlmProvider,
   type LlmProviderPlugin,
 } from '../src/index.js';
+import { openAIChatCodec } from '../src/protocol/codecs/openai-chat.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -41,7 +41,7 @@ describe('ModelSession', () => {
     const session = createModelSession({
       route,
       generation,
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client,
     });
 
@@ -76,7 +76,7 @@ describe('ModelSession', () => {
       createModelSession({
         route: routeSnapshot({ protocol: 'openai-responses' }),
         generation: {},
-        codec: new OpenAIChatCodec(),
+        codec: openAIChatCodec,
         client: new RecordingClient({ kind: 'json', response: {} }),
       }),
     ).toThrow(/protocol/i);

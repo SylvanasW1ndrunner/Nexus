@@ -2,9 +2,9 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   ModelProtocolError,
-  openAIChatCodec,
   type AttemptDecodeContext,
 } from '../../src/types.js';
+import { openAIChatCodec } from '../../src/protocol/codecs/openai-chat.js';
 
 type OpenAIChatFixture = {
   id: string;

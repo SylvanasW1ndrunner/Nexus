@@ -1,15 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import * as core from '../src/index.js';
 import {
-  MODEL_PROTOCOL_CODEC_REGISTRY,
+  MODEL_PROTOCOL_CODEC_REVISIONS,
   ModelExecutionGateway,
-  OpenAIChatCodec,
   createModelSession,
   describeModelSession,
-  describeModelSessionBundle,
-  openAIChatCodec,
-  rehydrateModelSession,
-  rehydrateModelSessionBundle,
   resolveModelProtocolCodec,
   type CanonicalModelRequest,
   type ModelClient,
@@ -17,7 +12,11 @@ import {
   type ModelProtocolCodec,
   type ModelRouteSnapshotInput,
 } from '../src/index.js';
-import { LegacyProviderCodec } from '../src/legacy-model-compatibility.js';
+import { legacyProviderCodec } from '../src/legacy-model-compatibility.js';
+import {
+  OpenAIChatCodec,
+  openAIChatCodec,
+} from '../src/protocol/codecs/openai-chat.js';
 
 describe('Task 2 round-two binding and replay invariants', () => {
   it('does not publish request replay correlations as a current response Envelope', async () => {
@@ -36,7 +35,7 @@ describe('Task 2 round-two binding and replay invariants', () => {
     const session = createModelSession({
       route: route(),
       generation: {},
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client,
       replay: {
         mode: 'same-connection',
@@ -74,8 +73,8 @@ describe('Task 2 round-two binding and replay invariants', () => {
 
   it('publishes exact stable revisions on the four registered canonical codecs', () => {
     expect(openAIChatCodec.revision).toBe('openai-chat@1');
-    expect(MODEL_PROTOCOL_CODEC_REGISTRY.get('openai-chat@1')).toBe(openAIChatCodec);
-    expect(MODEL_PROTOCOL_CODEC_REGISTRY.size).toBe(4);
+    expect(Object.keys(MODEL_PROTOCOL_CODEC_REVISIONS)).toHaveLength(4);
+    expect(resolveModelProtocolCodec('openai-chat', 'openai-chat@1')).toBe(openAIChatCodec);
   });
 
   it('rejects a counterfeit codec object even when protocol and revision strings match', () => {
@@ -93,7 +92,7 @@ describe('Task 2 round-two binding and replay invariants', () => {
       generation: {},
       codec: counterfeit,
       client: new StaticClient(chatResponse('unused')),
-    })).toThrow(/registered codec/i);
+    })).toThrow(/exact registered singleton/i);
   });
 
   it('fails unknown protocols with a typed codec-unavailable error', () => {
@@ -107,11 +106,10 @@ describe('Task 2 round-two binding and replay invariants', () => {
   });
 
   it('keeps the normalized legacy edge protocol out of replay and canonical fallback', () => {
-    const codec = new LegacyProviderCodec();
     expect(() => createModelSession({
-      route: route(),
+      route: route({ protocol: 'legacy-normalized', codecRevision: 'legacy-normalized@1' }),
       generation: {},
-      codec,
+      codec: legacyProviderCodec,
       client: new StaticClient(chatResponse('unused')),
       replay: { mode: 'compatible-protocol', envelopes: [] },
     })).toThrow(/legacy-normalized|replay/i);
@@ -124,7 +122,7 @@ describe('Task 2 round-two binding and replay invariants', () => {
         codecRevision: 'legacy-normalized@1',
       }),
       generation: {},
-      codec: new LegacyProviderCodec(),
+      codec: legacyProviderCodec,
       client: new StaticClient(chatResponse('should not execute')),
     });
     await expect(new ModelExecutionGateway().executeAttempt(session, {
@@ -163,37 +161,25 @@ describe('Task 2 round-two binding and replay invariants', () => {
     expect(fallbackCalls).toBe(0);
   });
 
-  it('rehydrates only descriptors whose route, session, bundle and codec digests all match', () => {
+  it('does not persist a Session whose client was not bound by trusted connection preparation', () => {
     const original = session(new StaticClient(chatResponse('original')));
-    const descriptor = describeModelSession(original);
-    const rebound = rehydrateModelSession({
-      descriptor,
-      expectedRouteDigest: original.route.metadata.digest,
-      expectedSessionDigest: original.bindingDigest,
-      expectedCodecRevision: 'openai-chat@1',
-      client: new StaticClient(chatResponse('rebound')),
-    });
-    expect(rebound).toMatchObject({ bindingDigest: original.bindingDigest });
-    expect(() => rehydrateModelSession({
-      descriptor: { ...descriptor, bindingDigest: 'sha256:tampered' },
-      expectedRouteDigest: original.route.metadata.digest,
-      expectedSessionDigest: original.bindingDigest,
-      expectedCodecRevision: 'openai-chat@1',
-      client: new StaticClient(chatResponse('bad')),
-    })).toThrow(/digest/i);
+    expectErrorCode(
+      () => describeModelSession(original),
+      'MODEL_CLIENT_BINDING_REQUIRED',
+    );
   });
 
-  it('rehydrates a persisted bundle only after every binding and the bundle digest are verified', () => {
+  it('does not persist a bundle containing unbound private clients', () => {
     const primary = createModelSession({
       route: route({ allowedFallbackRouteIds: ['route-2'] }),
       generation: {},
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client: new StaticClient(chatResponse('primary')),
     });
     const fallback = createModelSession({
       route: route({ routeId: 'route-2' }),
       generation: {},
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client: new StaticClient(chatResponse('fallback')),
       replay: { mode: 'compatible-protocol', envelopes: [] },
     });
@@ -202,28 +188,10 @@ describe('Task 2 round-two binding and replay invariants', () => {
       fallbacks: [fallback],
       policy: { allowCrossConnection: false, allowCrossModel: false },
     });
-    const descriptor = describeModelSessionBundle(bundle);
-    const bindings = {
-      'route-1': {
-        expectedRouteDigest: primary.route.metadata.digest,
-        expectedSessionDigest: primary.bindingDigest,
-        expectedCodecRevision: 'openai-chat@1',
-        client: new StaticClient(chatResponse('primary-rebound')),
-      },
-      'route-2': {
-        expectedRouteDigest: fallback.route.metadata.digest,
-        expectedSessionDigest: fallback.bindingDigest,
-        expectedCodecRevision: 'openai-chat@1',
-        client: new StaticClient(chatResponse('fallback-rebound')),
-      },
-    };
-    expect(rehydrateModelSessionBundle({ descriptor, expectedBundleDigest: bundle.bindingDigest, bindings }))
-      .toMatchObject({ bindingDigest: bundle.bindingDigest });
-    expect(() => rehydrateModelSessionBundle({
-      descriptor: { ...descriptor, bindingDigest: 'sha256:tampered' },
-      expectedBundleDigest: bundle.bindingDigest,
-      bindings,
-    })).toThrow(/digest/i);
+    expectErrorCode(
+      () => core.describeModelSessionBundle(bundle),
+      'MODEL_CLIENT_BINDING_REQUIRED',
+    );
   });
 
   it('rejects a structurally forged bare Session that was not factory-bound or rehydrated', async () => {
@@ -342,11 +310,22 @@ class StaticClient implements ModelClient {
   }
 }
 
+function expectErrorCode(operation: () => unknown, code: string): void {
+  let thrown: unknown;
+  try {
+    operation();
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error & { readonly code?: unknown }).code).toBe(code);
+}
+
 function session(client: ModelClient) {
   return createModelSession({
     route: route(),
     generation: {},
-    codec: new OpenAIChatCodec(),
+    codec: openAIChatCodec,
     client,
   });
 }

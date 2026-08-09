@@ -7,8 +7,6 @@ import * as core from '../src/index.js';
 import {
   HttpJsonTransport,
   ModelExecutionGateway,
-  OpenAIChatCodec,
-  OpenAIResponsesCodec,
   SseTransport,
   createBuiltinLlmProviderPlugins,
   createModelSession,
@@ -21,6 +19,8 @@ import {
   type ModelRouteSnapshotInput,
   type LlmProviderPlugin,
 } from '../src/index.js';
+import { openAIChatCodec } from '../src/protocol/codecs/openai-chat.js';
+import { openAIResponsesCodec } from '../src/protocol/codecs/openai-responses.js';
 
 const cleanupDirectories: string[] = [];
 
@@ -40,7 +40,7 @@ describe('Task 2 independent review contracts', () => {
     const input = {
       route: route(),
       generation: {},
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client,
       replay: { mode: 'same-connection' as const, envelopes },
     };
@@ -62,7 +62,7 @@ describe('Task 2 independent review contracts', () => {
         allowedFallbackRouteIds: ['chat'],
       }),
       generation: {},
-      codec: new OpenAIResponsesCodec(),
+      codec: openAIResponsesCodec,
       client: new RejectingClient(),
       replay: { mode: 'compatible-protocol', envelopes: [opaqueEnvelope()] },
     });
@@ -70,7 +70,7 @@ describe('Task 2 independent review contracts', () => {
     const fallback = createModelSession({
       route: route({ routeId: 'chat', protocol: 'openai-chat' }),
       generation: {},
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client: fallbackClient,
       replay: { mode: 'compatible-protocol', envelopes: [opaqueEnvelope()] },
     });
@@ -104,7 +104,7 @@ describe('Task 2 independent review contracts', () => {
     const otherModel = createModelSession({
       route: route({ routeId: 'other-model-route', modelId: 'model-2' }),
       generation: {},
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client: new RecordingClient(chatResponse('fallback')),
       replay: { mode: 'compatible-protocol', envelopes: [] },
     });
@@ -166,19 +166,19 @@ describe('Task 2 independent review contracts', () => {
     expect(() => createModelSession({
       route: route({ maxOutputTokens: 64 }),
       generation: { maxOutputTokens: 65 },
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client: new RecordingClient(chatResponse('bad')),
     })).toThrow(/maxOutputTokens/i);
     expect(() => createModelSession({
       route: route(),
       generation: { seed: 7 },
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client: new RecordingClient(chatResponse('bad')),
     })).toThrow(/seed/i);
     expect(() => createModelSession({
       route: route(),
       generation: { reasoningEffort: 'high' },
-      codec: new OpenAIChatCodec(),
+      codec: openAIChatCodec,
       client: new RecordingClient(chatResponse('bad')),
     })).toThrow(/reasoningEffort/i);
   });
@@ -330,7 +330,7 @@ function session(client: ModelClient, overrides: Partial<ModelRouteSnapshotInput
   return createModelSession({
     route: route(overrides),
     generation: {},
-    codec: new OpenAIChatCodec(),
+    codec: openAIChatCodec,
     client,
   });
 }

@@ -27,6 +27,7 @@ import { anthropicMessagesCodec } from './protocol/codecs/anthropic-messages.js'
 import { ollamaChatCodec } from './protocol/codecs/ollama-chat.js';
 import type { ModelProtocolCodec } from './protocol/codec.js';
 import { ModelCodecRegistryError } from './protocol/codec-registry.js';
+import { bindPreparedModelSessionClient } from './model-client-binding.js';
 import {
   LlmGateway,
   ModelExecutionGateway,
@@ -423,7 +424,11 @@ export class LlmConnectionManager {
         : candidateCodec.protocol === 'legacy-normalized'
           ? { mode: 'new' as const }
           : options.replay;
-      return createModelSession({
+      const client = options.clients?.[candidateRouteId] ??
+        (!fallback ? options.client : undefined) ??
+        defaultModelClient(runtime.connection, candidate, this.fetchImpl) ??
+        new LegacyProviderModelClient(provider, false);
+      const session = createModelSession({
         route: {
           routeId: candidateRouteId,
           connectionId: selection.connectionId,
@@ -459,12 +464,14 @@ export class LlmConnectionManager {
         },
         generation: this.normalizeParameters(candidate, options.generation ?? {}),
         codec: candidateCodec,
-        client: options.clients?.[candidateRouteId] ??
-          (!fallback ? options.client : undefined) ??
-          defaultModelClient(runtime.connection, candidate, this.fetchImpl) ??
-          new LegacyProviderModelClient(provider, false),
+        client,
         ...(replay === undefined ? {} : { replay }),
       });
+      bindPreparedModelSessionClient(session, {
+        connectionResolutionRevision: candidate.revision,
+        connectionConfigurationDigest: runtime.connection.credentialScope,
+      });
+      return session;
     };
     const primarySession = createBoundSession(resolution, false);
     const fallbackSessions = runtime.resolutions
@@ -553,6 +560,19 @@ export class LlmConnectionManager {
         ...(input.request.signal === undefined ? {} : { signal: input.request.signal }),
       });
     } catch (error) {
+      if (error instanceof ModelCodecRegistryError) {
+        throw annotateRouteError(
+          new LlmProviderError(
+            'LLM_MODEL_BINDING_INVALID',
+            error.message,
+            false,
+            undefined,
+            { modelGatewayCode: error.code },
+          ),
+          input.selection,
+          runtime.resolutions[0]!,
+        );
+      }
       throw annotateRouteError(
         modelGatewayToLegacyError(this.classifyProviderError(runtime.resolutions[0]!, error)),
         input.selection,

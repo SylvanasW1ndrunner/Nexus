@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   ModelProtocolError,
-  openAIChatCodec,
   type CanonicalModelRequest,
   type ModelProtocolEnvelope,
 } from '../../src/types.js';
+import { openAIChatCodec } from '../../src/protocol/codecs/openai-chat.js';
 
 const origin = { connectionId: 'conn-history', model: 'm1', protocol: 'openai-chat' as const };
 

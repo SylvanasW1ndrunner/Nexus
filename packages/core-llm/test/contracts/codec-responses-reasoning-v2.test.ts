@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   ModelProtocolError,
-  openAIChatCodec,
-  openAIResponsesCodec,
   type CanonicalModelRequest,
   type ModelContentBlock,
   type ModelProtocolEnvelope,
 } from '../../src/types.js';
+import { openAIChatCodec } from '../../src/protocol/codecs/openai-chat.js';
+import { openAIResponsesCodec } from '../../src/protocol/codecs/openai-responses.js';
 
 const reasoningItem = {
   id: 'reasoning-native',

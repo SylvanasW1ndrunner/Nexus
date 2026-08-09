@@ -271,6 +271,7 @@ export type LlmErrorCode =
   | 'LLM_PROVIDER_ERROR'
   | 'LLM_CAPABILITY_UNSUPPORTED'
   | 'LLM_PARAMETER_UNSUPPORTED'
+  | 'LLM_MODEL_BINDING_INVALID'
   | 'TOOL_PROTOCOL_MISMATCH'
   | 'LLM_NO_ROUTE'
   | 'LLM_POLICY_VIOLATION'
@@ -300,7 +301,3 @@ export * from './protocol/content.js';
 export * from './protocol/codec.js';
 export * from './protocol/envelope.js';
 export * from './protocol/model-stream.js';
-export * from './protocol/codecs/openai-chat.js';
-export * from './protocol/codecs/openai-responses.js';
-export * from './protocol/codecs/anthropic-messages.js';
-export * from './protocol/codecs/ollama-chat.js';

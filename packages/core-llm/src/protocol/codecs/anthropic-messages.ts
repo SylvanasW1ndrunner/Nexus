@@ -19,7 +19,6 @@ import {
   type ModelProtocolCodec,
   type ProtocolEncodeSession,
 } from '../codec.js';
-import { bindModelProtocolCodec } from '../codec-authenticity.js';
 import type { DecodedModelContentBlock } from '../content.js';
 import type { DecodedModelStreamEvent } from '../model-stream.js';
 
@@ -40,9 +39,6 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
   readonly protocol = 'anthropic-messages' as const;
   readonly revision = 'anthropic-messages@1' as const;
 
-  constructor() {
-    bindModelProtocolCodec(this);
-  }
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
     const session = createProtocolEncodeSession(context, this.protocol, request);
@@ -352,4 +348,5 @@ function invalid(message: string): never {
   throw new ModelProtocolError('INVALID_WIRE_RESPONSE', message);
 }
 
-export const anthropicMessagesCodec = new AnthropicMessagesCodec();
+export const anthropicMessagesCodec = Object.freeze(new AnthropicMessagesCodec());
+Object.freeze(AnthropicMessagesCodec.prototype);

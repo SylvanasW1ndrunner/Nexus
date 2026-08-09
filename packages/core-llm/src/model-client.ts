@@ -8,15 +8,30 @@ import { validateLlmGenerationConfig } from './generation-config.js';
 import type { ModelEncodeContext, ModelProtocolCodec } from './protocol/codec.js';
 import type { ModelProtocol } from './protocol/content.js';
 import type { ModelProtocolEnvelope } from './protocol/envelope.js';
-import { isAuthenticModelProtocolCodec } from './protocol/codec-authenticity.js';
-import { resolveModelProtocolCodec } from './protocol/codec-registry.js';
+import {
+  resolveExactModelProtocolCodec,
+  resolveModelProtocolCodec,
+} from './protocol/codec-registry.js';
+import {
+  attachModelClientBindingCapability,
+  ModelClientBindingError,
+  modelClientBindingCapabilityForSession,
+  requireModelClientBindingPayload,
+  type ModelClientBindingCapability,
+  type ModelClientBindingMetadata,
+} from './model-client-binding.js';
 
 export {
-  MODEL_PROTOCOL_CODEC_REGISTRY,
   MODEL_PROTOCOL_CODEC_REVISIONS,
   ModelCodecRegistryError,
   resolveModelProtocolCodec,
 } from './protocol/codec-registry.js';
+export {
+  ModelClientBindingError,
+  type ModelClientBindingCapability,
+  type ModelClientBindingErrorCode,
+  type ModelClientBindingMetadata,
+} from './model-client-binding.js';
 
 export type ModelRouteMetadata = {
   source: string;
@@ -158,17 +173,12 @@ export function createModelSession(input: {
   client: ModelClient;
   replay?: ModelReplayBinding;
 }): ModelSession {
-  if (!isAuthenticModelProtocolCodec(input.codec)) {
-    throw new Error('ModelSession requires a registered codec implementation.');
-  }
   if (input.codec.protocol !== input.route.protocol) {
     throw new Error(
       `ModelSession codec protocol ${input.codec.protocol} does not match route protocol ${input.route.protocol}.`,
     );
   }
-  const codec = input.codec.protocol === 'legacy-normalized'
-    ? input.codec
-    : resolveModelProtocolCodec(input.codec.protocol, input.codec.revision);
+  const codec = resolveExactModelProtocolCodec(input.codec);
   if (
     input.route.codecRevision !== codec.revision ||
     input.codec.revision !== codec.revision
@@ -254,21 +264,59 @@ export function isAuthenticModelSession(value: unknown): value is ModelSession {
   return typeof value === 'object' && value !== null && AUTHENTIC_SESSIONS.has(value as ModelSession);
 }
 
+function requireModelClientBindingCapability(
+  session: ModelSession,
+): ModelClientBindingCapability {
+  const capability = modelClientBindingCapabilityForSession(session);
+  if (capability === undefined) {
+    throw new ModelClientBindingError(
+      'MODEL_CLIENT_BINDING_REQUIRED',
+      'The Model Session has no authenticated client binding capability.',
+    );
+  }
+  return capability;
+}
+
 export type PersistedModelSessionDescriptor = Readonly<{
   route: ModelRouteSnapshotInput;
   generation: LlmGenerationConfig;
   replay: ModelReplayBinding;
+  clientBinding: ModelClientBindingMetadata;
   bindingDigest: string;
 }>;
+
+export function getModelClientBindingCapability(
+  session: ModelSession,
+): ModelClientBindingCapability {
+  if (session.route.protocol === 'legacy-normalized') {
+    throw new ModelClientBindingError(
+      'MODEL_SESSION_NOT_PERSISTABLE',
+      'legacy-normalized Sessions cannot be persisted or rehydrated.',
+    );
+  }
+  return requireModelClientBindingCapability(session);
+}
 
 export function describeModelSession(session: ModelSession): PersistedModelSessionDescriptor {
   if (!isAuthenticModelSession(session)) {
     throw new Error('Only an authentic Model Session can be persisted.');
   }
+  if (session.route.protocol === 'legacy-normalized') {
+    throw new ModelClientBindingError(
+      'MODEL_SESSION_NOT_PERSISTABLE',
+      'legacy-normalized Sessions cannot be persisted or rehydrated.',
+    );
+  }
+  const capability = requireModelClientBindingCapability(session);
+  const payload = requireModelClientBindingPayload(capability);
   return Object.freeze({
     route: routeDescriptor(session.route),
     generation: generationDescriptor(session.generation),
     replay: freezeReplay(session.replay),
+    clientBinding: Object.freeze({
+      connectionResolutionRevision: payload.connectionResolutionRevision,
+      connectionConfigurationDigest: payload.connectionConfigurationDigest,
+    }),
     bindingDigest: session.bindingDigest,
   });
 }
@@ -278,15 +326,28 @@ export function rehydrateModelSession(input: {
   expectedRouteDigest: string;
   expectedSessionDigest: string;
   expectedCodecRevision: string;
-  client: ModelClient;
+  capability?: ModelClientBindingCapability;
 }): ModelSession {
   const { descriptor } = input;
+  const payload = requireModelClientBindingPayload(input.capability);
   if (
     descriptor.route.metadata.digest !== input.expectedRouteDigest ||
     descriptor.bindingDigest !== input.expectedSessionDigest ||
-    descriptor.route.codecRevision !== input.expectedCodecRevision
+    descriptor.route.codecRevision !== input.expectedCodecRevision ||
+    payload.routeDigest !== descriptor.route.metadata.digest ||
+    payload.connectionId !== descriptor.route.connectionId ||
+    payload.providerId !== descriptor.route.providerId ||
+    payload.modelId !== descriptor.route.modelId ||
+    payload.protocol !== descriptor.route.protocol ||
+    payload.codecRevision !== descriptor.route.codecRevision ||
+    payload.connectionResolutionRevision !== descriptor.route.metadata.revision ||
+    payload.connectionResolutionRevision !== descriptor.clientBinding.connectionResolutionRevision ||
+    payload.connectionConfigurationDigest !== descriptor.clientBinding.connectionConfigurationDigest
   ) {
-    throw new Error('Persisted Model Session digest or codec revision does not match expectations.');
+    throw new ModelClientBindingError(
+      'MODEL_CLIENT_BINDING_MISMATCH',
+      'Persisted Model Session and authenticated client binding do not match.',
+    );
   }
   const codec = resolveModelProtocolCodec(
     descriptor.route.protocol,
@@ -297,14 +358,18 @@ export function rehydrateModelSession(input: {
     generation: descriptor.generation,
     replay: descriptor.replay,
     codec,
-    client: input.client,
+    client: payload.client,
   });
   if (
     session.route.metadata.digest !== input.expectedRouteDigest ||
     session.bindingDigest !== input.expectedSessionDigest
   ) {
-    throw new Error('Persisted Model Session failed digest verification during rehydration.');
+    throw new ModelClientBindingError(
+      'MODEL_CLIENT_BINDING_MISMATCH',
+      'Persisted Model Session failed digest verification during rehydration.',
+    );
   }
+  attachModelClientBindingCapability(session, input.capability!);
   return session;
 }
 
@@ -319,7 +384,7 @@ export type ModelSessionRehydrationBinding = Readonly<{
   expectedRouteDigest: string;
   expectedSessionDigest: string;
   expectedCodecRevision: string;
-  client: ModelClient;
+  capability?: ModelClientBindingCapability;
 }>;
 
 export function describeModelSessionBundle(
@@ -347,7 +412,10 @@ export function rehydrateModelSessionBundle(input: {
   const bind = (descriptor: PersistedModelSessionDescriptor): ModelSession => {
     const binding = input.bindings[descriptor.route.routeId];
     if (binding === undefined) {
-      throw new Error(`No private client binding was supplied for route ${descriptor.route.routeId}.`);
+      throw new ModelClientBindingError(
+        'MODEL_CLIENT_BINDING_REQUIRED',
+        `No authenticated client binding capability was supplied for route ${descriptor.route.routeId}.`,
+      );
     }
     return rehydrateModelSession({ descriptor, ...binding });
   };

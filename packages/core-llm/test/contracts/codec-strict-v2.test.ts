@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
-  anthropicMessagesCodec,
   ModelProtocolError,
-  ollamaChatCodec,
-  openAIChatCodec,
-  openAIResponsesCodec,
   type DecodedModelStreamEvent,
   type ModelProtocol,
 } from '../../src/types.js';
+import { anthropicMessagesCodec } from '../../src/protocol/codecs/anthropic-messages.js';
+import { ollamaChatCodec } from '../../src/protocol/codecs/ollama-chat.js';
+import { openAIChatCodec } from '../../src/protocol/codecs/openai-chat.js';
+import { openAIResponsesCodec } from '../../src/protocol/codecs/openai-responses.js';
 
 describe('version 2 strict native protocol contract', () => {
   it.each([

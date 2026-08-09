@@ -1,11 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  anthropicMessagesCodec,
   ModelProtocolError,
-  ollamaChatCodec,
-  openAIChatCodec,
-  openAIResponsesCodec,
   type AttemptDecodeContext,
   type CanonicalModelRequest,
   type CanonicalModelProtocol,
@@ -17,6 +13,10 @@ import {
   type ModelProtocolEnvelope,
   type ModelWireIdentity,
 } from '../../src/types.js';
+import { anthropicMessagesCodec } from '../../src/protocol/codecs/anthropic-messages.js';
+import { ollamaChatCodec } from '../../src/protocol/codecs/ollama-chat.js';
+import { openAIChatCodec } from '../../src/protocol/codecs/openai-chat.js';
+import { openAIResponsesCodec } from '../../src/protocol/codecs/openai-responses.js';
 
 type CorpusCase = {
   protocol: CanonicalModelProtocol;

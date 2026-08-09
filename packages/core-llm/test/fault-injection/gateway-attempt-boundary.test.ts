@@ -3,9 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ModelClientError,
   ModelExecutionGateway,
-  OpenAIChatCodec,
   OpenAICompatibleProvider,
-  OpenAIResponsesCodec,
   createModelSession,
   createModelSessionBundle,
   type CanonicalModelRequest,
@@ -15,6 +13,8 @@ import {
   type ModelRouteSnapshotInput,
   type ModelSession,
 } from '../../src/index.js';
+import { openAIChatCodec } from '../../src/protocol/codecs/openai-chat.js';
+import { openAIResponsesCodec } from '../../src/protocol/codecs/openai-responses.js';
 
 describe('ModelExecutionGateway attempt boundary', () => {
   it('discards a partial attempt before retrying and commits only one validated attempt', async () => {
@@ -230,7 +230,7 @@ describe('ModelExecutionGateway attempt boundary', () => {
         compatibility: { mode: 'compatible-protocol', family: 'openai-tools-v1' },
       },
       generation: {},
-      codec: new OpenAIResponsesCodec(),
+      codec: openAIResponsesCodec,
       client: fallbackClient,
       replay: { mode: 'compatible-protocol', envelopes: [] },
     });
@@ -328,7 +328,7 @@ function session(
   return createModelSession({
     route: route(overrides),
     generation: {},
-    codec: new OpenAIChatCodec(),
+    codec: openAIChatCodec,
     client,
   });
 }

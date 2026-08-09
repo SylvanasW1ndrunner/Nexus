@@ -16,7 +16,7 @@ import {
   type ModelProtocolCodec,
   type ModelProtocolEncodeResult,
 } from './protocol/codec.js';
-import { bindModelProtocolCodec } from './protocol/codec-authenticity.js';
+import { installLegacyNormalizedCodec } from './protocol/codec-registry.js';
 import type { DecodedModelContentBlock } from './protocol/content.js';
 import type { ModelMessage as CanonicalModelMessage } from './protocol/content.js';
 import type { DecodedModelStreamEvent } from './protocol/model-stream.js';
@@ -60,17 +60,13 @@ export class LegacyProviderModelClient implements ModelClient {
 }
 
 /** Codec for the normalized legacy Provider surface; execution still belongs to the canonical Gateway. */
-export class LegacyProviderCodec implements ModelProtocolCodec<
+class LegacyProviderCodec implements ModelProtocolCodec<
   LlmChatRequest,
   LlmChatResponse,
   LlmChatStreamEvent
 > {
   readonly protocol = 'legacy-normalized' as const;
   readonly revision = 'legacy-normalized@1' as const;
-
-  constructor() {
-    bindModelProtocolCodec(this);
-  }
 
   encode(
     request: CanonicalModelRequest,
@@ -82,6 +78,7 @@ export class LegacyProviderCodec implements ModelProtocolCodec<
     if (context.replay.mode !== 'new') {
       throw new Error('The legacy-normalized edge does not support protocol replay.');
     }
+    assertLegacyRepresentableRequest(request);
     return {
       wireRequest: canonicalToLegacyRequest(request),
       correlations: [],
@@ -176,7 +173,9 @@ export class LegacyProviderCodec implements ModelProtocolCodec<
   }
 }
 
-export const legacyProviderCodec = new LegacyProviderCodec();
+Object.freeze(LegacyProviderCodec.prototype);
+export const legacyProviderCodec = Object.freeze(new LegacyProviderCodec());
+installLegacyNormalizedCodec(legacyProviderCodec);
 
 export function legacyRequestToCanonical(
   request: Omit<LlmChatRequest, 'model'> & { model?: string },
@@ -279,6 +278,59 @@ function canonicalToLegacyRequest(request: CanonicalModelRequest): LlmChatReques
     ...(request.maxOutputTokens === undefined ? {} : { maxTokens: request.maxOutputTokens }),
     ...(request.stop === undefined ? {} : { stop: [...request.stop] }),
   };
+}
+
+function assertLegacyRepresentableRequest(request: CanonicalModelRequest): void {
+  for (const message of request.messages) {
+    if (message.role === 'developer') {
+      throw unrepresentableLegacyBlock('developer role');
+    }
+    const blockTypes = new Set(message.content.map((block) => block.type));
+    for (const block of message.content) {
+      if (
+        block.type === 'reasoning-summary' ||
+        block.type === 'resource-ref' ||
+        block.type === 'provider-opaque'
+      ) {
+        throw unrepresentableLegacyBlock(block.type);
+      }
+      if (block.type === 'tool-call') {
+        if (
+          message.role !== 'assistant' ||
+          typeof block.arguments !== 'object' ||
+          block.arguments === null ||
+          Array.isArray(block.arguments)
+        ) {
+          throw unrepresentableLegacyBlock('Tool Call arguments or role');
+        }
+      }
+      if (block.type === 'tool-result' && message.role !== 'tool') {
+        throw unrepresentableLegacyBlock('Tool Result role');
+      }
+    }
+    if (message.role === 'tool') {
+      if (message.content.length !== 1 || message.content[0]?.type !== 'tool-result') {
+        throw unrepresentableLegacyBlock('mixed Tool Result message');
+      }
+      continue;
+    }
+    if (blockTypes.has('tool-result')) {
+      throw unrepresentableLegacyBlock('Tool Result outside a Tool message');
+    }
+    if (blockTypes.has('tool-call') && blockTypes.size !== 1) {
+      throw unrepresentableLegacyBlock('interleaved Tool Call and text content');
+    }
+    if (message.role !== 'assistant' && blockTypes.has('tool-call')) {
+      throw unrepresentableLegacyBlock('Tool Call outside an Assistant message');
+    }
+  }
+}
+
+function unrepresentableLegacyBlock(label: string): ModelProtocolError {
+  return new ModelProtocolError(
+    'UNREPRESENTABLE_CANONICAL_BLOCK',
+    `The legacy-normalized edge cannot preserve ${label}.`,
+  );
 }
 
 function legacyMessageToCanonical(message: LlmMessage): CanonicalModelMessage[] {

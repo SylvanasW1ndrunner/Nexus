@@ -24,7 +24,6 @@ import {
   type ModelProtocolCodec,
   type ProtocolEncodeSession,
 } from '../codec.js';
-import { bindModelProtocolCodec } from '../codec-authenticity.js';
 import type { ModelFinishReason } from '../envelope.js';
 import type { DecodedModelStreamEvent } from '../model-stream.js';
 
@@ -93,9 +92,6 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
   readonly protocol = 'openai-responses' as const;
   readonly revision = 'openai-responses@1' as const;
 
-  constructor() {
-    bindModelProtocolCodec(this);
-  }
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
     const session = createProtocolEncodeSession(context, this.protocol, request);
@@ -931,4 +927,5 @@ function invalid(message: string): never {
   throw new ModelProtocolError('INVALID_WIRE_RESPONSE', message);
 }
 
-export const openAIResponsesCodec = new OpenAIResponsesCodec();
+export const openAIResponsesCodec = Object.freeze(new OpenAIResponsesCodec());
+Object.freeze(OpenAIResponsesCodec.prototype);

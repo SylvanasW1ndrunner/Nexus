@@ -1,14 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  anthropicMessagesCodec,
-  ollamaChatCodec,
-  openAIChatCodec,
-  openAIResponsesCodec,
   type AttemptDecodeContext,
   type DecodedModelStreamEvent,
   type ModelProtocolCodec,
 } from '../../src/types.js';
+import { anthropicMessagesCodec } from '../../src/protocol/codecs/anthropic-messages.js';
+import { ollamaChatCodec } from '../../src/protocol/codecs/ollama-chat.js';
+import { openAIChatCodec } from '../../src/protocol/codecs/openai-chat.js';
+import { openAIResponsesCodec } from '../../src/protocol/codecs/openai-responses.js';
 
 function loadFixture(name: string): unknown {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
