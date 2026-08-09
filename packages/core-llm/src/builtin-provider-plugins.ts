@@ -22,7 +22,7 @@ export function createBuiltinLlmProviderPlugins(): LlmProviderPlugin[] {
 }
 
 function ollamaPlugin(): LlmProviderPlugin {
-  const manifest = builtinManifest('ollama-native', 'Ollama native', 'ollama', 90);
+  const manifest = builtinManifest('ollama-native', 'Ollama native', 'ollama-chat', 90);
   return {
     manifest,
     match: () => ({
@@ -51,7 +51,12 @@ function ollamaPlugin(): LlmProviderPlugin {
 }
 
 function anthropicPlugin(): LlmProviderPlugin {
-  const manifest = builtinManifest('anthropic-messages', 'Anthropic Messages', 'anthropic', 80);
+  const manifest = builtinManifest(
+    'anthropic-messages',
+    'Anthropic Messages',
+    'anthropic-messages',
+    80,
+  );
   return {
     manifest,
     match: (connection) => {

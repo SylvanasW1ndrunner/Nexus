@@ -9,22 +9,34 @@ export type HttpJsonTransportOptions = {
   maxResponseBytes?: number;
 };
 
+type HttpJsonTransportState = {
+  url: string;
+  headers: Readonly<Record<string, string>>;
+  fetchImpl: (input: string | URL, init?: RequestInit) => Promise<Response>;
+  maxResponseBytes: number;
+};
+
+const HTTP_TRANSPORT_STATE = new WeakMap<HttpJsonTransport, HttpJsonTransportState>();
+
 /** One HTTP attempt. Retry, fallback and deadlines belong to ModelExecutionGateway. */
 export class HttpJsonTransport implements ModelClient {
-  private readonly fetchImpl: (input: string | URL, init?: RequestInit) => Promise<Response>;
-  private readonly maxResponseBytes: number;
-
-  constructor(private readonly options: HttpJsonTransportOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
-    this.maxResponseBytes = resolveLlmMaxResponseBytes(options.maxResponseBytes);
+  constructor(options: HttpJsonTransportOptions) {
+    HTTP_TRANSPORT_STATE.set(this, {
+      url: new URL(options.url).toString(),
+      headers: Object.freeze({ ...(options.headers ?? {}) }),
+      fetchImpl: options.fetch ?? fetch,
+      maxResponseBytes: resolveLlmMaxResponseBytes(options.maxResponseBytes),
+    });
+    Object.freeze(this);
   }
 
   async execute(request: ModelClientRequest) {
+    const state = HTTP_TRANSPORT_STATE.get(this)!;
     let response: Response;
     try {
-      response = await this.fetchImpl(this.options.url, {
+      response = await state.fetchImpl(state.url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...(this.options.headers ?? {}) },
+        headers: { 'content-type': 'application/json', ...state.headers },
         body: JSON.stringify(request.wireRequest),
         signal: request.signal,
       });
@@ -36,13 +48,22 @@ export class HttpJsonTransport implements ModelClient {
         { retryable: true },
       );
     }
-    const text = await readLimitedResponseText(response, this.maxResponseBytes);
+    const text = await readLimitedResponseText(response, state.maxResponseBytes);
+    if (!response.ok) throw httpFailure(response, bestEffortJson(text));
     const body = parseJson(text);
-    if (!response.ok) throw httpFailure(response, body);
     if (body === undefined) {
       throw new ModelClientError('TRANSPORT_ERROR', 'Model endpoint returned an empty JSON body.');
     }
     return { kind: 'json' as const, response: body };
+  }
+}
+
+function bestEffortJson(text: string): unknown {
+  if (!text.trim()) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
   }
 }
 

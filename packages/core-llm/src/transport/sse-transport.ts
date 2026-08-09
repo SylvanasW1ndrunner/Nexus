@@ -7,6 +7,7 @@ import {
   type LlmStreamLimitOptions,
 } from '../stream-safety.js';
 import { ModelClientError, type ModelClient, type ModelClientRequest } from '../model-client.js';
+import { LlmProviderError } from '../types.js';
 
 export type SseTransportOptions = {
   url: string;
@@ -16,27 +17,39 @@ export type SseTransportOptions = {
   streamLimits?: LlmStreamLimitOptions;
 };
 
+type SseTransportState = {
+  url: string;
+  headers: Readonly<Record<string, string>>;
+  fetchImpl: (input: string | URL, init?: RequestInit) => Promise<Response>;
+  maxResponseBytes: number;
+  maxFrameBytes: number;
+};
+
+const SSE_TRANSPORT_STATE = new WeakMap<SseTransport, SseTransportState>();
+
 /** One streaming HTTP attempt; it never retries or changes endpoints. */
 export class SseTransport implements ModelClient {
-  private readonly fetchImpl: (input: string | URL, init?: RequestInit) => Promise<Response>;
-  private readonly maxResponseBytes: number;
-  private readonly maxFrameBytes: number;
-
-  constructor(private readonly options: SseTransportOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
-    this.maxResponseBytes = resolveLlmMaxResponseBytes(options.maxResponseBytes);
-    this.maxFrameBytes = resolveLlmStreamLimits(options.streamLimits).maxSseFrameBytes;
+  constructor(options: SseTransportOptions) {
+    SSE_TRANSPORT_STATE.set(this, {
+      url: new URL(options.url).toString(),
+      headers: Object.freeze({ ...(options.headers ?? {}) }),
+      fetchImpl: options.fetch ?? fetch,
+      maxResponseBytes: resolveLlmMaxResponseBytes(options.maxResponseBytes),
+      maxFrameBytes: resolveLlmStreamLimits(options.streamLimits).maxSseFrameBytes,
+    });
+    Object.freeze(this);
   }
 
   async execute(request: ModelClientRequest) {
+    const state = SSE_TRANSPORT_STATE.get(this)!;
     let response: Response;
     try {
-      response = await this.fetchImpl(this.options.url, {
+      response = await state.fetchImpl(state.url, {
         method: 'POST',
         headers: {
           accept: 'text/event-stream',
           'content-type': 'application/json',
-          ...(this.options.headers ?? {}),
+          ...state.headers,
         },
         body: JSON.stringify({ ...(request.wireRequest as Record<string, unknown>), stream: true }),
         signal: request.signal,
@@ -50,7 +63,7 @@ export class SseTransport implements ModelClient {
       );
     }
     if (!response.ok) {
-      const body = await readLimitedResponseText(response, this.maxResponseBytes);
+      const body = await readLimitedResponseText(response, state.maxResponseBytes);
       const retryAfter = response.headers.get('retry-after') ?? undefined;
       throw new ModelClientError('HTTP_ERROR', `Model endpoint returned HTTP ${response.status}: ${body}`, {
         statusCode: response.status,
@@ -63,7 +76,7 @@ export class SseTransport implements ModelClient {
         retryable: true,
       });
     }
-    return { kind: 'stream' as const, events: jsonEvents(response.body, this.maxFrameBytes) };
+    return { kind: 'stream' as const, events: jsonEvents(response.body, state.maxFrameBytes) };
   }
 }
 
@@ -82,6 +95,9 @@ async function* jsonEvents(
     }
   } catch (error) {
     if (error instanceof ModelClientError) throw error;
+    if (error instanceof LlmProviderError && !error.retryable) {
+      throw new ModelClientError('TRANSPORT_ERROR', error.message, { retryable: false });
+    }
     throw new ModelClientError(
       'STREAM_DISCONNECTED',
       error instanceof Error ? error.message : 'Model stream disconnected.',

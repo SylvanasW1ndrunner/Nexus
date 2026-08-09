@@ -29,7 +29,7 @@ describe('LlmConnectionResolver', () => {
     const resolution = await resolver.resolve(connection);
 
     expect(resolution.pluginId).toBe('ollama-native');
-    expect(resolution.protocol).toBe('ollama');
+    expect(resolution.protocol).toBe('ollama-chat');
     expect(resolution.models).toEqual(['qwen2.5:14b']);
     expect(resolver.createProvider(connection, resolution)).toBeInstanceOf(OllamaProvider);
   });
@@ -45,7 +45,7 @@ describe('LlmConnectionResolver', () => {
     const resolution = await resolver.resolve(connection);
 
     expect(resolution.pluginId).toBe('anthropic-messages');
-    expect(resolution.protocol).toBe('anthropic');
+    expect(resolution.protocol).toBe('anthropic-messages');
     expect(resolver.createProvider(connection, resolution)).toBeInstanceOf(AnthropicProvider);
     expect(fetch).not.toHaveBeenCalledWith(
       expect.anything(),

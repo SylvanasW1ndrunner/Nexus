@@ -114,7 +114,7 @@ describe('ModelSession', () => {
       connectionId: connection!.id,
       modelId: 'test-model',
       protocol: 'openai-chat',
-      codecRevision: 'openai-chat@1.0.0',
+      codecRevision: 'openai-chat@1',
       contextTokens: 8_192,
       maxOutputTokens: 1_024,
     });

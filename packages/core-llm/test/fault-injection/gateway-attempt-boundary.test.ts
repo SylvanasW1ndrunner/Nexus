@@ -7,6 +7,7 @@ import {
   OpenAICompatibleProvider,
   OpenAIResponsesCodec,
   createModelSession,
+  createModelSessionBundle,
   type CanonicalModelRequest,
   type ModelClient,
   type ModelClientRequest,
@@ -225,17 +226,17 @@ describe('ModelExecutionGateway attempt boundary', () => {
     const fallback = createModelSession({
       route: {
         ...route({ routeId: 'responses-route', protocol: 'openai-responses' }),
+        codecRevision: 'openai-responses@1',
         compatibility: { mode: 'compatible-protocol', family: 'openai-tools-v1' },
       },
       generation: {},
       codec: new OpenAIResponsesCodec(),
       client: fallbackClient,
+      replay: { mode: 'compatible-protocol', envelopes: [] },
     });
 
-    const result = await gateway().executeAttempt(primary, request(), {
-      maxRetries: 0,
-      fallbacks: [fallback],
-    });
+    const bundle = createModelSessionBundle({ primary, fallbacks: [fallback] });
+    const result = await gateway().executeAttempt(bundle, request(), { maxRetries: 0 });
 
     expect(result.session.route.routeId).toBe('responses-route');
     expect(result.attempt.blocks).toEqual([{ type: 'text', text: 'fallback' }]);

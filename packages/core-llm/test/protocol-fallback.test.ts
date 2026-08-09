@@ -22,6 +22,7 @@ describe('protocol fallback', () => {
       selection,
       request: { messages: [{ role: 'user', content: 'hello' }] },
       context: { tenantId: 'tenant', taskType: 'agent' },
+      allowCompatibleProtocolFallbacks: true,
     });
 
     expect(result.response.text).toBe('responses fallback');
@@ -90,7 +91,8 @@ describe('protocol fallback', () => {
       })) events.push(event);
     })()).rejects.toBeDefined();
 
-    expect(events.length).toBeGreaterThan(0);
+    // The canonical Gateway keeps stream events tentative until terminal validation.
+    expect(events).toEqual([]);
     expect(fixture.requests.responses).toBe(0);
   });
 });
@@ -144,7 +146,10 @@ async function endpointFixture(options: FixtureOptions): Promise<{
         id: 'response-id',
         model: 'test-model',
         status: 'completed',
-        output_text: 'responses fallback',
+        output: [{
+          type: 'message',
+          content: [{ type: 'output_text', text: 'responses fallback' }],
+        }],
       }));
       return;
     }

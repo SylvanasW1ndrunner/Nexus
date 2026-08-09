@@ -14,23 +14,35 @@ import {
 } from './model-registry.js';
 import { estimateMessagesTokens } from './prompt-runtime.js';
 import {
-  assertGenerationParametersSupported,
   generationConfigFromRequest,
   resolveLlmOutputReservation,
-  validateLlmGenerationConfig,
 } from './generation-config.js';
 import { LlmReliabilityController, type LlmReliabilityConfig } from './reliability.js';
 import { LlmResponseCache } from './response-cache.js';
 import {
+  createModelSession,
+  createModelSessionBundle,
+  isAuthenticModelSessionBundle,
+  MODEL_PROTOCOL_CODEC_REVISIONS,
   ModelClientError,
+  type ModelClient,
+  type ModelSessionBundle,
   type ModelSession,
 } from './model-client.js';
+import {
+  LegacyProviderCodec,
+  LegacyProviderModelClient,
+  canonicalLegacyProtocol,
+  legacyAttemptToResponse,
+  legacyRequestToCanonical,
+} from './legacy-model-compatibility.js';
 import {
   ModelProtocolError,
   type CanonicalModelRequest,
 } from './protocol/codec.js';
 import type {
   DecodedModelAttempt,
+  ModelProtocolEnvelope,
   ValidatedModelAttempt,
 } from './protocol/envelope.js';
 import type { DecodedModelContentBlock } from './protocol/content.js';
@@ -108,6 +120,7 @@ export type DiscardedModelAttempt = {
 
 export type ModelAttemptExecution = {
   attempt: ValidatedModelAttempt;
+  protocolEnvelope: ModelProtocolEnvelope;
   session: ModelSession;
   discardedAttempts: readonly DiscardedModelAttempt[];
 };
@@ -129,6 +142,7 @@ export class ModelGatewayError extends Error {
       statusCode?: number;
       retryAfterMs?: number;
       cause?: unknown;
+      discardedAttempts?: readonly DiscardedModelAttempt[];
     } = {},
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -185,10 +199,28 @@ export class ModelExecutionGateway {
   }
 
   async executeAttempt(
-    session: ModelSession,
+    sessionOrBundle: ModelSession | ModelSessionBundle,
     request: CanonicalModelRequest,
     options: ModelAttemptOptions = {},
   ): Promise<ModelAttemptExecution> {
+    if ((options.fallbacks?.length ?? 0) > 0) {
+      throw new ModelGatewayError(
+        'MODEL_FALLBACK_INCOMPATIBLE',
+        'Fallback sessions must come from an authentic prepared ModelSessionBundle.',
+        false,
+      );
+    }
+    const bundle = isAuthenticModelSessionBundle(sessionOrBundle)
+      ? sessionOrBundle
+      : undefined;
+    if ('primary' in sessionOrBundle && bundle === undefined) {
+      throw new ModelGatewayError(
+        'MODEL_FALLBACK_INCOMPATIBLE',
+        'The supplied ModelSessionBundle is not an authentic prepared binding.',
+        false,
+      );
+    }
+    const session = bundle?.primary ?? sessionOrBundle as ModelSession;
     if (request.model !== session.route.modelId) {
       throw new ModelGatewayError(
         'MODEL_PROTOCOL_FAILED',
@@ -196,20 +228,21 @@ export class ModelExecutionGateway {
         false,
       );
     }
-    const fallbacks = [...(options.fallbacks ?? [])];
-    assertCompatibleFallbacks(session, fallbacks);
+    const fallbacks = [...(bundle?.fallbacks ?? [])];
     const maxRetries = boundedModelAttemptInteger(options.maxRetries ?? 1, 0, 10, 'maxRetries');
     const timeouts = modelAttemptTimeouts(options.timeouts);
     const retry = modelAttemptRetry(options.retry);
     const discarded: DiscardedModelAttempt[] = [];
     let terminalError: ModelGatewayError | undefined;
 
-    for (const candidate of [session, ...fallbacks]) {
+    const candidates = [session, ...fallbacks];
+    for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+      const candidate = candidates[candidateIndex]!;
       for (let retryIndex = 0; retryIndex <= maxRetries; retryIndex += 1) {
         const attemptId = this.createAttemptId();
         const tentativeBlocks: DecodedModelContentBlock[] = [];
         try {
-          const attempt = await this.executeOne(
+          const execution = await this.executeOne(
             candidate,
             request,
             attemptId,
@@ -218,7 +251,8 @@ export class ModelExecutionGateway {
             tentativeBlocks,
           );
           return Object.freeze({
-            attempt,
+            attempt: execution.attempt,
+            protocolEnvelope: execution.protocolEnvelope,
             session: candidate,
             discardedAttempts: Object.freeze(discarded.map(freezeDiscardedAttempt)),
           });
@@ -232,7 +266,15 @@ export class ModelExecutionGateway {
             blocks: tentativeBlocks.map(cloneDecodedBlock),
             discardedAt: this.clock.now(),
           });
-          if (!terminalError.retryable) throw terminalError;
+          if (!terminalError.retryable) {
+            if (
+              candidateIndex + 1 < candidates.length &&
+              isModelFallbackEligible(terminalError)
+            ) {
+              break;
+            }
+            throw withDiscardedModelAttempts(terminalError, discarded);
+          }
           if (retryIndex < maxRetries) {
             const delay = retryDelayFromError(
               modelRetryError(terminalError),
@@ -247,17 +289,20 @@ export class ModelExecutionGateway {
             try {
               await this.clock.sleep(delay, options.signal);
             } catch (error) {
-              throw classifyModelAttemptError(error, options.signal, this.clock.now());
+              throw withDiscardedModelAttempts(
+                classifyModelAttemptError(error, options.signal, this.clock.now()),
+                discarded,
+              );
             }
           }
         }
       }
     }
-    throw terminalError ?? new ModelGatewayError(
+    throw withDiscardedModelAttempts(terminalError ?? new ModelGatewayError(
       'MODEL_TRANSPORT_FAILED',
       'No model attempt was executed.',
       false,
-    );
+    ), discarded);
   }
 
   private async executeOne(
@@ -267,7 +312,7 @@ export class ModelExecutionGateway {
     timeouts: ModelAttemptTimeouts,
     sourceSignal: AbortSignal | undefined,
     tentativeBlocks: DecodedModelContentBlock[],
-  ): Promise<ValidatedModelAttempt> {
+  ): Promise<{ attempt: ValidatedModelAttempt; protocolEnvelope: ModelProtocolEnvelope }> {
     const controller = new AbortController();
     const abortFromSource = () => controller.abort(sourceSignal?.reason);
     sourceSignal?.addEventListener('abort', abortFromSource, { once: true });
@@ -282,7 +327,7 @@ export class ModelExecutionGateway {
           model: session.route.modelId,
           protocol: session.route.protocol,
         },
-        replay: { mode: 'new' },
+        replay: session.replay,
       });
     } catch (error) {
       sourceSignal?.removeEventListener('abort', abortFromSource);
@@ -342,13 +387,23 @@ export class ModelExecutionGateway {
     };
 
     try {
-      return await raceModelDeadline(
+      const attempt = await raceModelDeadline(
         run(),
         timeouts.totalMs,
         'total',
         controller,
         sourceSignal,
       );
+      return {
+        attempt,
+        protocolEnvelope: freezeProtocolEnvelope({
+          schemaVersion: 1,
+          attemptId: attempt.attemptId,
+          origin: attempt.origin,
+          correlations: encoded.correlations,
+          opaqueBlockRefs: encoded.opaqueBlockRefs,
+        }),
+      };
     } finally {
       sourceSignal?.removeEventListener('abort', abortFromSource);
     }
@@ -402,27 +457,6 @@ export type LlmGatewayOptions = {
 
 type AttemptUsage = { model: RegisteredLlmModel; usage: LlmUsage };
 
-export type LlmCompatibilityFallbackResult<TCandidate, TResult> = {
-  candidate: TCandidate;
-  result: TResult;
-  attempts: readonly string[];
-};
-
-export type LlmCompatibilityFallbackInput<TCandidate, TResult> = {
-  candidates: readonly TCandidate[];
-  candidateId: (candidate: TCandidate) => string;
-  execute: (candidate: TCandidate) => Promise<TResult>;
-  classifyError: (candidate: TCandidate, error: unknown) => LlmProviderError;
-  shouldFallback: (error: LlmProviderError) => boolean;
-};
-
-export type LlmCompatibilityStreamFallbackInput<TCandidate, TEvent> = Omit<
-  LlmCompatibilityFallbackInput<TCandidate, never>,
-  'execute'
-> & {
-  stream: (candidate: TCandidate) => AsyncIterable<TEvent>;
-};
-
 export class LlmGateway {
   readonly registry: LlmModelRegistry;
   readonly telemetry: InMemoryLlmTelemetrySink;
@@ -435,6 +469,7 @@ export class LlmGateway {
   private readonly validator = new StructuredOutputValidator();
   private readonly telemetrySink: LlmTelemetrySink;
   private readonly usageTracker: UsageTracker | undefined;
+  private readonly legacyCacheHitClients = new WeakSet<ModelClient>();
   private readonly now: () => Date;
   private readonly createRequestId: () => string;
   private readonly jobs: LlmAsyncJobManager<LlmGatewayChatInput, LlmGatewayResult>;
@@ -495,111 +530,44 @@ export class LlmGateway {
     this.reliability.configure(providerId, config);
   }
 
-  /**
-   * Compatibility boundary for the legacy connection/provider API. Protocol fallback stays in
-   * the Gateway while callers migrate to ModelExecutionGateway and immutable ModelSessions.
-   */
-  async executeCompatibilityFallback<TCandidate, TResult>(
-    input: LlmCompatibilityFallbackInput<TCandidate, TResult>,
-  ): Promise<LlmCompatibilityFallbackResult<TCandidate, TResult>> {
-    const attempts: string[] = [];
-    let lastError: LlmProviderError | undefined;
-    for (let index = 0; index < input.candidates.length; index += 1) {
-      const candidate = input.candidates[index]!;
-      attempts.push(input.candidateId(candidate));
-      try {
-        return Object.freeze({
-          candidate,
-          result: await input.execute(candidate),
-          attempts: Object.freeze([...attempts]),
-        });
-      } catch (error) {
-        lastError = input.classifyError(candidate, error);
-        if (index + 1 >= input.candidates.length || !input.shouldFallback(lastError)) {
-          throw lastError;
-        }
-      }
-    }
-    throw lastError ?? new LlmProviderError('LLM_NO_ROUTE', 'No usable LLM route exists.', false);
-  }
-
-  /** Gateway-owned streaming counterpart to executeCompatibilityFallback. */
-  async *streamCompatibilityFallback<TCandidate, TEvent>(
-    input: LlmCompatibilityStreamFallbackInput<TCandidate, TEvent>,
-  ): AsyncIterable<TEvent> {
-    let lastError: LlmProviderError | undefined;
-    for (let index = 0; index < input.candidates.length; index += 1) {
-      const candidate = input.candidates[index]!;
-      let responseStarted = false;
-      try {
-        for await (const event of input.stream(candidate)) {
-          responseStarted = true;
-          yield event;
-        }
-        return;
-      } catch (error) {
-        lastError = input.classifyError(candidate, error);
-        if (
-          responseStarted ||
-          index + 1 >= input.candidates.length ||
-          !input.shouldFallback(lastError)
-        ) {
-          throw lastError;
-        }
-      }
-    }
-    throw lastError ??
-      new LlmProviderError('LLM_NO_ROUTE', 'No usable LLM streaming route exists.', false);
-  }
-
-  async chat(input: LlmGatewayChatInput): Promise<LlmChatResponse> {
-    return (await this.execute(input)).response;
-  }
-
-  async execute(input: LlmGatewayChatInput): Promise<LlmGatewayResult> {
-    const execution = this.prepareExecution(input, false);
+  private async executeThroughModelGateway(
+    input: LlmGatewayChatInput,
+    streaming = false,
+  ): Promise<LlmGatewayResult> {
+    const execution = this.prepareExecution(input, streaming);
     const startedAt = performance.now();
+    const primary = execution.candidates[0] as RegisteredLlmModel;
     await this.emit(
       execution.event('request.started', { estimatedTokens: execution.estimatedInputTokens }),
     );
     await this.emit(
       execution.event('route.decided', {
-        providerId: execution.route.selected.model.providerId,
-        modelId: execution.route.selected.model.id,
+        providerId: primary.providerId,
+        modelId: primary.id,
         latencyMs: execution.routeLatencyMs,
         attributes: { fallbackCount: execution.candidates.length - 1 },
       }),
     );
-
-    const primaryCandidate = execution.candidates[0] as RegisteredLlmModel;
-    const primaryCached = input.cache?.enabled
+    const cached = input.cache?.enabled
       ? this.cache.get(
           input.context.tenantId,
-          primaryCandidate.providerId,
-          withSelectedModel(input.request, primaryCandidate.model),
+          primary.providerId,
+          withSelectedModel(input.request, primary.model),
           input.cache.namespace,
         )
       : undefined;
-    if (primaryCached) {
+    if (cached !== undefined) {
       await this.emit(execution.event('cache.hit'));
-      await this.emit(
-        execution.event('request.completed', {
-          providerId: primaryCandidate.providerId,
-          modelId: primaryCandidate.id,
-          latencyMs: performance.now() - startedAt,
-          attributes: { cacheHit: true },
-        }),
-      );
       return {
         requestId: execution.requestId,
         traceId: execution.traceId,
-        response: primaryCached,
+        response: cached,
         route: execution.route,
-        providerId: primaryCandidate.providerId,
-        modelId: primaryCandidate.id,
+        providerId: primary.providerId,
+        modelId: primary.id,
         attempts: 0,
         cacheHit: true,
-        usage: primaryCached.usage ?? zeroUsage(),
+        usage: cached.usage ?? zeroUsage(),
       };
     }
     if (input.cache?.enabled) await this.emit(execution.event('cache.miss'));
@@ -607,405 +575,282 @@ export class LlmGateway {
     let reservation: LlmBudgetReservation | undefined;
     try {
       reservation = this.reserveBudget(input, execution);
-      if (reservation)
-        await this.emit(
-          execution.event('budget.reserved', { estimatedTokens: reservation.estimatedTokens }),
-        );
-    } catch (error) {
-      const normalized = normalizeProviderError(error);
-      await this.emit(
-        execution.event('request.failed', {
-          latencyMs: performance.now() - startedAt,
-          errorCode: normalized.code,
-          attributes: { attempts: 0 },
-        }),
-      );
-      throw normalized;
-    }
-    const attemptUsages: AttemptUsage[] = [];
-    let attempts = 0;
-    let lastError: unknown;
-
-    try {
-      for (
-        let candidateIndex = 0;
-        candidateIndex < execution.candidates.length;
-        candidateIndex += 1
-      ) {
-        const candidate = execution.candidates[candidateIndex] as RegisteredLlmModel;
-        const provider = this.requireProvider(candidate.providerId);
-        const candidateRequest = withSelectedModel(input.request, candidate.model);
-        if (candidateIndex > 0) {
-          await this.emit(
-            execution.event('provider.fallback', {
-              providerId: candidate.providerId,
-              modelId: candidate.id,
-              attributes: { candidateIndex },
-            }),
-          );
-          const cached = input.cache?.enabled
-            ? this.cache.get(
-                input.context.tenantId,
-                candidate.providerId,
-                candidateRequest,
-                input.cache.namespace,
-              )
-            : undefined;
-          if (cached) {
-            const attemptedUsage = sumUsage(attemptUsages.map((item) => item.usage));
-            const attemptedCost = sumAttemptCost(attemptUsages);
-            if (reservation) {
-              if (attemptUsages.length > 0) {
-                this.budget.commitActual(reservation.id, attemptedUsage.totalTokens, attemptedCost);
-              } else {
-                this.budget.release(reservation.id);
-              }
-            }
-            if (attemptUsages.length > 0) {
-              await this.recordAttemptUsage(input.round, attemptUsages);
-            }
-            await this.emit(execution.event('cache.hit'));
-            await this.emit(
-              execution.event('request.completed', {
-                providerId: candidate.providerId,
-                modelId: candidate.id,
-                latencyMs: performance.now() - startedAt,
-                attributes: { cacheHit: true, attempts },
-              }),
-            );
-            return {
-              requestId: execution.requestId,
-              traceId: execution.traceId,
-              response: cached,
-              route: execution.route,
-              providerId: candidate.providerId,
-              modelId: candidate.id,
-              attempts,
-              cacheHit: true,
-              usage: cached.usage ?? zeroUsage(),
-            };
-          }
-        }
-        try {
-          assertGenerationParametersSupported(
-            candidate.generationParameters,
-            validateLlmGenerationConfig(generationConfigFromRequest(candidateRequest)),
-          );
-        } catch (error) {
-          lastError = error;
-          continue;
-        }
-        for (let retry = 0; retry <= execution.maxRetries; retry += 1) {
-          attempts += 1;
-          await this.emit(
-            execution.event('provider.attempt', {
-              providerId: candidate.providerId,
-              modelId: candidate.id,
-              attempt: attempts,
-            }),
-          );
-          try {
-            const response = await this.callWithStructuredCorrection(
-              provider,
-              candidate,
-              input,
-              execution.maxCorrections,
-              attemptUsages,
-              execution,
-            );
-            this.reliability.recordSuccess(candidate.providerId);
-            const usage = sumUsage(attemptUsages.map((item) => item.usage));
-            const resultResponse = { ...response, usage };
-            const cost = sumAttemptCost(attemptUsages);
-            if (reservation) this.budget.commitActual(reservation.id, usage.totalTokens, cost);
-            await this.recordAttemptUsage(input.round, attemptUsages);
-            if (input.cache?.enabled) {
-              this.cache.set(
-                input.context.tenantId,
-                candidate.providerId,
-                candidateRequest,
-                resultResponse,
-                {
-                  ...(input.cache.namespace === undefined
-                    ? {}
-                    : { namespace: input.cache.namespace }),
-                  ...(input.cache.ttlMs === undefined ? {} : { ttlMs: input.cache.ttlMs }),
-                },
-              );
-            }
-            await this.emit(
-              execution.event('request.completed', {
-                providerId: candidate.providerId,
-                modelId: candidate.id,
-                latencyMs: performance.now() - startedAt,
-                promptTokens: usage.promptTokens,
-                completionTokens: usage.completionTokens,
-                cost,
-                attributes: { cacheHit: false, attempts, usageEstimated: usage.estimated ?? false },
-              }),
-            );
-            return {
-              requestId: execution.requestId,
-              traceId: execution.traceId,
-              response: resultResponse,
-              route: execution.route,
-              providerId: candidate.providerId,
-              modelId: candidate.id,
-              attempts,
-              cacheHit: false,
-              usage,
-              cost,
-            };
-          } catch (error) {
-            lastError = normalizeTimeoutError(error);
-            if (isAborted(lastError)) throw lastError;
-            if (isRetryable(lastError)) {
-              attemptUsages.push({
-                model: candidate,
-                usage: estimateFailedAttemptUsage(input.request, candidate.model),
-              });
-            }
-            const opened =
-              shouldAffectCircuit(lastError) &&
-              this.reliability.recordFailure(candidate.providerId);
-            if (opened) {
-              await this.emit(
-                execution.event('provider.circuit_opened', {
-                  providerId: candidate.providerId,
-                  modelId: candidate.id,
+      const bundle = this.legacyModelSessionBundle(execution, input, streaming);
+      const gateway = new ModelExecutionGateway({
+        createAttemptId: this.createRequestId,
+      });
+      let correctionRequest = input.request;
+      let response!: LlmChatResponse;
+      let selected = primary;
+      let selectedSessionClient = bundle.primary.client;
+      let attempts = 0;
+      const attemptUsages: AttemptUsage[] = [];
+      for (let correction = 0; ; correction += 1) {
+        const result = await gateway.executeAttempt(
+          bundle,
+          legacyRequestToCanonical(correctionRequest, primary.model),
+          {
+            maxRetries: execution.maxRetries,
+            ...(input.request.signal === undefined ? {} : { signal: input.request.signal }),
+            ...(input.timeoutMs === undefined
+              ? {}
+              : {
+                  timeouts: {
+                    connectMs: input.timeoutMs,
+                    firstEventMs: input.timeoutMs,
+                    idleMs: input.timeoutMs,
+                    totalMs: input.timeoutMs,
+                  },
                 }),
-              );
-            }
-            if (!isRetryable(lastError) || retry === execution.maxRetries) break;
-            await this.emit(
-              execution.event('provider.retry', {
-                providerId: candidate.providerId,
-                modelId: candidate.id,
-                attempt: attempts,
-                errorCode: errorCode(lastError),
-              }),
-            );
-            await cancellableDelay(Math.min(2_000, 100 * 2 ** retry), input.request.signal);
+          },
+        );
+        response = legacyAttemptToResponse(
+          result.attempt.blocks,
+          result.attempt.usage,
+          result.attempt.providerResponseId,
+        );
+        if (result.attempt.finishReason !== undefined) {
+          response.finishReason = result.attempt.finishReason;
+        }
+        selected = execution.candidates.find(
+          (candidate) => candidate.id === result.session.route.routeId,
+        ) ?? primary;
+        selectedSessionClient = result.session.client;
+        for (const discarded of result.discardedAttempts) {
+          const candidate = execution.candidates.find((item) => item.id === discarded.routeId) ?? primary;
+          attemptUsages.push({
+            model: candidate,
+            usage: estimateFailedAttemptUsage(correctionRequest, candidate.model),
+          });
+          attempts += 1;
+          await this.emit(execution.event('provider.attempt', {
+            providerId: candidate.providerId,
+            modelId: candidate.id,
+            attempt: attempts,
+          }));
+        }
+        const selectedUsage = response.usage ?? estimateResponseUsage(
+          withSelectedModel(correctionRequest, selected.model),
+          response,
+        );
+        attemptUsages.push({ model: selected, usage: selectedUsage });
+        attempts += 1;
+        await this.emit(execution.event('provider.attempt', {
+          providerId: selected.providerId,
+          modelId: selected.id,
+          attempt: attempts,
+        }));
+        try {
+          this.validateResponse(
+            response,
+            withSelectedModel(correctionRequest, result.session.route.modelId),
+            input.validateToolCalls ?? true,
+          );
+          break;
+        } catch (error) {
+          if (
+            !(error instanceof LlmProviderError) ||
+            error.code !== 'LLM_STRUCTURED_OUTPUT_INVALID' ||
+            correction >= execution.maxCorrections
+          ) {
+            throw error;
           }
+          await this.emit(execution.event('provider.retry', {
+            providerId: selected.providerId,
+            modelId: selected.id,
+            errorCode: error.code,
+            attributes: { correction: true, correctionNumber: correction + 1 },
+          }));
+          correctionRequest = {
+            ...correctionRequest,
+            messages: [
+              ...correctionRequest.messages,
+              { role: 'assistant', content: response.text },
+              { role: 'user', content: this.validator.correctionInstruction(error) },
+            ],
+          };
         }
       }
-      if (lastError !== undefined) throw normalizeProviderError(lastError);
-      throw new LlmProviderError('LLM_NO_ROUTE', 'All routed LLM candidates failed.', true);
-    } catch (error) {
-      const normalized = normalizeProviderError(error);
-      const usage = sumUsage(attemptUsages.map((item) => item.usage));
-      const cost = sumAttemptCost(attemptUsages);
-      if (reservation) {
-        if (attemptUsages.length > 0)
-          this.budget.commitActual(reservation.id, usage.totalTokens, cost);
-        else this.budget.release(reservation.id);
+      const usage = sumUsage(attemptUsages.map((attempt) => attempt.usage));
+      response.usage = usage;
+      if (selected.id !== primary.id) {
+        await this.emit(execution.event('provider.fallback', {
+          providerId: selected.providerId,
+          modelId: selected.id,
+        }));
       }
-      if (attemptUsages.length > 0) await this.recordAttemptUsage(input.round, attemptUsages);
-      await this.emit(
-        execution.event(isAborted(normalized) ? 'request.cancelled' : 'request.failed', {
+      const cost = sumAttemptCost(attemptUsages);
+      if (reservation) this.budget.commitActual(reservation.id, usage.totalTokens, cost);
+      await this.recordAttemptUsage(input.round, attemptUsages);
+      const cacheHit = this.legacyCacheHitClients.has(selectedSessionClient);
+      const reportedAttempts = cacheHit ? Math.max(0, attempts - 1) : attempts;
+      if (input.cache?.enabled && !cacheHit) {
+        this.cache.set(
+          input.context.tenantId,
+          selected.providerId,
+          withSelectedModel(input.request, selected.model),
+          response,
+          {
+            ...(input.cache.namespace === undefined ? {} : { namespace: input.cache.namespace }),
+            ...(input.cache.ttlMs === undefined ? {} : { ttlMs: input.cache.ttlMs }),
+          },
+        );
+      }
+      await this.emit(execution.event('request.completed', {
+        providerId: selected.providerId,
+        modelId: selected.id,
+        latencyMs: performance.now() - startedAt,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        attributes: { attempts: reportedAttempts, cacheHit },
+      }));
+      return {
+        requestId: execution.requestId,
+        traceId: execution.traceId,
+        response,
+        route: execution.route,
+        providerId: selected.providerId,
+        modelId: selected.id,
+        attempts: reportedAttempts,
+        cacheHit,
+        usage,
+      };
+    } catch (error) {
+      const discarded = error instanceof ModelGatewayError
+        ? error.options.discardedAttempts ?? []
+        : [];
+      const failedUsages: AttemptUsage[] = discarded.map((attempt) => {
+        const candidate = execution.candidates.find((item) => item.id === attempt.routeId) ?? primary;
+        return {
+          model: candidate,
+          usage: estimateFailedAttemptUsage(input.request, candidate.model),
+        };
+      });
+      if (reservation) {
+        if (failedUsages.length > 0) {
+          const usage = sumUsage(failedUsages.map((attempt) => attempt.usage));
+          this.budget.commitActual(reservation.id, usage.totalTokens, sumAttemptCost(failedUsages));
+        } else {
+          this.budget.release(reservation.id);
+        }
+      }
+      if (failedUsages.length > 0) await this.recordAttemptUsage(input.round, failedUsages);
+      const normalized = modelGatewayToLegacyError(error);
+      await this.emit(execution.event(
+        normalized.code === 'LLM_ABORTED' ? 'request.cancelled' : 'request.failed',
+        {
           latencyMs: performance.now() - startedAt,
           errorCode: normalized.code,
-          promptTokens: usage.promptTokens,
-          completionTokens: usage.completionTokens,
-          cost,
-          attributes: { attempts, usageEstimated: usage.estimated ?? false },
-        }),
-      );
+        },
+      ));
       throw normalized;
     }
   }
 
-  async *stream(input: LlmGatewayChatInput): AsyncIterable<LlmChatStreamEvent> {
-    const execution = this.prepareExecution(input, true);
-    const startedAt = performance.now();
-    await this.emit(
-      execution.event('request.started', { estimatedTokens: execution.estimatedInputTokens }),
-    );
-    await this.emit(
-      execution.event('route.decided', {
-        providerId: execution.route.selected.model.providerId,
-        modelId: execution.route.selected.model.id,
-        latencyMs: execution.routeLatencyMs,
-      }),
-    );
-    let reservation: LlmBudgetReservation | undefined;
-    try {
-      reservation = this.reserveBudget(input, execution);
-      if (reservation)
-        await this.emit(
-          execution.event('budget.reserved', { estimatedTokens: reservation.estimatedTokens }),
-        );
-    } catch (error) {
-      const normalized = normalizeProviderError(error);
-      await this.emit(
-        execution.event('request.failed', {
-          latencyMs: performance.now() - startedAt,
-          errorCode: normalized.code,
-          attributes: { attempts: 0, streaming: true },
-        }),
-      );
-      throw normalized;
-    }
-    const attemptUsages: AttemptUsage[] = [];
-    let attempts = 0;
-    let lastError: unknown;
-    let visibleOutput = false;
-    let responseStarted = false;
-    try {
-      for (
-        let candidateIndex = 0;
-        candidateIndex < execution.candidates.length;
-        candidateIndex += 1
-      ) {
-        const candidate = execution.candidates[candidateIndex] as RegisteredLlmModel;
-        const provider = this.requireProvider(candidate.providerId);
-        if (candidateIndex > 0)
-          await this.emit(
-            execution.event('provider.fallback', {
-              providerId: candidate.providerId,
-              modelId: candidate.id,
-            }),
-          );
-        try {
-          assertGenerationParametersSupported(
-            candidate.generationParameters,
-            validateLlmGenerationConfig(generationConfigFromRequest(input.request as LlmChatRequest)),
-          );
-        } catch (error) {
-          lastError = error;
-          continue;
-        }
-        for (let retry = 0; retry <= execution.maxRetries; retry += 1) {
-          attempts += 1;
-          await this.emit(
-            execution.event('provider.attempt', {
-              providerId: candidate.providerId,
-              modelId: candidate.id,
-              attempt: attempts,
-            }),
-          );
-          const request = withSelectedModel(input.request, candidate.model);
-          const deadline = deadlineSignal(request.signal, input.timeoutMs);
-          const buffered: LlmChatStreamEvent[] = [];
-          let finalResponse: LlmChatResponse | undefined;
-          let release: (() => void) | undefined;
-          try {
-            release = await this.reliability.lease(
+  private legacyModelSessionBundle(
+    execution: ReturnType<LlmGateway['prepareExecution']>,
+    input: LlmGatewayChatInput,
+    streaming: boolean,
+  ): ModelSessionBundle {
+    const candidates = execution.candidates;
+    const primary = candidates[0] as RegisteredLlmModel;
+    const fallbackIds = candidates.slice(1).map((candidate) => candidate.id);
+    const makeSession = (candidate: RegisteredLlmModel, fallback: boolean): ModelSession => {
+      const provider = this.requireProvider(candidate.providerId);
+      const protocol = canonicalLegacyProtocol(provider.protocol);
+      const baseClient = new LegacyProviderModelClient(provider, streaming);
+      const client: ModelClient = {
+        execute: async (request) => {
+          if (fallback && input.cache?.enabled) {
+            const cached = this.cache.get(
+              input.context.tenantId,
               candidate.providerId,
-              deadline.signal,
-              estimateMessagesTokens(request.messages) + (request.maxTokens ?? 4_096),
+              withSelectedModel(input.request, candidate.model),
+              input.cache.namespace,
             );
-            const iterable = provider.stream
-              ? provider.stream({ ...request, signal: deadline.signal })
-              : emulateStream(await provider.chat({ ...request, signal: deadline.signal }));
-            for await (const event of iterable) {
-              responseStarted = true;
-              if (event.type === 'finish') finalResponse = event.response;
-              const contentEvent =
-                event.type === 'text-delta' ||
-                event.type === 'tool-call-delta' ||
-                event.type === 'tool-call';
-              if (!visibleOutput && !contentEvent) {
-                buffered.push(event);
-                continue;
-              }
-              if (!visibleOutput) {
-                visibleOutput = true;
-                for (const pending of buffered) yield pending;
-              }
-              yield event;
+            if (cached !== undefined) {
+              this.legacyCacheHitClients.add(client);
+              return { kind: 'json' as const, response: cached };
             }
-            if (!visibleOutput) {
-              visibleOutput = true;
-              for (const pending of buffered) yield pending;
-            }
-            const response = finalResponse ?? emptyResponse(candidate.model);
-            this.validateResponse(response, request, input.validateToolCalls ?? true);
-            const usage = response.usage ?? estimateResponseUsage(request, response);
-            attemptUsages.push({ model: candidate, usage });
-            const totalUsage = sumUsage(attemptUsages.map((item) => item.usage));
-            const cost = sumAttemptCost(attemptUsages);
-            if (reservation) this.budget.commitActual(reservation.id, totalUsage.totalTokens, cost);
-            await this.recordAttemptUsage(input.round, attemptUsages);
-            this.reliability.recordSuccess(candidate.providerId);
-            await this.emit(
-              execution.event('request.completed', {
-                providerId: candidate.providerId,
-                modelId: candidate.id,
-                latencyMs: performance.now() - startedAt,
-                promptTokens: totalUsage.promptTokens,
-                completionTokens: totalUsage.completionTokens,
-                cost,
-                attributes: {
-                  attempts,
-                  streaming: true,
-                  usageEstimated: totalUsage.estimated ?? false,
-                },
-              }),
-            );
-            return;
-          } catch (error) {
-            lastError = deadline.timedOut()
-              ? timeoutError(input.timeoutMs)
-              : normalizeProviderError(error);
-            if (responseStarted || isAborted(lastError)) {
-              throw responseStarted ? markStreamResponseStarted(lastError) : lastError;
-            }
-            if (isRetryable(lastError)) {
-              attemptUsages.push({
-                model: candidate,
-                usage: estimateFailedAttemptUsage(input.request, candidate.model),
-              });
-            }
-            const opened =
-              shouldAffectCircuit(lastError) &&
-              this.reliability.recordFailure(candidate.providerId);
-            if (opened)
-              await this.emit(
-                execution.event('provider.circuit_opened', {
-                  providerId: candidate.providerId,
-                  modelId: candidate.id,
-                }),
-              );
-            if (!isRetryable(lastError) || retry === execution.maxRetries) break;
-            await this.emit(
-              execution.event('provider.retry', {
-                providerId: candidate.providerId,
-                modelId: candidate.id,
-                attempt: attempts,
-                errorCode: errorCode(lastError),
-              }),
-            );
-          } finally {
-            deadline.cleanup();
-            release?.();
           }
-        }
-      }
-      if (lastError !== undefined) throw normalizeProviderError(lastError);
-      throw new LlmProviderError('LLM_NO_ROUTE', 'All routed LLM stream candidates failed.', true);
-    } catch (error) {
-      const normalized = normalizeProviderError(error);
-      const usage = sumUsage(attemptUsages.map((item) => item.usage));
-      const cost = sumAttemptCost(attemptUsages);
-      if (reservation) {
-        if (attemptUsages.length > 0)
-          this.budget.commitActual(reservation.id, usage.totalTokens, cost);
-        else this.budget.release(reservation.id);
-      }
-      if (attemptUsages.length > 0) await this.recordAttemptUsage(input.round, attemptUsages);
-      await this.emit(
-        execution.event(isAborted(normalized) ? 'request.cancelled' : 'request.failed', {
-          latencyMs: performance.now() - startedAt,
-          errorCode: normalized.code,
-          promptTokens: usage.promptTokens,
-          completionTokens: usage.completionTokens,
-          cost,
-          attributes: { attempts, streaming: true, usageEstimated: usage.estimated ?? false },
-        }),
-      );
-      throw normalized;
-    }
+          try {
+            const response = await this.reliability.execute(
+              candidate.providerId,
+              () => baseClient.execute(request),
+              request.signal,
+              execution.estimatedInputTokens + (candidate.limits.maxOutputTokens ?? 4_096),
+            );
+            this.reliability.recordSuccess(candidate.providerId);
+            return response;
+          } catch (error) {
+            if (shouldAffectModelClientCircuit(error)) {
+              this.reliability.recordFailure(candidate.providerId);
+            }
+            throw error;
+          }
+        },
+      };
+      return createModelSession({
+        route: {
+          routeId: candidate.id,
+          connectionId: `legacy:${candidate.providerId}`,
+          providerId: candidate.providerId,
+          modelId: candidate.model,
+          protocol,
+          codecRevision: MODEL_PROTOCOL_CODEC_REVISIONS[protocol],
+          capabilities: { ...candidate.capabilities },
+          generationParameters: { ...candidate.generationParameters },
+          contextTokens: candidate.limits.contextTokens,
+          maxInputTokens: candidate.limits.maxInputTokens,
+          maxOutputTokens: candidate.limits.maxOutputTokens,
+          metadata: {
+            source: 'legacy-registry',
+            revision: candidate.id,
+            digest: 'computed-by-createModelSession',
+          },
+          allowedFallbackRouteIds: fallback ? [] : fallbackIds,
+          compatibility: {
+            mode: 'compatible-protocol',
+            family: 'legacy-provider-normalized-v1',
+          },
+        },
+        generation: generationConfigFromRequest(
+          withSelectedModel(input.request, candidate.model),
+        ),
+        codec: new LegacyProviderCodec(protocol),
+        client,
+        replay: fallback
+          ? { mode: 'compatible-protocol', envelopes: [] }
+          : { mode: 'new' },
+      });
+    };
+    return createModelSessionBundle({
+      primary: makeSession(primary, false),
+      fallbacks: candidates.slice(1).map((candidate) => makeSession(candidate, true)),
+      policy: { allowCrossConnection: true, allowCrossModel: true },
+    });
+  }
+
+  async chat(input: LlmGatewayChatInput): Promise<LlmChatResponse> {
+    return (await this.execute(input)).response;
+  }
+
+  async execute(input: LlmGatewayChatInput): Promise<LlmGatewayResult> {
+    return await this.executeThroughModelGateway(input);
+  }
+
+  async *stream(input: LlmGatewayChatInput): AsyncIterable<LlmChatStreamEvent> {
+    const result = await this.executeThroughModelGateway(input, true);
+    if (result.response.text) yield { type: 'text-delta', text: result.response.text };
+    for (const toolCall of result.response.toolCalls) yield { type: 'tool-call', toolCall };
+    if (result.response.usage) yield { type: 'usage', usage: result.response.usage };
+    yield {
+      type: 'finish',
+      response: result.response,
+      ...(result.response.finishReason === undefined
+        ? {}
+        : { reason: result.response.finishReason }),
+    };
   }
 
   submitBatch(
@@ -1225,67 +1070,6 @@ export class LlmGateway {
     });
   }
 
-  private async callWithStructuredCorrection(
-    provider: LlmProvider,
-    model: RegisteredLlmModel,
-    input: LlmGatewayChatInput,
-    maxCorrections: number,
-    attemptUsages: AttemptUsage[],
-    execution: ReturnType<LlmGateway['prepareExecution']>,
-  ): Promise<LlmChatResponse> {
-    let request = withSelectedModel(input.request, model.model);
-    for (let correction = 0; correction <= maxCorrections; correction += 1) {
-      const deadline = deadlineSignal(request.signal, input.timeoutMs);
-      let response: LlmChatResponse;
-      try {
-        response = await this.reliability.execute(
-          model.providerId,
-          async () => provider.chat({ ...request, signal: deadline.signal }),
-          deadline.signal,
-          estimateMessagesTokens(request.messages) + (request.maxTokens ?? 4_096),
-        );
-      } catch (error) {
-        throw deadline.timedOut() ? timeoutError(input.timeoutMs) : error;
-      } finally {
-        deadline.cleanup();
-      }
-      const usage = response.usage ?? estimateResponseUsage(request, response);
-      attemptUsages.push({ model, usage });
-      try {
-        this.validateResponse(response, request, input.validateToolCalls ?? true);
-        return response;
-      } catch (error) {
-        if (
-          !(error instanceof LlmProviderError) ||
-          error.code !== 'LLM_STRUCTURED_OUTPUT_INVALID' ||
-          correction === maxCorrections
-        )
-          throw error;
-        await this.emit(
-          execution.event('provider.retry', {
-            providerId: model.providerId,
-            modelId: model.id,
-            errorCode: error.code,
-            attributes: { correction: true, correctionNumber: correction + 1 },
-          }),
-        );
-        request = {
-          ...request,
-          messages: [
-            ...request.messages,
-            { role: 'assistant', content: response.text },
-            { role: 'user', content: this.validator.correctionInstruction(error) },
-          ],
-        };
-      }
-    }
-    throw new LlmProviderError(
-      'LLM_STRUCTURED_OUTPUT_INVALID',
-      'Structured output correction was exhausted.',
-      false,
-    );
-  }
-
   private validateResponse(
     response: LlmChatResponse,
     request: LlmChatRequest,
@@ -1387,8 +1171,9 @@ function applySessionGeneration(
   session: ModelSession,
 ): CanonicalModelRequest {
   return {
-    ...request,
     model: session.route.modelId,
+    messages: structuredClone(request.messages),
+    ...(request.tools === undefined ? {} : { tools: structuredClone(request.tools) }),
     ...(session.generation.temperature === undefined
       ? {}
       : { temperature: session.generation.temperature }),
@@ -1398,6 +1183,98 @@ function applySessionGeneration(
       : { maxOutputTokens: session.generation.maxOutputTokens }),
     ...(session.generation.stop === undefined ? {} : { stop: [...session.generation.stop] }),
   };
+}
+
+export function modelGatewayToLegacyError(error: unknown): LlmProviderError {
+  const providerError = findProviderError(error);
+  if (providerError !== undefined) {
+    const parameter = unsupportedGenerationParameter(providerError.message);
+    if (parameter !== undefined) {
+      return new LlmProviderError(
+        'LLM_PARAMETER_UNSUPPORTED',
+        providerError.message,
+        false,
+        undefined,
+        { parameter },
+      );
+    }
+    const responseStarted = error instanceof ModelGatewayError &&
+      error.cause instanceof ModelClientError && error.cause.responseStarted;
+    return responseStarted ? markStreamResponseStarted(providerError) : providerError;
+  }
+  if (error instanceof ModelGatewayError) {
+    const unsupportedParameter = unsupportedGenerationParameter(error.message);
+    const code = unsupportedParameter !== undefined
+      ? 'LLM_PARAMETER_UNSUPPORTED'
+      : error.code === 'MODEL_CANCELLED'
+      ? 'LLM_ABORTED'
+      : error.code === 'MODEL_TIMEOUT'
+        ? 'LLM_TIMEOUT'
+        : error.code === 'MODEL_PROTOCOL_FAILED'
+          ? 'LLM_BAD_RESPONSE'
+          : 'LLM_PROVIDER_ERROR';
+    return new LlmProviderError(
+      code,
+      error.message,
+      error.retryable,
+      error.statusCode,
+      {
+        ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+        ...(error.cause instanceof ModelClientError && error.cause.responseStarted
+          ? { responseStarted: true }
+          : {}),
+        ...(unsupportedParameter === undefined ? {} : { parameter: unsupportedParameter }),
+        ...(error.code === 'MODEL_CANCELLED' || unsupportedParameter !== undefined
+          ? {}
+          : { modelGatewayCode: error.code }),
+      },
+    );
+  }
+  if (error instanceof Error) {
+    const parameter = unsupportedGenerationParameter(error.message);
+    if (parameter !== undefined) {
+      return new LlmProviderError(
+        'LLM_PARAMETER_UNSUPPORTED',
+        error.message,
+        false,
+        undefined,
+        { parameter },
+      );
+    }
+  }
+  return normalizeProviderError(error);
+}
+
+function unsupportedGenerationParameter(message: string): string | undefined {
+  const match = /(?:does not support generation parameter|generation parameter) ([A-Za-z]+)|^([A-Za-z]+) is not supported/.exec(
+    message,
+  );
+  return match?.[1] ?? match?.[2];
+}
+
+function freezeProtocolEnvelope(envelope: ModelProtocolEnvelope): ModelProtocolEnvelope {
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    attemptId: envelope.attemptId,
+    origin: Object.freeze({ ...envelope.origin }),
+    correlations: Object.freeze(envelope.correlations.map((correlation) => Object.freeze({
+      ...correlation,
+      ...(correlation.wireIdentity === undefined
+        ? {}
+        : { wireIdentity: Object.freeze({ ...correlation.wireIdentity }) }),
+    }))),
+    opaqueBlockRefs: Object.freeze([...envelope.opaqueBlockRefs]),
+  }) as unknown as ModelProtocolEnvelope;
+}
+
+function withDiscardedModelAttempts(
+  error: ModelGatewayError,
+  attempts: readonly DiscardedModelAttempt[],
+): ModelGatewayError {
+  return new ModelGatewayError(error.code, error.message, error.retryable, {
+    ...error.options,
+    discardedAttempts: Object.freeze(attempts.map(freezeDiscardedAttempt)),
+  });
 }
 
 function validateDecodedModelAttempt(attempt: DecodedModelAttempt): ValidatedModelAttempt {
@@ -1440,9 +1317,22 @@ async function* guardModelStream(
       yield next.value;
     }
   } finally {
-    // A transport iterator may be stalled inside next(). Abort is authoritative;
-    // cleanup must not hide the phase timeout behind the outer total deadline.
-    void iterator.return?.().catch(() => undefined);
+    await boundedIteratorCleanup(iterator);
+  }
+}
+
+async function boundedIteratorCleanup(iterator: AsyncIterator<unknown>): Promise<void> {
+  if (iterator.return === undefined) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      iterator.return().then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 50);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -1453,7 +1343,10 @@ function raceModelDeadline<T>(
   controller: AbortController,
   sourceSignal?: AbortSignal,
 ): Promise<T> {
-  if (sourceSignal?.aborted) return Promise.reject(modelCancelledError(sourceSignal.reason));
+  if (sourceSignal?.aborted) {
+    void operation.catch(() => undefined);
+    return Promise.reject(modelCancelledError(sourceSignal.reason));
+  }
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -1514,11 +1407,11 @@ function classifyModelAttemptError(
   }
   if (error instanceof ModelClientError) {
     const retryAfterMs = error.retryAfterMs ?? retryAfterMilliseconds(error.retryAfter, nowMs);
-    const retryableHttp =
+    const retryableHttp = error.retryable && (
       error.statusCode === 429 ||
       error.statusCode === 502 ||
       error.statusCode === 503 ||
-      error.statusCode === 504;
+      error.statusCode === 504);
     const retryableTransport =
       error.statusCode === undefined &&
       (error.code === 'CONNECT_FAILED' || error.code === 'STREAM_DISCONNECTED') &&
@@ -1561,6 +1454,11 @@ function discardReason(error: unknown, normalized: ModelGatewayError): string {
   return normalized.code;
 }
 
+function isModelFallbackEligible(error: ModelGatewayError): boolean {
+  return error.retryable ||
+    (error.code === 'MODEL_TRANSPORT_FAILED' && error.statusCode === 404);
+}
+
 function modelRetryError(error: ModelGatewayError): LlmProviderError {
   return new LlmProviderError(
     'LLM_PROVIDER_ERROR',
@@ -1569,28 +1467,6 @@ function modelRetryError(error: ModelGatewayError): LlmProviderError {
     error.statusCode,
     error.retryAfterMs === undefined ? undefined : { retryAfterMs: error.retryAfterMs },
   );
-}
-
-function assertCompatibleFallbacks(
-  primary: ModelSession,
-  fallbacks: readonly ModelSession[],
-): void {
-  for (const fallback of fallbacks) {
-    const declared = primary.route.allowedFallbackRouteIds.includes(fallback.route.routeId);
-    const primaryCompatibility = primary.route.compatibility;
-    const fallbackCompatibility = fallback.route.compatibility;
-    const compatible =
-      primaryCompatibility?.mode === 'compatible-protocol' &&
-      fallbackCompatibility?.mode === 'compatible-protocol' &&
-      primaryCompatibility.family === fallbackCompatibility.family;
-    if (!declared || !compatible) {
-      throw new ModelGatewayError(
-        'MODEL_FALLBACK_INCOMPATIBLE',
-        `Fallback route ${fallback.route.routeId} is not an explicit compatible-protocol candidate of ${primary.route.routeId}.`,
-        false,
-      );
-    }
-  }
 }
 
 function modelAttemptTimeouts(input: Partial<ModelAttemptTimeouts> = {}): ModelAttemptTimeouts {
@@ -1708,32 +1584,6 @@ function budgetScope(context: LlmGatewayContext): LlmBudgetScope {
   };
 }
 
-function deadlineSignal(source: AbortSignal | undefined, timeoutMs: number | undefined) {
-  const controller = new AbortController();
-  let timeoutReached = false;
-  const abort = () => controller.abort();
-  source?.addEventListener('abort', abort, { once: true });
-  if (source?.aborted) controller.abort();
-  const timer =
-    timeoutMs === undefined
-      ? undefined
-      : setTimeout(
-          () => {
-            timeoutReached = true;
-            controller.abort();
-          },
-          boundedInteger(timeoutMs, 1, 600_000, 'timeoutMs'),
-        );
-  return {
-    signal: controller.signal,
-    timedOut: () => timeoutReached,
-    cleanup: () => {
-      if (timer) clearTimeout(timer);
-      source?.removeEventListener('abort', abort);
-    },
-  };
-}
-
 function estimateResponseUsage(request: LlmChatRequest, response: LlmChatResponse): LlmUsage {
   const promptTokens = estimateMessagesTokens(request.messages);
   const completionTokens = Math.max(
@@ -1810,43 +1660,25 @@ function markStreamResponseStarted(error: unknown): LlmProviderError {
   );
 }
 
-function normalizeTimeoutError(error: unknown): LlmProviderError {
-  return normalizeProviderError(error);
-}
-
-function timeoutError(timeoutMs: number | undefined): LlmProviderError {
-  return new LlmProviderError(
-    'LLM_TIMEOUT',
-    `LLM request timed out after ${timeoutMs ?? 0}ms.`,
-    true,
-  );
-}
-
-function isRetryable(error: unknown): boolean {
-  return error instanceof LlmProviderError && error.retryable;
-}
-
-function isAborted(error: unknown): boolean {
-  return error instanceof LlmProviderError && error.code === 'LLM_ABORTED';
-}
-
 function shouldAffectCircuit(error: unknown): boolean {
   return error instanceof LlmProviderError && error.retryable && error.code !== 'LLM_RATE_LIMITED';
 }
 
-function errorCode(error: unknown): string {
-  return error instanceof LlmProviderError ? error.code : 'LLM_PROVIDER_ERROR';
+function shouldAffectModelClientCircuit(error: unknown): boolean {
+  const providerError = findProviderError(error);
+  if (providerError !== undefined) return shouldAffectCircuit(providerError);
+  return error instanceof ModelClientError && error.retryable && error.statusCode !== 429;
 }
 
-function emptyResponse(model: string): LlmChatResponse {
-  return { text: '', toolCalls: [], model };
-}
-
-function* emulateStream(response: LlmChatResponse): Iterable<LlmChatStreamEvent> {
-  if (response.text) yield { type: 'text-delta', text: response.text };
-  for (const toolCall of response.toolCalls) yield { type: 'tool-call', toolCall };
-  if (response.usage) yield { type: 'usage', usage: response.usage };
-  yield { type: 'finish', response };
+function findProviderError(error: unknown): LlmProviderError | undefined {
+  let current: unknown = error;
+  const visited = new Set<unknown>();
+  while (current instanceof Error && !visited.has(current)) {
+    if (current instanceof LlmProviderError) return current;
+    visited.add(current);
+    current = current.cause;
+  }
+  return undefined;
 }
 
 function hashTenant(tenantId: string): string {
@@ -1873,20 +1705,4 @@ function boundedInteger(value: number, min: number, max: number, name: string): 
 function minimumDefined(values: Array<number | undefined>): number | undefined {
   const defined = values.filter((value): value is number => value !== undefined);
   return defined.length === 0 ? undefined : Math.min(...defined);
-}
-
-async function cancellableDelay(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted)
-    throw new LlmProviderError('LLM_ABORTED', 'LLM request was aborted by the user.', false);
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      signal?.removeEventListener('abort', abort);
-      resolve();
-    }, ms);
-    const abort = () => {
-      clearTimeout(timeout);
-      reject(new LlmProviderError('LLM_ABORTED', 'LLM request was aborted by the user.', false));
-    };
-    signal?.addEventListener('abort', abort, { once: true });
-  });
 }

@@ -10,6 +10,38 @@ import {
 } from '../src/index.js';
 
 describe('LlmGateway', () => {
+  it('never retries a stream after any provider event, including usage-only events', async () => {
+    let attempts = 0;
+    const provider: LlmProvider = {
+      id: 'usage-then-error',
+      name: 'Usage then error',
+      mode: 'byok',
+      chat: () => Promise.reject(new Error('chat should not be called')),
+      async *stream() {
+        attempts += 1;
+        yield {
+          type: 'usage' as const,
+          usage: { promptTokens: 1, completionTokens: 0, totalTokens: 1 },
+        };
+        throw new LlmProviderError('LLM_PROVIDER_ERROR', 'stream failed', true, 503);
+      },
+      isAvailable: () => Promise.resolve({ available: true }),
+    };
+    const gateway = new LlmGateway();
+    gateway.registerProvider(provider, [{ model: 'm' }]);
+
+    await expect((async () => {
+      for await (const event of gateway.stream({
+        providerId: provider.id,
+        request: { model: 'm', messages: [{ role: 'user', content: 'hello' }] },
+        context: { tenantId: 'tenant', taskType: 'stream' },
+        maxRetries: 3,
+      })) {
+        expect(event.type).toBe('usage');
+      }
+    })()).rejects.toMatchObject({ detail: { responseStarted: true } });
+    expect(attempts).toBe(1);
+  });
   it('rejects textual tool markup at the canonical gateway boundary without retrying', async () => {
     let calls = 0;
     const provider: LlmProvider = {
@@ -333,7 +365,8 @@ describe('LlmGateway', () => {
         }
       })(),
     ).rejects.toMatchObject({ code: 'LLM_NETWORK_ERROR' });
-    expect(received).toEqual(['partial']);
+    // Tentative output from a failed attempt is discarded before it becomes caller-visible.
+    expect(received).toEqual([]);
     expect(backupCalls).toBe(0);
   });
 

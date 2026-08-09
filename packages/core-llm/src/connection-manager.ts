@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createBuiltinLlmProviderPlugins } from './builtin-provider-plugins.js';
 import type { RoundContext } from '@dbagent/core-usage';
 import { LlmConnectionResolver } from './connection-resolver.js';
@@ -12,9 +13,13 @@ import {
   validateLlmGenerationConfig,
 } from './generation-config.js';
 import {
+  createModelSessionBundle,
   createModelSession,
+  MODEL_PROTOCOL_CODEC_REVISIONS,
   type ModelClient,
+  type ModelReplayBinding,
   type ModelSession,
+  type ModelSessionBundle,
 } from './model-client.js';
 import { HttpJsonTransport } from './transport/http-json-transport.js';
 import { openAIChatCodec } from './protocol/codecs/openai-chat.js';
@@ -24,10 +29,21 @@ import { ollamaChatCodec } from './protocol/codecs/ollama-chat.js';
 import type { ModelProtocolCodec } from './protocol/codec.js';
 import {
   LlmGateway,
+  ModelExecutionGateway,
+  modelGatewayToLegacyError,
   type LlmGatewayChatInput,
   type LlmGatewayContext,
   type LlmGatewayResult,
 } from './llm-gateway.js';
+import {
+  legacyAttemptToResponse,
+  legacyRequestToCanonical,
+  LegacyProviderCodec,
+  LegacyProviderModelClient,
+  canonicalLegacyProtocol,
+} from './legacy-model-compatibility.js';
+import { assertNoTextualToolInvocation } from './tool-protocol.js';
+import { LlmTaskRouter } from './routing.js';
 import {
   LlmModelCatalogManager,
   type LlmCatalogSnapshot,
@@ -117,6 +133,8 @@ export type LlmConnectionManagerChatInput = {
   round?: RoundContext;
   /** Agent runtimes validate tool calls at their own execution boundary. */
   validateToolCalls?: boolean;
+  /** Explicitly freezes all resolved compatible protocol alternatives into this Run bundle. */
+  allowCompatibleProtocolFallbacks?: boolean;
   gateway?: Pick<
     LlmGatewayChatInput,
     | 'task'
@@ -337,6 +355,21 @@ export class LlmConnectionManager {
       signal?: AbortSignal;
     },
   ): Promise<ModelSession> {
+    return (await this.prepareModelSessionBundle(selection, options)).primary;
+  }
+
+  /** Prepares the complete authenticated primary/fallback binding without executing a model. */
+  async prepareModelSessionBundle(
+    selection: LlmModelSelection,
+    options: {
+      client?: ModelClient;
+      clients?: Readonly<Record<string, ModelClient>>;
+      generation?: LlmGenerationConfig;
+      replay?: ModelReplayBinding;
+      allowedFallbackRouteIds?: readonly string[];
+      signal?: AbortSignal;
+    },
+  ): Promise<ModelSessionBundle> {
     const prepared = await this.prepare(
       selection,
       options.signal === undefined ? {} : { signal: options.signal },
@@ -352,8 +385,6 @@ export class LlmConnectionManager {
         false,
       );
     }
-    const codec = canonicalCodec(resolution.protocol);
-    const routeId = modelSessionRouteId(resolution, selection.modelId);
     const availableFallbacks = new Set(
       runtime.resolutions.slice(1).map((candidate) => modelSessionRouteId(candidate, selection.modelId)),
     );
@@ -364,38 +395,80 @@ export class LlmConnectionManager {
         );
       }
     }
-    return createModelSession({
-      route: {
-        routeId,
-        connectionId: selection.connectionId,
-        providerId: resolution.providerId,
-        modelId: selection.modelId,
-        protocol: codec.protocol,
-        codecRevision: `${codec.protocol}@${resolution.pluginVersion}`,
-        capabilities: Object.fromEntries(
-          Object.entries(prepared.model.capabilities).map(([name, metadata]) => [
-            name,
-            metadata.value ?? 'unknown',
-          ]),
-        ),
-        contextTokens: prepared.model.contextTokens.value,
-        maxInputTokens: prepared.model.maxInputTokens.value,
-        maxOutputTokens: prepared.model.maxOutputTokens.value,
-        metadata: {
-          source: prepared.model.contextTokens.source,
-          revision: resolution.revision,
-          digest: `sha256:${resolution.revision}`,
+    const allowedFallbackRouteIds = [...(options.allowedFallbackRouteIds ?? [])];
+    const createBoundSession = (
+      candidate: LlmConnectionResolution,
+      fallback: boolean,
+    ): ModelSession => {
+      const canonicalProtocol = canonicalLegacyProtocol(candidate.protocol);
+      const candidateCodec = canonicalCodec(candidate.protocol) ??
+        new LegacyProviderCodec(canonicalProtocol);
+      const candidateRouteId = modelSessionRouteId(candidate, selection.modelId);
+      const provider = runtime.providers.get(candidate.pluginId);
+      if (provider === undefined) {
+        throw new ModelGatewayPreparationError(
+          `Resolved Provider Plugin ${candidate.pluginId} has no prepared Provider client.`,
+        );
+      }
+      const replay = fallback
+        ? {
+            mode: 'compatible-protocol' as const,
+            envelopes: options.replay?.mode !== undefined && options.replay.mode !== 'new'
+              ? options.replay.envelopes
+              : [],
+          }
+        : options.replay;
+      return createModelSession({
+        route: {
+          routeId: candidateRouteId,
+          connectionId: selection.connectionId,
+          providerId: candidate.providerId,
+          modelId: selection.modelId,
+          protocol: candidateCodec.protocol,
+          codecRevision: MODEL_PROTOCOL_CODEC_REVISIONS[candidateCodec.protocol],
+          capabilities: Object.fromEntries(
+            Object.entries(prepared.model.capabilities).map(([name, metadata]) => [
+              name,
+              metadata.value ?? 'unknown',
+            ]),
+          ),
+          generationParameters: Object.fromEntries(
+            Object.entries(prepared.model.generationParameters).map(([name, metadata]) => [
+              name,
+              metadata.value ?? 'unknown',
+            ]),
+          ),
+          contextTokens: prepared.model.contextTokens.value,
+          maxInputTokens: prepared.model.maxInputTokens.value,
+          maxOutputTokens: prepared.model.maxOutputTokens.value,
+          metadata: {
+            source: prepared.model.contextTokens.source,
+            revision: candidate.revision,
+            digest: 'computed-by-createModelSession',
+          },
+          allowedFallbackRouteIds: fallback ? [] : allowedFallbackRouteIds,
+          compatibility: {
+            mode: 'compatible-protocol',
+            family: `${selection.connectionId}:${selection.modelId}:canonical-tools-v1`,
+          },
         },
-        allowedFallbackRouteIds: [...(options.allowedFallbackRouteIds ?? [])],
-        compatibility: {
-          mode: 'compatible-protocol',
-          family: `${selection.connectionId}:${selection.modelId}:canonical-tools-v1`,
-        },
-      },
-      generation: options.generation ?? {},
-      codec,
-      client: options.client ?? defaultModelClient(runtime.connection, resolution, this.fetchImpl),
-    });
+        generation: this.normalizeParameters(candidate, options.generation ?? {}),
+        codec: candidateCodec,
+        client: options.clients?.[candidateRouteId] ??
+          (!fallback ? options.client : undefined) ??
+          defaultModelClient(runtime.connection, candidate, this.fetchImpl) ??
+          new LegacyProviderModelClient(provider, false),
+        ...(replay === undefined ? {} : { replay }),
+      });
+    };
+    const primarySession = createBoundSession(resolution, false);
+    const fallbackSessions = runtime.resolutions
+      .slice(1)
+      .filter((candidate) => allowedFallbackRouteIds.includes(
+        modelSessionRouteId(candidate, selection.modelId),
+      ))
+      .map((candidate) => createBoundSession(candidate, true));
+    return createModelSessionBundle({ primary: primarySession, fallbacks: fallbackSessions });
   }
 
   effectiveParameters(
@@ -463,54 +536,115 @@ export class LlmConnectionManager {
       ...(input.sessionParameters === undefined ? {} : { session: input.sessionParameters }),
       ...(input.parameters === undefined ? {} : { request: input.parameters }),
     });
-    const outcome = await this.gateway.executeCompatibilityFallback({
-      candidates: runtime.resolutions.filter((resolution) =>
-        runtime.providers.has(resolution.pluginId),
-      ),
-      candidateId: (resolution) => resolution.protocol,
-      execute: async (resolution) => {
-        const provider = runtime.providers.get(resolution.pluginId)!;
-        this.registerProviderModel(provider, resolution, this.requireCatalogModel(input.selection));
-        const request = withGenerationParameters(
-          input.request,
-          input.selection.modelId,
-          this.normalizeParameters(resolution, effective.values),
-        );
-        const result = await this.gateway.execute({
-          providerId: provider.id,
-          request,
-          context: input.context,
-          ...(input.round === undefined ? {} : { round: input.round }),
-          ...(input.gateway?.task === undefined ? {} : { task: input.gateway.task }),
-          ...(input.gateway?.policies === undefined ? {} : { policies: input.gateway.policies }),
-          ...(input.gateway?.budget === undefined ? {} : { budget: input.gateway.budget }),
-          ...(input.gateway?.cache === undefined ? {} : { cache: input.gateway.cache }),
-          ...(input.gateway?.timeoutMs === undefined ? {} : { timeoutMs: input.gateway.timeoutMs }),
+    const allowedFallbackRouteIds = input.allowCompatibleProtocolFallbacks
+      ? runtime.resolutions.slice(1).map((resolution) =>
+          modelSessionRouteId(resolution, input.selection.modelId))
+      : [];
+    let bundle: ModelSessionBundle;
+    try {
+      bundle = await this.prepareModelSessionBundle(input.selection, {
+        generation: effective.values,
+        allowedFallbackRouteIds,
+        ...(input.request.signal === undefined ? {} : { signal: input.request.signal }),
+      });
+    } catch (error) {
+      throw annotateRouteError(
+        modelGatewayToLegacyError(this.classifyProviderError(runtime.resolutions[0]!, error)),
+        input.selection,
+        runtime.resolutions[0]!,
+      );
+    }
+    let execution;
+    try {
+      execution = await new ModelExecutionGateway().executeAttempt(
+        bundle,
+        legacyRequestToCanonical(input.request, input.selection.modelId),
+        {
           maxRetries: input.gateway?.maxRetries ?? 0,
-          maxFallbacks: 0,
-          ...(input.gateway?.maxStructuredCorrections === undefined
+          ...(input.request.signal === undefined ? {} : { signal: input.request.signal }),
+          ...(input.gateway?.timeoutMs === undefined
             ? {}
-            : { maxStructuredCorrections: input.gateway.maxStructuredCorrections }),
-          ...(input.validateToolCalls === undefined
-            ? {}
-            : { validateToolCalls: input.validateToolCalls }),
-        });
-        return result;
-      },
-      classifyError: (resolution, error) =>
-        annotateRouteError(
-          this.classifyProviderError(resolution, error),
-          input.selection,
-          resolution,
-        ),
-      shouldFallback: isProtocolEndpointRejection,
+            : {
+                timeouts: {
+                  connectMs: input.gateway.timeoutMs,
+                  firstEventMs: input.gateway.timeoutMs,
+                  idleMs: input.gateway.timeoutMs,
+                  totalMs: input.gateway.timeoutMs,
+                },
+              }),
+        },
+      );
+    } catch (error) {
+      const primaryResolution = runtime.resolutions[0]!;
+      throw annotateRouteError(
+        modelGatewayToLegacyError(this.classifyProviderError(primaryResolution, error)),
+        input.selection,
+        primaryResolution,
+      );
+    }
+    const response = legacyAttemptToResponse(
+      execution.attempt.blocks,
+      execution.attempt.usage,
+      execution.attempt.providerResponseId,
+    );
+    if (execution.attempt.finishReason !== undefined) {
+      response.finishReason = execution.attempt.finishReason;
+    }
+    assertNoTextualToolInvocation({
+      text: response.text,
+      toolCalls: response.toolCalls,
+      toolsRequested: Boolean(input.request.tools?.length),
+      toolNames: input.request.tools?.map((tool) => tool.name) ?? [],
+      protocol: execution.session.route.protocol,
     });
+    const selectedResolution = runtime.resolutions.find((resolution) =>
+      modelSessionRouteId(resolution, input.selection.modelId) === execution.session.route.routeId);
+    if (selectedResolution === undefined) {
+      throw new LlmProviderError('LLM_NO_ROUTE', 'Validated Session route left the prepared bundle.', false);
+    }
+    const registered = this.gateway.registry.find(
+      selectedResolution.providerId,
+      input.selection.modelId,
+    );
+    if (registered === undefined) {
+      throw new LlmProviderError('LLM_NO_ROUTE', 'Prepared model is missing from the Gateway registry.', false);
+    }
+    const routeDecision = new LlmTaskRouter(this.gateway.registry).route({
+      task: {
+        taskType: input.context.taskType,
+        requirements: { requiredModelIds: [registered.id] },
+      },
+    });
+    const usage = response.usage ?? {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      estimated: true,
+    };
+    response.usage = usage;
+    const protocolAttempts = [
+      ...execution.discardedAttempts.map((discarded) =>
+        runtime.resolutions.find((resolution) =>
+          modelSessionRouteId(resolution, input.selection.modelId) === discarded.routeId)?.protocol ??
+          'unknown'),
+      selectedResolution.protocol,
+    ];
     return {
-      response: outcome.result.response,
-      route: this.resolver.resolveRoute(outcome.candidate, input.selection.modelId),
+      response,
+      route: this.resolver.resolveRoute(selectedResolution, input.selection.modelId),
       effectiveParameters: effective,
-      protocolAttempts: [...outcome.attempts],
-      gateway: outcome.result,
+      protocolAttempts,
+      gateway: {
+        requestId: input.context.requestId ?? randomUUID(),
+        traceId: input.context.traceId ?? input.context.requestId ?? randomUUID(),
+        response,
+        route: routeDecision,
+        providerId: selectedResolution.providerId,
+        modelId: registered.id,
+        attempts: execution.discardedAttempts.length + 1,
+        cacheHit: false,
+        usage,
+      },
     };
   }
 
@@ -519,48 +653,17 @@ export class LlmConnectionManager {
   }
 
   async *stream(input: LlmConnectionManagerChatInput): AsyncIterable<LlmChatStreamEvent> {
-    const runtime = await this.ensureReady(input.selection, input.request.signal);
-    const effective = this.effectiveParameters(input.selection, {
-      ...(input.sessionParameters === undefined ? {} : { session: input.sessionParameters }),
-      ...(input.parameters === undefined ? {} : { request: input.parameters }),
-    });
-    yield* this.gateway.streamCompatibilityFallback({
-      candidates: runtime.resolutions.filter((resolution) =>
-        runtime.providers.has(resolution.pluginId),
-      ),
-      candidateId: (resolution) => resolution.protocol,
-      stream: (resolution) => {
-        const provider = runtime.providers.get(resolution.pluginId)!;
-        this.registerProviderModel(provider, resolution, this.requireCatalogModel(input.selection));
-        const request = withGenerationParameters(
-          input.request,
-          input.selection.modelId,
-          this.normalizeParameters(resolution, effective.values),
-        );
-        return this.gateway.stream({
-          providerId: provider.id,
-          request,
-          context: input.context,
-          ...(input.round === undefined ? {} : { round: input.round }),
-          ...(input.gateway?.task === undefined ? {} : { task: input.gateway.task }),
-          ...(input.gateway?.policies === undefined ? {} : { policies: input.gateway.policies }),
-          ...(input.gateway?.budget === undefined ? {} : { budget: input.gateway.budget }),
-          ...(input.gateway?.timeoutMs === undefined ? {} : { timeoutMs: input.gateway.timeoutMs }),
-          maxRetries: input.gateway?.maxRetries ?? 0,
-          maxFallbacks: 0,
-          ...(input.validateToolCalls === undefined
-            ? {}
-            : { validateToolCalls: input.validateToolCalls }),
-        });
-      },
-      classifyError: (resolution, error) =>
-        annotateRouteError(
-          this.classifyProviderError(resolution, error),
-          input.selection,
-          resolution,
-        ),
-      shouldFallback: isProtocolEndpointRejection,
-    });
+    const result = await this.executeChat(input);
+    if (result.response.text) yield { type: 'text-delta', text: result.response.text };
+    for (const toolCall of result.response.toolCalls) yield { type: 'tool-call', toolCall };
+    if (result.response.usage) yield { type: 'usage', usage: result.response.usage };
+    yield {
+      type: 'finish',
+      response: result.response,
+      ...(result.response.finishReason === undefined
+        ? {}
+        : { reason: result.response.finishReason }),
+    };
   }
 
   async embed(input: {
@@ -738,11 +841,20 @@ export class LlmConnectionManager {
   ): unknown {
     const classifier = this.registry.get(resolution.pluginId)?.errors;
     if (!classifier) return error;
-    try {
-      return classifier.classify(error) ?? error;
-    } catch {
-      return error;
+    let current: unknown = error;
+    const visited = new Set<unknown>();
+    while (!visited.has(current)) {
+      visited.add(current);
+      try {
+        const classified = classifier.classify(current);
+        if (classified !== undefined) return classified;
+      } catch {
+        return error;
+      }
+      current = current instanceof Error ? current.cause : undefined;
+      if (current === undefined) break;
     }
+    return error;
   }
 
   private withConnectionOperation<T>(connectionId: string, operation: () => Promise<T>): Promise<T> {
@@ -793,14 +905,12 @@ class ModelGatewayPreparationError extends Error {
   }
 }
 
-function canonicalCodec(protocol: string): ModelProtocolCodec {
+function canonicalCodec(protocol: string): ModelProtocolCodec | undefined {
   if (protocol === 'openai-chat') return openAIChatCodec;
   if (protocol === 'openai-responses') return openAIResponsesCodec;
   if (protocol === 'anthropic-messages') return anthropicMessagesCodec;
   if (protocol === 'ollama-chat') return ollamaChatCodec;
-  throw new ModelGatewayPreparationError(
-    `Resolved protocol ${protocol} has no canonical Model Protocol Codec.`,
-  );
+  return undefined;
 }
 
 function modelSessionRouteId(
@@ -814,7 +924,7 @@ function defaultModelClient(
   connection: LlmConnection,
   resolution: LlmConnectionResolution,
   fetchImpl?: LlmFetch,
-): ModelClient {
+): ModelClient | undefined {
   const path = resolution.protocol === 'openai-chat'
     ? '/chat/completions'
     : resolution.protocol === 'openai-responses'
@@ -825,9 +935,7 @@ function defaultModelClient(
           ? '/api/chat'
           : undefined;
   if (path === undefined) {
-    throw new ModelGatewayPreparationError(
-      `Resolved protocol ${resolution.protocol} has no canonical HTTP transport route.`,
-    );
+    return undefined;
   }
   return new HttpJsonTransport({
     url: appendLlmEndpointPath(resolution.providerBaseUrl, path),
@@ -866,27 +974,6 @@ function sameConnection(left: LlmConnection, right: LlmConnection): boolean {
   return JSON.stringify(leftHeaders) === JSON.stringify(rightHeaders);
 }
 
-function withGenerationParameters(
-  request: LlmManagedChatRequest,
-  model: string,
-  parameters: LlmGenerationConfig,
-): LlmChatRequest {
-  return {
-    ...request,
-    model,
-    ...(parameters.temperature === undefined ? {} : { temperature: parameters.temperature }),
-    ...(parameters.topP === undefined ? {} : { topP: parameters.topP }),
-    ...(parameters.maxOutputTokens === undefined
-      ? {}
-      : { maxTokens: parameters.maxOutputTokens }),
-    ...(parameters.seed === undefined ? {} : { seed: parameters.seed }),
-    ...(parameters.stop === undefined ? {} : { stop: [...parameters.stop] }),
-    ...(parameters.reasoningEffort === undefined
-      ? {}
-      : { reasoning: { effort: parameters.reasoningEffort } }),
-  };
-}
-
 function gatewayCapabilities(
   model: LlmCatalogModel,
   provider: LlmProvider,
@@ -917,13 +1004,6 @@ function parameterError(
     parameter,
     metadataSource,
   });
-}
-
-function isProtocolEndpointRejection(error: unknown): boolean {
-  return error instanceof LlmProviderError &&
-    error.code === 'LLM_PROVIDER_ERROR' &&
-    error.detail?.responseStarted !== true &&
-    (error.statusCode === 404 || error.statusCode === 405);
 }
 
 function annotateRouteError(
