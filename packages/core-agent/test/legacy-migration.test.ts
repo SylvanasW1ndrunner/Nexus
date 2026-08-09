@@ -50,6 +50,12 @@ describe('StateMigrationRunner', () => {
       migratorRevision: 'task-4-r3-public-contract',
     });
     const inspection = await migrated.inspect();
+    expect(withTestDatabase(join(fixture.projectDir, 'state.db'), (database) => ({
+      status: (database.prepare('SELECT status FROM schema_migrations').get() as { status: string }).status,
+      sealed: Number((database.prepare(
+        'SELECT sealed FROM legacy_migration_build_context WHERE id = 1',
+      ).get() as { sealed: number }).sealed),
+    }))).toEqual({ status: 'active', sealed: 1 });
     const journal = new SqliteAgentJournal({ filePath: join(fixture.projectDir, 'state.db') });
     const publicStore = new JournalSessionStore(journal, inspection.projectId);
 
@@ -321,6 +327,59 @@ describe('StateMigrationRunner', () => {
     });
     expect((await migrated.readImportedLegacyState()).sessions[0]?.title)
       .not.toBe('writer-won-the-race');
+  }, 20_000);
+
+  it('rechecks the live source after the final-cut barrier and rebuilds from the preserved source', async () => {
+    const projectDir = await createLegacyWriterProject();
+    const migration = spawnMigrationWorker(projectDir, 'migrate', {
+      DBAGENT_MIGRATION_BARRIER_POINT: 'after-live-recheck',
+    });
+    await waitForPath(join(projectDir, 'migration-barrier-ready'));
+    withTestDatabase(join(projectDir, 'state.db'), (database) => {
+      const row = database.prepare('SELECT payload_json FROM agent_sessions WHERE id = ?')
+        .get('session-a') as { payload_json: string };
+      const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+      payload.title = 'changed-at-final-cut';
+      database.prepare('UPDATE agent_sessions SET title = ?, payload_json = ? WHERE id = ?')
+        .run('changed-at-final-cut', JSON.stringify(payload), 'session-a');
+      database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    });
+    await writeFile(join(projectDir, 'migration-barrier-release'), 'release');
+    expect(await waitForExit(migration)).not.toBe(0);
+
+    const recovered = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r2',
+    });
+    expect((await recovered.readImportedLegacyState()).sessions[0]?.title)
+      .toBe('changed-at-final-cut');
+  }, 20_000);
+
+  it('rolls back a tampered promoted file before active and remigrates the preserved source', async () => {
+    const projectDir = await createLegacyProject();
+    const migration = spawnMigrationWorker(projectDir, 'migrate', {
+      DBAGENT_MIGRATION_BARRIER_POINT: 'after-promote-before-active',
+    });
+    await waitForPath(join(projectDir, 'migration-barrier-ready'));
+    withTestDatabase(join(projectDir, 'state.db'), (database) => {
+      const row = database.prepare(`
+        SELECT project_id, sequence, payload_json FROM agent_events
+        WHERE event_type = 'legacy.imported' ORDER BY project_id, sequence LIMIT 1
+      `).get() as { project_id: string; sequence: number; payload_json: string };
+      const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+      payload.legacyId = 'tampered-after-promotion';
+      database.prepare(`
+        UPDATE agent_events SET payload_json = ? WHERE project_id = ? AND sequence = ?
+      `).run(JSON.stringify(payload), row.project_id, row.sequence);
+      database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    });
+    await writeFile(join(projectDir, 'migration-barrier-release'), 'release');
+    expect(await waitForExit(migration)).not.toBe(0);
+    const recovered = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r2',
+    });
+    expect(await recovered.activeSchemaVersion()).toBe(2);
+    expect((await recovered.readImportedLegacyState()).sessions.map(({ id }) => id))
+      .toEqual(['session-a', 'session-b']);
   }, 20_000);
 
   it('releases the exclusive activation writer gate when the migration process is killed', async () => {

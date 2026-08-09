@@ -361,7 +361,7 @@ async function migrateLocked(
   const currentRow = await readMigrationRowIfNew(finalPath);
   if (currentRow !== undefined) {
     const reconstructed = intentFromActiveRow(projectDir, currentRow);
-    await validateShadow(reconstructed);
+    await validateShadow(reconstructed, true);
     await setMigrationActive(finalPath, reconstructed.migrationId);
     const completed = { ...reconstructed, status: 'completed' as const };
     await writeIntent(projectDir, completed);
@@ -588,9 +588,13 @@ async function activate(
   crashAt: MigrationCrashPoint | undefined,
 ): Promise<StateMigrationRunner> {
   const writerGate = acquireExclusiveStateWriterGate(projectDir);
+  let ownsPromotedSource = false;
   try {
-    await validateShadow(intent);
     const currentRow = await readMigrationRowIfNew(intent.finalPath);
+    ownsPromotedSource = currentRow !== undefined &&
+      currentRow.migration_id === intent.migrationId &&
+      await pathExists(intent.sourceBackupPath);
+    await validateShadow(intent);
     if (currentRow === undefined) {
       if (await pathExists(intent.sourcePath)) {
         if (await pathExists(intent.sourceBackupPath)) {
@@ -600,10 +604,11 @@ async function activate(
             inspectionFromIntent(intent, intent.status),
           );
         }
+        await migrationBarrier(projectDir, 'after-live-recheck');
         await assertSourceDigestStillMatches(projectDir, intent);
         await assertLiveLegacyStillMatches(projectDir, intent);
         await sealMigrationBuildContext(intent.shadowPath, intent);
-        await migrationBarrier(projectDir, 'after-live-recheck');
+        await validateShadow(intent, true);
         await rename(intent.sourcePath, intent.sourceBackupPath);
         await fsyncDirectory(projectDir);
         crashIf(crashAt, 'after-source-renamed', inspectionFromIntent(intent, intent.status));
@@ -617,6 +622,7 @@ async function activate(
           );
         }
         await rename(intent.shadowPath, intent.finalPath);
+        ownsPromotedSource = true;
         await fsyncDirectory(projectDir);
         crashIf(crashAt, 'after-shadow-promoted', inspectionFromIntent(intent, intent.status));
       }
@@ -631,12 +637,19 @@ async function activate(
         inspectionFromIntent(intent, intent.status),
       );
     }
+    await migrationBarrier(projectDir, 'after-promote-before-active');
+    await validateShadow(intent, true);
     await setMigrationActive(intent.finalPath, intent.migrationId);
     const completed = { ...intent, status: 'completed' as const };
     await writeIntent(projectDir, completed);
     await rm(intent.shadowPath, { force: true });
     await fsyncDirectory(projectDir);
     return new StateMigrationRunner(projectDir, completed);
+  } catch (error) {
+    if (!(error instanceof StateMigrationError && error.code === 'INJECTED_CRASH')) {
+      await rollbackFailedActivation(projectDir, intent, ownsPromotedSource);
+    }
+    throw error;
   } finally {
     writerGate.close();
   }
@@ -1196,7 +1209,7 @@ async function assertLegacySource(path: string): Promise<void> {
   }
 }
 
-async function validateShadow(intent: MigrationIntent): Promise<void> {
+async function validateShadow(intent: MigrationIntent, requireSealed = false): Promise<void> {
   const path = await pathExists(intent.shadowPath) ? intent.shadowPath : intent.finalPath;
   const row = readValidatedMigrationRow(path);
   if (
@@ -1245,7 +1258,8 @@ async function validateShadow(intent: MigrationIntent): Promise<void> {
         FROM legacy_migration_build_context WHERE id = 1
       `).get() as { migration_id: string; source_digest: string; sealed: number } | undefined;
       if (context === undefined || context.migration_id !== intent.migrationId ||
-        context.source_digest !== intent.sourceDigest || ![0, 1].includes(Number(context.sealed))) {
+        context.source_digest !== intent.sourceDigest ||
+        (requireSealed ? Number(context.sealed) !== 1 : ![0, 1].includes(Number(context.sealed)))) {
         throw new Error('Legacy migration build context is invalid.');
       }
       const carriers = database.prepare(`
@@ -1500,6 +1514,10 @@ async function setMigrationActive(path: string, migrationId: string): Promise<vo
   withDatabase(path, (database) => {
     database.exec('BEGIN IMMEDIATE');
     try {
+      const context = database.prepare(`
+        SELECT sealed FROM legacy_migration_build_context WHERE id = 1 AND migration_id = ?
+      `).get(migrationId) as { sealed: number } | undefined;
+      if (Number(context?.sealed) !== 1) throw new Error('Unsealed migration cannot become active.');
       const result = database.prepare(`
         UPDATE schema_migrations SET status = 'active'
         WHERE migration_id = ? AND status IN ('validated_pending_activation', 'active')
@@ -1513,6 +1531,24 @@ async function setMigrationActive(path: string, migrationId: string): Promise<vo
     database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   });
   await fsyncFile(path);
+}
+
+async function rollbackFailedActivation(
+  projectDir: string,
+  intent: MigrationIntent,
+  ownsPromotedSource: boolean,
+): Promise<void> {
+  const sourceExists = await pathExists(intent.sourcePath);
+  const backupExists = await pathExists(intent.sourceBackupPath);
+  if (ownsPromotedSource && backupExists) {
+    if (sourceExists) await rm(intent.sourcePath, { force: true });
+    await rename(intent.sourceBackupPath, intent.sourcePath);
+  } else if (!sourceExists && backupExists) {
+    await rename(intent.sourceBackupPath, intent.sourcePath);
+  }
+  await rm(intent.shadowPath, { force: true });
+  await rm(join(projectDir, 'state.migration.json'), { force: true });
+  await fsyncDirectory(projectDir);
 }
 
 function intentFromValidatedRow(
