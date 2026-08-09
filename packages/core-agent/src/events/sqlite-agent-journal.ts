@@ -42,8 +42,7 @@ import type {
   CommitValidatedAttemptCommand,
   ModelTurnCommitResult,
 } from './run-event-committer.js';
-import type { LegacyMigrationWriterAuthority } from '../session/legacy-migration-writer.js';
-import { LEGACY_MIGRATION_WRITER_AUTHORITY } from '../session/legacy-migration-writer.js';
+import { activeLegacyMigrationIdentity } from '../session/legacy-migration-writer.js';
 
 type NodeDatabaseSyncConstructor = new (location: string) => NodeDatabaseSync;
 
@@ -175,37 +174,24 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async commit(command: JournalCommand): Promise<JournalCommitResult> {
     await Promise.resolve();
-    const normalized = validateJournalCommand(snapshotJournalCommand(command));
-    return this.#commitNormalized(normalized);
-  }
-
-  /** @internal StateMigrationRunner is the only package boundary allowed to call this. */
-  async commitLegacyImport(
-    authority: LegacyMigrationWriterAuthority,
-    command: JournalCommand,
-    identity: { migrationId: string; sourceDigest: string },
-  ): Promise<JournalCommitResult> {
-    await Promise.resolve();
-    if (authority !== LEGACY_MIGRATION_WRITER_AUTHORITY) {
-      throw new AgentJournalError('COMMITTER_REQUIRED', 'Legacy migration writer authority is required.');
-    }
-    if (!/^[a-f0-9]{64}$/u.test(identity.migrationId) || !/^[a-f0-9]{64}$/u.test(identity.sourceDigest)) {
-      throw new AgentJournalError('INVALID_ARGUMENT', 'Validated legacy migration identity is required.');
-    }
-    const normalized = validateJournalCommand(snapshotJournalCommand(command), true);
-    if (normalized.events.some(({ type }) => type !== 'legacy.imported') ||
-      !normalized.commandId.includes(identity.migrationId)) {
+    const identity = activeLegacyMigrationIdentity(this);
+    const normalized = validateJournalCommand(snapshotJournalCommand(command), identity !== undefined);
+    if (identity !== undefined && (
+      normalized.events.some(({ type }) => type !== 'legacy.imported' && type !== 'run.cancelled') ||
+      !normalized.commandId.includes(identity.migrationId)
+    )) {
       throw new AgentJournalError(
         'COMMITTER_REQUIRED',
-        'Legacy import boundary accepts only identity-bound legacy.imported facts.',
+        'Legacy import boundary accepts only identity-bound migration facts.',
       );
     }
-    const contextMatches = this.#withDatabase((database) => {
+    const contextMatches = identity === undefined || this.#withDatabase((database) => {
       const row = database.prepare(`
-        SELECT migration_id, source_digest FROM legacy_migration_build_context WHERE id = 1
-      `).get() as { migration_id: string; source_digest: string } | undefined;
+        SELECT migration_id, source_digest, sealed
+        FROM legacy_migration_build_context WHERE id = 1
+      `).get() as { migration_id: string; source_digest: string; sealed: number } | undefined;
       return row !== undefined && row.migration_id === identity.migrationId &&
-        row.source_digest === identity.sourceDigest;
+        row.source_digest === identity.sourceDigest && row.sealed === 0;
     });
     if (!contextMatches) {
       throw new AgentJournalError(
@@ -1437,7 +1423,7 @@ function validateJournalCommand(command: JournalCommand, allowLegacyImport = fal
     validatePortable(value.payload, `${value.type} payload`);
     if (
       value.type === 'input.received' ||
-      value.type.startsWith('run.') ||
+      (value.type.startsWith('run.') && !(allowLegacyImport && value.type === 'run.cancelled')) ||
       value.type.startsWith('turn.') ||
       value.type.startsWith('model_') ||
       value.type.startsWith('tool.')
@@ -2060,6 +2046,7 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
       client_request_id TEXT NOT NULL,
       state TEXT NOT NULL,
       revision INTEGER NOT NULL,
+      hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
       input_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -2221,8 +2208,20 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
       FOREIGN KEY (project_id, run_id) REFERENCES agent_runs(project_id, run_id)
     );
   `);
+  migrateHiddenRuns(database);
   migrateArtifactReferenceUniqueness(database);
   migrateLegacyRunLeaseForeignKey(database);
+}
+
+function migrateHiddenRuns(database: NodeDatabaseSync): void {
+  const columns = database.prepare('PRAGMA table_info(agent_runs)').all() as unknown as Array<{
+    name: string;
+  }>;
+  if (!columns.some(({ name }) => name === 'hidden')) {
+    database.exec(
+      'ALTER TABLE agent_runs ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1))',
+    );
+  }
 }
 
 function migrateArtifactReferenceUniqueness(database: NodeDatabaseSync): void {

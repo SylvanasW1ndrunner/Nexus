@@ -58,6 +58,91 @@ export class JournalSessionStore {
       limit: options.limit ?? 100,
     }, true));
   }
+
+  async preferences(sessionId: string): Promise<LegacyPreferenceProjection[]> {
+    requireSessionId(sessionId);
+    const facts = await this.#legacyFacts(sessionId);
+    return facts.flatMap(({ payload }) => payload.entityType === 'preference'
+      ? [{
+          id: payload.legacyId,
+          userId: payload.userId,
+          key: payload.key,
+          value: payload.value,
+          confidence: payload.confidence,
+          sourceSessionId: payload.sourceSessionId,
+        }]
+      : []);
+  }
+
+  async checkpoints(sessionId: string): Promise<LegacyCheckpointProjection[]> {
+    requireSessionId(sessionId);
+    const facts = await this.#legacyFacts(sessionId);
+    return facts.flatMap(({ payload }) => payload.entityType === 'checkpoint'
+      ? [{
+          sessionId: payload.sessionId,
+          sequence: payload.sequence,
+          summary: payload.summary,
+          createdAt: payload.createdAt,
+        }]
+      : []);
+  }
+
+  async subagents(sessionId: string): Promise<LegacySubagentProjection[]> {
+    requireSessionId(sessionId);
+    const facts = await this.#legacyFacts(sessionId);
+    return facts.flatMap(({ payload }) => payload.entityType === 'subagent'
+      ? [{
+          id: payload.legacyId,
+          parentSessionId: payload.parentSessionId,
+          childSessionId: payload.childSessionId,
+          status: payload.status,
+          depth: payload.depth,
+        }]
+      : []);
+  }
+
+  async #legacyFacts(
+    sessionId: string,
+  ): Promise<Array<Extract<AgentEvent, { type: 'legacy.imported' }>>> {
+    const result: Array<Extract<AgentEvent, { type: 'legacy.imported' }>> = [];
+    let cursor = 0;
+    while (true) {
+      const page = await this.journal.readProject(this.projectId, cursor, 1_000);
+      if (page.length === 0) return result;
+      for (const event of page) {
+        cursor = event.sequence;
+        if (event.sessionId === sessionId && event.type === 'legacy.imported') result.push(event);
+      }
+    }
+  }
+}
+
+export type LegacyPreferenceProjection = {
+  id: string;
+  userId: string;
+  key: string;
+  value: string;
+  confidence: number;
+  sourceSessionId: string | null;
+};
+
+export type LegacyCheckpointProjection = {
+  sessionId: string;
+  sequence: number;
+  summary: string;
+  createdAt: string;
+};
+
+export type LegacySubagentProjection = {
+  id: string;
+  parentSessionId: string;
+  childSessionId: string | null;
+  status: string;
+  depth: number;
+};
+
+function requireSessionId(sessionId: string): void {
+  if (!sessionId.trim()) throw new TypeError('sessionId is required.');
 }
 
 async function consumeProjectPages<T>(

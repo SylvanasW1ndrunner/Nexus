@@ -12,12 +12,27 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
-import type { PortableValue } from '@dbagent/shared';
+import { assertPortableValue, type PortableValue } from '@dbagent/shared';
 import { SqliteAgentJournal } from '../events/sqlite-agent-journal.js';
-import type { AgentEventDraft, AgentEventPayloadMap } from '../events/agent-event.js';
-import { LEGACY_MIGRATION_WRITER_AUTHORITY } from './legacy-migration-writer.js';
+import { replayAgentEvents } from '../events/event-projectors.js';
+import type {
+  AgentEvent,
+  AgentEventDraft,
+  AgentEventPayloadMap,
+  LegacyImportedToolCall,
+} from '../events/agent-event.js';
+import {
+  AuditProjectionAccumulator,
+  SessionProjectionAccumulator,
+  UserActivityProjectionAccumulator,
+} from './session-projection.js';
+import type { AgentMessage } from '../types.js';
+import {
+  createLegacyMigrationWriter,
+  type LegacyMigrationWriter,
+} from './legacy-migration-writer.js';
 import {
   acquireExclusiveStateWriterGate,
   acquireMigrationOwnerGate,
@@ -125,7 +140,7 @@ export type ImportedLegacyState = {
     title: string;
     userId: string | null;
     mode: string;
-    messages: Array<{ role: string; content: string; createdAt: string }>;
+    messages: Array<AgentMessage & { messageIndex: number }>;
   }>;
   runs: Array<{
     runId: string;
@@ -158,6 +173,14 @@ export type ImportedLegacyState = {
     depth: number;
   }>;
   diagnostics: Array<{ code: string; evidence: string }>;
+};
+
+export type LegacyArchiveRef = {
+  schemaVersion: 1;
+  archiveHandle: string;
+  relativePath: string;
+  checksum: string;
+  byteSize: number;
 };
 
 export class StateMigrationRunner {
@@ -239,6 +262,53 @@ export class StateMigrationRunner {
     return imported;
   }
 
+  listLegacyArchives(): Promise<LegacyArchiveRef[]> {
+    return Promise.resolve(withDatabase(this.#intent.finalPath, (database) => {
+      const rows = database.prepare(`
+        SELECT archive_handle, relative_path, checksum, byte_size
+        FROM legacy_archives WHERE migration_id = ? ORDER BY relative_path
+      `).all(this.#intent.migrationId) as unknown as Array<{
+        archive_handle: string;
+        relative_path: string;
+        checksum: string;
+        byte_size: number;
+      }>;
+      return rows.map((row) => ({
+        schemaVersion: 1 as const,
+        archiveHandle: row.archive_handle,
+        relativePath: row.relative_path,
+        checksum: row.checksum,
+        byteSize: Number(row.byte_size),
+      }));
+    }));
+  }
+
+  async readLegacyArchive(ref: LegacyArchiveRef): Promise<Uint8Array> {
+    assertLegacyArchiveRef(ref);
+    const row = withDatabase(this.#intent.finalPath, (database) =>
+      database.prepare(`
+        SELECT relative_path, object_relative_path, archive_handle, checksum, byte_size
+        FROM legacy_archives WHERE migration_id = ? AND archive_handle = ?
+      `).get(this.#intent.migrationId, ref.archiveHandle) as {
+        relative_path: string;
+        object_relative_path: string;
+        archive_handle: string;
+        checksum: string;
+        byte_size: number;
+      } | undefined,
+    );
+    if (row === undefined || row.relative_path !== ref.relativePath ||
+      row.checksum !== ref.checksum || Number(row.byte_size) !== ref.byteSize) {
+      throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy archive reference is invalid.');
+    }
+    const path = containedMigrationPath(this.#projectDir, row.object_relative_path);
+    const bytes = await readFile(path);
+    if (bytes.byteLength !== ref.byteSize || sha256Bytes(bytes) !== ref.checksum) {
+      throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy archive bytes failed verification.');
+    }
+    return new Uint8Array(bytes);
+  }
+
   async inspect(): Promise<MigrationInspection> {
     const intent = await readIntent(this.#projectDir);
     return inspectionFromIntent(intent ?? this.#intent, intent?.status ?? 'missing');
@@ -276,6 +346,7 @@ async function migrateLocked(
   const currentRow = await readMigrationRowIfNew(finalPath);
   if (currentRow !== undefined) {
     const reconstructed = intentFromActiveRow(projectDir, currentRow);
+    await validateShadow(reconstructed);
     await setMigrationActive(finalPath, reconstructed.migrationId);
     const completed = { ...reconstructed, status: 'completed' as const };
     await writeIntent(projectDir, completed);
@@ -289,6 +360,7 @@ async function migrateLocked(
       throw new StateMigrationError('MIGRATION_STATE_CONFLICT', 'Validated Shadow target conflicts.');
     }
     const intent = intentFromValidatedRow(projectDir, shadowCandidates[0]!, row);
+    await validateShadow(intent);
     await assertSourceDigestStillMatches(projectDir, intent);
     await writeIntent(projectDir, intent);
     crashIf(options.crashAt, 'after-intent-fsync', inspectionFromIntent(intent, intent.status));
@@ -371,7 +443,8 @@ async function buildValidatedShadow(
       CREATE TABLE legacy_migration_build_context (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         migration_id TEXT NOT NULL,
-        source_digest TEXT NOT NULL
+        source_digest TEXT NOT NULL,
+        sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1))
       )
     `);
     database.prepare(`
@@ -379,9 +452,14 @@ async function buildValidatedShadow(
       VALUES (1, ?, ?)
     `).run(migrationId, sourceDigest);
   });
-  await importLegacyFacts(journal, {
-    migrationId, sourceDigest, importedState, archives, projectIds,
-  });
+  const migrationWriter = createLegacyMigrationWriter(journal, { migrationId, sourceDigest });
+  try {
+    await importLegacyFacts(journal, migrationWriter, {
+      migrationId, sourceDigest, importedState, archives, projectIds,
+    });
+  } finally {
+    migrationWriter.seal();
+  }
   const eventCount = await journal.countEvents();
   const shadow = new DatabaseSync(shadowPath);
   try {
@@ -467,7 +545,7 @@ async function buildValidatedShadow(
   }
   await fsyncFile(shadowPath);
   await fsyncDirectory(projectDir);
-  return {
+  const intent: MigrationIntent = {
     schemaVersion: 1,
     migrationId,
     projectIds,
@@ -484,6 +562,8 @@ async function buildValidatedShadow(
     status: 'validated_pending_activation',
     manifest,
   };
+  await validateShadow(intent);
+  return intent;
 }
 
 async function activate(
@@ -493,7 +573,7 @@ async function activate(
 ): Promise<StateMigrationRunner> {
   const writerGate = acquireExclusiveStateWriterGate(projectDir);
   try {
-    await validateIntentAndShadow(intent);
+    await validateShadow(intent);
     const currentRow = await readMigrationRowIfNew(intent.finalPath);
     if (currentRow === undefined) {
       if (await pathExists(intent.sourcePath)) {
@@ -506,6 +586,7 @@ async function activate(
         }
         await assertSourceDigestStillMatches(projectDir, intent);
         await assertLiveLegacyStillMatches(projectDir, intent);
+        await sealMigrationBuildContext(intent.shadowPath, intent);
         await migrationBarrier(projectDir, 'after-live-recheck');
         await rename(intent.sourcePath, intent.sourceBackupPath);
         await fsyncDirectory(projectDir);
@@ -557,11 +638,13 @@ function readLegacyState(path: string): ImportedLegacyState {
         : [];
       const messages = tableExists(database, 'agent_session_messages')
         ? (database.prepare(`
-          SELECT session_id, role, content, created_at
+          SELECT session_id, message_index, role, content, created_at,
+                 tool_call_id, tool_name, tool_calls_json
           FROM agent_session_messages
           ORDER BY session_id, message_index
         `).all() as unknown as Array<{
-          session_id: string; role: string; content: string; created_at: string;
+          session_id: string; message_index: number; role: string; content: string; created_at: string;
+          tool_call_id: string | null; tool_name: string | null; tool_calls_json: string | null;
         }>)
         : [];
       const sessions = sessionRows.map((session) => ({
@@ -573,11 +656,7 @@ function readLegacyState(path: string): ImportedLegacyState {
         mode: session.mode,
         messages: messages
           .filter(({ session_id: sessionId }) => sessionId === session.id)
-          .map((message) => ({
-            role: message.role,
-            content: message.content,
-            createdAt: message.created_at,
-          })),
+          .map(legacyMessageFromRow),
       }));
       const runRows = tableExists(database, 'agent_runs')
         ? (database.prepare(`
@@ -775,23 +854,180 @@ async function assertLegacySource(path: string): Promise<void> {
   }
 }
 
-async function validateIntentAndShadow(intent: MigrationIntent): Promise<void> {
-  if (await pathExists(intent.shadowPath)) {
-    const row = readValidatedMigrationRow(intent.shadowPath);
-    if (
-      row.migration_id !== intent.migrationId ||
-      row.source_digest !== intent.sourceDigest ||
-      row.validation_digest !== intent.validationDigest ||
-      row.target_schema_version !== intent.targetSchemaVersion ||
-      row.migrator_revision !== intent.migratorRevision
-    ) {
-      throw new StateMigrationError(
-        'MIGRATION_STATE_CONFLICT',
-        'Shadow metadata conflicts with activation intent.',
-        inspectionFromIntent(intent, intent.status),
-      );
+async function validateShadow(intent: MigrationIntent): Promise<void> {
+  const path = await pathExists(intent.shadowPath) ? intent.shadowPath : intent.finalPath;
+  const row = readValidatedMigrationRow(path);
+  if (
+    row.migration_id !== intent.migrationId ||
+    row.source_digest !== intent.sourceDigest ||
+    row.validation_digest !== intent.validationDigest ||
+    row.imported_state_digest !== intent.importedStateDigest ||
+    row.target_schema_version !== intent.targetSchemaVersion ||
+    row.migrator_revision !== intent.migratorRevision ||
+    row.project_ids_json !== canonicalJson(intent.projectIds) ||
+    row.manifest_json !== canonicalJson(intent.manifest)
+  ) {
+    throw new StateMigrationError(
+      'MIGRATION_STATE_CONFLICT',
+      'Shadow metadata conflicts with activation intent.',
+      inspectionFromIntent(intent, intent.status),
+    );
+  }
+  try {
+    const databaseValidation = withDatabase(path, (database) => {
+      const integrity = database.prepare('PRAGMA integrity_check').get() as {
+        integrity_check: string;
+      };
+      if (integrity.integrity_check !== 'ok') throw new Error('SQLite integrity_check failed.');
+      const columns = database.prepare('PRAGMA table_info(agent_events)').all() as unknown as Array<{
+        name: string;
+      }>;
+      const requiredColumns = [
+        'project_id', 'sequence', 'event_id', 'schema_version', 'session_id', 'run_id',
+        'turn_id', 'parent_event_id', 'invocation_id', 'attempt_id', 'event_type',
+        'occurred_at', 'payload_json', 'audience_json', 'persistence',
+      ];
+      if (requiredColumns.some((name) => !columns.some((column) => column.name === name))) {
+        throw new Error('Journal event schema is incomplete.');
+      }
+      const imported = database.prepare(`
+        SELECT event_count FROM legacy_imports WHERE migration_id = ?
+      `).get(intent.migrationId) as { event_count: number } | undefined;
+      if (imported === undefined) throw new Error('Legacy import count is missing.');
+      const eventCount = Number((database.prepare(
+        'SELECT COUNT(*) AS count FROM agent_events',
+      ).get() as { count: number }).count);
+      if (eventCount !== Number(imported.event_count)) throw new Error('Legacy import event count changed.');
+      const context = database.prepare(`
+        SELECT migration_id, source_digest, sealed
+        FROM legacy_migration_build_context WHERE id = 1
+      `).get() as { migration_id: string; source_digest: string; sealed: number } | undefined;
+      if (context === undefined || context.migration_id !== intent.migrationId ||
+        context.source_digest !== intent.sourceDigest || ![0, 1].includes(Number(context.sealed))) {
+        throw new Error('Legacy migration build context is invalid.');
+      }
+      const carriers = database.prepare(`
+        SELECT state, hidden FROM agent_runs WHERE client_request_id LIKE 'legacy-import:%'
+      `).all() as unknown as Array<{ state: string; hidden: number }>;
+      if (carriers.length === 0 || carriers.some(({ state, hidden }) =>
+        !['Completed', 'Failed', 'Cancelled'].includes(state) || Number(hidden) !== 1)) {
+        throw new Error('Synthetic legacy carrier Runs are not terminal and hidden.');
+      }
+      return { eventCount };
+    });
+
+    const journal = new SqliteAgentJournal({ filePath: path });
+    const reconstructed = emptyImportedLegacyState();
+    for (const projectId of intent.projectIds) {
+      const events = await readAllProjectEvents(journal, projectId);
+      for (const event of events) {
+        if (event.type === 'legacy.imported') applyLegacyImport(reconstructed, event.payload);
+      }
+      replayAgentEvents(events);
+      const sessionIds = new Set(events.map(({ sessionId }) => sessionId));
+      for (const sessionId of sessionIds) {
+        const accumulators = [
+          new SessionProjectionAccumulator({ projectId, sessionId, afterSequence: 0, limit: 1_000 }, true),
+          new UserActivityProjectionAccumulator({ projectId, sessionId, afterSequence: 0, limit: 1_000 }, true),
+          new AuditProjectionAccumulator({ projectId, sessionId, afterSequence: 0, limit: 1_000 }, true),
+        ];
+        for (const accumulator of accumulators) {
+          for (const event of events) if (!accumulator.accept(event)) break;
+          accumulator.finish();
+        }
+      }
+    }
+    normalizeImportedLegacyState(reconstructed);
+    reconstructed.plan = reconstructed.runs.find(({ plan }) => plan !== null)?.plan ?? null;
+    if (sha256(canonicalJson(reconstructed)) !== intent.importedStateDigest) {
+      throw new Error('Imported legacy state digest changed.');
+    }
+    const validationReport = validateLegacyState(reconstructed, intent.manifest);
+    if (sha256(canonicalJson(validationReport)) !== intent.validationDigest ||
+      sha256(canonicalJson(JSON.parse(row.validation_report_json) as unknown)) !== intent.validationDigest) {
+      throw new Error('Migration validation report digest changed.');
+    }
+    await validateLegacyArchives(dirname(intent.finalPath), path, intent);
+    if (databaseValidation.eventCount !== await journal.countEvents()) {
+      throw new Error('Journal event count is not stable after projection validation.');
+    }
+  } catch (error) {
+    if (error instanceof StateMigrationError) throw error;
+    throw new StateMigrationError(
+      'MIGRATION_VALIDATION_FAILED',
+      `Validated Shadow failed semantic revalidation: ${errorMessage(error)}`,
+      inspectionFromIntent(intent, intent.status),
+    );
+  }
+}
+
+async function readAllProjectEvents(
+  journal: SqliteAgentJournal,
+  projectId: string,
+): Promise<AgentEvent[]> {
+  const result: AgentEvent[] = [];
+  let cursor = 0;
+  while (true) {
+    const page = await journal.readProject(projectId, cursor, 1_000);
+    if (page.length === 0) return result;
+    result.push(...page);
+    cursor = page.at(-1)!.sequence;
+  }
+}
+
+function normalizeImportedLegacyState(state: ImportedLegacyState): void {
+  state.sessions.sort((left, right) => left.id.localeCompare(right.id, 'en'));
+  for (const session of state.sessions) {
+    session.messages.sort((left, right) => left.messageIndex - right.messageIndex);
+  }
+  state.runs.sort((left, right) => left.runId.localeCompare(right.runId, 'en'));
+  state.preferences.sort((left, right) => left.id.localeCompare(right.id, 'en'));
+  state.checkpoints.sort((left, right) =>
+    left.sessionId.localeCompare(right.sessionId, 'en') || left.sequence - right.sequence);
+  state.subagents.sort((left, right) => left.id.localeCompare(right.id, 'en'));
+}
+
+async function validateLegacyArchives(
+  projectDir: string,
+  databasePath: string,
+  intent: MigrationIntent,
+): Promise<void> {
+  const rows = withDatabase(databasePath, (database) => database.prepare(`
+    SELECT relative_path, object_relative_path, archive_handle, checksum, byte_size
+    FROM legacy_archives WHERE migration_id = ? ORDER BY relative_path
+  `).all(intent.migrationId) as unknown as Array<{
+    relative_path: string;
+    object_relative_path: string;
+    archive_handle: string;
+    checksum: string;
+    byte_size: number;
+  }>);
+  const expected = intent.manifest.filter(({ relativePath }) => relativePath !== 'state.source.db');
+  if (rows.length !== expected.length) throw new Error('Legacy archive count changed.');
+  for (const [index, entry] of expected.entries()) {
+    const row = rows[index]!;
+    if (row.relative_path !== entry.relativePath || row.checksum !== entry.checksum ||
+      Number(row.byte_size) !== entry.byteSize || row.archive_handle !== `legacy-archive:${entry.checksum}`) {
+      throw new Error('Legacy archive metadata changed.');
+    }
+    const bytes = await readFile(containedMigrationPath(projectDir, row.object_relative_path));
+    if (bytes.byteLength !== entry.byteSize || sha256Bytes(bytes) !== entry.checksum) {
+      throw new Error(`Legacy archive bytes changed: ${entry.relativePath}`);
     }
   }
+}
+
+async function sealMigrationBuildContext(path: string, intent: MigrationIntent): Promise<void> {
+  if (!(await pathExists(path))) return;
+  withDatabase(path, (database) => {
+    const result = database.prepare(`
+      UPDATE legacy_migration_build_context SET sealed = 1
+      WHERE id = 1 AND migration_id = ? AND source_digest = ? AND sealed IN (0, 1)
+    `).run(intent.migrationId, intent.sourceDigest);
+    if (Number(result.changes) !== 1) throw new Error('Migration build context cannot be sealed.');
+    database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  });
+  await fsyncFile(path);
 }
 
 function readValidatedMigrationRow(path: string): MigrationRow {
@@ -1141,6 +1377,7 @@ async function materializeLegacyArchives(
 
 async function importLegacyFacts(
   journal: SqliteAgentJournal,
+  writer: LegacyMigrationWriter,
   input: {
     migrationId: string;
     sourceDigest: string;
@@ -1168,10 +1405,7 @@ async function importLegacyFacts(
       projectRoot: session.projectRoot, title: session.title, userId: session.userId,
       mode: session.mode,
     });
-    session.messages.forEach((message, messageIndex) => facts.push({
-      entityType: 'message', legacyId: `${session.id}:${messageIndex}`, messageIndex,
-      role: normalizeLegacyRole(message.role), content: message.content, createdAt: message.createdAt,
-    }));
+    session.messages.forEach((message) => facts.push(legacyMessageFact(session.id, message)));
   }
   const firstSessionId = sessions[0]!.id;
   const target = (sessionId: string | null | undefined) =>
@@ -1217,6 +1451,9 @@ async function importLegacyFacts(
       projectId, runId: created.runId,
       ownerId: `legacy-migration:${input.migrationId.slice(0, 24)}`, ttlMs: 60_000,
     });
+    withDatabase(journal.filePath, (database) => {
+      database.prepare('UPDATE agent_runs SET hidden = 1 WHERE run_id = ?').run(created.runId);
+    });
     const facts = factsBySession.get(session.id)!;
     for (let offset = 0; offset < facts.length; offset += 500) {
       const projection = await journal.getRunProjection(created.runId);
@@ -1224,18 +1461,25 @@ async function importLegacyFacts(
       const events: AgentEventDraft[] = facts.slice(offset, offset + 500).map((payload) => ({
         type: 'legacy.imported', payload,
       }));
-      await journal.commitLegacyImport(
-        LEGACY_MIGRATION_WRITER_AUTHORITY,
-        {
+      await writer.commit({
           projectId, sessionId: session.id, runId: created.runId,
           commandId: `legacy-import:${input.migrationId}:${sha256(session.id).slice(0, 16)}:${offset}`,
           lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
           expectedRunRevision: projection.revision,
           events,
-        },
-        { migrationId: input.migrationId, sourceDigest: input.sourceDigest },
-      );
+      });
     }
+    const projection = await journal.getRunProjection(created.runId);
+    if (projection === null) throw new Error('Synthetic legacy Run projection is missing.');
+    await writer.commit({
+      projectId,
+      sessionId: session.id,
+      runId: created.runId,
+      commandId: `legacy-import:${input.migrationId}:${sha256(session.id).slice(0, 16)}:terminal`,
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: projection.revision,
+      events: [{ type: 'run.cancelled', payload: { reason: 'legacy-import-carrier-hidden' } }],
+    });
   }
   if (new Set(sessions.map((session) => legacyProjectId(session.projectKey, session.projectRoot))).size !==
     input.projectIds.length) {
@@ -1243,8 +1487,163 @@ async function importLegacyFacts(
   }
 }
 
-function normalizeLegacyRole(role: string): 'user' | 'assistant' {
-  return role === 'user' ? 'user' : 'assistant';
+function legacyMessageFromRow(message: {
+  message_index: number;
+  role: string;
+  content: string;
+  created_at: string;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  tool_calls_json: string | null;
+}): AgentMessage & { messageIndex: number } {
+  const base = {
+    messageIndex: message.message_index,
+    content: message.content,
+    createdAt: message.created_at,
+  };
+  if (message.role === 'user' || message.role === 'system') {
+    if (message.tool_call_id !== null || message.tool_name !== null || message.tool_calls_json !== null) {
+      throw new StateMigrationError(
+        'MIGRATION_VALIDATION_FAILED',
+        `Legacy ${message.role} message contains Tool-only fields.`,
+      );
+    }
+    return { ...base, role: message.role };
+  }
+  if (message.role === 'assistant') {
+    if (message.tool_call_id !== null || message.tool_name !== null) {
+      throw new StateMigrationError(
+        'MIGRATION_VALIDATION_FAILED',
+        'Legacy assistant message contains Tool-result identity fields.',
+      );
+    }
+    if (message.tool_calls_json === null) return { ...base, role: 'assistant' };
+    const toolCalls = parseLegacyToolCalls(message.tool_calls_json);
+    return { ...base, role: 'assistant', toolCalls };
+  }
+  if (message.role === 'tool') {
+    if (message.tool_call_id === null || message.tool_name === null || message.tool_calls_json !== null) {
+      throw new StateMigrationError(
+        'MIGRATION_VALIDATION_FAILED',
+        'Legacy Tool message does not have an exact Tool-result identity.',
+      );
+    }
+    return {
+      ...base,
+      role: 'tool',
+      toolCallId: message.tool_call_id,
+      toolName: message.tool_name,
+    };
+  }
+  throw new StateMigrationError(
+    'MIGRATION_VALIDATION_FAILED',
+    `Unsupported legacy message role: ${message.role}`,
+  );
+}
+
+function parseLegacyToolCalls(value: string): NonNullable<Extract<
+  AgentMessage,
+  { role: 'assistant' }
+>['toolCalls']> {
+  const parsed = JSON.parse(value) as unknown;
+  try {
+    assertPortableValue(parsed);
+  } catch (error) {
+    throw new StateMigrationError(
+      'MIGRATION_VALIDATION_FAILED',
+      `Legacy assistant toolCalls are not portable: ${errorMessage(error)}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy assistant toolCalls must be an array.');
+  }
+  return parsed.map((item) => {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy Tool call must be an object.');
+    }
+    const record = item as Record<string, PortableValue>;
+    if (Object.keys(record).sort().join(',') !== 'arguments,id,name' ||
+      typeof record.id !== 'string' || !record.id ||
+      typeof record.name !== 'string' || !record.name ||
+      record.arguments === null || typeof record.arguments !== 'object' ||
+      Array.isArray(record.arguments)) {
+      throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy Tool call schema is invalid.');
+    }
+    return {
+      id: record.id,
+      name: record.name,
+      arguments: structuredClone(record.arguments) as Record<string, PortableValue>,
+    };
+  });
+}
+
+function legacyMessageFact(
+  sessionId: string,
+  message: AgentMessage & { messageIndex: number },
+): AgentEventPayloadMap['legacy.imported'] {
+  const base = {
+    entityType: 'message' as const,
+    legacyId: `${sessionId}:${message.messageIndex}`,
+    messageIndex: message.messageIndex,
+    content: message.content,
+    createdAt: message.createdAt,
+  };
+  if (message.role === 'assistant') {
+    return {
+      ...base,
+      role: message.role,
+      ...(message.toolCalls === undefined ? {} : { toolCalls: portableLegacyToolCalls(message.toolCalls) }),
+    };
+  }
+  if (message.role === 'tool') {
+    return {
+      ...base,
+      role: message.role,
+      toolCallId: message.toolCallId,
+      toolName: message.toolName,
+    };
+  }
+  return { ...base, role: message.role };
+}
+
+function portableLegacyToolCalls(
+  toolCalls: NonNullable<Extract<AgentMessage, { role: 'assistant' }>['toolCalls']>,
+): LegacyImportedToolCall[] {
+  try {
+    assertPortableValue(toolCalls);
+  } catch (error) {
+    throw new StateMigrationError(
+      'MIGRATION_VALIDATION_FAILED',
+      `Legacy assistant toolCalls are not portable: ${errorMessage(error)}`,
+    );
+  }
+  return structuredClone(toolCalls) as LegacyImportedToolCall[];
+}
+
+function legacyMessageFromFact(
+  payload: Extract<AgentEventPayloadMap['legacy.imported'], { entityType: 'message' }>,
+): AgentMessage & { messageIndex: number } {
+  const base = {
+    messageIndex: payload.messageIndex,
+    content: payload.content,
+    createdAt: payload.createdAt,
+  };
+  if (payload.role === 'assistant') {
+    return {
+      ...base,
+      role: payload.role,
+      ...(payload.toolCalls === undefined ? {} : { toolCalls: payload.toolCalls }),
+    };
+  }
+  if (payload.role === 'tool') {
+    return {
+      ...base,
+      role: payload.role,
+      toolCallId: payload.toolCallId,
+      toolName: payload.toolName,
+    };
+  }
+  return { ...base, role: payload.role };
 }
 
 function emptyImportedLegacyState(): ImportedLegacyState {
@@ -1266,9 +1665,7 @@ function applyLegacyImport(
       return;
     case 'message': {
       const sessionId = payload.legacyId.slice(0, payload.legacyId.lastIndexOf(':'));
-      state.sessions.find(({ id }) => id === sessionId)?.messages.push({
-        role: payload.role, content: payload.content, createdAt: payload.createdAt,
-      });
+      state.sessions.find(({ id }) => id === sessionId)?.messages.push(legacyMessageFromFact(payload));
       return;
     }
     case 'run':
@@ -1434,7 +1831,32 @@ function requireText(value: string, name: string): string {
   return value.trim();
 }
 
+function assertLegacyArchiveRef(ref: LegacyArchiveRef): void {
+  if (ref === null || typeof ref !== 'object' || Array.isArray(ref) ||
+    ref.schemaVersion !== 1 || !ref.archiveHandle.startsWith('legacy-archive:') ||
+    !ref.relativePath || !isSha256(ref.checksum) ||
+    !Number.isSafeInteger(ref.byteSize) || ref.byteSize < 0) {
+    throw new StateMigrationError('INVALID_ARGUMENT', 'Legacy archive reference is invalid.');
+  }
+}
+
+function containedMigrationPath(projectDir: string, relativePath: string): string {
+  if (!relativePath || relativePath.startsWith('/') || relativePath.split(/[\\/]/u).includes('..')) {
+    throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy archive path is invalid.');
+  }
+  const root = resolve(projectDir);
+  const path = resolve(root, ...relativePath.split('/'));
+  if (!path.startsWith(`${root}${sep}`)) {
+    throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy archive path escaped Project.');
+  }
+  return path;
+}
+
 function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function sha256Bytes(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
 

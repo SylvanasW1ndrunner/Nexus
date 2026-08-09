@@ -84,6 +84,12 @@ type ToolTerminalPayload = {
   resultRefs: string[];
 };
 
+export type LegacyImportedToolCall = {
+  id: string;
+  name: string;
+  arguments: Record<string, PortableValue>;
+};
+
 export type PersistedValidatedAttempt = {
   attemptId: string;
   origin: { connectionId: string; model: string; protocol: string };
@@ -191,10 +197,14 @@ export interface AgentEventPayloadMap {
         entityType: 'session'; legacyId: string; projectKey: string; projectRoot: string;
         title: string; userId: string | null; mode: string;
       }
-    | {
+    | ({
         entityType: 'message'; legacyId: string; messageIndex: number;
-        role: 'user' | 'assistant'; content: string; createdAt: string;
-      }
+        content: string; createdAt: string;
+      } & (
+        | { role: 'user' | 'system' }
+        | { role: 'assistant'; toolCalls?: LegacyImportedToolCall[] }
+        | { role: 'tool'; toolCallId: string; toolName: string }
+      ))
     | {
         entityType: 'run'; legacyId: string; sessionId: string;
         status: 'completed' | 'interrupted_legacy'; plan: PortableValue | null;

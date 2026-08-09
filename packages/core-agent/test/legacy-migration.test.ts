@@ -254,6 +254,108 @@ describe('StateMigrationRunner', () => {
         },
       }],
     })).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
+    expect('commitLegacyImport' in journal).toBe(false);
+  });
+
+  it('revalidates Journal facts and archived bytes after the validated-shadow cut', async () => {
+    const journalTamperDir = await createLegacyProject();
+    const journalCut = await captureCrashInspection(journalTamperDir);
+    withTestDatabase(journalCut.shadowPath, (database) => {
+      const row = database.prepare(`
+        SELECT project_id, sequence, payload_json FROM agent_events
+        WHERE event_type = 'legacy.imported' ORDER BY project_id, sequence LIMIT 1
+      `).get() as { project_id: string; sequence: number; payload_json: string };
+      const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+      payload.title = 'tampered-after-validation';
+      database.prepare(`
+        UPDATE agent_events SET payload_json = ? WHERE project_id = ? AND sequence = ?
+      `).run(JSON.stringify(payload), row.project_id, row.sequence);
+    });
+    await expect(StateMigrationRunner.open(journalTamperDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
+    })).rejects.toMatchObject({ code: 'MIGRATION_VALIDATION_FAILED' });
+
+    const archiveTamperDir = await createLegacyProject();
+    const archiveCut = await captureCrashInspection(archiveTamperDir);
+    const archive = withTestDatabase(archiveCut.shadowPath, (database) =>
+      database.prepare(`
+        SELECT object_relative_path, byte_size FROM legacy_archives ORDER BY relative_path LIMIT 1
+      `).get() as { object_relative_path: string; byte_size: number },
+    );
+    await writeFile(
+      join(archiveTamperDir, archive.object_relative_path),
+      new Uint8Array(archive.byte_size).fill(0x78),
+    );
+    await expect(StateMigrationRunner.open(archiveTamperDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
+    })).rejects.toMatchObject({ code: 'MIGRATION_VALIDATION_FAILED' });
+  });
+
+  it('exposes every exact legacy fact through normal public projections and verified archives', async () => {
+    const projectDir = await createLegacyProject();
+    withTestDatabase(join(projectDir, 'state.db'), (database) => {
+      const insert = database.prepare(`
+        INSERT INTO agent_session_messages (
+          session_id, message_index, role, content, created_at,
+          tool_call_id, tool_name, tool_calls_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      insert.run('session-b', 1, 'system', 'system exact', '2026-08-08T00:03:01.000Z',
+        null, null, null);
+      insert.run('session-b', 2, 'assistant', 'calling tool', '2026-08-08T00:03:02.000Z',
+        null, null, JSON.stringify([{ id: 'call-1', name: 'lookup', arguments: { id: 7 } }]));
+      insert.run('session-b', 3, 'tool', 'tool exact', '2026-08-08T00:03:03.000Z',
+        'call-1', 'lookup', null);
+    });
+
+    const migrated = await StateMigrationRunner.open(projectDir);
+    const inspection = await migrated.inspect();
+    const journal = new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') });
+    const store = new JournalSessionStore(journal, inspection.projectId);
+    const child = await store.load('session-b', { limit: 100 });
+    expect(child.messages.map(({ role, content, ...message }) => ({ role, content, ...message })))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ role: 'system', content: 'system exact' }),
+        expect.objectContaining({
+          role: 'assistant', content: 'calling tool',
+          toolCalls: [{ id: 'call-1', name: 'lookup', arguments: { id: 7 } }],
+        }),
+        expect.objectContaining({
+          role: 'tool', content: 'tool exact', toolCallId: 'call-1', toolName: 'lookup',
+        }),
+      ]));
+    expect(child.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId: 'legacy-run-running', state: 'Interrupted' }),
+    ]));
+    expect(await store.preferences('session-a')).toEqual([
+      expect.objectContaining({ id: 'preference-language', key: 'language' }),
+    ]);
+    expect(await store.checkpoints('session-a')).toEqual([
+      expect.objectContaining({ sequence: 7 }),
+    ]);
+    expect(await store.subagents('session-a')).toEqual([
+      expect.objectContaining({ id: 'subagent-a', childSessionId: 'session-b' }),
+    ]);
+
+    const carriers = withTestDatabase(join(projectDir, 'state.db'), (database) =>
+      database.prepare(`
+        SELECT state, hidden FROM agent_runs WHERE client_request_id LIKE 'legacy-import:%'
+      `).all() as unknown as Array<{ state: string; hidden: number }>,
+    );
+    expect(carriers.length).toBeGreaterThan(0);
+    expect(carriers.every(({ state, hidden }) =>
+      ['Completed', 'Failed', 'Cancelled'].includes(state) && hidden === 1)).toBe(true);
+    expect(child.runs.every(({ runId }) => !runId.startsWith('run_'))).toBe(true);
+    expect(withTestDatabase(join(projectDir, 'state.db'), (database) =>
+      database.prepare('SELECT sealed FROM legacy_migration_build_context WHERE id = 1')
+        .get() as { sealed: number },
+    ).sealed).toBe(1);
+
+    const archives = await migrated.listLegacyArchives();
+    expect(archives).toHaveLength(4);
+    const firstBytes = await migrated.readLegacyArchive(archives[0]!);
+    const reopened = await StateMigrationRunner.open(projectDir);
+    await expect(reopened.readLegacyArchive(archives[0]!)).resolves.toEqual(firstBytes);
   });
 
   it('rechecks the live semantic source immediately before activation', async () => {

@@ -446,11 +446,36 @@ function validateLegacyImported(payload: unknown): void {
       if (record.userId !== null) requireString(record, 'userId');
       return;
     case 'message':
-      exactKeys(record, ['entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt']);
+      if (record.role === 'assistant') {
+        exactKeys(record, [
+          'entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt', 'toolCalls',
+        ]);
+      } else if (record.role === 'tool') {
+        exactKeys(record, [
+          'entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt',
+          'toolCallId', 'toolName',
+        ]);
+      } else {
+        exactKeys(record, ['entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt']);
+      }
       requireNonNegativeInteger(record, 'messageIndex');
-      requireEnum(record, 'role', ['user', 'assistant']);
+      requireEnum(record, 'role', ['user', 'assistant', 'tool', 'system']);
       requireString(record, 'content');
       requireIsoTimestamp(record.createdAt, 'createdAt');
+      if (record.role === 'assistant' && Object.hasOwn(record, 'toolCalls')) {
+        if (!Array.isArray(record.toolCalls)) throw new TypeError('Legacy assistant toolCalls must be an array.');
+        for (const call of record.toolCalls) {
+          const value = requireRecord(call);
+          exactKeys(value, ['id', 'name', 'arguments']);
+          requireString(value, 'id');
+          requireString(value, 'name');
+          if (!Object.hasOwn(value, 'arguments')) throw new TypeError('Legacy Tool arguments are required.');
+        }
+      }
+      if (record.role === 'tool') {
+        requireString(record, 'toolCallId');
+        requireString(record, 'toolName');
+      }
       return;
     case 'run':
       exactKeys(record, ['entityType', 'legacyId', 'sessionId', 'status', 'plan', 'createdAt', 'updatedAt']);

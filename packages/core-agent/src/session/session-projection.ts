@@ -1,4 +1,5 @@
 import type { PortableValue } from '@dbagent/shared';
+import type { AgentMessage } from '../types.js';
 import type { AgentEvent, AgentEventType } from '../events/agent-event.js';
 import {
   AGENT_EVENT_SCHEMA_REGISTRY,
@@ -23,11 +24,8 @@ export class ProjectionError extends Error {
   }
 }
 
-export type SessionProjectionMessage = {
+export type SessionProjectionMessage = AgentMessage & {
   sourceSequence: number;
-  role: 'user' | 'assistant';
-  content: string;
-  createdAt: string;
   runId: string;
 };
 
@@ -48,12 +46,16 @@ export type SessionProjectionRun = {
   state: string;
   createdAt: string;
   updatedAt: string;
+  terminal?: boolean;
 };
 
 export type SessionProjection = {
   schemaVersion: 1;
   projectId: string;
   sessionId: string;
+  title?: string;
+  userId?: string | null;
+  mode?: string;
   messages: SessionProjectionMessage[];
   artifacts: SessionProjectionArtifact[];
   runs: SessionProjectionRun[];
@@ -371,6 +373,8 @@ export class SessionProjectionAccumulator {
   readonly #messages: SessionProjectionMessage[] = [];
   readonly #artifacts = new Map<string, SessionProjectionArtifact>();
   readonly #runs = new Map<string, SessionProjectionRun>();
+  readonly #hiddenRuns = new Set<string>();
+  #legacyMetadata: { title: string; userId: string | null; mode: string } | undefined;
   #cursor: number;
 
   constructor(options: ProjectionOptions, trustedJournal = false) {
@@ -411,6 +415,7 @@ export class SessionProjectionAccumulator {
       schemaVersion: 1,
       projectId: this.#options.projectId,
       sessionId: this.#options.sessionId,
+      ...(this.#legacyMetadata === undefined ? {} : this.#legacyMetadata),
       messages: [...this.#messages],
       artifacts: [...this.#artifacts.values()].sort((a, b) => a.sourceSequence - b.sourceSequence),
       runs: [...this.#runs.values()].sort(
@@ -428,14 +433,14 @@ export class SessionProjectionAccumulator {
     } else if (event.type === 'model_attempt_committed') {
       const content = committedText(event);
       if (content.length > 0) this.#messages.push(sessionMessage(event, 'assistant', content));
+    } else if (event.type === 'legacy.imported' && event.payload.entityType === 'session') {
+      this.#legacyMetadata = {
+        title: event.payload.title,
+        userId: event.payload.userId,
+        mode: event.payload.mode,
+      };
     } else if (event.type === 'legacy.imported' && event.payload.entityType === 'message') {
-      this.#messages.push({
-        sourceSequence: event.sequence,
-        role: event.payload.role,
-        content: event.payload.content,
-        createdAt: event.payload.createdAt,
-        runId: event.runId,
-      });
+      this.#messages.push(legacySessionMessage(event));
     }
     if (event.type === 'artifact.created') {
       this.#artifacts.set(event.payload.artifactId, {
@@ -456,6 +461,10 @@ export class SessionProjectionAccumulator {
       }
     }
     if (event.type === 'run.created') {
+      if (event.payload.clientRequestId.startsWith('legacy-import:')) {
+        this.#hiddenRuns.add(event.runId);
+        return;
+      }
       this.#runs.set(event.runId, {
         runId: event.runId,
         clientRequestId: event.payload.clientRequestId,
@@ -463,7 +472,16 @@ export class SessionProjectionAccumulator {
         createdAt: event.occurredAt,
         updatedAt: event.occurredAt,
       });
-    } else {
+    } else if (event.type === 'legacy.imported' && event.payload.entityType === 'run') {
+      this.#runs.set(event.payload.legacyId, {
+        runId: event.payload.legacyId,
+        clientRequestId: `legacy:${event.payload.legacyId}`,
+        state: event.payload.status === 'completed' ? 'Completed' : 'Interrupted',
+        createdAt: event.payload.createdAt,
+        updatedAt: event.payload.updatedAt,
+        terminal: true,
+      });
+    } else if (!this.#hiddenRuns.has(event.runId)) {
       const state = projectedRunState(event.type);
       if (state !== undefined) {
         const existing = this.#runs.get(event.runId);
@@ -683,7 +701,7 @@ function committedText(event: Extract<AgentEvent, { type: 'model_attempt_committ
 
 function sessionMessage(
   event: AgentEvent,
-  role: SessionProjectionMessage['role'],
+  role: 'user' | 'assistant',
   content: string,
 ): SessionProjectionMessage {
   return {
@@ -693,6 +711,36 @@ function sessionMessage(
     createdAt: event.occurredAt,
     runId: event.runId,
   };
+}
+
+function legacySessionMessage(
+  event: Extract<AgentEvent, { type: 'legacy.imported' }>,
+): SessionProjectionMessage {
+  if (event.payload.entityType !== 'message') {
+    throw new ProjectionError('SCHEMA_INVALID', 'Expected a legacy message fact.');
+  }
+  const base = {
+    sourceSequence: event.sequence,
+    content: event.payload.content,
+    createdAt: event.payload.createdAt,
+    runId: event.runId,
+  };
+  if (event.payload.role === 'assistant') {
+    return {
+      ...base,
+      role: event.payload.role,
+      ...(event.payload.toolCalls === undefined ? {} : { toolCalls: event.payload.toolCalls }),
+    };
+  }
+  if (event.payload.role === 'tool') {
+    return {
+      ...base,
+      role: event.payload.role,
+      toolCallId: event.payload.toolCallId,
+      toolName: event.payload.toolName,
+    };
+  }
+  return { ...base, role: event.payload.role };
 }
 
 function toAuditEvent(event: AgentEvent): AuditProjectionEvent {
