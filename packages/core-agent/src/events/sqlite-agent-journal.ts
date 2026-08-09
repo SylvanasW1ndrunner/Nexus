@@ -1100,12 +1100,13 @@ export class SqliteAgentJournal implements AgentJournal {
     const { DatabaseSync } = createRequire(import.meta.url)(sqliteModuleId) as {
       DatabaseSync: NodeDatabaseSyncConstructor;
     };
-    const database = new DatabaseSync(this.filePath);
+    let database: NodeDatabaseSync | undefined;
     try {
-      initializeDatabase(database, this.busyTimeoutMs);
+      database = new DatabaseSync(this.filePath);
+      initializeDatabaseWithBusyRetry(database, this.busyTimeoutMs);
       return operation(database);
     } catch (error) {
-      if (error instanceof Error && /database is (?:locked|busy)/iu.test(error.message)) {
+      if (isSqliteBusy(error)) {
         throw new AgentJournalError(
           'JOURNAL_BUSY',
           `Agent Journal remained busy for ${this.busyTimeoutMs}ms.`,
@@ -1113,9 +1114,32 @@ export class SqliteAgentJournal implements AgentJournal {
       }
       throw error;
     } finally {
-      database.close();
+      database?.close();
     }
   }
+}
+
+function initializeDatabaseWithBusyRetry(
+  database: NodeDatabaseSync,
+  busyTimeoutMs: number,
+): void {
+  const deadline = Date.now() + busyTimeoutMs;
+  while (true) {
+    try {
+      initializeDatabase(database, Math.max(1, deadline - Date.now()));
+      return;
+    } catch (error) {
+      if (!isSqliteBusy(error) || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(8, deadline - Date.now()));
+    }
+  }
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = 'code' in error ? String((error as { code?: unknown }).code) : '';
+  return /SQLITE_(?:BUSY|LOCKED)/iu.test(code) ||
+    /database(?: table)? is (?:locked|busy)|SQLITE_(?:BUSY|LOCKED)/iu.test(error.message);
 }
 
 function snapshotCreateRunCommand(command: CreateRunCommand): CreateRunCommand {

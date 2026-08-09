@@ -27,30 +27,32 @@ export async function acquireArtifactMutationGate(
   };
   const deadline = Date.now() + timeoutMs;
   while (true) {
-    const database = new DatabaseSync(path);
+    let database: NodeDatabaseSync | undefined;
     let transactionOpen = false;
     try {
+      database = new DatabaseSync(path);
       database.exec('PRAGMA busy_timeout = 0');
       database.exec('BEGIN EXCLUSIVE');
       transactionOpen = true;
       database.prepare('SELECT COUNT(*) AS count FROM sqlite_schema').get();
+      const acquired = database;
       let closed = false;
       return {
         close() {
           if (closed) return;
           closed = true;
           try {
-            database.exec('COMMIT');
+            acquired.exec('COMMIT');
           } finally {
-            database.close();
+            acquired.close();
           }
         },
       };
     } catch (error) {
       try {
-        if (transactionOpen) database.exec('ROLLBACK');
+        if (transactionOpen) database?.exec('ROLLBACK');
       } finally {
-        database.close();
+        database?.close();
       }
       if (!isBusy(error)) throw error;
       if (Date.now() >= deadline) throw new ArtifactMutationGateTimeoutError(timeoutMs);
@@ -60,7 +62,10 @@ export async function acquireArtifactMutationGate(
 }
 
 function isBusy(error: unknown): boolean {
-  return error instanceof Error && /database is locked|SQLITE_BUSY/iu.test(error.message);
+  if (!(error instanceof Error)) return false;
+  const code = 'code' in error ? String((error as { code?: unknown }).code) : '';
+  return /SQLITE_(?:BUSY|LOCKED)/iu.test(code) ||
+    /database(?: table)? is (?:locked|busy)|SQLITE_(?:BUSY|LOCKED)/iu.test(error.message);
 }
 
 async function delay(milliseconds: number): Promise<void> {

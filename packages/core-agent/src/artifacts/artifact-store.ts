@@ -63,6 +63,7 @@ export type CommitArtifactInput = {
 export type ArtifactGcReport = {
   stagedObjectsDeleted: number;
   committedObjectsDeleted: number;
+  orphanTemporaryFilesDeleted: number;
   bytesDeleted: number;
 };
 

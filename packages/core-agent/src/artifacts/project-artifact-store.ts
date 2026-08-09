@@ -66,6 +66,8 @@ type ArtifactFactState = {
   lifecycle: 'available' | 'expired' | 'deleted';
 };
 
+const ORPHAN_STAGE_TEMP_MAX_AGE_MS = 60_000;
+
 export class ProjectArtifactStore implements AgentArtifactStore {
   readonly #projectId: string;
   readonly #rootDir: string;
@@ -101,6 +103,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async stage(input: StageArtifactInput): Promise<StagedArtifact> {
+    validateStageInput(input);
     const stateGate = acquireSharedStateWriterGate(legacyProjectDirForArtifactRoot(this.#rootDir));
     try {
       return await this.#stageWithStateGate(input);
@@ -118,85 +121,93 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     ) {
       throw new ArtifactStoreError('INVALID_ARGUMENT', 'expectedByteSize must be non-negative.');
     }
-    if (input.expiresAt !== undefined && !Number.isFinite(Date.parse(input.expiresAt))) {
-      throw new ArtifactStoreError('INVALID_ARGUMENT', 'expiresAt must be an ISO date.');
-    }
-    await this.#ensureDirectories();
-    const temporaryName = `.stage-${this.#createId()}.tmp`;
-    const temporaryPath = join(this.#stagedDir(), temporaryName);
-    const file = await open(temporaryPath, 'wx', 0o600);
-    const hash = createHash('sha256');
-    let byteSize = 0;
+    if (input.expiresAt !== undefined) requireExactIso(input.expiresAt, 'expiresAt');
+    let temporaryPath: string | undefined;
+    let file: FileHandle | undefined;
+    let createdBlobPath: string | undefined;
     try {
-      try {
-        for await (const chunk of asAsyncIterable(input.source)) {
-          if (!(chunk instanceof Uint8Array)) {
-            throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact chunks must be Uint8Array.');
-          }
-          byteSize += chunk.byteLength;
-          if (!Number.isSafeInteger(byteSize)) {
-            throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact is too large.');
-          }
-          hash.update(chunk);
-          let offset = 0;
-          while (offset < chunk.byteLength) {
-            const bytesWritten = await this.#writeChunk(file, chunk, offset);
-            if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0 ||
-              bytesWritten > chunk.byteLength - offset) {
-              throw new ArtifactStoreError('STAGE_FAILED', 'Artifact write made invalid progress.');
-            }
-            offset += bytesWritten;
-          }
+      await this.#ensureDirectories();
+      temporaryPath = join(this.#stagedDir(), `.stage-${this.#createId()}.tmp`);
+      file = await open(temporaryPath, 'wx', 0o600);
+      const hash = createHash('sha256');
+      let byteSize = 0;
+      for await (const chunk of asAsyncIterable(input.source)) {
+        if (!(chunk instanceof Uint8Array)) {
+          throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact chunks must be Uint8Array.');
         }
-        await file.sync();
-      } finally {
-        await file.close();
+        byteSize += chunk.byteLength;
+        if (!Number.isSafeInteger(byteSize)) {
+          throw new ArtifactStoreError('INVALID_ARGUMENT', 'Artifact is too large.');
+        }
+        hash.update(chunk);
+        let offset = 0;
+        while (offset < chunk.byteLength) {
+          const bytesWritten = await this.#writeChunk(file, chunk, offset);
+          if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0 ||
+            bytesWritten > chunk.byteLength - offset) {
+            throw new ArtifactStoreError('STAGE_FAILED', 'Artifact write made invalid progress.');
+          }
+          offset += bytesWritten;
+        }
       }
-    } catch (error) {
-      await rm(temporaryPath, { force: true });
-      if (error instanceof ArtifactStoreError) throw error;
-      throw new ArtifactStoreError('STAGE_FAILED', 'Artifact source failed during staging.');
-    }
-    const checksum = hash.digest('hex');
-    await verifyFile(temporaryPath, checksum, byteSize);
-    if (input.expectedChecksum !== undefined && input.expectedChecksum !== checksum) {
-      await rm(temporaryPath, { force: true });
-      throw new ArtifactStoreError('CHECKSUM_MISMATCH', 'Staged bytes did not match checksum.');
-    }
-    if (expectedByteSize !== undefined && expectedByteSize !== byteSize) {
-      await rm(temporaryPath, { force: true });
-      throw new ArtifactStoreError('SIZE_MISMATCH', 'Staged bytes did not match exact byte size.');
-    }
-    const referenceNonce = this.#createId();
-    const artifactId = `artifact_${sha256(`${this.#projectId}\0${checksum}\0${referenceNonce}`)}`;
-    const handle = `agent-artifact:${sha256(this.#projectId).slice(0, 24)}:${artifactId.slice(-40)}`;
-    const blobName = `${artifactId}.blob`;
-    const staged: StagedMetadata = {
-      storageVersion: 1,
-      schemaVersion: 1,
-      artifactId,
-      handle,
-      projectId: this.#projectId,
-      checksum,
-      byteSize,
-      mediaType,
-      availability: 'staged',
-      stagedAt: this.#now(),
-      ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
-      blobName,
-    };
-    const blobPath = containedPath(this.#stagedDir(), blobName);
-    try {
-      await rename(temporaryPath, blobPath);
-    } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
-      await rm(temporaryPath, { force: true });
+      await file.sync();
+      await file.close();
+      file = undefined;
+
+      const checksum = hash.digest('hex');
+      await verifyFile(temporaryPath, checksum, byteSize);
+      if (input.expectedChecksum !== undefined && input.expectedChecksum !== checksum) {
+        throw new ArtifactStoreError('CHECKSUM_MISMATCH', 'Staged bytes did not match checksum.');
+      }
+      if (expectedByteSize !== undefined && expectedByteSize !== byteSize) {
+        throw new ArtifactStoreError('SIZE_MISMATCH', 'Staged bytes did not match exact byte size.');
+      }
+      const referenceNonce = this.#createId();
+      const artifactId = `artifact_${sha256(`${this.#projectId}\0${checksum}\0${referenceNonce}`)}`;
+      const handle = `agent-artifact:${sha256(this.#projectId).slice(0, 24)}:${artifactId.slice(-40)}`;
+      const blobName = `${artifactId}.blob`;
+      const staged: StagedMetadata = {
+        storageVersion: 1,
+        schemaVersion: 1,
+        artifactId,
+        handle,
+        projectId: this.#projectId,
+        checksum,
+        byteSize,
+        mediaType,
+        availability: 'staged',
+        stagedAt: requireExactIso(this.#now(), 'stagedAt'),
+        ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+        blobName,
+      };
+      const blobPath = containedPath(this.#stagedDir(), blobName);
+      try {
+        await rename(temporaryPath, blobPath);
+        temporaryPath = undefined;
+        createdBlobPath = blobPath;
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+        await rm(temporaryPath!, { force: true });
+        temporaryPath = undefined;
+        await verifyFile(blobPath, checksum, byteSize);
+      }
       await verifyFile(blobPath, checksum, byteSize);
+      await fsyncDirectory(this.#stagedDir());
+      await writeAtomicJson(this.#stagedMetadataPath(artifactId), staged, this.#createId);
+      createdBlobPath = undefined;
+      return publicStaged(staged);
+    } catch (error) {
+      await file?.close().catch(() => undefined);
+      await Promise.all([
+        temporaryPath === undefined ? Promise.resolve() : rm(temporaryPath, { force: true }),
+        createdBlobPath === undefined ? Promise.resolve() : rm(createdBlobPath, { force: true }),
+      ]).catch(() => undefined);
+      if (error instanceof ArtifactStoreError) throw error;
+      throw new ArtifactStoreError(
+        'STAGE_FAILED',
+        `Artifact staging failed${errorCode(error) === undefined ? '' : ` (${errorCode(error)})`}.`,
+      );
     }
-    await verifyFile(blobPath, checksum, byteSize);
-    await fsyncDirectory(this.#stagedDir());
-    await writeAtomicJson(this.#stagedMetadataPath(artifactId), staged, this.#createId);
-    return publicStaged(staged);
   }
 
   async commit(input: CommitArtifactInput): Promise<ArtifactRef> {
@@ -384,6 +395,16 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     let stagedObjectsDeleted = 0;
     let committedObjectsDeleted = 0;
     let bytesDeleted = 0;
+    let orphanTemporaryFilesDeleted = 0;
+    for (const entry of await readdir(this.#stagedDir(), { withFileTypes: true })) {
+      if (!entry.isFile() || !/^\.stage-[A-Za-z0-9_-]+\.tmp$/u.test(entry.name)) continue;
+      const path = containedPath(this.#stagedDir(), entry.name);
+      const details = await stat(path);
+      if (details.mtimeMs > now.getTime() - ORPHAN_STAGE_TEMP_MAX_AGE_MS) continue;
+      await rm(path, { force: true });
+      orphanTemporaryFilesDeleted += 1;
+      bytesDeleted += details.size;
+    }
     for (const entry of await readdir(this.#metadataDir(), { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith('.staged.json')) continue;
       const artifactId = entry.name.slice(0, -'.staged.json'.length);
@@ -416,7 +437,12 @@ export class ProjectArtifactStore implements AgentArtifactStore {
         bytesDeleted += metadata.byteSize;
       }
     }
-    return { stagedObjectsDeleted, committedObjectsDeleted, bytesDeleted };
+    return {
+      stagedObjectsDeleted,
+      committedObjectsDeleted,
+      orphanTemporaryFilesDeleted,
+      bytesDeleted,
+    };
   }
 
   async #acquireMutationGate() {
@@ -426,7 +452,11 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       if (error instanceof ArtifactMutationGateTimeoutError) {
         throw new ArtifactStoreError('STORE_BUSY', error.message);
       }
-      throw error;
+      if (error instanceof ArtifactStoreError) throw error;
+      throw new ArtifactStoreError(
+        'STORE_BUSY',
+        `Artifact mutation gate failed${errorCode(error) === undefined ? '' : ` (${errorCode(error)})`}.`,
+      );
     }
   }
 
@@ -592,6 +622,16 @@ function requireText(value: string, name: string): string {
     throw new ArtifactStoreError('INVALID_ARGUMENT', `${name} is required.`);
   }
   return value.trim();
+}
+
+function validateStageInput(input: StageArtifactInput): void {
+  requireMediaType(input.mediaType);
+  if (input.expectedByteSize !== undefined &&
+    (!Number.isSafeInteger(input.expectedByteSize) || input.expectedByteSize < 0)) {
+    throw new ArtifactStoreError('INVALID_ARGUMENT', 'expectedByteSize must be non-negative.');
+  }
+  if (input.expectedChecksum !== undefined) requireChecksum(input.expectedChecksum);
+  if (input.expiresAt !== undefined) requireExactIso(input.expiresAt, 'expiresAt');
 }
 
 function requireMediaType(value: string): string {
@@ -864,26 +904,30 @@ async function writeAtomicJson(
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${createId()}.tmp`;
-  const file = await open(temporaryPath, 'wx', 0o600);
+  let file: FileHandle | undefined;
+  let promoted = false;
   try {
+    file = await open(temporaryPath, 'wx', 0o600);
     await file.writeFile(`${JSON.stringify(value)}\n`, 'utf8');
     await file.sync();
-  } finally {
     await file.close();
-  }
-  try {
-    await rename(temporaryPath, path);
-  } catch (error) {
-    let existing: string;
     try {
-      existing = await readFile(path, 'utf8');
-    } catch {
-      throw error;
+      await rename(temporaryPath, path);
+      promoted = true;
+    } catch (error) {
+      let existing: string;
+      try {
+        existing = await readFile(path, 'utf8');
+      } catch {
+        throw error;
+      }
+      if (existing !== `${JSON.stringify(value)}\n`) throw error;
     }
-    if (existing !== `${JSON.stringify(value)}\n`) throw error;
-    await rm(temporaryPath, { force: true });
+    await fsyncDirectory(dirname(path));
+  } finally {
+    await file?.close().catch(() => undefined);
+    if (!promoted) await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
-  await fsyncDirectory(dirname(path));
 }
 
 async function readJsonIfExists<T>(path: string): Promise<T | undefined> {

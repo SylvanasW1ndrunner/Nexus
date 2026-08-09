@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -28,6 +29,27 @@ afterEach(async () => {
 });
 
 describe('ProjectArtifactStore', () => {
+  it('rejects non-canonical expiresAt before filesystem or source I/O', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dbagent-artifact-preflight-'));
+    temporaryDirectories.push(directory);
+    const artifactRoot = join(directory, 'untouched-artifacts');
+    let sourceReads = 0;
+    const source = (async function* () {
+      sourceReads += 1;
+      yield Buffer.from('must not be read');
+    })();
+    const store = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: artifactRoot,
+      journal: {} as SqliteAgentJournal,
+    });
+
+    await expect(store.stage({
+      mediaType: 'text/plain', source, expiresAt: '2026-08-09T12:00:00Z',
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(sourceReads).toBe(0);
+    await expect(stat(artifactRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('streams, verifies, commits and reopens a content-addressed project artifact', async () => {
     const fixture = await createFixture();
     const content = Buffer.from('hello 世界'.repeat(32_768));
@@ -273,6 +295,44 @@ describe('ProjectArtifactStore', () => {
       .filter(({ type, payload }) => type === 'artifact.created' &&
         payload.artifactId === staged.artifactId)).toHaveLength(1);
   });
+
+  it.each([false, true])(
+    'coordinates real child commit versus GC and releases the gate after SIGKILL=%s',
+    async (killCommit) => {
+      const fixture = await createFixture();
+      const staged = await fixture.store.stage({
+        mediaType: 'text/plain', source: chunks(Buffer.from('child-mutation-race')),
+        expiresAt: '2026-08-09T11:00:00.000Z',
+      });
+      const commitInput = {
+        staged, journal: fixture.context(`child-commit-${killCommit}`), summary: 'child mutation race',
+      };
+      const commit = spawnArtifactWorker(fixture.directory, 'commit', commitInput);
+      await waitForPath(join(fixture.directory, 'artifact-commit-ready'));
+      const gc = spawnArtifactWorker(fixture.directory, 'gc');
+      await waitForPath(join(fixture.directory, 'artifact-gc-started'));
+      await delay(250);
+      expect(gc.exitCode).toBeNull();
+
+      if (killCommit) {
+        commit.kill('SIGKILL');
+        await waitForExit(commit);
+      } else {
+        await writeFile(join(fixture.directory, 'artifact-commit-release'), 'release');
+        const commitExit = await waitForExit(commit);
+        if (commitExit !== 0) {
+          throw new Error(await readFile(join(fixture.directory, 'artifact-commit-error'), 'utf8'));
+        }
+      }
+      const gcExit = await waitForExit(gc);
+      if (gcExit !== 0) {
+        throw new Error(await readFile(join(fixture.directory, 'artifact-gc-error'), 'utf8'));
+      }
+      expect(await readFile(join(fixture.directory, 'artifact-gc-completed'), 'utf8'))
+        .toBe('completed');
+    },
+    20_000,
+  );
 
   it('stops legacy duplicate artifact facts with a typed migration conflict', async () => {
     const fixture = await createFixture();
@@ -533,6 +593,66 @@ describe('ProjectArtifactStore', () => {
       .filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
+  it('cleans temporary and promoted bytes after verify, rename, and metadata failures', async () => {
+    const fixture = await createFixture();
+    const content = Buffer.from('failure-atomic-stage');
+    const corruptedWriter = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      writeChunk: async (file, chunk, offset) =>
+        (await file.write(Buffer.alloc(chunk.byteLength - offset, 0x78), 0, chunk.byteLength - offset, null))
+          .bytesWritten,
+    });
+    await expect(corruptedWriter.stage({ mediaType: 'text/plain', source: chunks(content) }))
+      .rejects.toBeInstanceOf(ArtifactStoreError);
+
+    const checksum = createHash('sha256').update(content).digest('hex');
+    const artifactId = (nonce: string) =>
+      `artifact_${createHash('sha256').update(`project-a\0${checksum}\0${nonce}`).digest('hex')}`;
+    await mkdir(join(fixture.artifactRoot, 'staged'), { recursive: true });
+    await mkdir(join(fixture.artifactRoot, 'staged', `${artifactId('rename-nonce')}.blob`));
+    let renameId = 0;
+    const renameFailure = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      createId: () => ['rename-temp', 'rename-nonce'][renameId++] ?? 'rename-extra',
+    });
+    await expect(renameFailure.stage({ mediaType: 'text/plain', source: chunks(content) }))
+      .rejects.toBeInstanceOf(ArtifactStoreError);
+
+    const metadataArtifactId = artifactId('metadata-nonce');
+    await mkdir(join(fixture.artifactRoot, 'metadata', `${metadataArtifactId}.staged.json`), {
+      recursive: true,
+    });
+    let metadataId = 0;
+    const metadataFailure = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      createId: () => ['metadata-temp', 'metadata-nonce', 'metadata-json'][metadataId++] ?? 'metadata-extra',
+    });
+    await expect(metadataFailure.stage({ mediaType: 'text/plain', source: chunks(content) }))
+      .rejects.toMatchObject({ code: 'STAGE_FAILED' });
+
+    expect((await readdir(join(fixture.artifactRoot, 'staged')))
+      .filter((name) => name.startsWith('.stage-'))).toEqual([]);
+    await expect(stat(join(fixture.artifactRoot, 'staged', `${metadataArtifactId}.blob`)))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('collects aged orphan stage temporaries and preserves fresh ones', async () => {
+    const fixture = await createFixture();
+    const stagedDir = join(fixture.artifactRoot, 'staged');
+    await mkdir(stagedDir, { recursive: true });
+    const oldPath = join(stagedDir, '.stage-aged.tmp');
+    const freshPath = join(stagedDir, '.stage-fresh.tmp');
+    await writeFile(oldPath, 'old');
+    await writeFile(freshPath, 'fresh');
+    await utimes(oldPath, new Date('2026-08-09T11:00:00.000Z'), new Date('2026-08-09T11:00:00.000Z'));
+    await utimes(freshPath, new Date('2026-08-09T11:59:30.000Z'), new Date('2026-08-09T11:59:30.000Z'));
+
+    await expect(fixture.store.collectGarbage(new Date('2026-08-09T12:00:00.000Z')))
+      .resolves.toMatchObject({ orphanTemporaryFilesDeleted: 1, bytesDeleted: 3 });
+    await expect(stat(oldPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(freshPath, 'utf8')).resolves.toBe('fresh');
+  });
+
   it('collects only expired unreferenced staged bytes and never a committed referenced object', async () => {
     const fixture = await createFixture();
     const orphan = await fixture.store.stage({
@@ -638,6 +758,56 @@ async function createRunContext(journal: SqliteAgentJournal, suffix: string) {
       expectedRunRevision: 2,
     }),
   };
+}
+
+function spawnArtifactWorker(
+  projectDir: string,
+  mode: 'commit' | 'gc',
+  commitInput?: unknown,
+) {
+  const viteNode = join(
+    process.cwd(),
+    'node_modules',
+    '.pnpm',
+    'vite-node@2.1.9_@types+node@22.19.20',
+    'node_modules',
+    'vite-node',
+    'vite-node.mjs',
+  );
+  const helper = join(
+    process.cwd(), 'packages', 'core-agent', 'test', 'fixtures', 'artifact-mutation-worker.ts',
+  );
+  return spawn(process.execPath, [viteNode, helper], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      DBAGENT_ARTIFACT_CHILD_PROJECT: projectDir,
+      DBAGENT_ARTIFACT_WORKER_MODE: mode,
+      ...(commitInput === undefined ? {} : {
+        DBAGENT_ARTIFACT_COMMIT_INPUT: JSON.stringify(commitInput),
+      }),
+    },
+    stdio: 'ignore',
+  });
+}
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    try {
+      await stat(path);
+      return;
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'ENOENT') throw error;
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
+      await delay(20);
+    }
+  }
+}
+
+async function waitForExit(child: ReturnType<typeof spawn>): Promise<number | null> {
+  if (child.exitCode !== null) return child.exitCode;
+  return await new Promise((resolveExit) => child.once('exit', resolveExit));
 }
 
 async function* chunks(content: Buffer, size = content.byteLength || 1): AsyncIterable<Uint8Array> {

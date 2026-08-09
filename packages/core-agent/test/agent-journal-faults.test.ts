@@ -5,7 +5,7 @@ import { Worker } from 'node:worker_threads';
 import { createRequire } from 'node:module';
 import type { DatabaseSync } from 'node:sqlite';
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { ValidatedModelAttempt } from '@dbagent/core-llm';
 import { RunEventCommitter, SqliteAgentJournal } from '../src/index.js';
@@ -464,13 +464,18 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
     });
     const journal = new SqliteAgentJournal({ filePath, busyTimeoutMs: 75 });
 
-    let error: unknown;
+    const errors: unknown[] = [];
     try {
-      await journal.createRun({
-        projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'ddl-busy', input: 'go',
-      });
-    } catch (caught) {
-      error = caught;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        try {
+          await journal.createRun({
+            projectId: 'project-a', sessionId: 'session-a',
+            clientRequestId: `ddl-busy-${attempt}`, input: 'go',
+          });
+        } catch (caught) {
+          errors.push(caught);
+        }
+      }
     } finally {
       worker.postMessage('release');
       await new Promise<void>((resolveExit, reject) => {
@@ -478,7 +483,10 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
         worker.once('error', reject);
       });
     }
-    expect(error).toMatchObject({ code: 'JOURNAL_BUSY' });
+    expect(errors).toHaveLength(10);
+    expect(errors.every((error) =>
+      (error as { code?: string }).code === 'JOURNAL_BUSY')).toBe(true);
+    await expect(rm(dirname(filePath), { recursive: true, force: true })).resolves.toBeUndefined();
   });
 
   it('uses a barrier for two real Journal writers racing the same command and Turn', async () => {
@@ -627,13 +635,27 @@ function waitForWorkerMessage(
 async function waitForCommandRow(filePath: string, commandId: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const database = openDatabase(filePath);
-    const found = database.prepare(
-      'SELECT 1 AS present FROM agent_commands WHERE project_id = ? AND command_id = ?',
-    ).get('project-a', commandId);
-    database.close();
+    let database: DatabaseSync | undefined;
+    let found: unknown;
+    try {
+      database = openDatabase(filePath);
+      found = database.prepare(
+        'SELECT 1 AS present FROM agent_commands WHERE project_id = ? AND command_id = ?',
+      ).get('project-a', commandId);
+    } catch (error) {
+      if (!isTransientSqliteBusy(error)) throw error;
+    } finally {
+      database?.close();
+    }
     if (found !== undefined) return;
     await new Promise((resolveWait) => setTimeout(resolveWait, 5));
   }
   throw new Error(`Timed out waiting for committed command ${commandId}.`);
+}
+
+function isTransientSqliteBusy(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = 'code' in error ? String((error as { code?: unknown }).code) : '';
+  return /SQLITE_(?:BUSY|LOCKED)/iu.test(code) ||
+    /database(?: table)? is (?:locked|busy)|SQLITE_(?:BUSY|LOCKED)/iu.test(error.message);
 }
