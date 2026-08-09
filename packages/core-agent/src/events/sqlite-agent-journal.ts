@@ -1270,25 +1270,44 @@ function snapshotDataArray<T>(
     throw new AgentJournalError('INVALID_ARGUMENT', `${label}.length must be a data property.`);
   }
   const length = Number(lengthDescriptor.value);
-  const allowedKeys = new Set(['length', ...Array.from({ length }, (_, index) => String(index))]);
-  const unknownKeys = Reflect.ownKeys(descriptors)
-    .filter((key) => typeof key !== 'string' || !allowedKeys.has(key));
-  if (unknownKeys.length > 0) {
-    throw new AgentJournalError(
-      'INVALID_ARGUMENT', `${label} contains unknown keys: ${unknownKeys.map(String).join(', ')}.`,
-    );
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label}.length must be a safe integer.`);
   }
-  const output: T[] = [];
-  for (let index = 0; index < length; index += 1) {
-    const descriptor = descriptors[String(index)];
-    if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) {
+  const entries: Array<{ index: number; value: unknown }> = [];
+  const indices = new Set<number>();
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (key === 'length') continue;
+    const index = typeof key === 'string' ? canonicalArrayIndex(key) : undefined;
+    const descriptor = descriptors[key];
+    if (
+      index === undefined || index >= length || indices.has(index) || descriptor === undefined
+    ) {
+      throw new AgentJournalError(
+        'INVALID_ARGUMENT', `${label} contains an invalid array key: ${String(key)}.`,
+      );
+    }
+    if (!Object.hasOwn(descriptor, 'value')) {
       throw new AgentJournalError(
         'INVALID_ARGUMENT', `${label}[${index}] must be an own data property.`,
       );
     }
-    output.push(snapshotItem(descriptor.value, `${label}[${index}]`));
+    indices.add(index);
+    entries.push({ index, value: descriptor.value });
   }
+  if (entries.length !== length) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label} must be dense.`);
+  }
+  entries.sort((left, right) => left.index - right.index);
+  const output = entries.map(({ index, value: item }) =>
+    snapshotItem(item, `${label}[${index}]`));
   return Object.freeze(output);
+}
+
+function canonicalArrayIndex(key: string): number | undefined {
+  const index = Number(key);
+  return Number.isInteger(index) && index >= 0 && index < 0xffff_ffff && String(index) === key
+    ? index
+    : undefined;
 }
 
 function snapshotPortableData(

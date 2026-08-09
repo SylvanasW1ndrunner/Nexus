@@ -380,6 +380,80 @@ describe('SqliteAgentJournal', () => {
     });
   });
 
+  it('rejects a huge sparse Portable array without expanding its declared length', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const hugeLength = 0xffff_ffff;
+    const sparse: PortableValue[] = [];
+    Object.defineProperty(sparse, 'length', { value: hugeLength, writable: true });
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Array, 'from');
+    if (originalDescriptor === undefined) throw new Error('Array.from descriptor is unavailable.');
+    const originalArrayFrom = Array.from;
+    let attemptedDeclaredLengthExpansion = false;
+    Object.defineProperty(Array, 'from', {
+      ...originalDescriptor,
+      value(this: unknown, ...args: unknown[]): unknown {
+        const source = args[0];
+        if (source !== null && typeof source === 'object') {
+          const lengthDescriptor = Object.getOwnPropertyDescriptor(source, 'length');
+          if (lengthDescriptor?.value === hugeLength) {
+            attemptedDeclaredLengthExpansion = true;
+            throw new Error('DECLARED_LENGTH_EXPANSION_BLOCKED');
+          }
+        }
+        return Reflect.apply(originalArrayFrom, this, args) as unknown;
+      },
+    });
+
+    try {
+      await expect(journal.createRun({
+        projectId: 'project-a', sessionId: 'session-a',
+        clientRequestId: 'huge-sparse-array', input: sparse,
+      })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+      expect(attemptedDeclaredLengthExpansion).toBe(false);
+    } finally {
+      Object.defineProperty(Array, 'from', originalDescriptor);
+    }
+  });
+
+  it('rejects a cyclic Portable record at public ingress with a typed error', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const cyclic: Record<string, PortableValue> = {};
+    cyclic.self = cyclic;
+
+    await expect(journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'cyclic-input', input: cyclic,
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('rejects an ordinary sparse Portable array at public ingress with a typed error', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const sparse = new Array<PortableValue>(2);
+    sparse[1] = 'present';
+
+    await expect(journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'sparse-input', input: sparse,
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('rejects an extra own array key at public ingress with a typed error', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const value: PortableValue[] = [];
+    Object.defineProperty(value, 'metadata', { value: 'forbidden', enumerable: true });
+
+    await expect(journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'array-extra-key', input: value,
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('rejects a nested non-plain record at public ingress with a typed error', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+
+    await expect(journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'non-plain-input',
+      input: { nested: new Date(0) } as never,
+    })).rejects.toMatchObject({ code: 'INVALID_EVENT_PAYLOAD' });
+  });
+
   it('rejects a startRun lease accessor before it can splice owner and token from different values', async () => {
     const journal = new SqliteAgentJournal({ filePath: await journalPath() });
     const created = await journal.createRun({
