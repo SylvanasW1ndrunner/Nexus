@@ -102,14 +102,12 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async createRun(command: CreateRunCommand): Promise<CreateRunResult> {
     await Promise.resolve();
-    assertExactKeys(command, [
-      'projectId', 'sessionId', 'clientRequestId', 'input',
-    ], 'Create Run command');
-    const projectId = requireText(command.projectId, 'projectId');
-    const sessionId = requireText(command.sessionId, 'sessionId');
-    const clientRequestId = requireText(command.clientRequestId, 'clientRequestId');
-    validatePortable(command.input, 'Run input');
-    const input = structuredClone(command.input);
+    const snapshot = snapshotCreateRunCommand(command);
+    const projectId = requireText(snapshot.projectId, 'projectId');
+    const sessionId = requireText(snapshot.sessionId, 'sessionId');
+    const clientRequestId = requireText(snapshot.clientRequestId, 'clientRequestId');
+    validatePortable(snapshot.input, 'Run input');
+    const input = snapshot.input;
     const digest = digestValue(input);
     return this.#withDatabase((database) =>
       transaction(database, () => {
@@ -175,7 +173,7 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async commit(command: JournalCommand): Promise<JournalCommitResult> {
     await Promise.resolve();
-    const normalized = validateJournalCommand(command);
+    const normalized = validateJournalCommand(snapshotJournalCommand(command));
     const requestDigest = digestValue({
       projectId: normalized.projectId,
       sessionId: normalized.sessionId,
@@ -224,7 +222,7 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async startRun(command: StartRunCommand): Promise<JournalCommitResult> {
     await Promise.resolve();
-    const normalized = validateStartRunCommand(command);
+    const normalized = validateStartRunCommand(snapshotStartRunCommand(command));
     return this.#withDatabase((database) => transaction(database, () => {
       const digest = digestValue({
         projectId: normalized.projectId,
@@ -254,7 +252,7 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async startTurn(command: StartTurnCommand): Promise<JournalCommitResult> {
     await Promise.resolve();
-    const normalized = validateStartTurnCommand(command);
+    const normalized = validateStartTurnCommand(snapshotStartTurnCommand(command));
     return this.#withDatabase((database) => transaction(database, () => {
       const digest = digestValue({
         projectId: normalized.projectId,
@@ -432,7 +430,7 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async acquireRunLease(input: AcquireRunLeaseInput): Promise<RunLease> {
     await Promise.resolve();
-    const normalized = validateLeaseInput(input);
+    const normalized = validateLeaseInput(snapshotAcquireRunLeaseCommand(input));
     return this.#withDatabase((database) =>
       transaction(database, () => {
         this.#assertRun(database, normalized.projectId, undefined, normalized.runId);
@@ -477,7 +475,7 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async renewRunLease(input: RenewRunLeaseInput): Promise<RunLease> {
     await Promise.resolve();
-    const normalized = { ...validateLeaseInput(input), fencingToken: input.fencingToken };
+    const normalized = validateLeaseInput(snapshotRenewRunLeaseCommand(input));
     if (!Number.isInteger(normalized.fencingToken) || normalized.fencingToken < 1) {
       throw new AgentJournalError('INVALID_ARGUMENT', 'fencingToken must be a positive integer.');
     }
@@ -1088,6 +1086,260 @@ export class SqliteAgentJournal implements AgentJournal {
     } finally {
       database.close();
     }
+  }
+}
+
+function snapshotCreateRunCommand(command: CreateRunCommand): CreateRunCommand {
+  const record = snapshotDataRecord(command, [
+    'projectId', 'sessionId', 'clientRequestId', 'input',
+  ], [], 'Create Run command');
+  return Object.freeze({
+    projectId: record.projectId,
+    sessionId: record.sessionId,
+    clientRequestId: record.clientRequestId,
+    input: snapshotPortableData(record.input, 'Create Run input'),
+  }) as CreateRunCommand;
+}
+
+function snapshotJournalCommand(command: JournalCommand): JournalCommand {
+  const record = snapshotDataRecord(command, [
+    'projectId', 'sessionId', 'runId', 'commandId', 'lease', 'expectedRunRevision', 'events',
+  ], [], 'Journal command');
+  return Object.freeze({
+    projectId: record.projectId,
+    sessionId: record.sessionId,
+    runId: record.runId,
+    commandId: record.commandId,
+    lease: snapshotRunLeaseReference(record.lease, 'Journal command lease'),
+    expectedRunRevision: record.expectedRunRevision,
+    events: snapshotDataArray(record.events, 'Journal command events', snapshotEventDraft),
+  }) as JournalCommand;
+}
+
+function snapshotStartRunCommand(command: StartRunCommand): StartRunCommand {
+  const record = snapshotDataRecord(command, [
+    'projectId', 'sessionId', 'runId', 'commandId', 'lease', 'expectedRunRevision',
+  ], [], 'Start Run command');
+  return Object.freeze({
+    projectId: record.projectId,
+    sessionId: record.sessionId,
+    runId: record.runId,
+    commandId: record.commandId,
+    lease: snapshotRunLeaseReference(record.lease, 'Start Run lease'),
+    expectedRunRevision: record.expectedRunRevision,
+  }) as StartRunCommand;
+}
+
+function snapshotStartTurnCommand(command: StartTurnCommand): StartTurnCommand {
+  const record = snapshotDataRecord(command, [
+    'projectId', 'sessionId', 'runId', 'turnId', 'commandId', 'lease', 'expectedRunRevision',
+  ], [], 'Start Turn command');
+  return Object.freeze({
+    projectId: record.projectId,
+    sessionId: record.sessionId,
+    runId: record.runId,
+    turnId: record.turnId,
+    commandId: record.commandId,
+    lease: snapshotRunLeaseReference(record.lease, 'Start Turn lease'),
+    expectedRunRevision: record.expectedRunRevision,
+  }) as StartTurnCommand;
+}
+
+function snapshotAcquireRunLeaseCommand(input: AcquireRunLeaseInput): AcquireRunLeaseInput {
+  const record = snapshotDataRecord(input, [
+    'projectId', 'runId', 'ownerId', 'ttlMs',
+  ], [], 'Acquire Run lease command');
+  return Object.freeze({
+    projectId: record.projectId,
+    runId: record.runId,
+    ownerId: record.ownerId,
+    ttlMs: record.ttlMs,
+  }) as AcquireRunLeaseInput;
+}
+
+function snapshotRenewRunLeaseCommand(input: RenewRunLeaseInput): RenewRunLeaseInput {
+  const record = snapshotDataRecord(input, [
+    'projectId', 'runId', 'ownerId', 'ttlMs', 'fencingToken',
+  ], [], 'Renew Run lease command');
+  return Object.freeze({
+    projectId: record.projectId,
+    runId: record.runId,
+    ownerId: record.ownerId,
+    ttlMs: record.ttlMs,
+    fencingToken: record.fencingToken,
+  }) as RenewRunLeaseInput;
+}
+
+function snapshotRunLeaseReference(value: unknown, label: string): RunLeaseReference {
+  const record = snapshotDataRecord(value, ['ownerId', 'fencingToken'], [], label);
+  return Object.freeze({
+    ownerId: record.ownerId,
+    fencingToken: record.fencingToken,
+  }) as RunLeaseReference;
+}
+
+function snapshotEventDraft(value: unknown, label: string): AgentEventDraft {
+  const record = snapshotDataRecord(value, ['type', 'payload'], [
+    'turnId', 'parentEventId', 'invocationId', 'attemptId',
+    'schemaVersion', 'audience', 'persistence',
+  ], label);
+  if (
+    Object.hasOwn(record, 'schemaVersion') || Object.hasOwn(record, 'audience') ||
+    Object.hasOwn(record, 'persistence')
+  ) {
+    throw new AgentJournalError(
+      'PRODUCER_METADATA_FORBIDDEN',
+      'Event producers cannot choose schemaVersion, audience, or persistence.',
+    );
+  }
+  return Object.freeze({
+    type: record.type,
+    payload: snapshotPortableData(record.payload, `${label} payload`),
+    ...(Object.hasOwn(record, 'turnId') ? { turnId: record.turnId } : {}),
+    ...(Object.hasOwn(record, 'parentEventId') ? { parentEventId: record.parentEventId } : {}),
+    ...(Object.hasOwn(record, 'invocationId') ? { invocationId: record.invocationId } : {}),
+    ...(Object.hasOwn(record, 'attemptId') ? { attemptId: record.attemptId } : {}),
+  }) as AgentEventDraft;
+}
+
+function snapshotDataRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[],
+  label: string,
+): Readonly<Record<string, unknown>> {
+  if (value === null || typeof value !== 'object' || nodeUtilTypes.isProxy(value)) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label} must be a plain non-Proxy object.`);
+  }
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label} must be a plain non-Proxy object.`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as
+    Record<PropertyKey, PropertyDescriptor>;
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
+  const actualKeys = Reflect.ownKeys(descriptors);
+  const unknownKeys = actualKeys.filter((key) => typeof key !== 'string' || !allowed.has(key));
+  if (unknownKeys.length > 0) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT',
+      `${label} contains unknown keys: ${unknownKeys.map(String).sort().join(', ')}.`,
+    );
+  }
+  const output = Object.create(null) as Record<string, unknown>;
+  for (const key of requiredKeys) {
+    const descriptor = descriptors[key];
+    if (descriptor === undefined) {
+      throw new AgentJournalError('INVALID_ARGUMENT', `${label}.${key} is required.`);
+    }
+    defineSnapshotValue(output, key, descriptor, `${label}.${key}`);
+  }
+  for (const key of optionalKeys) {
+    const descriptor = descriptors[key];
+    if (descriptor !== undefined) defineSnapshotValue(output, key, descriptor, `${label}.${key}`);
+  }
+  return Object.freeze(output);
+}
+
+function defineSnapshotValue(
+  output: Record<string, unknown>, key: string, descriptor: PropertyDescriptor, label: string,
+): void {
+  if (!Object.hasOwn(descriptor, 'value')) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label} must be an own data property.`);
+  }
+  Object.defineProperty(output, key, {
+    value: descriptor.value,
+    enumerable: true,
+    configurable: false,
+    writable: false,
+  });
+}
+
+function snapshotDataArray<T>(
+  value: unknown,
+  label: string,
+  snapshotItem: (item: unknown, label: string) => T,
+): readonly T[] {
+  if (!Array.isArray(value) || nodeUtilTypes.isProxy(value)) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label} must be a non-Proxy array.`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as
+    Record<PropertyKey, PropertyDescriptor>;
+  const lengthDescriptor = descriptors.length;
+  if (lengthDescriptor === undefined || !Object.hasOwn(lengthDescriptor, 'value')) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label}.length must be a data property.`);
+  }
+  const length = Number(lengthDescriptor.value);
+  const allowedKeys = new Set(['length', ...Array.from({ length }, (_, index) => String(index))]);
+  const unknownKeys = Reflect.ownKeys(descriptors)
+    .filter((key) => typeof key !== 'string' || !allowedKeys.has(key));
+  if (unknownKeys.length > 0) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', `${label} contains unknown keys: ${unknownKeys.map(String).join(', ')}.`,
+    );
+  }
+  const output: T[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) {
+      throw new AgentJournalError(
+        'INVALID_ARGUMENT', `${label}[${index}] must be an own data property.`,
+      );
+    }
+    output.push(snapshotItem(descriptor.value, `${label}[${index}]`));
+  }
+  return Object.freeze(output);
+}
+
+function snapshotPortableData(
+  value: unknown,
+  label: string,
+  ancestors = new WeakSet<object>(),
+): PortableValue {
+  if (
+    (typeof value === 'object' && value !== null || typeof value === 'function') &&
+    nodeUtilTypes.isProxy(value)
+  ) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label} must not contain a Proxy.`);
+  }
+  if (value === null || typeof value !== 'object') return value as PortableValue;
+  if (ancestors.has(value)) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${label} must not contain cycles.`);
+  }
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return snapshotDataArray(value, label, (item, itemLabel) =>
+        snapshotPortableData(item, itemLabel, ancestors)) as PortableValue;
+    }
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new AgentJournalError(
+        'INVALID_EVENT_PAYLOAD', `${label} must contain only plain portable records.`,
+      );
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const output = Object.create(null) as Record<string, PortableValue>;
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== 'string') {
+        throw new AgentJournalError('INVALID_ARGUMENT', `${label} must not contain symbol keys.`);
+      }
+      const descriptor = descriptors[key];
+      if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) {
+        throw new AgentJournalError(
+          'INVALID_ARGUMENT', `${label}.${key} must be an own data property.`,
+        );
+      }
+      Object.defineProperty(output, key, {
+        value: snapshotPortableData(descriptor.value, `${label}.${key}`, ancestors),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
+    return Object.freeze(output);
+  } finally {
+    ancestors.delete(value);
   }
 }
 
@@ -1954,13 +2206,13 @@ function migrateLegacyRunLeaseForeignKey(database: NodeDatabaseSync): void {
 function snapshotValidatedAttemptCommand(
   command: CommitValidatedAttemptCommand,
 ): Readonly<CommitValidatedAttemptCommand> {
-  const values = readPlainDataRecord(command, [
+  const values = snapshotDataRecord(command, [
     'projectId', 'sessionId', 'runId', 'turnId', 'commandId', 'lease',
     'expectedRunRevision', 'expectedTurnRevision', 'attempt',
-  ], 'Model commit command');
-  const leaseValues = readPlainDataRecord(values.lease, [
+  ], [], 'Model commit command');
+  const leaseValues = snapshotDataRecord(values.lease, [
     'ownerId', 'fencingToken',
-  ], 'Model commit lease');
+  ], [], 'Model commit lease');
   const lease = Object.freeze({
     ownerId: requireText(leaseValues.ownerId, 'lease.ownerId'),
     fencingToken: requireRevision(leaseValues.fencingToken, 'lease.fencingToken'),
@@ -1976,33 +2228,6 @@ function snapshotValidatedAttemptCommand(
     expectedTurnRevision: requireRevision(values.expectedTurnRevision, 'expectedTurnRevision'),
     attempt: values.attempt as CommitValidatedAttemptCommand['attempt'],
   });
-}
-
-function readPlainDataRecord(
-  value: unknown,
-  keys: readonly string[],
-  label: string,
-): Record<string, unknown> {
-  if (
-    value === null || typeof value !== 'object' || nodeUtilTypes.isProxy(value) ||
-    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
-  ) {
-    throw new AgentJournalError('INVALID_ARGUMENT', `${label} must be a plain object.`);
-  }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  assertExactKeys(descriptors, keys, label);
-  const output: Record<string, unknown> = {};
-  for (const key of keys) {
-    const descriptor = descriptors[key];
-    if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) {
-      throw new AgentJournalError(
-        'INVALID_ARGUMENT',
-        `${label}.${key} must be an own data property.`,
-      );
-    }
-    output[key] = descriptor.value;
-  }
-  return output;
 }
 
 function assertCanonicalAttemptIdentities(

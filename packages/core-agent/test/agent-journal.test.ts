@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { PortableValue } from '@dbagent/shared';
 import {
   AGENT_EVENT_SCHEMA_REGISTRY,
   AgentJournalError,
@@ -268,6 +269,234 @@ describe('SqliteAgentJournal', () => {
       }],
     })).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
     await expect(journal.countEvents('input.received', 'project-a')).resolves.toBe(1);
+  });
+
+  it('rejects a createRun input accessor before validation and persistence can observe different values', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    let valueReads = 0;
+    const input: Record<string, PortableValue> = {};
+    Object.defineProperty(input, 'text', {
+      enumerable: true,
+      get() {
+        valueReads += 1;
+        return valueReads === 1 ? 'validated' : 'persisted';
+      },
+    });
+
+    await expect(journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'accessor-input', input,
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(valueReads).toBe(0);
+    await expect(journal.countEvents(undefined, 'project-a')).resolves.toBe(0);
+  });
+
+  it('rejects a generic command whose events accessor swaps into a reserved input fact', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'generic-swap', input: 'go',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+    const command: Record<string, unknown> = {
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      commandId: 'generic-events-swap',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 1,
+    };
+    let eventReads = 0;
+    Object.defineProperty(command, 'events', {
+      enumerable: true,
+      get() {
+        eventReads += 1;
+        return eventReads === 1
+          ? [{ type: 'artifact.created', payload: { artifactId: 'a', mediaType: 'text/plain', summary: 'ok' } }]
+          : [{ type: 'input.received', payload: { clientRequestId: 'forged', content: 'forged' } }];
+      },
+    });
+
+    await expect(journal.commit(command as never))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(eventReads).toBe(0);
+    await expect(journal.countEvents('input.received', 'project-a')).resolves.toBe(1);
+  });
+
+  it('rejects a Proxy event draft before its type or payload can change', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'draft-proxy', input: 'go',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+    const draft = new Proxy({
+      type: 'artifact.created' as const,
+      payload: { artifactId: 'artifact-a', mediaType: 'text/plain', summary: 'safe' },
+    }, {});
+
+    await expect(journal.commit({
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      commandId: 'draft-proxy-command',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 1, events: [draft],
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(journal.countEvents('artifact.created', 'project-a')).resolves.toBe(0);
+  });
+
+  it('keeps optional event draft causal keys optional after safe snapshotting', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'optional-draft', input: 'go',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+
+    await expect(journal.commit({
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      commandId: 'optional-draft-command',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 1,
+      events: [{
+        type: 'artifact.created',
+        payload: { artifactId: 'artifact-a', mediaType: 'text/plain', summary: 'safe' },
+      }],
+    })).resolves.toMatchObject({ events: [{ type: 'artifact.created' }] });
+  });
+
+  it('snapshots null-prototype Portable records and empty arrays without changing persisted input', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const input = Object.assign(Object.create(null) as Record<string, PortableValue>, {
+      request: 'inspect', refs: [],
+      nested: Object.assign(Object.create(null) as Record<string, PortableValue>, { ok: true }),
+    });
+
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'null-prototype', input,
+    });
+
+    await expect(journal.getRunProjection(created.runId)).resolves.toMatchObject({
+      input: { request: 'inspect', refs: [], nested: { ok: true } },
+    });
+  });
+
+  it('rejects a startRun lease accessor before it can splice owner and token from different values', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'start-run-swap', input: 'go',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+    const command: Record<string, unknown> = {
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      commandId: 'start-run-accessor', expectedRunRevision: 1,
+    };
+    let leaseReads = 0;
+    Object.defineProperty(command, 'lease', {
+      enumerable: true,
+      get() {
+        leaseReads += 1;
+        return leaseReads === 1
+          ? { ownerId: lease.ownerId, fencingToken: 999 }
+          : { ownerId: 'attacker', fencingToken: lease.fencingToken };
+      },
+    });
+
+    await expect(journal.startRun(command as never))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(leaseReads).toBe(0);
+    await expect(journal.countEvents('run.started', 'project-a')).resolves.toBe(0);
+  });
+
+  it('rejects a startTurn lease accessor before it can splice owner and token from different values', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'start-turn-swap', input: 'go',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+    await journal.startRun({
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      commandId: 'start-before-turn-swap',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken }, expectedRunRevision: 1,
+    });
+    const command: Record<string, unknown> = {
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      turnId: 'turn-accessor', commandId: 'start-turn-accessor', expectedRunRevision: 2,
+    };
+    let leaseReads = 0;
+    Object.defineProperty(command, 'lease', {
+      enumerable: true,
+      get() {
+        leaseReads += 1;
+        return leaseReads === 1
+          ? { ownerId: lease.ownerId, fencingToken: 999 }
+          : { ownerId: 'attacker', fencingToken: lease.fencingToken };
+      },
+    });
+
+    await expect(journal.startTurn(command as never))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(leaseReads).toBe(0);
+    await expect(journal.countEvents('turn.started', 'project-a')).resolves.toBe(0);
+  });
+
+  it('rejects an acquireRunLease Proxy before validation and SQL can observe different owners', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'acquire-proxy', input: 'go',
+    });
+    let ownerReads = 0;
+    const target = {
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    };
+    const attack = new Proxy(target, {
+      get(value, property) {
+        if (property !== 'ownerId') return value[property as keyof typeof value];
+        ownerReads += 1;
+        return ownerReads === 1 ? 'worker-a' : 'worker-b';
+      },
+    });
+
+    await expect(journal.acquireRunLease(attack))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(ownerReads).toBe(0);
+  });
+
+  it('rejects a renewRunLease Proxy before validation and SQL can observe different ttl and token values', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'renew-proxy', input: 'go',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+    let ttlReads = 0;
+    let tokenReads = 0;
+    const target = {
+      projectId: 'project-a', runId: created.runId, ownerId: lease.ownerId,
+      ttlMs: 10_000, fencingToken: lease.fencingToken,
+    };
+    const attack = new Proxy(target, {
+      get(value, property) {
+        if (property === 'ttlMs') {
+          ttlReads += 1;
+          return ttlReads < 4 ? 10_000 : 1;
+        }
+        if (property === 'fencingToken') {
+          tokenReads += 1;
+          return tokenReads === 1 ? 999 : lease.fencingToken;
+        }
+        return value[property as keyof typeof value];
+      },
+    });
+
+    await expect(journal.renewRunLease(attack))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(ttlReads).toBe(0);
+    expect(tokenReads).toBe(0);
   });
 
   it('does not expose the prepared model-attempt persistence primitive', async () => {
