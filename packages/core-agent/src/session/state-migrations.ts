@@ -10,6 +10,7 @@ import {
   rm,
   stat,
   writeFile,
+  type FileHandle,
 } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -38,7 +39,7 @@ import type {
 import {
   createLegacyMigrationWriter,
   type LegacyMigrationWriter,
-} from './legacy-migration-writer.js';
+} from '../internal/legacy-migration-writer.js';
 import {
   acquireExclusiveStateWriterGate,
   acquireMigrationOwnerGate,
@@ -325,13 +326,78 @@ export class StateMigrationRunner {
     }));
   }
 
-  async readLegacyArchive(ref: LegacyArchiveRef): Promise<Uint8Array> {
+  async openLegacyArchive(ref: LegacyArchiveRef): Promise<AsyncIterable<Uint8Array>> {
     assertLegacyArchiveRef(ref);
+    const row = this.#resolveLegacyArchive(ref);
+    const path = containedMigrationPath(this.#projectDir, row.object_relative_path);
+    let file: FileHandle | undefined;
+    try {
+      file = await open(path, 'r');
+      const details = await file.stat();
+      if (details.size !== ref.byteSize || await hashFileHandle(file) !== ref.checksum) {
+        throw new StateMigrationError(
+          'MIGRATION_VALIDATION_FAILED',
+          'Legacy archive bytes failed verification.',
+        );
+      }
+      const verified = file;
+      file = undefined;
+      return streamFileHandle(verified, ref.byteSize);
+    } catch (error) {
+      await file?.close().catch(() => undefined);
+      if (error instanceof StateMigrationError) throw error;
+      throw new StateMigrationError(
+        'MIGRATION_VALIDATION_FAILED',
+        `Legacy archive bytes could not be opened: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async readLegacyArchive(
+    ref: LegacyArchiveRef,
+    options: { maxBytes: number },
+  ): Promise<Uint8Array> {
+    assertLegacyArchiveRef(ref);
+    if (!Number.isSafeInteger(options?.maxBytes) || options.maxBytes < 0) {
+      throw new StateMigrationError('INVALID_ARGUMENT', 'maxBytes must be a non-negative integer.');
+    }
+    if (ref.byteSize > options.maxBytes) {
+      throw new StateMigrationError('INVALID_ARGUMENT', 'Legacy archive exceeds maxBytes.');
+    }
+    const chunks: Uint8Array[] = [];
+    let byteSize = 0;
+    for await (const chunk of await this.openLegacyArchive(ref)) {
+      byteSize += chunk.byteLength;
+      if (byteSize > options.maxBytes) {
+        throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy archive exceeded maxBytes.');
+      }
+      chunks.push(chunk);
+    }
+    const bytes = new Uint8Array(byteSize);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  }
+
+  #resolveLegacyArchive(ref: LegacyArchiveRef): {
+    object_relative_path: string;
+  } {
     const row = withDatabase(this.#intent.finalPath, (database) =>
       database.prepare(`
         SELECT relative_path, object_relative_path, archive_handle, checksum, byte_size
-        FROM legacy_archives WHERE migration_id = ? AND archive_handle = ?
-      `).get(this.#intent.migrationId, ref.archiveHandle) as {
+        FROM legacy_archives
+        WHERE migration_id = ? AND archive_handle = ? AND relative_path = ?
+          AND checksum = ? AND byte_size = ?
+      `).get(
+        this.#intent.migrationId,
+        ref.archiveHandle,
+        ref.relativePath,
+        ref.checksum,
+        ref.byteSize,
+      ) as {
         relative_path: string;
         object_relative_path: string;
         archive_handle: string;
@@ -339,16 +405,10 @@ export class StateMigrationRunner {
         byte_size: number;
       } | undefined,
     );
-    if (row === undefined || row.relative_path !== ref.relativePath ||
-      row.checksum !== ref.checksum || Number(row.byte_size) !== ref.byteSize) {
+    if (row === undefined) {
       throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy archive reference is invalid.');
     }
-    const path = containedMigrationPath(this.#projectDir, row.object_relative_path);
-    const bytes = await readFile(path);
-    if (bytes.byteLength !== ref.byteSize || sha256Bytes(bytes) !== ref.checksum) {
-      throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy archive bytes failed verification.');
-    }
-    return new Uint8Array(bytes);
+    return row;
   }
 
   async inspect(): Promise<MigrationInspection> {
@@ -474,7 +534,7 @@ async function buildValidatedShadow(
       `legacy-source:${sourceDigest}`, `legacy-source://${sourceDigest}`,
     ));
   }
-  const archives = await materializeLegacyArchives(projectDir, manifest);
+  const archives = await materializeLegacyArchives(projectDir, manifest, migrationId);
   const journal = new SqliteAgentJournal({
     filePath: shadowPath,
     now: () => new Date(0).toISOString(),
@@ -487,7 +547,8 @@ async function buildValidatedShadow(
         id INTEGER PRIMARY KEY CHECK (id = 1),
         migration_id TEXT NOT NULL,
         source_digest TEXT NOT NULL,
-        sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1))
+        sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1)),
+        authority_issued INTEGER NOT NULL DEFAULT 0 CHECK (authority_issued IN (0, 1))
       )
     `);
     database.prepare(`
@@ -1521,7 +1582,8 @@ async function validateLegacyArchives(
   for (const [index, entry] of expected.entries()) {
     const row = rows[index]!;
     if (row.relative_path !== entry.relativePath || row.checksum !== entry.checksum ||
-      Number(row.byte_size) !== entry.byteSize || row.archive_handle !== `legacy-archive:${entry.checksum}`) {
+      Number(row.byte_size) !== entry.byteSize ||
+      row.archive_handle !== legacyArchiveHandle(intent.migrationId, entry.relativePath)) {
       throw new Error('Legacy archive metadata changed.');
     }
     const bytes = await readFile(containedMigrationPath(projectDir, row.object_relative_path));
@@ -1883,6 +1945,7 @@ function deterministicIdGenerator(migrationId: string): () => string {
 async function materializeLegacyArchives(
   projectDir: string,
   manifest: readonly MigrationManifestEntry[],
+  migrationId: string,
 ): Promise<MaterializedLegacyArchive[]> {
   const root = resolve(projectDir);
   const result: MaterializedLegacyArchive[] = [];
@@ -1904,7 +1967,7 @@ async function materializeLegacyArchives(
     result.push({
       ...entry,
       objectRelativePath,
-      archiveHandle: `legacy-archive:${entry.checksum}`,
+      archiveHandle: legacyArchiveHandle(migrationId, entry.relativePath),
     });
   }
   await fsyncDirectory(projectDir);
@@ -2446,6 +2509,42 @@ async function hashFile(path: string): Promise<string> {
   return hash.digest('hex');
 }
 
+async function hashFileHandle(file: FileHandle): Promise<string> {
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
+  while (true) {
+    const { bytesRead } = await file.read(buffer, 0, buffer.byteLength, position);
+    if (bytesRead === 0) return hash.digest('hex');
+    hash.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+}
+
+async function* streamFileHandle(
+  file: FileHandle,
+  expectedByteSize: number,
+): AsyncIterable<Uint8Array> {
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
+  try {
+    while (position < expectedByteSize) {
+      const requested = Math.min(buffer.byteLength, expectedByteSize - position);
+      const { bytesRead } = await file.read(buffer, 0, requested, position);
+      if (bytesRead === 0) {
+        throw new StateMigrationError(
+          'MIGRATION_VALIDATION_FAILED',
+          'Legacy archive bytes changed while streaming.',
+        );
+      }
+      position += bytesRead;
+      yield new Uint8Array(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    await file.close();
+  }
+}
+
 async function fsyncFile(path: string): Promise<void> {
   const file = await open(path, 'r+');
   try {
@@ -2550,6 +2649,10 @@ function sha256(value: string): string {
 
 function sha256Bytes(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function legacyArchiveHandle(migrationId: string, relativePath: string): string {
+  return `legacy-archive:${sha256(`${migrationId}\0${relativePath}`)}`;
 }
 
 function errorCode(error: unknown): string | undefined {

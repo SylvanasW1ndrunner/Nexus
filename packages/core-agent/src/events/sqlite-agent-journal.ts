@@ -42,7 +42,7 @@ import type {
   CommitValidatedAttemptCommand,
   ModelTurnCommitResult,
 } from './run-event-committer.js';
-import { activeLegacyMigrationIdentity } from '../session/legacy-migration-writer.js';
+import { activeLegacyMigrationIdentity } from '../internal/legacy-migration-writer.js';
 
 type NodeDatabaseSyncConstructor = new (location: string) => NodeDatabaseSync;
 

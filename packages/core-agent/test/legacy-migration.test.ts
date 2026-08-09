@@ -1,4 +1,4 @@
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -21,6 +21,7 @@ import {
   type MigrationCrashPoint,
   type MigrationInspection,
 } from '../src/index.js';
+import { createLegacyMigrationWriter } from '../src/internal/legacy-migration-writer.js';
 
 const temporaryDirectories: string[] = [];
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
@@ -230,6 +231,109 @@ describe('StateMigrationRunner', () => {
       importBatches: 3,
       carrierLeaseRenewals: 3,
     });
+  });
+
+  it('keeps equal-byte archives independently addressable by source path', async () => {
+    const projectDir = await createLegacyProject();
+    await writeFile(join(projectDir, 'legacy-artifacts', 'output-copy.txt'), 'legacy artifact\n');
+    const migrated = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r3-reference-identity',
+    });
+
+    const matching = (await migrated.listLegacyArchives()).filter(
+      ({ relativePath }) => relativePath.startsWith('legacy-artifacts/output'),
+    );
+    expect(matching.map(({ relativePath }) => relativePath)).toEqual([
+      'legacy-artifacts/output-copy.txt',
+      'legacy-artifacts/output.txt',
+    ]);
+    expect(new Set(matching.map(({ archiveHandle }) => archiveHandle))).toHaveLength(2);
+    await expect(Promise.all(matching.map((ref) =>
+      migrated.readLegacyArchive(ref, { maxBytes: ref.byteSize }),
+    )))
+      .resolves.toEqual([
+        new TextEncoder().encode('legacy artifact\n'),
+        new TextEncoder().encode('legacy artifact\n'),
+      ]);
+  });
+
+  it('streams the verified descriptor after pathname replacement and bounds convenience reads', async () => {
+    const projectDir = await createLegacyProject();
+    const migrated = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r3-archive-descriptor',
+    });
+    const ref = (await migrated.listLegacyArchives()).find(
+      ({ relativePath }) => relativePath === 'legacy-artifacts/output.txt',
+    )!;
+    const objectRelativePath = withTestDatabase(join(projectDir, 'state.db'), (database) =>
+      (database.prepare(`
+        SELECT object_relative_path FROM legacy_archives
+        WHERE migration_id = ? AND archive_handle = ? AND relative_path = ?
+      `).get(
+        (database.prepare('SELECT migration_id FROM schema_migrations').get() as {
+          migration_id: string;
+        }).migration_id,
+        ref.archiveHandle,
+        ref.relativePath,
+      ) as { object_relative_path: string }).object_relative_path,
+    );
+    const objectPath = join(projectDir, ...objectRelativePath.split('/'));
+
+    const stream = await migrated.openLegacyArchive(ref);
+    await rename(objectPath, `${objectPath}.verified`);
+    await writeFile(objectPath, 'replacement bytes\n');
+    await expect(readChunks(stream)).resolves.toEqual(new TextEncoder().encode('legacy artifact\n'));
+    await expect(migrated.openLegacyArchive(ref)).rejects.toMatchObject({
+      code: 'MIGRATION_VALIDATION_FAILED',
+    });
+    await expect(migrated.readLegacyArchive(ref, { maxBytes: ref.byteSize - 1 }))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('issues migration authority once per unsealed Shadow and rejects sealed or active state', async () => {
+    const migrationId = 'a'.repeat(64);
+    const sourceDigest = 'b'.repeat(64);
+    const createShadow = async (name: string, options: { sealed?: boolean; active?: boolean } = {}) => {
+      const projectDir = await mkdtemp(join(tmpdir(), `dbagent-${name}-`));
+      temporaryDirectories.push(projectDir);
+      const path = join(projectDir, 'shadow.db');
+      const journal = new SqliteAgentJournal({ filePath: path });
+      await journal.countEvents();
+      withTestDatabase(path, (database) => {
+        database.exec(`
+          CREATE TABLE legacy_migration_build_context (
+            id INTEGER PRIMARY KEY, migration_id TEXT NOT NULL, source_digest TEXT NOT NULL,
+            sealed INTEGER NOT NULL, authority_issued INTEGER NOT NULL DEFAULT 0
+          );
+        `);
+        database.prepare(`
+          INSERT INTO legacy_migration_build_context
+            (id, migration_id, source_digest, sealed, authority_issued)
+          VALUES (1, ?, ?, ?, 0)
+        `).run(migrationId, sourceDigest, options.sealed ? 1 : 0);
+        if (options.active) {
+          database.exec('CREATE TABLE schema_migrations (status TEXT NOT NULL)');
+          database.prepare('INSERT INTO schema_migrations (status) VALUES (?)').run('active');
+        }
+      });
+      return { path, journal };
+    };
+
+    const available = await createShadow('authority-once');
+    const writer = createLegacyMigrationWriter(available.journal, { migrationId, sourceDigest });
+    expect(() => createLegacyMigrationWriter(
+      new SqliteAgentJournal({ filePath: available.path }),
+      { migrationId, sourceDigest },
+    )).toThrow('unavailable');
+    writer.seal();
+    await expect(writer.commit({} as never)).rejects.toThrow('sealed');
+
+    const sealed = await createShadow('authority-sealed', { sealed: true });
+    expect(() => createLegacyMigrationWriter(sealed.journal, { migrationId, sourceDigest }))
+      .toThrow('unavailable');
+    const active = await createShadow('authority-active', { active: true });
+    expect(() => createLegacyMigrationWriter(active.journal, { migrationId, sourceDigest }))
+      .toThrow('active Shadow');
   });
 
   it.each(crashPoints)('recovers a real on-disk cut at %s without duplicate import', async (cut) => {
@@ -661,9 +765,13 @@ describe('StateMigrationRunner', () => {
 
     const archives = await migrated.listLegacyArchives();
     expect(archives).toHaveLength(4);
-    const firstBytes = await migrated.readLegacyArchive(archives[0]!);
+    const firstBytes = await migrated.readLegacyArchive(archives[0]!, {
+      maxBytes: archives[0]!.byteSize,
+    });
     const reopened = await StateMigrationRunner.open(projectDir);
-    await expect(reopened.readLegacyArchive(archives[0]!)).resolves.toEqual(firstBytes);
+    await expect(reopened.readLegacyArchive(archives[0]!, {
+      maxBytes: archives[0]!.byteSize,
+    })).resolves.toEqual(firstBytes);
   });
 
   it('rechecks the live semantic source immediately before activation', async () => {
@@ -1131,6 +1239,19 @@ function withTestDatabase<T>(path: string, operation: (database: NodeDatabaseSyn
   } finally {
     database.close();
   }
+}
+
+async function readChunks(chunks: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const result: Uint8Array[] = [];
+  for await (const chunk of chunks) result.push(chunk);
+  const byteSize = result.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const bytes = new Uint8Array(byteSize);
+  let offset = 0;
+  for (const chunk of result) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 function spawnMigrationWorker(
