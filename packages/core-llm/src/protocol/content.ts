@@ -14,10 +14,9 @@ export type ModelOrigin = {
 
 export type ModelReplayScope = 'same-connection-only' | 'compatible-protocol';
 
-export type ModelWireIdentity = {
-  callId?: string;
-  providerItemId?: string;
-};
+export type ModelWireIdentity =
+  | { callId: string; providerItemId?: string }
+  | { callId?: never; providerItemId: string };
 
 export type CommonModelContentBlock =
   | { type: 'text'; text: string }
@@ -27,9 +26,10 @@ export type CommonModelContentBlock =
       mediaType: string;
       purpose: 'input' | 'output';
     }
-  | { type: 'reasoning-summary'; text: string }
+  | { type: 'reasoning-summary'; text: string; derivedFromOpaqueRef?: string }
   | {
       type: 'provider-opaque';
+      opaqueRef: string;
       protocol: string;
       origin: { connectionId: string; model: string };
       replay: ModelReplayScope;

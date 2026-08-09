@@ -8,6 +8,7 @@ import {
   ModelProtocolError,
   normalizedUsage,
   normalizeFinishReason,
+  opaqueBlockRef,
   providerOpaqueBlock,
   records,
   requiredString,
@@ -28,17 +29,18 @@ type OllamaStreamBlock =
       kind: 'tool';
       ordinal: number;
       index: number;
-      wireIdentity?: { callId?: string } | undefined;
+      wireIdentity?: { callId: string } | undefined;
       name: string;
       argumentsValue: unknown;
       argumentsText: string;
+      sawArguments: boolean;
     };
 
 export class OllamaChatCodec implements ModelProtocolCodec {
   readonly protocol = 'ollama-chat' as const;
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
-    const session = createProtocolEncodeSession(context, this.protocol);
+    const session = createProtocolEncodeSession(context, this.protocol, request);
     return session.finish({
       model: request.model,
       stream: false,
@@ -69,7 +71,11 @@ export class OllamaChatCodec implements ModelProtocolCodec {
       invalid('Ollama thinking must be a string');
     }
     if (thinking !== undefined && thinking.length > 0) {
-      blocks.push(providerOpaqueBlock(context, { type: 'thinking', thinking }));
+      blocks.push(providerOpaqueBlock(
+        context,
+        { type: 'thinking', thinking },
+        opaqueBlockRef(context, blocks.length),
+      ));
     }
     const text = stringValue(message.content);
     if (message.content !== undefined && text === undefined) {
@@ -116,9 +122,16 @@ export class OllamaChatCodec implements ModelProtocolCodec {
 
     for await (const chunkValue of stream) {
       const chunk = asRecord(chunkValue, 'Ollama stream chunk');
+      if (done) invalid('Ollama stream emitted a chunk after done=true');
+      if (chunk.done !== undefined && typeof chunk.done !== 'boolean') {
+        invalid('Ollama done must be a boolean');
+      }
       const message = chunk.message === undefined ? {} : asRecord(chunk.message, 'Ollama message');
       providerResponseId ??= stringValue(chunk.created_at);
       const thinking = stringValue(message.thinking);
+      if (message.thinking !== undefined && thinking === undefined) {
+        invalid('Ollama stream thinking must be a string');
+      }
       if (thinking !== undefined && thinking.length > 0) {
         if (thinkingState === undefined) {
           thinkingState = { kind: 'thinking', ordinal: states.length, text: '' };
@@ -127,6 +140,9 @@ export class OllamaChatCodec implements ModelProtocolCodec {
         thinkingState.text += thinking;
       }
       const text = stringValue(message.content);
+      if (message.content !== undefined && text === undefined) {
+        invalid('Ollama stream content must be a string');
+      }
       if (text !== undefined && text.length > 0) {
         if (textState === undefined) {
           textState = { kind: 'text', ordinal: states.length, text: '' };
@@ -136,6 +152,12 @@ export class OllamaChatCodec implements ModelProtocolCodec {
         yield { type: 'text-delta', blockOrdinal: textState.ordinal, text };
       }
       for (const [fallbackIndex, rawCall] of records(message.tool_calls, 'Ollama stream tool_calls').entries()) {
+        if (
+          rawCall.index !== undefined &&
+          (!Number.isInteger(rawCall.index) || (rawCall.index as number) < 0)
+        ) {
+          invalid('Ollama tool-call index must be a non-negative integer');
+        }
         const index = typeof rawCall.index === 'number' ? rawCall.index : fallbackIndex;
         let state = toolStates.get(index);
         if (state === undefined) {
@@ -146,18 +168,46 @@ export class OllamaChatCodec implements ModelProtocolCodec {
             name: '',
             argumentsValue: undefined,
             argumentsText: '',
+            sawArguments: false,
           };
           states.push(state);
           toolStates.set(index, state);
         }
-        const rawCallId = stringValue(rawCall.id);
-        if (rawCallId !== undefined && state.wireIdentity === undefined) {
-          state.wireIdentity = { callId: rawCallId };
+        if (rawCall.id !== undefined && typeof rawCall.id !== 'string') {
+          invalid('Ollama stream tool-call id must be a string');
         }
-        const fn = rawCall.function === undefined ? {} : asRecord(rawCall.function);
-        state.name = stringValue(fn.name) ?? state.name;
-        if (typeof fn.arguments === 'string') state.argumentsText += fn.arguments;
-        else if (fn.arguments !== undefined) state.argumentsValue = fn.arguments;
+        const rawCallId = stringValue(rawCall.id);
+        if (
+          rawCallId !== undefined &&
+          state.wireIdentity !== undefined &&
+          state.wireIdentity.callId !== rawCallId
+        ) {
+          invalid('Ollama stream tool-call id changed for one index');
+        }
+        if (rawCallId !== undefined) state.wireIdentity ??= { callId: rawCallId };
+        const fn = asRecord(rawCall.function, 'Ollama stream function call');
+        if (fn.name !== undefined && typeof fn.name !== 'string') {
+          invalid('Ollama stream function name must be a string');
+        }
+        const name = stringValue(fn.name);
+        if (name !== undefined && state.name.length > 0 && state.name !== name) {
+          invalid('Ollama stream function name changed for one index');
+        }
+        state.name = name ?? state.name;
+        if (fn.arguments !== undefined) {
+          state.sawArguments = true;
+          if (typeof fn.arguments === 'string') {
+            if (state.argumentsValue !== undefined) {
+              invalid('Ollama stream mixed structured and string tool arguments');
+            }
+            state.argumentsText += fn.arguments;
+          } else {
+            if (state.argumentsText.length > 0 || state.argumentsValue !== undefined) {
+              invalid('Ollama stream repeated structured tool arguments');
+            }
+            state.argumentsValue = fn.arguments;
+          }
+        }
         yield {
           type: 'tool-call-delta',
           blockOrdinal: state.ordinal,
@@ -175,9 +225,14 @@ export class OllamaChatCodec implements ModelProtocolCodec {
 
     const blocks = states.map((state): DecodedModelContentBlock => {
       if (state.kind === 'thinking') {
-        return providerOpaqueBlock(context, { type: 'thinking', thinking: state.text });
+        return providerOpaqueBlock(
+          context,
+          { type: 'thinking', thinking: state.text },
+          opaqueBlockRef(context, state.ordinal),
+        );
       }
       if (state.kind === 'text') return { type: 'text', text: state.text };
+      if (!state.sawArguments) invalid('Ollama stream function arguments are required');
       return draftToolCall(
         context,
         state.ordinal,
@@ -227,19 +282,20 @@ function encodeMessage(
     content = '';
     calls = [];
   };
-  for (const [ordinal, block] of message.content.entries()) {
+  for (const block of message.content) {
+    if (block.type === 'reasoning-summary' && !session.shouldProjectReasoningSummary(block)) continue;
     if (block.type === 'text' || block.type === 'reasoning-summary') {
       if (calls.length > 0) flush();
       content += block.text;
     } else if (block.type === 'tool-call') {
-      const identity = session.identityFor(block.callId, ordinal);
+      const identity = session.identityFor(block.callId);
       calls.push({
         id: requiredIdentityCallId(identity),
         function: { name: block.name, arguments: block.arguments },
       });
     } else if (block.type === 'tool-result') {
       flush();
-      const identity = session.identityFor(block.callId, ordinal);
+      const identity = session.identityFor(block.callId);
       output.push({
         role: 'tool',
         content: JSON.stringify(block.output),
@@ -247,7 +303,9 @@ function encodeMessage(
       });
     } else if (block.type === 'provider-opaque') {
       if (content.length > 0 || calls.length > 0 || thinking !== undefined) flush();
-      const opaque = asRecord(session.opaqueValue(block), 'Ollama opaque block');
+      const opaqueValue = session.opaqueValue(block);
+      if (opaqueValue === undefined) continue;
+      const opaque = asRecord(opaqueValue, 'Ollama opaque block');
       if (opaque.type !== 'thinking' || typeof opaque.thinking !== 'string') {
         throw new ModelProtocolError(
           'UNREPRESENTABLE_CANONICAL_BLOCK',

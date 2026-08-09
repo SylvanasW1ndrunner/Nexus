@@ -83,6 +83,7 @@ describe('provider codec golden contract', () => {
 
     expect(attempt.blocks[1]).toEqual({
       type: 'provider-opaque',
+      opaqueRef: 'attempt-golden:opaque:1',
       protocol: 'anthropic-messages',
       origin: { connectionId: 'conn-golden', model: 'm1' },
       replay: 'same-connection-only',

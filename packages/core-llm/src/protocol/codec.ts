@@ -41,8 +41,8 @@ export type ModelEncodeContext = {
   target: ModelOrigin;
   replay:
     | { mode: 'new' }
-    | { mode: 'same-connection'; envelope: ModelProtocolEnvelope }
-    | { mode: 'compatible-protocol'; envelope: ModelProtocolEnvelope };
+    | { mode: 'same-connection'; envelopes: readonly ModelProtocolEnvelope[] }
+    | { mode: 'compatible-protocol'; envelopes: readonly ModelProtocolEnvelope[] };
 };
 
 export type ModelProtocolEncodeResult<TWireRequest> = {
@@ -191,9 +191,11 @@ export function draftToolCall(
 export function providerOpaqueBlock(
   context: AttemptDecodeContext,
   value: unknown,
+  opaqueRef: string,
 ): DecodedModelContentBlock {
   return {
     type: 'provider-opaque',
+    opaqueRef,
     protocol: context.origin.protocol,
     origin: {
       connectionId: context.origin.connectionId,
@@ -202,6 +204,10 @@ export function providerOpaqueBlock(
     replay: 'same-connection-only',
     value: portableValue(value),
   };
+}
+
+export function opaqueBlockRef(context: AttemptDecodeContext, key: number | string): string {
+  return `${context.attemptId}:opaque:${key}`;
 }
 
 export function createDecodedAttempt(
@@ -225,8 +231,8 @@ export function createDecodedAttempt(
     ...(options.providerResponseId === undefined
       ? {}
       : { providerResponseId: options.providerResponseId }),
-    opaqueBlockRefs: blocks.flatMap((block, ordinal) =>
-      block.type === 'provider-opaque' ? [`${context.attemptId}:opaque:${ordinal}`] : [],
+    opaqueBlockRefs: blocks.flatMap((block) =>
+      block.type === 'provider-opaque' ? [block.opaqueRef] : [],
     ),
   };
 }
@@ -262,8 +268,13 @@ export function rejectDuplicateWireIdentities(blocks: readonly DecodedModelConte
 }
 
 export type ProtocolEncodeSession = {
-  identityFor(callId: string, ordinal: number): ModelWireIdentity;
-  opaqueValue(block: Extract<DecodedModelContentBlock, { type: 'provider-opaque' }>): PortableValue;
+  identityFor(callId: string): ModelWireIdentity;
+  shouldProjectReasoningSummary(
+    block: Extract<DecodedModelContentBlock, { type: 'reasoning-summary' }>,
+  ): boolean;
+  opaqueValue(
+    block: Extract<DecodedModelContentBlock, { type: 'provider-opaque' }>,
+  ): PortableValue | undefined;
   rejectResource(): never;
   finish<TWireRequest>(wireRequest: TWireRequest): ModelProtocolEncodeResult<TWireRequest>;
 };
@@ -271,6 +282,7 @@ export type ProtocolEncodeSession = {
 export function createProtocolEncodeSession(
   context: ModelEncodeContext,
   protocol: ModelProtocol,
+  request: CanonicalModelRequest,
 ): ProtocolEncodeSession {
   if (context.target.protocol !== protocol) {
     throw new ModelProtocolError(
@@ -278,42 +290,126 @@ export function createProtocolEncodeSession(
       `Expected ${protocol} encode target, received ${context.target.protocol}`,
     );
   }
-  const sourceEnvelope = context.replay.mode === 'new' ? undefined : context.replay.envelope;
-  if (
-    context.replay.mode === 'same-connection' &&
-    (sourceEnvelope?.origin.connectionId !== context.target.connectionId ||
-      sourceEnvelope.origin.protocol !== protocol)
-  ) {
-    throw new ModelProtocolError(
-      'PROTOCOL_MISMATCH',
-      'Same-connection replay target does not match the protocol envelope origin',
-    );
+  const sourceEnvelopes = context.replay.mode === 'new' ? [] : context.replay.envelopes;
+  const correlationIndex = new Map<
+    string,
+    { correlation: ProtocolCorrelation; envelope: ModelProtocolEnvelope }
+  >();
+  const opaqueIndex = new Map<string, ModelProtocolEnvelope>();
+  for (const envelope of sourceEnvelopes) {
+    for (const correlation of envelope.correlations) {
+      if (correlationIndex.has(correlation.callId)) {
+        throw new ModelProtocolError(
+          'MISSING_PROTOCOL_CORRELATION',
+          `Multiple replay envelopes contain canonical call ${correlation.callId}`,
+        );
+      }
+      correlationIndex.set(correlation.callId, { correlation, envelope });
+    }
+    for (const opaqueRef of envelope.opaqueBlockRefs) {
+      if (opaqueIndex.has(opaqueRef)) {
+        throw new ModelProtocolError(
+          'OPAQUE_REPLAY_FORBIDDEN',
+          `Multiple replay envelopes contain opaque ref ${opaqueRef}`,
+        );
+      }
+      opaqueIndex.set(opaqueRef, envelope);
+    }
   }
   const correlations: ProtocolCorrelation[] = [];
   const resolved = new Map<string, ModelWireIdentity>();
+  const consumedOpaqueRefs: string[] = [];
+  const projectedOpaqueRefs = new Set<string>();
+  const requestedOpaqueBlocks = new Map<
+    string,
+    Extract<DecodedModelContentBlock, { type: 'provider-opaque' }>
+  >();
+  for (const message of request.messages) {
+    for (const block of message.content) {
+      if (block.type !== 'provider-opaque') continue;
+      if (requestedOpaqueBlocks.has(block.opaqueRef)) {
+        throw new ModelProtocolError(
+          'OPAQUE_REPLAY_FORBIDDEN',
+          `Canonical request repeats opaque ref ${block.opaqueRef}`,
+        );
+      }
+      requestedOpaqueBlocks.set(block.opaqueRef, block);
+    }
+  }
+  const envelopeOwnsOpaque = (
+    block: Extract<DecodedModelContentBlock, { type: 'provider-opaque' }>,
+    sourceEnvelope: ModelProtocolEnvelope,
+  ): boolean =>
+      sourceEnvelope.origin.connectionId === block.origin.connectionId &&
+      sourceEnvelope.origin.model === block.origin.model &&
+      sourceEnvelope.origin.protocol === block.protocol;
+  const replayableOpaque = (
+    block: Extract<DecodedModelContentBlock, { type: 'provider-opaque' }>,
+    sourceEnvelope: ModelProtocolEnvelope,
+  ): boolean => {
+    if (!envelopeOwnsOpaque(block, sourceEnvelope)) return false;
+    const exactOrigin =
+      context.replay.mode === 'same-connection' &&
+      block.protocol === protocol &&
+      block.origin.connectionId === context.target.connectionId &&
+      block.origin.model === context.target.model &&
+      sourceEnvelope.origin.connectionId === context.target.connectionId &&
+      sourceEnvelope.origin.protocol === protocol;
+    const compatible =
+      context.replay.mode === 'compatible-protocol' &&
+      block.replay === 'compatible-protocol' &&
+      block.protocol === protocol;
+    return exactOrigin || compatible;
+  };
+  for (const message of request.messages) {
+    for (const block of message.content) {
+      if (block.type !== 'reasoning-summary' || block.derivedFromOpaqueRef === undefined) continue;
+      const opaque = requestedOpaqueBlocks.get(block.derivedFromOpaqueRef);
+      const sourceEnvelope = opaqueIndex.get(block.derivedFromOpaqueRef);
+      if (
+        opaque !== undefined &&
+        sourceEnvelope !== undefined &&
+        !replayableOpaque(opaque, sourceEnvelope)
+      ) {
+        projectedOpaqueRefs.add(block.derivedFromOpaqueRef);
+      }
+    }
+  }
   return {
-    identityFor(callId, ordinal) {
+    identityFor(callId) {
       const cached = resolved.get(callId);
       if (cached !== undefined) return cached;
-      const source = sourceEnvelope?.correlations.find(
-        (correlation) => correlation.callId === callId,
-      );
+      const indexed = correlationIndex.get(callId);
+      const source = indexed?.correlation;
+      if (context.replay.mode !== 'new' && indexed === undefined) {
+        throw new ModelProtocolError(
+          'MISSING_PROTOCOL_CORRELATION',
+          `No replay envelope contains canonical call ${callId}`,
+        );
+      }
       let wireIdentity: ModelWireIdentity;
       if (context.replay.mode === 'same-connection') {
-        if (source?.wireIdentity === undefined) {
+        if (
+          indexed?.envelope.origin.connectionId !== context.target.connectionId ||
+          indexed.envelope.origin.protocol !== protocol
+        ) {
           throw new ModelProtocolError(
-            'MISSING_PROTOCOL_CORRELATION',
-            `No replayable wire identity exists for canonical call ${callId}`,
+            'PROTOCOL_MISMATCH',
+            `Replay envelope for canonical call ${callId} does not match the encode target`,
           );
         }
-        wireIdentity = source.wireIdentity;
+        wireIdentity = source?.wireIdentity ?? generatedWireIdentity(
+          protocol,
+          context.requestId,
+          correlations.length,
+        );
       } else {
         wireIdentity = generatedWireIdentity(protocol, context.requestId, correlations.length);
       }
       resolved.set(callId, wireIdentity);
       correlations.push({
         callId,
-        draftCallKey: source?.draftCallKey ?? `${context.requestId}:${ordinal}`,
+        draftCallKey: source?.draftCallKey ?? `${context.requestId}:${correlations.length}`,
         wireIdentity,
         replay:
           context.replay.mode === 'same-connection'
@@ -322,27 +418,43 @@ export function createProtocolEncodeSession(
       });
       return wireIdentity;
     },
+    shouldProjectReasoningSummary(block) {
+      if (block.derivedFromOpaqueRef === undefined) return true;
+      if (projectedOpaqueRefs.has(block.derivedFromOpaqueRef)) return true;
+      const opaque = requestedOpaqueBlocks.get(block.derivedFromOpaqueRef);
+      const sourceEnvelope = opaqueIndex.get(block.derivedFromOpaqueRef);
+      if (
+        opaque !== undefined &&
+        sourceEnvelope !== undefined &&
+        replayableOpaque(opaque, sourceEnvelope)
+      ) {
+        return false;
+      }
+      projectedOpaqueRefs.add(block.derivedFromOpaqueRef);
+      return true;
+    },
     opaqueValue(block) {
-      const exactOrigin =
-        block.protocol === protocol &&
-        block.origin.connectionId === context.target.connectionId &&
-        block.origin.model === context.target.model;
-      const compatible =
-        context.replay.mode === 'compatible-protocol' &&
-        block.replay === 'compatible-protocol' &&
-        block.protocol === protocol;
-      if (context.replay.mode !== 'same-connection' && !compatible) {
+      const sourceEnvelope = opaqueIndex.get(block.opaqueRef);
+      if (sourceEnvelope === undefined) {
         throw new ModelProtocolError(
           'OPAQUE_REPLAY_FORBIDDEN',
-          'Provider-opaque content cannot be replayed outside its declared scope',
+          `No replay envelope contains opaque ref ${block.opaqueRef}`,
         );
       }
-      if (!exactOrigin && !compatible) {
+      if (!envelopeOwnsOpaque(block, sourceEnvelope)) {
         throw new ModelProtocolError(
           'OPAQUE_REPLAY_FORBIDDEN',
-          'Provider-opaque content origin does not match the encode target',
+          `Replay envelope origin does not own opaque ref ${block.opaqueRef}`,
         );
       }
+      if (projectedOpaqueRefs.has(block.opaqueRef)) return undefined;
+      if (!replayableOpaque(block, sourceEnvelope)) {
+        throw new ModelProtocolError(
+          'OPAQUE_REPLAY_FORBIDDEN',
+          'Provider-opaque content cannot be replayed on the encode target',
+        );
+      }
+      consumedOpaqueRefs.push(block.opaqueRef);
       return block.value;
     },
     rejectResource() {
@@ -355,7 +467,7 @@ export function createProtocolEncodeSession(
       return {
         wireRequest,
         correlations,
-        opaqueBlockRefs: sourceEnvelope?.opaqueBlockRefs ?? [],
+        opaqueBlockRefs: consumedOpaqueRefs,
       };
     },
   };

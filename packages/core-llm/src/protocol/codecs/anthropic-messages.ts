@@ -8,6 +8,7 @@ import {
   ModelProtocolError,
   normalizedUsage,
   normalizeFinishReason,
+  opaqueBlockRef,
   providerOpaqueBlock,
   requiredRecords,
   requiredString,
@@ -27,21 +28,25 @@ type AnthropicStreamBlock =
   | {
       kind: 'tool';
       ordinal: number;
-      wireIdentity?: { callId?: string } | undefined;
+      wireIdentity?: { callId: string } | undefined;
       name: string;
       argumentsText: string;
       initialInput?: unknown;
+      sawArguments: boolean;
     };
 
 export class AnthropicMessagesCodec implements ModelProtocolCodec {
   readonly protocol = 'anthropic-messages' as const;
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
-    const session = createProtocolEncodeSession(context, this.protocol);
+    const session = createProtocolEncodeSession(context, this.protocol, request);
     const system: Array<{ type: 'text'; text: string }> = [];
     for (const message of request.messages) {
       if (message.role !== 'system' && message.role !== 'developer') continue;
       for (const block of message.content) {
+        if (block.type === 'reasoning-summary' && !session.shouldProjectReasoningSummary(block)) {
+          continue;
+        }
         if (block.type === 'text' || block.type === 'reasoning-summary') {
           system.push({ type: 'text', text: block.text });
         } else if (block.type === 'resource-ref') {
@@ -96,7 +101,7 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
           ),
         );
       } else {
-        blocks.push(providerOpaqueBlock(context, item));
+        blocks.push(providerOpaqueBlock(context, item, opaqueBlockRef(context, blocks.length)));
       }
     }
     const usage = root.usage === undefined ? undefined : asRecord(root.usage, 'Anthropic usage');
@@ -131,12 +136,20 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
     let providerResponseId: string | undefined;
     let finishReason: ReturnType<typeof normalizeFinishReason>;
     let terminal = false;
+    let messageStarted = false;
 
     for await (const eventValue of stream) {
       const event = asRecord(eventValue, 'Anthropic stream event');
-      const type = stringValue(event.type);
-      const index = typeof event.index === 'number' ? event.index : states.size;
+      const type = requiredString(event.type, 'Anthropic stream event type');
+      if (terminal) invalid('Anthropic stream emitted an event after message_stop');
+      const indexedEvent =
+        type === 'content_block_start' ||
+        type === 'content_block_delta' ||
+        type === 'content_block_stop';
+      const index = indexedEvent ? requiredIndex(event.index, 'Anthropic content block index') : -1;
       if (type === 'message_start') {
+        if (messageStarted) invalid('Anthropic stream repeated message_start');
+        messageStarted = true;
         const message = asRecord(event.message, 'Anthropic stream message');
         providerResponseId = stringValue(message.id);
         const usage = message.usage === undefined ? undefined : asRecord(message.usage);
@@ -146,6 +159,7 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
             ? usage.cache_read_input_tokens
             : cachedInputTokens;
       } else if (type === 'content_block_start') {
+        if (states.has(index)) invalid('Anthropic content block index started more than once');
         const block = asRecord(event.content_block, 'Anthropic content block');
         const blockType = requiredString(block.type, 'Anthropic content block type');
         if (blockType === 'text') {
@@ -163,6 +177,7 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
             name: requiredString(block.name, 'Anthropic tool name'),
             argumentsText: '',
             ...(block.input === undefined ? {} : { initialInput: block.input }),
+            sawArguments: block.input !== undefined,
           });
         } else {
           states.set(index, { kind: 'opaque', ordinal: states.size, value: block });
@@ -171,12 +186,18 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
         const delta = asRecord(event.delta, 'Anthropic content block delta');
         const state = states.get(index);
         if (state === undefined) invalid('Anthropic delta references an unknown content block');
+        if (stopped.has(index)) invalid('Anthropic delta references a stopped content block');
         if (state?.kind === 'text' && delta.type === 'text_delta') {
-          const text = stringValue(delta.text) ?? '';
+          if (typeof delta.text !== 'string') invalid('Anthropic text delta must be a string');
+          const text = delta.text;
           state.text += text;
           yield { type: 'text-delta', blockOrdinal: state.ordinal, text };
         } else if (state.kind === 'tool' && delta.type === 'input_json_delta') {
-          const argumentsDelta = stringValue(delta.partial_json) ?? '';
+          if (typeof delta.partial_json !== 'string') {
+            invalid('Anthropic tool arguments delta must be a string');
+          }
+          const argumentsDelta = delta.partial_json;
+          state.sawArguments = true;
           state.argumentsText += argumentsDelta;
           yield {
             type: 'tool-call-delta',
@@ -187,15 +208,20 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
           };
         } else if (state.kind === 'opaque') {
           if (delta.type === 'thinking_delta') {
-            state.value.thinking = `${stringValue(state.value.thinking) ?? ''}${stringValue(delta.thinking) ?? ''}`;
+            if (typeof delta.thinking !== 'string') invalid('Anthropic thinking delta must be a string');
+            state.value.thinking = `${stringValue(state.value.thinking) ?? ''}${delta.thinking}`;
           } else if (delta.type === 'signature_delta') {
-            state.value.signature = `${stringValue(state.value.signature) ?? ''}${stringValue(delta.signature) ?? ''}`;
-          }
-        }
+            if (typeof delta.signature !== 'string') invalid('Anthropic signature delta must be a string');
+            state.value.signature = `${stringValue(state.value.signature) ?? ''}${delta.signature}`;
+          } else invalid('Anthropic opaque block received an unsupported delta type');
+        } else invalid('Anthropic delta type does not match its content block');
       } else if (type === 'content_block_stop') {
         const state = states.get(index);
         if (state === undefined || stopped.has(index)) {
           invalid('Anthropic content_block_stop does not match one started block');
+        }
+        if (state.kind === 'tool' && !state.sawArguments) {
+          invalid('Anthropic tool block arguments are required');
         }
         const block = anthropicStreamBlock(state, context);
         stopped.add(index);
@@ -241,11 +267,12 @@ function encodeMessage(
   session: ProtocolEncodeSession,
 ): Record<string, unknown> {
   const content: Record<string, unknown>[] = [];
-  for (const [ordinal, block] of message.content.entries()) {
+  for (const block of message.content) {
+    if (block.type === 'reasoning-summary' && !session.shouldProjectReasoningSummary(block)) continue;
     if (block.type === 'text' || block.type === 'reasoning-summary') {
       content.push({ type: 'text', text: block.text });
     } else if (block.type === 'tool-call') {
-      const identity = session.identityFor(block.callId, ordinal);
+      const identity = session.identityFor(block.callId);
       content.push({
         type: 'tool_use',
         id: requiredIdentityCallId(identity),
@@ -253,7 +280,7 @@ function encodeMessage(
         input: block.arguments,
       });
     } else if (block.type === 'tool-result') {
-      const identity = session.identityFor(block.callId, ordinal);
+      const identity = session.identityFor(block.callId);
       content.push({
         type: 'tool_result',
         tool_use_id: requiredIdentityCallId(identity),
@@ -261,7 +288,8 @@ function encodeMessage(
         ...(block.isError ? { is_error: true } : {}),
       });
     } else if (block.type === 'provider-opaque') {
-      content.push(asRecord(session.opaqueValue(block), 'Anthropic opaque block'));
+      const opaque = session.opaqueValue(block);
+      if (opaque !== undefined) content.push(asRecord(opaque, 'Anthropic opaque block'));
     } else {
       session.rejectResource();
     }
@@ -277,7 +305,9 @@ function anthropicStreamBlock(
   context: AttemptDecodeContext,
 ): DecodedModelContentBlock {
   if (state.kind === 'text') return { type: 'text', text: state.text };
-  if (state.kind === 'opaque') return providerOpaqueBlock(context, state.value);
+  if (state.kind === 'opaque') {
+    return providerOpaqueBlock(context, state.value, opaqueBlockRef(context, state.ordinal));
+  }
   return draftToolCall(
     context,
     state.ordinal,
@@ -285,6 +315,13 @@ function anthropicStreamBlock(
     state.argumentsText.length > 0 ? state.argumentsText : state.initialInput,
     state.wireIdentity,
   );
+}
+
+function requiredIndex(value: unknown, label: string): number {
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    invalid(`${label} must be a non-negative integer`);
+  }
+  return value as number;
 }
 
 function requiredIdentityCallId(identity: { callId?: string }): string {

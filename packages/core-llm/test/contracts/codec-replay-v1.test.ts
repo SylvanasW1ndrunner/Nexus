@@ -46,7 +46,7 @@ describe('version 1 provider replay corpus', () => {
     const encoded = codecs[testCase.protocol].encode(committed.request, {
       requestId: 'same-request',
       target: context.origin,
-      replay: { mode: 'same-connection', envelope: committed.envelope },
+      replay: { mode: 'same-connection', envelopes: [committed.envelope] },
     });
 
     expect(encoded.correlations[0]?.wireIdentity).toEqual(testCase.expectedWireIdentity);
@@ -71,7 +71,7 @@ describe('version 1 provider replay corpus', () => {
     const encoded = anthropicMessagesCodec.encode(committed.request, {
       requestId: 'cross-request',
       target: { connectionId: 'conn-anthropic', model: 'claude', protocol: 'anthropic-messages' },
-      replay: { mode: 'compatible-protocol', envelope: committed.envelope },
+      replay: { mode: 'compatible-protocol', envelopes: [committed.envelope] },
     });
 
     expect(encoded.correlations[0]?.wireIdentity).toEqual({ callId: 'cross-request:call:0' });
@@ -106,7 +106,7 @@ describe('version 1 provider replay corpus', () => {
     const encoded = openAIResponsesCodec.encode(committed.request, {
       requestId: 'same-request',
       target: decoded.origin,
-      replay: { mode: 'same-connection', envelope: committed.envelope },
+      replay: { mode: 'same-connection', envelopes: [committed.envelope] },
     });
     const functionCall = (encoded.wireRequest as {
       input: Array<Record<string, unknown>>;
@@ -185,6 +185,7 @@ describe('version 1 provider replay corpus', () => {
         role: 'assistant',
         content: [{
           type: 'provider-opaque',
+          opaqueRef: 'opaque-source:opaque:0',
           protocol: 'anthropic-messages',
           origin: { connectionId: 'conn-source', model: 'claude' },
           replay: 'same-connection-only',

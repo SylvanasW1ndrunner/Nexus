@@ -8,6 +8,7 @@ import {
   ModelProtocolError,
   normalizedUsage,
   normalizeFinishReason,
+  opaqueBlockRef,
   providerOpaqueBlock,
   records,
   requiredRecords,
@@ -28,16 +29,17 @@ type StreamBlockState =
       kind: 'tool';
       ordinal: number;
       index: number;
-      wireIdentity?: { callId?: string } | undefined;
+      wireIdentity?: { callId: string } | undefined;
       name: string;
       argumentsText: string;
+      sawArguments: boolean;
     };
 
 export class OpenAIChatCodec implements ModelProtocolCodec {
   readonly protocol = 'openai-chat' as const;
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
-    const session = createProtocolEncodeSession(context, this.protocol);
+    const session = createProtocolEncodeSession(context, this.protocol, request);
     return session.finish({
       model: request.model,
       messages: request.messages.flatMap((message) => encodeMessage(message, session)),
@@ -73,7 +75,11 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
     const blocks: DecodedModelContentBlock[] = [];
     appendOpenAIContent(blocks, message.content, context);
     for (const callValue of records(message.tool_calls, 'OpenAI Chat tool_calls')) {
+      if (callValue.type !== 'function') invalid('OpenAI Chat tool call type must be function');
       const fn = asRecord(callValue.function, 'OpenAI function call');
+      if (typeof fn.arguments !== 'string') {
+        invalid('OpenAI Chat function arguments must be a string');
+      }
       const ordinal = blocks.length;
       const wireCallId = stringValue(callValue.id);
       blocks.push(
@@ -160,18 +166,45 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
               index,
               name: '',
               argumentsText: '',
+              sawArguments: false,
             };
             toolStates.set(index, state);
             states.push(state);
           }
-          const rawCallId = stringValue(rawCall.id);
-          if (rawCallId !== undefined && state.wireIdentity === undefined) {
-            state.wireIdentity = { callId: rawCallId };
+          if (!Number.isInteger(rawCall.index) || (rawCall.index as number) < 0) {
+            invalid('OpenAI Chat tool-call index must be a non-negative integer');
           }
-          const fn = rawCall.function === undefined ? {} : asRecord(rawCall.function);
-          state.name += stringValue(fn.name) ?? '';
+          if (rawCall.type !== undefined && rawCall.type !== 'function') {
+            invalid('OpenAI Chat stream tool-call type must be function');
+          }
+          if (rawCall.id !== undefined && typeof rawCall.id !== 'string') {
+            invalid('OpenAI Chat stream tool-call id must be a string');
+          }
+          const rawCallId = stringValue(rawCall.id);
+          if (
+            rawCallId !== undefined &&
+            state.wireIdentity !== undefined &&
+            state.wireIdentity.callId !== rawCallId
+          ) {
+            invalid('OpenAI Chat stream tool-call id changed for one index');
+          }
+          if (rawCallId !== undefined) {
+            state.wireIdentity ??= { callId: rawCallId };
+          }
+          const fn = asRecord(rawCall.function, 'OpenAI stream function call');
+          if (fn.name !== undefined && typeof fn.name !== 'string') {
+            invalid('OpenAI Chat stream function name must be a string');
+          }
+          if (fn.arguments !== undefined && typeof fn.arguments !== 'string') {
+            invalid('OpenAI Chat stream function arguments must be a string');
+          }
+          const nameDelta = stringValue(fn.name);
+          state.name += nameDelta ?? '';
           const argumentsDelta = stringValue(fn.arguments);
-          state.argumentsText += argumentsDelta ?? '';
+          if (argumentsDelta !== undefined) {
+            state.sawArguments = true;
+            state.argumentsText += argumentsDelta;
+          }
           yield {
             type: 'tool-call-delta',
             blockOrdinal: state.ordinal,
@@ -187,6 +220,7 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
 
     const blocks = states.map((state): DecodedModelContentBlock => {
       if (state.kind === 'text') return { type: 'text', text: state.text };
+      if (!state.sawArguments) invalid('OpenAI Chat stream function arguments are required');
       return draftToolCall(
         context,
         state.ordinal,
@@ -232,7 +266,7 @@ function appendOpenAIContent(
       }
       blocks.push({ type: 'text', text: part.text });
     } else if (type !== undefined) {
-      blocks.push(providerOpaqueBlock(context, part));
+      blocks.push(providerOpaqueBlock(context, part, opaqueBlockRef(context, blocks.length)));
     } else {
       throw new ModelProtocolError('INVALID_WIRE_RESPONSE', 'OpenAI content part type is required');
     }
@@ -257,12 +291,13 @@ function encodeMessage(
     content = [];
     toolCalls = [];
   };
-  for (const [ordinal, block] of message.content.entries()) {
+  for (const block of message.content) {
+    if (block.type === 'reasoning-summary' && !session.shouldProjectReasoningSummary(block)) continue;
     if (block.type === 'text' || block.type === 'reasoning-summary') {
       if (toolCalls.length > 0) flush();
       content.push({ type: 'text', text: block.text });
     } else if (block.type === 'tool-call') {
-      const identity = session.identityFor(block.callId, ordinal);
+      const identity = session.identityFor(block.callId);
       const wireCallId = requiredIdentityCallId(identity);
       toolCalls.push({
         id: wireCallId,
@@ -271,7 +306,7 @@ function encodeMessage(
       });
     } else if (block.type === 'tool-result') {
       flush();
-      const identity = session.identityFor(block.callId, ordinal);
+      const identity = session.identityFor(block.callId);
       output.push({
         role: 'tool',
         tool_call_id: requiredIdentityCallId(identity),
@@ -279,7 +314,8 @@ function encodeMessage(
       });
     } else if (block.type === 'provider-opaque') {
       if (toolCalls.length > 0) flush();
-      content.push(asRecord(session.opaqueValue(block), 'OpenAI opaque content'));
+      const opaque = session.opaqueValue(block);
+      if (opaque !== undefined) content.push(asRecord(opaque, 'OpenAI opaque content'));
     } else {
       session.rejectResource();
     }
@@ -297,6 +333,10 @@ function requiredIdentityCallId(identity: { callId?: string }): string {
     );
   }
   return identity.callId;
+}
+
+function invalid(message: string): never {
+  throw new ModelProtocolError('INVALID_WIRE_RESPONSE', message);
 }
 
 export const openAIChatCodec = new OpenAIChatCodec();

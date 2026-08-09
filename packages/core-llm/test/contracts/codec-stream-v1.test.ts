@@ -68,6 +68,22 @@ describe('version 1 canonical stream contract', () => {
           { type: 'response.output_text.delta', output_index: 7, content_index: 3, delta: 'hello' },
           { type: 'response.output_text.done', output_index: 7, content_index: 3, text: 'hello' },
           {
+            type: 'response.content_part.done',
+            output_index: 7,
+            content_index: 3,
+            part: { type: 'output_text', text: 'hello' },
+          },
+          {
+            type: 'response.output_item.done',
+            output_index: 7,
+            item: {
+              id: 'message-7',
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: 'hello' }],
+            },
+          },
+          {
             type: 'response.output_item.added',
             output_index: 11,
             item: { id: 'item-11', type: 'function_call', call_id: 'call-11', name: 'inspect', arguments: '' },
@@ -163,7 +179,20 @@ describe('version 1 canonical stream contract', () => {
     {
       name: 'OpenAI Responses',
       iterable: openAIResponsesCodec.decodeStream(
-        streamOf({ type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'partial' }),
+        streamOf(
+          {
+            type: 'response.output_item.added',
+            output_index: 0,
+            item: { id: 'message-partial', type: 'message', content: [] },
+          },
+          {
+            type: 'response.content_part.added',
+            output_index: 0,
+            content_index: 0,
+            part: { type: 'output_text', text: '' },
+          },
+          { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'partial' },
+        ),
         context('openai-responses'),
       ),
     },
