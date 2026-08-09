@@ -780,7 +780,7 @@ function readLegacyState(path: string): ImportedLegacyState {
         }>)
         : [];
       const sessions = readLegacySessions(database, messages, runs);
-      validateLegacyToolCallLinks(sessions);
+      const toolDiagnostics = validateLegacyToolCallLinks(sessions);
       const preferences = readLegacyPreferences(database);
       const checkpoints = readLegacyContextCheckpoints(database);
       const subagents = readLegacySubagents(database);
@@ -796,12 +796,15 @@ function readLegacyState(path: string): ImportedLegacyState {
         preferences,
         checkpoints,
         subagents,
-        diagnostics: diagnosticRows.map((diagnostic) => ({
-          code: diagnostic.kind === 'approval'
-            ? 'LEGACY_APPROVAL_EXPIRED'
-            : 'LEGACY_RESULT_HANDLE_EXPIRED',
-          evidence: diagnostic.durable_evidence,
-        })),
+        diagnostics: [
+          ...diagnosticRows.map((diagnostic) => ({
+            code: diagnostic.kind === 'approval'
+              ? 'LEGACY_APPROVAL_EXPIRED'
+              : 'LEGACY_RESULT_HANDLE_EXPIRED',
+            evidence: diagnostic.durable_evidence,
+          })),
+          ...toolDiagnostics,
+        ],
       };
     } catch (error) {
       if (error instanceof StateMigrationError) throw error;
@@ -1082,40 +1085,44 @@ function parseLegacyRunRecord(payloadJson: string): AgentRunRecord {
   return record as AgentRunRecord;
 }
 
-function validateLegacyToolCallLinks(sessions: ImportedLegacyState['sessions']): void {
+function validateLegacyToolCallLinks(
+  sessions: ImportedLegacyState['sessions'],
+): ImportedLegacyState['diagnostics'] {
+  const diagnostics: ImportedLegacyState['diagnostics'] = [];
   for (const session of sessions) {
-    const seen = new Set<string>();
-    const pending: Array<{ id: string; name: string }> = [];
+    const calls = new Map<string, { id: string; name: string }>();
     const resolved = new Set<string>();
     for (const message of session.messages) {
       if (message.role === 'assistant') {
         for (const call of message.toolCalls ?? []) {
-          if (seen.has(call.id)) {
+          if (calls.has(call.id)) {
             throw new StateMigrationError(
               'MIGRATION_VALIDATION_FAILED', `Legacy ToolCall id is duplicated: ${call.id}.`,
             );
           }
-          seen.add(call.id);
-          pending.push({ id: call.id, name: call.name });
+          calls.set(call.id, { id: call.id, name: call.name });
         }
       } else if (message.role === 'tool') {
-        const expected = pending.shift();
-        if (expected === undefined || expected.id !== message.toolCallId ||
-          expected.name !== message.toolName || resolved.has(message.toolCallId)) {
+        const expected = calls.get(message.toolCallId);
+        if (expected === undefined || expected.name !== message.toolName ||
+          resolved.has(message.toolCallId)) {
           throw new StateMigrationError(
             'MIGRATION_VALIDATION_FAILED',
-            `Legacy Tool result ordering or identity is invalid: ${message.toolCallId}.`,
+            `Legacy Tool result identity is invalid: ${message.toolCallId}.`,
           );
         }
         resolved.add(message.toolCallId);
       }
     }
-    if (pending.length > 0) {
-      throw new StateMigrationError(
-        'MIGRATION_VALIDATION_FAILED', `Legacy ToolCall has no exact result: ${pending[0]!.id}.`,
-      );
+    for (const call of calls.values()) {
+      if (resolved.has(call.id)) continue;
+      diagnostics.push({
+        code: 'LEGACY_TOOL_OUTCOME_UNKNOWN',
+        evidence: `Session ${session.id} was interrupted before ToolCall ${call.id} (${call.name}) recorded a result.`,
+      });
     }
   }
+  return diagnostics;
 }
 
 function latestLegacyRunId(runs: ImportedLegacyState['runs'], sessionId: string): string | undefined {
@@ -2103,9 +2110,6 @@ async function importLegacyFacts(
     let lease = await journal.acquireRunLease({
       projectId, runId: created.runId,
       ownerId: `legacy-migration:${input.migrationId.slice(0, 24)}`, ttlMs: 60_000,
-    });
-    withDatabase(journal.filePath, (database) => {
-      database.prepare('UPDATE agent_runs SET hidden = 1 WHERE run_id = ?').run(created.runId);
     });
     const facts = factsBySession.get(session.id)!;
     for (let offset = 0; offset < facts.length; offset += 500) {

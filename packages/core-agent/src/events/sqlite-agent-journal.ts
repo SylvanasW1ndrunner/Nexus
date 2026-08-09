@@ -103,6 +103,7 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async createRun(command: CreateRunCommand): Promise<CreateRunResult> {
     await Promise.resolve();
+    const migrationIdentity = activeLegacyMigrationIdentity(this);
     const snapshot = snapshotCreateRunCommand(command);
     const projectId = requireText(snapshot.projectId, 'projectId');
     const sessionId = requireText(snapshot.sessionId, 'sessionId');
@@ -143,7 +144,12 @@ export class SqliteAgentJournal implements AgentJournal {
           sessionId,
           runId,
           type: 'run.created',
-          payload: { clientRequestId },
+          payload: {
+            clientRequestId,
+            ...(migrationIdentity === undefined ? {} : {
+              visibility: 'legacy-import-carrier' as const,
+            }),
+          },
           parentEventId: inputEvent.eventId,
           occurredAt,
         });
@@ -151,10 +157,13 @@ export class SqliteAgentJournal implements AgentJournal {
           .prepare(
             `INSERT INTO agent_runs (
               run_id, project_id, session_id, client_request_id, state, revision,
-              input_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'created', 1, ?, ?, ?)`,
+              input_json, created_at, updated_at, hidden
+            ) VALUES (?, ?, ?, ?, 'created', 1, ?, ?, ?, ?)`,
           )
-          .run(runId, projectId, sessionId, clientRequestId, JSON.stringify(input), occurredAt, occurredAt);
+          .run(
+            runId, projectId, sessionId, clientRequestId, JSON.stringify(input),
+            occurredAt, occurredAt, migrationIdentity === undefined ? 0 : 1,
+          );
         const result: CreateRunResult = {
           runId,
           inputEventId: inputEvent.eventId,

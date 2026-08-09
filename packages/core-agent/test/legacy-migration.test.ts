@@ -158,13 +158,9 @@ describe('StateMigrationRunner', () => {
         createdAt: '2026-08-08T02:00:02.000Z',
       },
     ]],
-    ['out-of-order Tool results', [
-      { role: 'assistant', content: 'two calls', toolCalls: [
-        { id: 'call-a', name: 'lookup', arguments: { id: 1 } },
-        { id: 'call-b', name: 'lookup', arguments: { id: 2 } },
-      ], createdAt: '2026-08-08T02:00:01.000Z' },
+    ['an orphan Tool result', [
       {
-        role: 'tool', toolCallId: 'call-b', toolName: 'lookup', content: 'second first',
+        role: 'tool', toolCallId: 'call-orphan', toolName: 'lookup', content: 'orphan',
         createdAt: '2026-08-08T02:00:02.000Z',
       },
     ]],
@@ -180,11 +176,6 @@ describe('StateMigrationRunner', () => {
         role: 'tool', toolCallId: 'call-a', toolName: 'lookup', content: 'duplicate',
         createdAt: '2026-08-08T02:00:03.000Z',
       },
-    ]],
-    ['a missing Tool result', [
-      { role: 'assistant', content: 'pending', toolCalls: [
-        { id: 'call-a', name: 'lookup', arguments: { id: 1 } },
-      ], createdAt: '2026-08-08T02:00:01.000Z' },
     ]],
   ] satisfies Array<[string, AgentSession['messages']]>)('rejects %s from a public Session producer', async (
     _case,
@@ -213,6 +204,59 @@ describe('StateMigrationRunner', () => {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r3-tool-causality',
     })).rejects.toMatchObject({ code: 'MIGRATION_VALIDATION_FAILED' });
+  });
+
+  it.each([
+    ['unordered results', [
+      { role: 'assistant', content: 'two calls', toolCalls: [
+        { id: 'call-a', name: 'lookup', arguments: { id: 1 } },
+        { id: 'call-b', name: 'update', arguments: { id: 2 } },
+      ], createdAt: '2026-08-08T02:00:01.000Z' },
+      {
+        role: 'tool', toolCallId: 'call-b', toolName: 'update', content: 'second first',
+        createdAt: '2026-08-08T02:00:02.000Z',
+      },
+      {
+        role: 'tool', toolCallId: 'call-a', toolName: 'lookup', content: 'first second',
+        createdAt: '2026-08-08T02:00:03.000Z',
+      },
+    ], false],
+    ['an interrupted missing result', [
+      { role: 'assistant', content: 'pending', toolCalls: [
+        { id: 'call-pending', name: 'lookup', arguments: { id: 1 } },
+      ], createdAt: '2026-08-08T02:00:01.000Z' },
+    ], true],
+  ] satisfies Array<[string, AgentSession['messages'], boolean]>)('imports %s by ToolCall identity', async (
+    _case,
+    toolMessages,
+    expectsOutcomeUnknown,
+  ) => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'dbagent-public-tool-identity-'));
+    temporaryDirectories.push(projectDir);
+    const sessionStore = new AgentSessionStore(join(projectDir, 'state.db'), {
+      rootPath: projectDir, configDirectory: '.dbagent',
+    });
+    await sessionStore.save({
+      now: '2026-08-08T02:00:04.000Z',
+      session: {
+        id: 'tool-identity-session', title: 'Tool identity', mode: 'read',
+        project: { rootPath: projectDir, configDirectory: '.dbagent' },
+        messages: [
+          { role: 'user', content: 'Start', createdAt: '2026-08-08T02:00:00.000Z' },
+          ...toolMessages,
+        ],
+        tokenUsage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        aborted: false,
+      },
+    });
+
+    const migrated = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r4-tool-identity',
+    });
+    const diagnostics = (await migrated.readImportedLegacyState()).diagnostics;
+    expect(diagnostics.some(({ code, evidence }) =>
+      code === 'LEGACY_TOOL_OUTCOME_UNKNOWN' && evidence.includes('call-pending')))
+      .toBe(expectsOutcomeUnknown);
   });
 
   it('streams a multi-page migration once and renews the carrier lease for every batch', async () => {
@@ -812,6 +856,36 @@ describe('StateMigrationRunner', () => {
     await expect(reopened.readLegacyArchive(archives[0]!, {
       maxBytes: archives[0]!.byteSize,
     })).resolves.toEqual(firstBytes);
+  });
+
+  it('uses the cursor only for output and hides the durable carrier from late views', async () => {
+    const projectDir = await createLegacyProject();
+    const migrated = await StateMigrationRunner.open(projectDir);
+    const inspection = await migrated.inspect();
+    const carrier = withTestDatabase(join(projectDir, 'state.db'), (database) =>
+      database.prepare(`
+        SELECT runs.run_id, MAX(events.sequence) AS last_import_sequence
+        FROM agent_runs AS runs
+        JOIN agent_events AS events ON events.run_id = runs.run_id
+        WHERE runs.hidden = 1 AND events.session_id = 'session-a'
+          AND events.event_type = 'legacy.imported'
+        GROUP BY runs.run_id
+      `).get() as { run_id: string; last_import_sequence: number },
+    );
+    const store = new JournalSessionStore(
+      new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') }),
+      inspection.projectId,
+    );
+
+    const session = await store.load('session-a', {
+      afterSequence: carrier.last_import_sequence, limit: 100,
+    });
+    const activity = await store.activities('session-a', {
+      afterSequence: carrier.last_import_sequence, limit: 100,
+    });
+    expect(session.messages).toEqual([]);
+    expect(session.runs.some(({ runId }) => runId === carrier.run_id)).toBe(false);
+    expect(activity.items.some(({ runId }) => runId === carrier.run_id)).toBe(false);
   });
 
   it('rechecks the live semantic source immediately before activation', async () => {

@@ -442,6 +442,7 @@ export class SessionProjectionAccumulator {
       this.#cursor = Math.max(this.#cursor, event.sequence);
       return true;
     }
+    this.#observeCarrierIdentity(event);
     if (event.sequence <= this.#options.afterSequence) return true;
     if (wouldOverflowSessionPage(
       event,
@@ -521,13 +522,17 @@ export class SessionProjectionAccumulator {
       }
     }
     if (event.type === 'run.created') {
-      this.#runs.set(event.runId, {
-        runId: event.runId,
-        clientRequestId: event.payload.clientRequestId,
-        state: 'created',
-        createdAt: event.occurredAt,
-        updatedAt: event.occurredAt,
-      });
+      if (this.#hiddenRuns.has(event.runId)) {
+        this.#runs.delete(event.runId);
+      } else {
+        this.#runs.set(event.runId, {
+          runId: event.runId,
+          clientRequestId: event.payload.clientRequestId,
+          state: 'created',
+          createdAt: event.occurredAt,
+          updatedAt: event.occurredAt,
+        });
+      }
     } else if (event.type === 'legacy.imported' && event.payload.entityType === 'run') {
       this.#hiddenRuns.add(event.runId);
       this.#runs.delete(event.runId);
@@ -562,6 +567,13 @@ export class SessionProjectionAccumulator {
       }
     }
   }
+
+  #observeCarrierIdentity(event: AgentEvent): void {
+    if (!isLegacyCarrierIdentityEvent(event)) return;
+    this.#hiddenRuns.add(event.runId);
+    this.#runs.delete(event.runId);
+    removeWhere(this.#messages, (message) => message.runId === event.runId);
+  }
 }
 
 export class UserActivityProjectionAccumulator {
@@ -586,13 +598,16 @@ export class UserActivityProjectionAccumulator {
     const terminal = event.sessionId === this.#options.sessionId
       ? this.#validator.releaseTerminal(event)
       : undefined;
+    if (event.sessionId === this.#options.sessionId && isLegacyCarrierIdentityEvent(event)) {
+      this.#legacyCarrierRuns.add(event.runId);
+      removeWhere(this.#items, (item) => item.runId === event.runId);
+    }
     if (event.sessionId !== this.#options.sessionId || event.sequence <= this.#options.afterSequence) {
       if (event.sessionId !== this.#options.sessionId) {
         this.#cursor = Math.max(this.#cursor, event.sequence);
       }
       return true;
     }
-    if (event.type === 'legacy.imported') this.#legacyCarrierRuns.add(event.runId);
     const descriptor = event.type === 'legacy.imported'
       ? legacyActivityDescriptor(event.payload.entityType)
       : this.#legacyCarrierRuns.has(event.runId)
@@ -615,6 +630,17 @@ export class UserActivityProjectionAccumulator {
 
   finish(): ProjectionPage<UserActivityEvent> {
     return { items: [...this.#items], nextSourceSequence: this.#cursor };
+  }
+}
+
+function isLegacyCarrierIdentityEvent(event: AgentEvent): boolean {
+  return (event.type === 'run.created' && event.payload.visibility === 'legacy-import-carrier') ||
+    event.type === 'legacy.imported';
+}
+
+function removeWhere<T>(items: T[], predicate: (item: T) => boolean): void {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (predicate(items[index]!)) items.splice(index, 1);
   }
 }
 

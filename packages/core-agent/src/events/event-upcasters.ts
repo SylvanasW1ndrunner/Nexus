@@ -124,8 +124,8 @@ function upcastLegacyImportedV1(payload: PortableValue): AgentEventPayloadMap['l
       switch (role) {
         case 'assistant':
           legacyExactKeys(record, [
-            'entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt', 'toolCalls',
-          ]);
+            'entityType', 'legacyId', 'messageIndex', 'role', 'content', 'createdAt',
+          ], ['toolCalls']);
           return {
             ...base,
             record: {
@@ -210,7 +210,7 @@ function upcastLegacyImportedV1(payload: PortableValue): AgentEventPayloadMap['l
         sessionId: legacyString(record.sessionId, 'checkpoint sessionId'),
         record: {
           version: 1,
-          sequence: legacyNonNegativeInteger(record.sequence, 'checkpoint sequence'),
+          sequence: legacyPositiveInteger(record.sequence, 'checkpoint sequence'),
           trigger: 'auto',
           method: 'deterministic-fallback',
           summary: legacyString(record.summary, 'checkpoint summary'),
@@ -235,7 +235,7 @@ function upcastLegacyImportedV1(payload: PortableValue): AgentEventPayloadMap['l
           task: 'Legacy subagent task unavailable',
           contextStrategy: 'fresh',
           status: legacySubagentStatus(record.status),
-          depth: legacyNonNegativeInteger(record.depth, 'subagent depth'),
+          depth: legacyPositiveInteger(record.depth, 'subagent depth'),
           createdAt: LEGACY_EPOCH,
           updatedAt: LEGACY_EPOCH,
         },
@@ -273,11 +273,13 @@ function legacyRecord(value: PortableValue, label: string): { [key: string]: Por
 
 function legacyExactKeys(
   record: { [key: string]: PortableValue },
-  allowed: readonly string[],
+  required: readonly string[],
+  optional: readonly string[] = [],
 ): void {
   const actual = Object.keys(record).sort();
-  const expected = [...allowed].filter((key) => record[key] !== undefined).sort();
-  if (actual.join('\0') !== expected.join('\0')) {
+  const allowed = new Set([...required, ...optional]);
+  if (required.some((key) => !Object.hasOwn(record, key)) ||
+    actual.some((key) => !allowed.has(key))) {
     throw new Error(`CORRUPT_EVENT:legacy.imported v1 keys are invalid: ${actual.join(',')}.`);
   }
 }
@@ -312,6 +314,13 @@ function legacyNonNegativeInteger(value: PortableValue | undefined, label: strin
   return value;
 }
 
+function legacyPositiveInteger(value: PortableValue | undefined, label: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`CORRUPT_EVENT:${label} must be a positive integer.`);
+  }
+  return value;
+}
+
 function legacyFiniteNumber(value: PortableValue | undefined, label: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new Error(`CORRUPT_EVENT:${label} must be finite.`);
@@ -320,15 +329,15 @@ function legacyFiniteNumber(value: PortableValue | undefined, label: string): nu
 }
 
 function legacyMode(value: PortableValue | undefined): 'read' | 'edit' | 'full' {
-  const mode = legacyString(value, 'session mode');
-  return mode === 'read' || mode === 'edit' || mode === 'full' ? mode : 'read';
+  return legacyEnum(value, ['read', 'edit', 'full'] as const, 'session mode');
 }
 
 function legacySubagentStatus(
   value: PortableValue | undefined,
 ): 'running' | 'completed' | 'failed' | 'cancelled' {
-  const status = legacyString(value, 'subagent status');
-  return status === 'completed' || status === 'failed' || status === 'cancelled' ? status : 'running';
+  return legacyEnum(
+    value, ['running', 'completed', 'failed', 'cancelled'] as const, 'subagent status',
+  );
 }
 
 function legacyMessageSessionId(legacyId: string): string {

@@ -196,8 +196,11 @@ function validateInput(payload: unknown): void {
 
 function validateRunCreated(payload: unknown): void {
   const record = requireRecord(payload);
-  exactKeys(record, ['clientRequestId']);
+  exactKeys(record, ['clientRequestId', 'visibility']);
   requireString(record, 'clientRequestId');
+  if (record.visibility !== undefined && record.visibility !== 'legacy-import-carrier') {
+    throw new TypeError('Run visibility is invalid.');
+  }
 }
 
 function validateRunFailure(payload: unknown): void {

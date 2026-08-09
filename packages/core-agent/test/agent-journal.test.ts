@@ -131,6 +131,14 @@ describe('SqliteAgentJournal', () => {
         entityType: 'subagent', legacyId: 'subagent-a', parentSessionId: 'session-a',
         childSessionId: 'session-b', status: 'completed', depth: 1,
       },
+      {
+        entityType: 'diagnostic', legacyId: 'diagnostic-a', code: 'LEGACY_WARNING',
+        evidence: 'Historical diagnostic',
+      },
+      {
+        entityType: 'archive', legacyId: 'archive-a', relativePath: 'audit/events.jsonl',
+        archiveHandle: `legacy-archive:${'b'.repeat(64)}`, checksum: 'a'.repeat(64), byteSize: 12,
+      },
     ];
 
     expect(payloads.map((payload, index) => upcastAgentEvent({
@@ -188,7 +196,84 @@ describe('SqliteAgentJournal', () => {
           createdAt: '1970-01-01T00:00:00.000Z', updatedAt: '1970-01-01T00:00:00.000Z',
         },
       },
+      {
+        entityType: 'diagnostic', legacyId: 'diagnostic-a', code: 'LEGACY_WARNING',
+        evidence: 'Historical diagnostic',
+      },
+      {
+        entityType: 'archive', legacyId: 'archive-a', relativePath: 'audit/events.jsonl',
+        archiveHandle: `legacy-archive:${'b'.repeat(64)}`, checksum: 'a'.repeat(64), byteSize: 12,
+      },
     ]);
+  });
+
+  it('golden-upcasts all four historical message roles', () => {
+    const records: PortableValue[] = [
+      { role: 'user', content: 'user', createdAt: '2026-08-08T00:00:01.000Z' },
+      { role: 'system', content: 'system', createdAt: '2026-08-08T00:00:02.000Z' },
+      {
+        role: 'assistant', content: 'assistant', createdAt: '2026-08-08T00:00:03.000Z',
+        toolCalls: [{ id: 'call-a', name: 'lookup', arguments: { id: 7 } }],
+      },
+      {
+        role: 'tool', content: 'tool', createdAt: '2026-08-08T00:00:04.000Z',
+        toolCallId: 'call-a', toolName: 'lookup',
+      },
+    ];
+    const roles = records.map((record, index) => upcastAgentEvent({
+      eventId: `legacy-role-${index}`, projectId: 'project-a', sequence: index + 1,
+      schemaVersion: 1, sessionId: 'session-a', runId: 'carrier-a',
+      occurredAt: '2026-08-09T00:00:00.000Z', type: 'legacy.imported' as const,
+      payload: {
+        entityType: 'message', legacyId: `session-a:${index}`, messageIndex: index,
+        ...(record as Record<string, PortableValue>),
+      },
+    }).payload);
+    expect(roles.map((payload) => payload.entityType === 'message' && payload.record.role))
+      .toEqual(['user', 'system', 'assistant', 'tool']);
+  });
+
+  it.each([
+    ['unknown session mode', {
+      entityType: 'session', legacyId: 'session-a', projectKey: 'a', projectRoot: '/a',
+      title: 'a', userId: null, mode: 'unknown',
+    }],
+    ['unknown message role', {
+      entityType: 'message', legacyId: 'session-a:0', messageIndex: 0,
+      role: 'unknown', content: 'a', createdAt: '2026-08-08T00:00:00.000Z',
+    }],
+    ['unknown run status', {
+      entityType: 'run', legacyId: 'run-a', sessionId: 'session-a', status: 'unknown',
+      plan: null, createdAt: '2026-08-08T00:00:00.000Z',
+      updatedAt: '2026-08-08T00:00:00.000Z',
+    }],
+    ['unknown subagent status', {
+      entityType: 'subagent', legacyId: 'subagent-a', parentSessionId: 'session-a',
+      childSessionId: null, status: 'unknown', depth: 1,
+    }],
+    ['zero checkpoint sequence', {
+      entityType: 'checkpoint', legacyId: 'checkpoint-a', sessionId: 'session-a', sequence: 0,
+      summary: 'a', createdAt: '2026-08-08T00:00:00.000Z',
+    }],
+    ['zero subagent depth', {
+      entityType: 'subagent', legacyId: 'subagent-a', parentSessionId: 'session-a',
+      childSessionId: null, status: 'running', depth: 0,
+    }],
+    ['missing diagnostic evidence', {
+      entityType: 'diagnostic', legacyId: 'diagnostic-a', code: 'A',
+    }],
+    ['extra diagnostic key', {
+      entityType: 'diagnostic', legacyId: 'diagnostic-a', code: 'A', evidence: 'a', extra: true,
+    }],
+  ] satisfies Array<[string, PortableValue]>)('rejects strict historical v1 payload: %s', (
+    _case,
+    payload,
+  ) => {
+    expect(() => upcastAgentEvent({
+      eventId: 'legacy-negative', projectId: 'project-a', sequence: 1, schemaVersion: 1,
+      sessionId: 'session-a', runId: 'carrier-a', occurredAt: '2026-08-09T00:00:00.000Z',
+      type: 'legacy.imported' as const, payload,
+    })).toThrow(/CORRUPT_EVENT/u);
   });
 
   it('rejects producer-controlled metadata, unknown schemas, secrets, and non-portable payloads', async () => {

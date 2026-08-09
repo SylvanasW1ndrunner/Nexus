@@ -124,7 +124,10 @@ export interface AgentEventPayloadMap {
     content: PortableValue;
     steeringTarget?: { runId: string };
   };
-  'run.created': { clientRequestId: string };
+  'run.created': {
+    clientRequestId: string;
+    visibility?: 'legacy-import-carrier';
+  };
   'run.started': EmptyPayload;
   'run.resumed': { reason?: string };
   'run.steered': { clientRequestId: string; content: PortableValue };

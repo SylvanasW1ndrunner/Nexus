@@ -30,6 +30,26 @@ afterEach(async () => {
 });
 
 describe('Journal event projections', () => {
+  it('keeps an ordinary user Run visible when its request id uses the legacy-import prefix', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dbagent-projection-prefix-'));
+    temporaryDirectories.push(directory);
+    const journal = new SqliteAgentJournal({ filePath: join(directory, 'state.db') });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-prefix',
+      clientRequestId: 'legacy-import:user-chosen', input: { text: 'ordinary input' },
+    });
+    const projection = await new JournalSessionStore(journal, 'project-a')
+      .load('session-prefix', { limit: 100 });
+    expect(projection.runs).toEqual([
+      expect.objectContaining({
+        runId: created.runId, clientRequestId: 'legacy-import:user-chosen', state: 'created',
+      }),
+    ]);
+    expect(projection.messages).toEqual([
+      expect.objectContaining({ runId: created.runId, role: 'user', content: 'ordinary input' }),
+    ]);
+  });
+
   it('replays byte-equal Session, User and Audit views twice and across two reopens', async () => {
     const fixture = await createGoldenJournal();
     const firstEvents = await readAll(fixture.journal, 'project-a', 2);
