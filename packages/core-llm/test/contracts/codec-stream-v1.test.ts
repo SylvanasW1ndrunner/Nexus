@@ -14,6 +14,7 @@ describe('version 1 canonical stream contract', () => {
     await expectIncomplete(
       anthropicMessagesCodec.decodeStream(
         streamOf(
+          { type: 'message_start', message: {} },
           { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
           { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
           { type: 'content_block_stop', index: 0 },
@@ -25,6 +26,7 @@ describe('version 1 canonical stream contract', () => {
     await expectIncomplete(
       anthropicMessagesCodec.decodeStream(
         streamOf(
+          { type: 'message_start', message: {} },
           { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
           { type: 'message_stop' },
         ),
@@ -37,6 +39,7 @@ describe('version 1 canonical stream contract', () => {
     const events = await collect(
       anthropicMessagesCodec.decodeStream(
         streamOf(
+          { type: 'message_start', message: {} },
           { type: 'content_block_start', index: 4, content_block: { type: 'text', text: '' } },
           { type: 'content_block_delta', index: 4, delta: { type: 'text_delta', text: 'done' } },
           { type: 'content_block_stop', index: 4 },

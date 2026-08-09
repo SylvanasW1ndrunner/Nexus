@@ -32,6 +32,30 @@ describe('version 2 strict native protocol contract', () => {
     );
   });
 
+  it('rejects a Responses static function call that only has a provider item id', () => {
+    expectSyncError(
+      () => openAIResponsesCodec.decode({
+        status: 'completed',
+        output: [{ id: 'item-only', type: 'function_call', name: 'inspect', arguments: '{}' }],
+      }, context('openai-responses')),
+      'INVALID_WIRE_RESPONSE',
+    );
+  });
+
+  it('rejects a nonterminal Responses static payload as incomplete', () => {
+    expectSyncError(
+      () => openAIResponsesCodec.decode({ status: 'in_progress', output: [] }, context('openai-responses')),
+      'INCOMPLETE_MODEL_ATTEMPT',
+    );
+  });
+
+  it('rejects a non-boolean Ollama static done field', () => {
+    expectSyncError(
+      () => ollamaChatCodec.decode({ message: { content: '' }, done: 'true' }, context('ollama-chat')),
+      'INVALID_WIRE_RESPONSE',
+    );
+  });
+
   it.each([
     {
       name: 'missing output_index',
@@ -103,6 +127,53 @@ describe('version 2 strict native protocol contract', () => {
         { type: 'response.output_item.done', output_index: 0, item: { id: 'item-a', type: 'function_call', call_id: 'call-a', name: 'inspect', arguments: '{"changed":true}' } },
       ],
     },
+    {
+      name: 'provider-item-only function call before replay',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'item-only', type: 'function_call', name: 'inspect', arguments: '' } },
+      ],
+    },
+    {
+      name: 'content part completion before output_text.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
+        { type: 'response.content_part.done', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
+      ],
+    },
+    {
+      name: 'duplicate output_text.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
+        { type: 'response.output_text.done', output_index: 0, content_index: 0, text: '' },
+        { type: 'response.output_text.done', output_index: 0, content_index: 0, text: '' },
+      ],
+    },
+    {
+      name: 'reasoning part completion before reasoning_summary_text.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'reasoning', type: 'reasoning', summary: [] } },
+        { type: 'response.reasoning_summary_part.added', output_index: 0, summary_index: 0, part: { type: 'summary_text', text: '' } },
+        { type: 'response.reasoning_summary_part.done', output_index: 0, summary_index: 0, part: { type: 'summary_text', text: '' } },
+      ],
+    },
+    {
+      name: 'duplicate reasoning_summary_text.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'reasoning', type: 'reasoning', summary: [] } },
+        { type: 'response.reasoning_summary_part.added', output_index: 0, summary_index: 0, part: { type: 'summary_text', text: '' } },
+        { type: 'response.reasoning_summary_text.done', output_index: 0, summary_index: 0, text: '' },
+        { type: 'response.reasoning_summary_text.done', output_index: 0, summary_index: 0, text: '' },
+      ],
+    },
+    {
+      name: 'function item completion before function_call_arguments.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'item-a', type: 'function_call', call_id: 'call-a', name: 'inspect', arguments: '{}' } },
+        { type: 'response.output_item.done', output_index: 0, item: { id: 'item-a', type: 'function_call', call_id: 'call-a', name: 'inspect', arguments: '{}' } },
+      ],
+    },
   ])('rejects Responses $name', async ({ events }) => {
     await expectStreamError(
       openAIResponsesCodec.decodeStream(streamOf(...events), context('openai-responses')),
@@ -134,11 +205,58 @@ describe('version 2 strict native protocol contract', () => {
       streamOf(
         { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
         { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
+        { type: 'response.output_text.done', output_index: 0, content_index: 0, text: '' },
         { type: 'response.content_part.done', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
         { type: 'response.content_part.done', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
       ),
       context('openai-responses'),
     ), 'INVALID_WIRE_RESPONSE');
+  });
+
+  it('uses native Responses indexes for canonical order under reversed and interleaved arrival', async () => {
+    const events = await collect(openAIResponsesCodec.decodeStream(
+      streamOf(
+        { type: 'response.output_item.added', output_index: 11, item: { id: 'tool-11', type: 'function_call', call_id: 'call-11', name: 'inspect', arguments: '' } },
+        { type: 'response.function_call_arguments.delta', output_index: 11, delta: '{}' },
+        { type: 'response.output_item.added', output_index: 7, item: { id: 'msg-7', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 7, content_index: 3, part: { type: 'output_text', text: '' } },
+        { type: 'response.output_text.delta', output_index: 7, content_index: 3, delta: 'hello' },
+        { type: 'response.function_call_arguments.done', output_index: 11, arguments: '{}' },
+        { type: 'response.output_text.done', output_index: 7, content_index: 3, text: 'hello' },
+        { type: 'response.content_part.done', output_index: 7, content_index: 3, part: { type: 'output_text', text: 'hello' } },
+        { type: 'response.output_item.done', output_index: 11, item: { id: 'tool-11', type: 'function_call', call_id: 'call-11', name: 'inspect', arguments: '{}' } },
+        { type: 'response.output_item.done', output_index: 7, item: { id: 'msg-7', type: 'message', content: [{ type: 'output_text', text: 'hello' }] } },
+        { type: 'response.completed', response: { status: 'completed' } },
+      ),
+      context('openai-responses'),
+    ));
+
+    expect(events.filter(
+      (event) => event.type === 'text-delta' || event.type === 'tool-call-delta',
+    ).map((event) => event.blockOrdinal)).toEqual([1, 0]);
+    const finish = events.at(-1);
+    expect(finish?.type).toBe('finish');
+    if (finish?.type !== 'finish') throw new Error('Expected Responses finish');
+    expect(finish.attempt.blocks.map((block) => block.type)).toEqual(['text', 'tool-call-draft']);
+  });
+
+  it('preserves an opaque Responses message content part through item completion', async () => {
+    const refusal = { type: 'refusal', refusal: 'cannot comply' };
+    const events = await collect(openAIResponsesCodec.decodeStream(
+      streamOf(
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: refusal },
+        { type: 'response.content_part.done', output_index: 0, content_index: 0, part: refusal },
+        { type: 'response.output_item.done', output_index: 0, item: { id: 'msg', type: 'message', content: [refusal] } },
+        { type: 'response.completed', response: { status: 'completed' } },
+      ),
+      context('openai-responses'),
+    ));
+
+    const complete = events.find((event) => event.type === 'block-complete');
+    expect(complete?.type).toBe('block-complete');
+    if (complete?.type !== 'block-complete') throw new Error('Expected opaque completion');
+    expect(complete.block.type).toBe('provider-opaque');
   });
 
   it.each([
@@ -175,9 +293,38 @@ describe('version 2 strict native protocol contract', () => {
       }] }), context('openai-chat')),
     },
     {
+      name: 'non-string OpenAI Chat delta content',
+      protocol: 'openai-chat' as const,
+      iterable: openAIChatCodec.decodeStream(streamOf({ choices: [{ delta: { content: 42 }, finish_reason: 'stop' }] }), context('openai-chat')),
+    },
+    {
+      name: 'OpenAI Chat content after finish',
+      protocol: 'openai-chat' as const,
+      iterable: openAIChatCodec.decodeStream(streamOf(
+        { choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] },
+        { choices: [{ delta: { content: 'late' } }] },
+      ), context('openai-chat')),
+    },
+    {
+      name: 'Anthropic content before message_start',
+      protocol: 'anthropic-messages' as const,
+      iterable: anthropicMessagesCodec.decodeStream(streamOf(
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      ), context('anthropic-messages')),
+    },
+    {
+      name: 'Anthropic text start with a non-string text field',
+      protocol: 'anthropic-messages' as const,
+      iterable: anthropicMessagesCodec.decodeStream(streamOf(
+        { type: 'message_start', message: {} },
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 42 } },
+      ), context('anthropic-messages')),
+    },
+    {
       name: 'duplicate Anthropic content start',
       protocol: 'anthropic-messages' as const,
       iterable: anthropicMessagesCodec.decodeStream(streamOf(
+        { type: 'message_start', message: {} },
         { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
         { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
       ), context('anthropic-messages')),
@@ -186,6 +333,7 @@ describe('version 2 strict native protocol contract', () => {
       name: 'Anthropic tool block missing arguments',
       protocol: 'anthropic-messages' as const,
       iterable: anthropicMessagesCodec.decodeStream(streamOf(
+        { type: 'message_start', message: {} },
         { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-a', name: 'inspect' } },
         { type: 'content_block_stop', index: 0 },
         { type: 'message_stop' },
@@ -195,6 +343,7 @@ describe('version 2 strict native protocol contract', () => {
       name: 'Anthropic delta type conflicting with its block',
       protocol: 'anthropic-messages' as const,
       iterable: anthropicMessagesCodec.decodeStream(streamOf(
+        { type: 'message_start', message: {} },
         { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
         { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } },
       ), context('anthropic-messages')),

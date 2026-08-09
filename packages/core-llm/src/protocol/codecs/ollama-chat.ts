@@ -64,6 +64,9 @@ export class OllamaChatCodec implements ModelProtocolCodec {
   decode(response: unknown, context: AttemptDecodeContext) {
     assertContextProtocol(context, this.protocol);
     const root = asRecord(response, 'Ollama Chat response');
+    if (root.done !== undefined && typeof root.done !== 'boolean') {
+      invalid('Ollama done must be a boolean');
+    }
     const message = asRecord(root.message, 'Ollama message');
     const blocks: DecodedModelContentBlock[] = [];
     const thinking = stringValue(message.thinking);

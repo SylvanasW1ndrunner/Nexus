@@ -126,6 +126,7 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
     let finishReason: ReturnType<typeof normalizeFinishReason>;
     let usage: ReturnType<typeof normalizedUsage>;
     let providerResponseId: string | undefined;
+    let finished = false;
 
     for await (const eventValue of stream) {
       const event = asRecord(eventValue, 'OpenAI Chat stream event');
@@ -145,8 +146,22 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
         );
         if (usage !== undefined) yield { type: 'usage', usage };
       }
-      for (const choice of records(event.choices, 'OpenAI stream choices')) {
+      const choices = records(event.choices, 'OpenAI stream choices');
+      if (finished) {
+        if (rawUsage === undefined || choices.length > 0) {
+          invalid('OpenAI Chat stream only permits usage-only chunks after finish');
+        }
+        continue;
+      }
+      for (const choice of choices) {
         const delta = choice.delta === undefined ? {} : asRecord(choice.delta, 'OpenAI delta');
+        if (
+          delta.content !== undefined &&
+          delta.content !== null &&
+          typeof delta.content !== 'string'
+        ) {
+          invalid('OpenAI Chat delta content must be a string or null');
+        }
         const text = stringValue(delta.content);
         if (text !== undefined && text.length > 0) {
           if (textState === undefined) {
@@ -214,7 +229,9 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
             ...(argumentsDelta === undefined ? {} : { argumentsDelta }),
           };
         }
-        finishReason = normalizeFinishReason(choice.finish_reason) ?? finishReason;
+        const choiceFinishReason = normalizeFinishReason(choice.finish_reason);
+        finishReason = choiceFinishReason ?? finishReason;
+        finished ||= choiceFinishReason !== undefined;
       }
     }
 

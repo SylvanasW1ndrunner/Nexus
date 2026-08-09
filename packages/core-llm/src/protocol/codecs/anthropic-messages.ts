@@ -159,10 +159,14 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
             ? usage.cache_read_input_tokens
             : cachedInputTokens;
       } else if (type === 'content_block_start') {
+        if (!messageStarted) invalid('Anthropic content block started before message_start');
         if (states.has(index)) invalid('Anthropic content block index started more than once');
         const block = asRecord(event.content_block, 'Anthropic content block');
         const blockType = requiredString(block.type, 'Anthropic content block type');
         if (blockType === 'text') {
+          if (block.text !== undefined && typeof block.text !== 'string') {
+            invalid('Anthropic text block text must be a string');
+          }
           states.set(index, {
             kind: 'text',
             ordinal: states.size,
@@ -183,6 +187,7 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
           states.set(index, { kind: 'opaque', ordinal: states.size, value: block });
         }
       } else if (type === 'content_block_delta') {
+        if (!messageStarted) invalid('Anthropic content block delta preceded message_start');
         const delta = asRecord(event.delta, 'Anthropic content block delta');
         const state = states.get(index);
         if (state === undefined) invalid('Anthropic delta references an unknown content block');
@@ -216,6 +221,7 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
           } else invalid('Anthropic opaque block received an unsupported delta type');
         } else invalid('Anthropic delta type does not match its content block');
       } else if (type === 'content_block_stop') {
+        if (!messageStarted) invalid('Anthropic content block stop preceded message_start');
         const state = states.get(index);
         if (state === undefined || stopped.has(index)) {
           invalid('Anthropic content_block_stop does not match one started block');
@@ -227,11 +233,13 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
         stopped.add(index);
         yield { type: 'block-complete', blockOrdinal: state.ordinal, block };
       } else if (type === 'message_delta') {
+        if (!messageStarted) invalid('Anthropic message_delta preceded message_start');
         const delta = asRecord(event.delta, 'Anthropic message delta');
         finishReason = normalizeFinishReason(delta.stop_reason) ?? finishReason;
         const usage = event.usage === undefined ? undefined : asRecord(event.usage);
         outputTokens = typeof usage?.output_tokens === 'number' ? usage.output_tokens : outputTokens;
       } else if (type === 'message_stop') {
+        if (!messageStarted) invalid('Anthropic message_stop preceded message_start');
         terminal = true;
       } else if (type !== 'ping') {
         invalid(`Unsupported Anthropic stream event: ${String(type)}`);

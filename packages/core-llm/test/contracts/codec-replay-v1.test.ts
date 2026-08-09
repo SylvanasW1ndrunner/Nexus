@@ -116,7 +116,7 @@ describe('version 1 provider replay corpus', () => {
     expect(functionCall).not.toHaveProperty('id');
   });
 
-  it('rejects duplicate Responses provider item IDs when call_id is missing', () => {
+  it('rejects Responses provider-item-only calls before they can enter replay state', () => {
     expectProtocolError(
       () => openAIResponsesCodec.decode({
         status: 'completed',
@@ -125,7 +125,7 @@ describe('version 1 provider replay corpus', () => {
           { id: 'item-shared', type: 'function_call', name: 'inspect', arguments: '{"n":2}' },
         ],
       }, decodeContext('openai-responses')),
-      'DUPLICATE_WIRE_CALL_ID',
+      'INVALID_WIRE_RESPONSE',
     );
   });
 
