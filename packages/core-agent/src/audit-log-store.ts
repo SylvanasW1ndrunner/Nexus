@@ -11,6 +11,10 @@ import type {
   AgentRunStatus,
   AgentToolExecutionRecord,
 } from './types.js';
+import {
+  acquireSharedStateWriterGate,
+  legacyProjectDirForSidecar,
+} from './session/state-writer-gate.js';
 
 const MAX_AUDIT_STRING_CHARS = 4_000;
 
@@ -106,9 +110,16 @@ export class AgentAuditLogStore implements AgentAuditLogWriter {
   constructor(private readonly filePath: string) {}
 
   async append(event: AgentAuditEvent): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const safeEvent = normalizeAuditEvent(event);
-    await appendFile(this.filePath, `${JSON.stringify(safeEvent)}\n`, 'utf8');
+    const gate = acquireSharedStateWriterGate(
+      legacyProjectDirForSidecar(this.filePath, 'legacy-audit'),
+    );
+    try {
+      await mkdir(dirname(this.filePath), { recursive: true });
+      const safeEvent = normalizeAuditEvent(event);
+      await appendFile(this.filePath, `${JSON.stringify(safeEvent)}\n`, 'utf8');
+    } finally {
+      gate.close();
+    }
   }
 
   async readAll(): Promise<AgentAuditEvent[]> {

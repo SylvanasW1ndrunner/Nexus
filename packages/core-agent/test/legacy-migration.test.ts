@@ -86,6 +86,26 @@ describe('StateMigrationRunner', () => {
     await expect(publicStore.subagents(fixture.session.id)).resolves.toEqual([
       fixture.subagent,
     ]);
+    for (const [readPage, expected] of [
+      [(options: { afterSequence: number; limit: number }) =>
+        publicStore.preferences(fixture.session.id, options), fixture.preference],
+      [(options: { afterSequence: number; limit: number }) =>
+        publicStore.checkpoints(fixture.session.id, options), fixture.session.contextCheckpoint],
+      [(options: { afterSequence: number; limit: number }) =>
+        publicStore.subagents(fixture.session.id, options), fixture.subagent],
+    ] as const) {
+      const page = await readPage({ afterSequence: 0, limit: 1 });
+      expect(page.items).toEqual([expected]);
+      expect(page.nextSourceSequence).toBeGreaterThan(0);
+      await expect(readPage({ afterSequence: page.nextSourceSequence, limit: 1 }))
+        .resolves.toMatchObject({ items: [] });
+      await expect(readPage({ afterSequence: -1, limit: 1 })).rejects.toMatchObject({
+        code: 'LIMIT_INVALID',
+      });
+      await expect(readPage({ afterSequence: 0, limit: 0 })).rejects.toMatchObject({
+        code: 'LIMIT_INVALID',
+      });
+    }
     const activities = await publicStore.activities(fixture.session.id, { limit: 100 });
     expect(activities.items).toEqual(expect.arrayContaining([
       ...fixture.session.messages.map((message) => expect.objectContaining({
@@ -180,6 +200,36 @@ describe('StateMigrationRunner', () => {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r3-tool-causality',
     })).rejects.toMatchObject({ code: 'MIGRATION_VALIDATION_FAILED' });
+  });
+
+  it('streams a multi-page migration once and renews the carrier lease for every batch', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'dbagent-public-scale-migration-'));
+    temporaryDirectories.push(projectDir);
+    const project = { rootPath: projectDir, configDirectory: '.dbagent' };
+    const messages: AgentSession['messages'] = Array.from({ length: 1_205 }, (_, index) => ({
+      role: 'user' as const,
+      content: `scale-message-${index}`,
+      createdAt: new Date(Date.UTC(2026, 7, 8, 4, 0, index)).toISOString(),
+    }));
+    await new AgentSessionStore(join(projectDir, 'state.db'), project).save({
+      now: '2026-08-08T05:00:00.000Z',
+      session: {
+        id: 'scale-session', title: 'Scale migration', mode: 'read', project, messages,
+        tokenUsage: { promptTokens: 1_205, completionTokens: 0, totalTokens: 1_205 },
+        aborted: false,
+      },
+    });
+
+    const migrated = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r3-scale',
+    });
+    expect((await migrated.readImportedLegacyState()).sessions[0]?.messages).toHaveLength(1_205);
+    await expect(migrated.validationDiagnostics()).resolves.toEqual({
+      projectPasses: 1,
+      maxPageSize: 1_000,
+      importBatches: 3,
+      carrierLeaseRenewals: 3,
+    });
   });
 
   it.each(crashPoints)('recovers a real on-disk cut at %s without duplicate import', async (cut) => {
@@ -401,6 +451,55 @@ describe('StateMigrationRunner', () => {
     }
     expect(await readFile(join(projectDir, 'legacy-writer-completed'), 'utf8')).toBe('completed');
   }, 20_000);
+
+  it.each(['audit', 'checkpoint', 'stream', 'artifact'] as const)(
+    'blocks the %s manifest producer at the final cut and rejects it after activation',
+    async (mode) => {
+      const projectDir = await createLegacyProject();
+      const migration = spawnMigrationWorker(projectDir, 'migrate', {
+        DBAGENT_MIGRATION_BARRIER_POINT: 'after-live-recheck',
+      });
+      await waitForPath(join(projectDir, 'migration-barrier-ready'));
+      const writer = spawnMigrationWorker(projectDir, mode);
+      await waitForPath(join(projectDir, `${mode}-writer-started`));
+      await delay(250);
+      expect(writer.exitCode).toBeNull();
+      await expect(stat(join(projectDir, `${mode}-writer-completed`))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+
+      await writeFile(join(projectDir, 'migration-barrier-release'), 'release');
+      expect(await waitForExit(migration)).toBe(0);
+      expect(await waitForExit(writer)).not.toBe(0);
+      expect(await readFile(join(projectDir, `${mode}-worker-error`), 'utf8'))
+        .toContain('STATE_MIGRATION_ACTIVE');
+    },
+    20_000,
+  );
+
+  it.each(['audit', 'checkpoint', 'stream', 'artifact'] as const)(
+    'releases the %s manifest-producer gate after migration SIGKILL',
+    async (mode) => {
+      const projectDir = await createLegacyProject();
+      const migration = spawnMigrationWorker(projectDir, 'migrate', {
+        DBAGENT_MIGRATION_BARRIER_POINT: 'after-live-recheck',
+      });
+      await waitForPath(join(projectDir, 'migration-barrier-ready'));
+      const writer = spawnMigrationWorker(projectDir, mode);
+      await waitForPath(join(projectDir, `${mode}-writer-started`));
+      await delay(250);
+      expect(writer.exitCode).toBeNull();
+
+      migration.kill('SIGKILL');
+      await waitForExit(migration);
+      const writerExit = await waitForExit(writer);
+      if (writerExit !== 0) {
+        throw new Error(await readFile(join(projectDir, `${mode}-worker-error`), 'utf8'));
+      }
+      expect(await readFile(join(projectDir, `${mode}-writer-completed`), 'utf8')).toBe('completed');
+    },
+    20_000,
+  );
 
   it.each(crashPoints)('recovers after an uncatchable child termination at %s', async (cut) => {
     const projectDir = await createLegacyProject();
@@ -1036,7 +1135,7 @@ function withTestDatabase<T>(path: string, operation: (database: NodeDatabaseSyn
 
 function spawnMigrationWorker(
   projectDir: string,
-  mode: 'migrate' | 'write',
+  mode: 'migrate' | 'write' | 'audit' | 'checkpoint' | 'stream' | 'artifact',
   environment: Record<string, string> = {},
 ) {
   const viteNode = join(

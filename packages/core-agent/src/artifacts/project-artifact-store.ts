@@ -27,6 +27,10 @@ import {
   acquireArtifactMutationGate,
   ArtifactMutationGateTimeoutError,
 } from './artifact-mutation-gate.js';
+import {
+  acquireSharedStateWriterGate,
+  legacyProjectDirForArtifactRoot,
+} from '../session/state-writer-gate.js';
 
 export * from './artifact-store.js';
 
@@ -97,6 +101,15 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async stage(input: StageArtifactInput): Promise<StagedArtifact> {
+    const stateGate = acquireSharedStateWriterGate(legacyProjectDirForArtifactRoot(this.#rootDir));
+    try {
+      return await this.#stageWithStateGate(input);
+    } finally {
+      stateGate.close();
+    }
+  }
+
+  async #stageWithStateGate(input: StageArtifactInput): Promise<StagedArtifact> {
     const mediaType = requireMediaType(input.mediaType);
     const expectedByteSize = input.expectedByteSize;
     if (
@@ -187,11 +200,16 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async commit(input: CommitArtifactInput): Promise<ArtifactRef> {
-    const gate = await this.#acquireMutationGate();
+    const stateGate = acquireSharedStateWriterGate(legacyProjectDirForArtifactRoot(this.#rootDir));
     try {
-      return await this.#commitWithGate(input);
+      const gate = await this.#acquireMutationGate();
+      try {
+        return await this.#commitWithGate(input);
+      } finally {
+        gate.close();
+      }
     } finally {
-      gate.close();
+      stateGate.close();
     }
   }
 

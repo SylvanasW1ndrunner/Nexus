@@ -16,7 +16,6 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { assertPortableValue, type PortableValue } from '@dbagent/shared';
 import { SqliteAgentJournal } from '../events/sqlite-agent-journal.js';
-import { replayAgentEvents } from '../events/event-projectors.js';
 import type {
   AgentEvent,
   AgentEventDraft,
@@ -24,6 +23,7 @@ import type {
 } from '../events/agent-event.js';
 import {
   AuditProjectionAccumulator,
+  ProjectionEventValidator,
   SessionProjectionAccumulator,
   UserActivityProjectionAccumulator,
 } from './session-projection.js';
@@ -198,6 +198,13 @@ export type LegacyArchiveRef = {
   byteSize: number;
 };
 
+export type MigrationValidationDiagnostics = {
+  projectPasses: number;
+  maxPageSize: number;
+  importBatches: number;
+  carrierLeaseRenewals: number;
+};
+
 export class StateMigrationRunner {
   readonly #projectDir: string;
   readonly #intent: MigrationIntent;
@@ -257,6 +264,26 @@ export class StateMigrationRunner {
         ).count,
       ),
     ));
+  }
+
+  validationDiagnostics(): Promise<MigrationValidationDiagnostics> {
+    return Promise.resolve(withDatabase(this.#intent.finalPath, (database) => {
+      const row = database.prepare(`
+        SELECT project_passes, max_page_size, import_batches, carrier_lease_renewals
+        FROM legacy_imports WHERE migration_id = ?
+      `).get(this.#intent.migrationId) as {
+        project_passes: number;
+        max_page_size: number;
+        import_batches: number;
+        carrier_lease_renewals: number;
+      };
+      return {
+        projectPasses: Number(row.project_passes),
+        maxPageSize: Number(row.max_page_size),
+        importBatches: Number(row.import_batches),
+        carrierLeaseRenewals: Number(row.carrier_lease_renewals),
+      };
+    }));
   }
 
   async readImportedLegacyState(): Promise<ImportedLegacyState> {
@@ -469,8 +496,12 @@ async function buildValidatedShadow(
     `).run(migrationId, sourceDigest);
   });
   const migrationWriter = createLegacyMigrationWriter(journal, { migrationId, sourceDigest });
+  let importDiagnostics: Pick<
+    MigrationValidationDiagnostics,
+    'importBatches' | 'carrierLeaseRenewals'
+  >;
   try {
-    await importLegacyFacts(journal, migrationWriter, {
+    importDiagnostics = await importLegacyFacts(journal, migrationWriter, {
       migrationId, sourceDigest, importedState, archives, projectIds,
     });
   } finally {
@@ -502,6 +533,10 @@ async function buildValidatedShadow(
         migration_id TEXT PRIMARY KEY,
         project_ids_json TEXT NOT NULL,
         event_count INTEGER NOT NULL,
+        project_passes INTEGER NOT NULL DEFAULT 0,
+        max_page_size INTEGER NOT NULL DEFAULT 0,
+        import_batches INTEGER NOT NULL,
+        carrier_lease_renewals INTEGER NOT NULL,
         created_at TEXT NOT NULL
       );
       CREATE TABLE legacy_archives (
@@ -519,9 +554,15 @@ async function buildValidatedShadow(
       shadow.prepare('INSERT INTO state_metadata (id, schema_version) VALUES (1, ?)')
         .run(options.targetSchemaVersion);
       shadow.prepare(`
-        INSERT INTO legacy_imports (migration_id, project_ids_json, event_count, created_at)
-        VALUES (?, ?, ?, ?)
-      `).run(migrationId, canonicalJson(projectIds), eventCount, new Date(0).toISOString());
+        INSERT INTO legacy_imports (
+          migration_id, project_ids_json, event_count, import_batches,
+          carrier_lease_renewals, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        migrationId, canonicalJson(projectIds), eventCount,
+        importDiagnostics.importBatches, importDiagnostics.carrierLeaseRenewals,
+        new Date(0).toISOString(),
+      );
       const insertArchive = shadow.prepare(`
         INSERT INTO legacy_archives (
           migration_id, relative_path, object_relative_path, archive_handle, checksum, byte_size
@@ -1274,24 +1315,63 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
 
     const journal = new SqliteAgentJournal({ filePath: path });
     const reconstructed = emptyImportedLegacyState();
+    let projectPasses = 0;
+    let maxPageSize = 0;
     for (const projectId of intent.projectIds) {
-      const events = await readAllProjectEvents(journal, projectId);
-      for (const event of events) {
-        if (event.type === 'legacy.imported') applyLegacyImport(reconstructed, event.payload);
-      }
-      replayAgentEvents(events);
-      const sessionIds = new Set(events.map(({ sessionId }) => sessionId));
-      for (const sessionId of sessionIds) {
-        const accumulators = [
-          new SessionProjectionAccumulator({ projectId, sessionId, afterSequence: 0, limit: 1_000 }, true),
-          new UserActivityProjectionAccumulator({ projectId, sessionId, afterSequence: 0, limit: 1_000 }, true),
-          new AuditProjectionAccumulator({ projectId, sessionId, afterSequence: 0, limit: 1_000 }, true),
-        ];
-        for (const accumulator of accumulators) {
-          for (const event of events) if (!accumulator.accept(event)) break;
-          accumulator.finish();
+      projectPasses += 1;
+      const causalValidator = new ProjectionEventValidator(projectId);
+      const projections = new Map<string, {
+        accumulators: Array<{
+          accept(event: AgentEvent): boolean;
+          finish(): unknown;
+        }>;
+        active: boolean[];
+      }>();
+      let cursor = 0;
+      while (true) {
+        const page = await journal.readProject(projectId, cursor, 1_000);
+        if (page.length === 0) break;
+        maxPageSize = Math.max(maxPageSize, page.length);
+        for (const event of page) {
+          cursor = event.sequence;
+          causalValidator.accept(event);
+          causalValidator.releaseTerminal(event);
+          if (event.type === 'legacy.imported') applyLegacyImport(reconstructed, event.payload);
+          let projection = projections.get(event.sessionId);
+          if (projection === undefined) {
+            projection = {
+              accumulators: [
+                new SessionProjectionAccumulator({
+                  projectId, sessionId: event.sessionId, afterSequence: 0, limit: 1_000,
+                }, true),
+                new UserActivityProjectionAccumulator({
+                  projectId, sessionId: event.sessionId, afterSequence: 0, limit: 1_000,
+                }, true),
+                new AuditProjectionAccumulator({
+                  projectId, sessionId: event.sessionId, afterSequence: 0, limit: 1_000,
+                }, true),
+              ],
+              active: [true, true, true],
+            };
+            projections.set(event.sessionId, projection);
+          }
+          projection.accumulators.forEach((accumulator, index) => {
+            if (projection!.active[index]) projection!.active[index] = accumulator.accept(event);
+          });
         }
       }
+      for (const projection of projections.values()) {
+        projection.accumulators.forEach((accumulator) => accumulator.finish());
+      }
+    }
+    if (!requireSealed) {
+      withDatabase(path, (database) => {
+        database.prepare(`
+          UPDATE legacy_imports SET project_passes = ?, max_page_size = ?
+          WHERE migration_id = ?
+        `).run(projectPasses, maxPageSize, intent.migrationId);
+        database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      });
     }
     normalizeImportedLegacyState(reconstructed);
     reconstructed.plan ??= firstLegacyPlan(reconstructed.runs);
@@ -1314,20 +1394,6 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
       `Validated Shadow failed semantic revalidation: ${errorMessage(error)}`,
       inspectionFromIntent(intent, intent.status),
     );
-  }
-}
-
-async function readAllProjectEvents(
-  journal: SqliteAgentJournal,
-  projectId: string,
-): Promise<AgentEvent[]> {
-  const result: AgentEvent[] = [];
-  let cursor = 0;
-  while (true) {
-    const page = await journal.readProject(projectId, cursor, 1_000);
-    if (page.length === 0) return result;
-    result.push(...page);
-    cursor = page.at(-1)!.sequence;
   }
 }
 
@@ -1855,7 +1921,9 @@ async function importLegacyFacts(
     archives: MaterializedLegacyArchive[];
     projectIds: string[];
   },
-): Promise<void> {
+): Promise<Pick<MigrationValidationDiagnostics, 'importBatches' | 'carrierLeaseRenewals'>> {
+  let importBatches = 0;
+  let carrierLeaseRenewals = 0;
   const sessions = input.importedState.sessions.length > 0
     ? input.importedState.sessions
     : [{
@@ -1965,7 +2033,7 @@ async function importLegacyFacts(
       projectId, sessionId: session.id, clientRequestId,
       input: { legacyMigrationId: input.migrationId },
     });
-    const lease = await journal.acquireRunLease({
+    let lease = await journal.acquireRunLease({
       projectId, runId: created.runId,
       ownerId: `legacy-migration:${input.migrationId.slice(0, 24)}`, ttlMs: 60_000,
     });
@@ -1974,6 +2042,15 @@ async function importLegacyFacts(
     });
     const facts = factsBySession.get(session.id)!;
     for (let offset = 0; offset < facts.length; offset += 500) {
+      importBatches += 1;
+      lease = await journal.renewRunLease({
+        projectId,
+        runId: created.runId,
+        ownerId: lease.ownerId,
+        fencingToken: lease.fencingToken,
+        ttlMs: 60_000,
+      });
+      carrierLeaseRenewals += 1;
       const projection = await journal.getRunProjection(created.runId);
       if (projection === null) throw new Error('Synthetic legacy Run projection is missing.');
       const events: AgentEventDraft[] = facts.slice(offset, offset + 500).map((payload) => ({
@@ -2003,6 +2080,7 @@ async function importLegacyFacts(
     input.projectIds.length) {
     throw new StateMigrationError('MIGRATION_VALIDATION_FAILED', 'Legacy Project isolation map changed.');
   }
+  return { importBatches, carrierLeaseRenewals };
 }
 
 function legacyMessageFromRow(message: {

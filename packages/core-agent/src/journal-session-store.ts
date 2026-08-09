@@ -7,6 +7,7 @@ import type {
 } from './types.js';
 import {
   AuditProjectionAccumulator,
+  ProjectionError,
   SessionProjectionAccumulator,
   UserActivityProjectionAccumulator,
   type AuditProjectionEvent,
@@ -14,6 +15,8 @@ import {
   type SessionProjection,
   type UserActivityEvent,
 } from './session/session-projection.js';
+
+type LegacyPageOptions = { afterSequence: number; limit: number };
 
 /** Read-only, bounded Session/User/Audit views over committed Journal facts. */
 export class JournalSessionStore {
@@ -64,24 +67,60 @@ export class JournalSessionStore {
     }, true));
   }
 
-  async preferences(sessionId: string): Promise<LegacyPreferenceProjection[]> {
+  preferences(sessionId: string): Promise<LegacyPreferenceProjection[]>;
+  preferences(
+    sessionId: string,
+    options: LegacyPageOptions,
+  ): Promise<ProjectionPage<LegacyPreferenceProjection>>;
+  async preferences(
+    sessionId: string,
+    options?: LegacyPageOptions,
+  ): Promise<LegacyPreferenceProjection[] | ProjectionPage<LegacyPreferenceProjection>> {
     requireSessionId(sessionId);
+    if (options !== undefined) {
+      return await this.#legacyPage(sessionId, options, (event) =>
+        event.payload.entityType === 'preference' ? structuredClone(event.payload.record) : undefined);
+    }
     const facts = await this.#legacyFacts(sessionId);
     return facts.flatMap(({ payload }) => payload.entityType === 'preference'
       ? [structuredClone(payload.record)]
       : []);
   }
 
-  async checkpoints(sessionId: string): Promise<LegacyCheckpointProjection[]> {
+  checkpoints(sessionId: string): Promise<LegacyCheckpointProjection[]>;
+  checkpoints(
+    sessionId: string,
+    options: LegacyPageOptions,
+  ): Promise<ProjectionPage<LegacyCheckpointProjection>>;
+  async checkpoints(
+    sessionId: string,
+    options?: LegacyPageOptions,
+  ): Promise<LegacyCheckpointProjection[] | ProjectionPage<LegacyCheckpointProjection>> {
     requireSessionId(sessionId);
+    if (options !== undefined) {
+      return await this.#legacyPage(sessionId, options, (event) =>
+        event.payload.entityType === 'checkpoint' ? structuredClone(event.payload.record) : undefined);
+    }
     const facts = await this.#legacyFacts(sessionId);
     return facts.flatMap(({ payload }) => payload.entityType === 'checkpoint'
       ? [structuredClone(payload.record)]
       : []);
   }
 
-  async subagents(sessionId: string): Promise<LegacySubagentProjection[]> {
+  subagents(sessionId: string): Promise<LegacySubagentProjection[]>;
+  subagents(
+    sessionId: string,
+    options: LegacyPageOptions,
+  ): Promise<ProjectionPage<LegacySubagentProjection>>;
+  async subagents(
+    sessionId: string,
+    options?: LegacyPageOptions,
+  ): Promise<LegacySubagentProjection[] | ProjectionPage<LegacySubagentProjection>> {
     requireSessionId(sessionId);
+    if (options !== undefined) {
+      return await this.#legacyPage(sessionId, options, (event) =>
+        event.payload.entityType === 'subagent' ? structuredClone(event.payload.record) : undefined);
+    }
     const facts = await this.#legacyFacts(sessionId);
     return facts.flatMap(({ payload }) => payload.entityType === 'subagent'
       ? [structuredClone(payload.record)]
@@ -102,6 +141,28 @@ export class JournalSessionStore {
       }
     }
   }
+
+  async #legacyPage<T>(
+    sessionId: string,
+    options: LegacyPageOptions,
+    select: (event: Extract<AgentEvent, { type: 'legacy.imported' }>) => T | undefined,
+  ): Promise<ProjectionPage<T>> {
+    requireLegacyPageOptions(options);
+    const items: T[] = [];
+    let cursor = options.afterSequence;
+    while (true) {
+      const page = await this.journal.readProject(this.projectId, cursor, 1_000);
+      if (page.length === 0) return { items, nextSourceSequence: cursor };
+      for (const event of page) {
+        cursor = event.sequence;
+        if (event.sessionId !== sessionId || event.type !== 'legacy.imported') continue;
+        const item = select(event);
+        if (item === undefined) continue;
+        items.push(item);
+        if (items.length === options.limit) return { items, nextSourceSequence: cursor };
+      }
+    }
+  }
 }
 
 export type LegacyPreferenceProjection = AgentUserPreference;
@@ -110,6 +171,15 @@ export type LegacySubagentProjection = AgentSubagentRecord;
 
 function requireSessionId(sessionId: string): void {
   if (!sessionId.trim()) throw new TypeError('sessionId is required.');
+}
+
+function requireLegacyPageOptions(options: LegacyPageOptions): void {
+  if (!Number.isSafeInteger(options.afterSequence) || options.afterSequence < 0) {
+    throw new ProjectionError('LIMIT_INVALID', 'afterSequence must be non-negative.');
+  }
+  if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 1_000) {
+    throw new ProjectionError('LIMIT_INVALID', 'Projection limit must be between 1 and 1000.');
+  }
 }
 
 async function consumeProjectPages<T>(

@@ -3,6 +3,10 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { redactPersistedAgentString, redactPersistedAgentValue } from './redaction.js';
 import type { AgentSession, AgentToolExecutionRecord } from './types.js';
+import {
+  acquireSharedStateWriterGate,
+  legacyProjectDirForSidecar,
+} from './session/state-writer-gate.js';
 
 export type AgentCheckpointStatus = 'running' | 'done' | 'aborted' | 'abandoned' | 'failed';
 
@@ -38,32 +42,36 @@ export class AgentCheckpointStore implements AgentCheckpointWriter {
   constructor(private readonly filePath: string) {}
 
   async save(input: SaveAgentCheckpointInput): Promise<AgentIterationCheckpoint> {
-    const now = input.now ?? new Date().toISOString();
-    const checkpoints = await this.readAll();
-    const existingIndex = checkpoints.findIndex(
-      (item) => item.sessionId === input.session.id && item.iteration === input.iteration,
-    );
-    const existing = existingIndex >= 0 ? checkpoints[existingIndex] : undefined;
-    const checkpoint: AgentIterationCheckpoint = {
-      id: existing?.id ?? randomUUID(),
-      sessionId: input.session.id,
-      iteration: input.iteration,
-      status: input.status,
-      session: redactPersistedAgentValue(input.session) as AgentSession,
-      toolExecutions: redactPersistedAgentValue(input.toolExecutions) as AgentToolExecutionRecord[],
-      finalText: redactPersistedAgentString(input.finalText ?? ''),
-      startedAt: existing?.startedAt ?? now,
-      updatedAt: now,
-      ...(input.status === 'running' ? {} : { finishedAt: now }),
-      ...(input.errorMessage === undefined ? {} : { errorMessage: redactPersistedAgentString(input.errorMessage) }),
-    };
+    return await this.withWriterGate(async () => {
+      const now = input.now ?? new Date().toISOString();
+      const checkpoints = await this.readAll();
+      const existingIndex = checkpoints.findIndex(
+        (item) => item.sessionId === input.session.id && item.iteration === input.iteration,
+      );
+      const existing = existingIndex >= 0 ? checkpoints[existingIndex] : undefined;
+      const checkpoint: AgentIterationCheckpoint = {
+        id: existing?.id ?? randomUUID(),
+        sessionId: input.session.id,
+        iteration: input.iteration,
+        status: input.status,
+        session: redactPersistedAgentValue(input.session) as AgentSession,
+        toolExecutions: redactPersistedAgentValue(input.toolExecutions) as AgentToolExecutionRecord[],
+        finalText: redactPersistedAgentString(input.finalText ?? ''),
+        startedAt: existing?.startedAt ?? now,
+        updatedAt: now,
+        ...(input.status === 'running' ? {} : { finishedAt: now }),
+        ...(input.errorMessage === undefined
+          ? {}
+          : { errorMessage: redactPersistedAgentString(input.errorMessage) }),
+      };
 
-    const next =
-      existingIndex >= 0
-        ? checkpoints.map((item, index) => (index === existingIndex ? checkpoint : item))
-        : [...checkpoints, checkpoint];
-    await writeJsonFileAtomic(this.filePath, next);
-    return checkpoint;
+      const next =
+        existingIndex >= 0
+          ? checkpoints.map((item, index) => (index === existingIndex ? checkpoint : item))
+          : [...checkpoints, checkpoint];
+      await writeJsonFileAtomic(this.filePath, next);
+      return checkpoint;
+    });
   }
 
   async listBySession(sessionId: string): Promise<AgentIterationCheckpoint[]> {
@@ -82,57 +90,74 @@ export class AgentCheckpointStore implements AgentCheckpointWriter {
   }
 
   async markInterrupted(sessionId: string, errorMessage: string, now = new Date().toISOString()): Promise<number> {
-    const checkpoints = await this.readAll();
-    let changed = 0;
-    const next = checkpoints.map((checkpoint) => {
-      if (checkpoint.sessionId !== sessionId || checkpoint.status !== 'running') return checkpoint;
-      changed += 1;
-      return {
-        ...checkpoint,
-        status: 'failed' as const,
-        errorMessage: redactPersistedAgentString(errorMessage),
-        updatedAt: now,
-        finishedAt: now,
-      };
+    return await this.withWriterGate(async () => {
+      const checkpoints = await this.readAll();
+      let changed = 0;
+      const next = checkpoints.map((checkpoint) => {
+        if (checkpoint.sessionId !== sessionId || checkpoint.status !== 'running') return checkpoint;
+        changed += 1;
+        return {
+          ...checkpoint,
+          status: 'failed' as const,
+          errorMessage: redactPersistedAgentString(errorMessage),
+          updatedAt: now,
+          finishedAt: now,
+        };
+      });
+      if (changed > 0) await writeJsonFileAtomic(this.filePath, next);
+      return changed;
     });
-    if (changed > 0) await writeJsonFileAtomic(this.filePath, next);
-    return changed;
   }
 
   async markAbandoned(sessionId: string, reason: string, now = new Date().toISOString()): Promise<number> {
-    const checkpoints = await this.readAll();
-    let changed = 0;
-    const next = checkpoints.map((checkpoint) => {
-      if (checkpoint.sessionId !== sessionId || checkpoint.status !== 'running') return checkpoint;
-      changed += 1;
-      return {
-        ...checkpoint,
-        status: 'abandoned' as const,
-        errorMessage: redactPersistedAgentString(reason),
-        updatedAt: now,
-        finishedAt: now,
-      };
+    return await this.withWriterGate(async () => {
+      const checkpoints = await this.readAll();
+      let changed = 0;
+      const next = checkpoints.map((checkpoint) => {
+        if (checkpoint.sessionId !== sessionId || checkpoint.status !== 'running') return checkpoint;
+        changed += 1;
+        return {
+          ...checkpoint,
+          status: 'abandoned' as const,
+          errorMessage: redactPersistedAgentString(reason),
+          updatedAt: now,
+          finishedAt: now,
+        };
+      });
+      if (changed > 0) await writeJsonFileAtomic(this.filePath, next);
+      return changed;
     });
-    if (changed > 0) await writeJsonFileAtomic(this.filePath, next);
-    return changed;
   }
 
   async markCheckpointAbandoned(checkpointId: string, reason: string, now = new Date().toISOString()): Promise<boolean> {
-    const checkpoints = await this.readAll();
-    let changed = false;
-    const next = checkpoints.map((checkpoint) => {
-      if (checkpoint.id !== checkpointId || checkpoint.status !== 'running') return checkpoint;
-      changed = true;
-      return {
-        ...checkpoint,
-        status: 'abandoned' as const,
-        errorMessage: redactPersistedAgentString(reason),
-        updatedAt: now,
-        finishedAt: now,
-      };
+    return await this.withWriterGate(async () => {
+      const checkpoints = await this.readAll();
+      let changed = false;
+      const next = checkpoints.map((checkpoint) => {
+        if (checkpoint.id !== checkpointId || checkpoint.status !== 'running') return checkpoint;
+        changed = true;
+        return {
+          ...checkpoint,
+          status: 'abandoned' as const,
+          errorMessage: redactPersistedAgentString(reason),
+          updatedAt: now,
+          finishedAt: now,
+        };
+      });
+      if (changed) await writeJsonFileAtomic(this.filePath, next);
+      return changed;
     });
-    if (changed) await writeJsonFileAtomic(this.filePath, next);
-    return changed;
+  }
+
+  private async withWriterGate<T>(operation: () => Promise<T>): Promise<T> {
+    const gate = acquireSharedStateWriterGate(
+      legacyProjectDirForSidecar(this.filePath, 'legacy-checkpoints'),
+    );
+    try {
+      return await operation();
+    } finally {
+      gate.close();
+    }
   }
 
   private async readAll(): Promise<AgentIterationCheckpoint[]> {

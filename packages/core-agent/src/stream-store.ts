@@ -3,6 +3,10 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { LlmChatResponse, LlmChatStreamEvent, LlmToolCall, LlmUsage } from '@dbagent/core-llm';
 import { redactPersistedAgentString, redactPersistedAgentValue } from './redaction.js';
+import {
+  acquireSharedStateWriterGate,
+  legacyProjectDirForSidecar,
+} from './session/state-writer-gate.js';
 
 export type AgentStreamStatus = 'streaming' | 'complete' | 'incomplete' | 'failed' | 'aborted';
 
@@ -43,35 +47,45 @@ export class AgentStreamStore {
   constructor(private readonly filePath: string) {}
 
   async start(input: StartAgentStreamInput): Promise<AgentStreamRecord> {
-    const now = input.now ?? new Date().toISOString();
-    const records = await this.readAll();
-    const record: AgentStreamRecord = {
-      id: input.id ?? randomUUID(),
-      sessionId: input.sessionId,
-      providerId: input.providerId,
-      model: input.model,
-      status: 'streaming',
-      text: '',
-      toolCalls: [],
-      startedAt: now,
-      updatedAt: now,
-      chunks: [],
-      ...(input.roundId === undefined ? {} : { roundId: input.roundId }),
-    };
-    await writeJsonFileAtomic(this.filePath, [...records.filter((item) => item.id !== record.id), record]);
-    return record;
+    return await this.withWriterGate(async () => {
+      const now = input.now ?? new Date().toISOString();
+      const records = await this.readAll();
+      const record: AgentStreamRecord = {
+        id: input.id ?? randomUUID(),
+        sessionId: input.sessionId,
+        providerId: input.providerId,
+        model: input.model,
+        status: 'streaming',
+        text: '',
+        toolCalls: [],
+        startedAt: now,
+        updatedAt: now,
+        chunks: [],
+        ...(input.roundId === undefined ? {} : { roundId: input.roundId }),
+      };
+      await writeJsonFileAtomic(this.filePath, [
+        ...records.filter((item) => item.id !== record.id),
+        record,
+      ]);
+      return record;
+    });
   }
 
   async appendEvent(streamId: string, event: LlmChatStreamEvent, now = new Date().toISOString()): Promise<AgentStreamRecord> {
-    const records = await this.readAll();
-    const index = records.findIndex((item) => item.id === streamId);
-    if (index < 0) throw new Error(`Agent stream does not exist: ${streamId}`);
+    return await this.withWriterGate(async () => {
+      const records = await this.readAll();
+      const index = records.findIndex((item) => item.id === streamId);
+      if (index < 0) throw new Error(`Agent stream does not exist: ${streamId}`);
 
-    const current = records[index]!;
-    const persistedEvent = redactPersistedAgentValue(event) as LlmChatStreamEvent;
-    const next = applyEvent(current, persistedEvent, now);
-    await writeJsonFileAtomic(this.filePath, records.map((item, itemIndex) => (itemIndex === index ? next : item)));
-    return next;
+      const current = records[index]!;
+      const persistedEvent = redactPersistedAgentValue(event) as LlmChatStreamEvent;
+      const next = applyEvent(current, persistedEvent, now);
+      await writeJsonFileAtomic(
+        this.filePath,
+        records.map((item, itemIndex) => (itemIndex === index ? next : item)),
+      );
+      return next;
+    });
   }
 
   async markIncomplete(streamId: string, errorMessage: string, now = new Date().toISOString()): Promise<AgentStreamRecord> {
@@ -108,18 +122,34 @@ export class AgentStreamStore {
     errorMessage: string,
     now: string,
   ): Promise<AgentStreamRecord> {
-    const records = await this.readAll();
-    const index = records.findIndex((item) => item.id === streamId);
-    if (index < 0) throw new Error(`Agent stream does not exist: ${streamId}`);
-    const next: AgentStreamRecord = {
-      ...records[index]!,
-      status,
-      errorMessage: redactPersistedAgentString(errorMessage),
-      updatedAt: now,
-      finishedAt: now,
-    };
-    await writeJsonFileAtomic(this.filePath, records.map((item, itemIndex) => (itemIndex === index ? next : item)));
-    return next;
+    return await this.withWriterGate(async () => {
+      const records = await this.readAll();
+      const index = records.findIndex((item) => item.id === streamId);
+      if (index < 0) throw new Error(`Agent stream does not exist: ${streamId}`);
+      const next: AgentStreamRecord = {
+        ...records[index]!,
+        status,
+        errorMessage: redactPersistedAgentString(errorMessage),
+        updatedAt: now,
+        finishedAt: now,
+      };
+      await writeJsonFileAtomic(
+        this.filePath,
+        records.map((item, itemIndex) => (itemIndex === index ? next : item)),
+      );
+      return next;
+    });
+  }
+
+  private async withWriterGate<T>(operation: () => Promise<T>): Promise<T> {
+    const gate = acquireSharedStateWriterGate(
+      legacyProjectDirForSidecar(this.filePath, 'legacy-streams'),
+    );
+    try {
+      return await operation();
+    } finally {
+      gate.close();
+    }
   }
 
   private async readAll(): Promise<AgentStreamRecord[]> {
