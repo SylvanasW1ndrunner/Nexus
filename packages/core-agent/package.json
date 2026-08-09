@@ -10,7 +10,8 @@
     "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:journal": "vitest run test/agent-journal*.test.ts test/run-ingress-idempotency.test.ts test/model-turn-commit.test.ts --pool=forks"
   },
   "dependencies": {
     "@dbagent/core-llm": "workspace:*",
