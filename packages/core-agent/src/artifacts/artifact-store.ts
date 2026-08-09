@@ -81,6 +81,7 @@ export type ArtifactStoreErrorCode =
   | 'EXPIRED'
   | 'DELETED'
   | 'LEGACY_UNAVAILABLE'
+  | 'STATE_MIGRATION_ACTIVE'
   | 'STORE_BUSY'
   | 'INJECTED_CRASH';
 

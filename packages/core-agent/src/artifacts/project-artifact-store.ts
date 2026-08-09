@@ -30,6 +30,7 @@ import {
 import {
   acquireSharedStateWriterGate,
   legacyProjectDirForArtifactRoot,
+  StateWriterGateError,
 } from '../session/state-writer-gate.js';
 
 export * from './artifact-store.js';
@@ -104,11 +105,11 @@ export class ProjectArtifactStore implements AgentArtifactStore {
 
   async stage(input: StageArtifactInput): Promise<StagedArtifact> {
     validateStageInput(input);
-    const stateGate = acquireSharedStateWriterGate(legacyProjectDirForArtifactRoot(this.#rootDir));
+    const gates = await this.#acquireLifecycleGates();
     try {
       return await this.#stageWithStateGate(input);
     } finally {
-      stateGate.close();
+      gates.close();
     }
   }
 
@@ -211,16 +212,11 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async commit(input: CommitArtifactInput): Promise<ArtifactRef> {
-    const stateGate = acquireSharedStateWriterGate(legacyProjectDirForArtifactRoot(this.#rootDir));
+    const gates = await this.#acquireLifecycleGates();
     try {
-      const gate = await this.#acquireMutationGate();
-      try {
-        return await this.#commitWithGate(input);
-      } finally {
-        gate.close();
-      }
+      return await this.#commitWithGate(input);
     } finally {
-      stateGate.close();
+      gates.close();
     }
   }
 
@@ -293,24 +289,24 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   async open(ref: ReadableArtifactRef): Promise<ReadableStream<Uint8Array>> {
     assertReadableArtifact(ref, this.#projectId);
     this.#assertProject(ref.projectId);
-    const lifecycle = await this.#artifactLifecycle(ref.artifactId, new Date(this.#now()));
-    if (lifecycle === 'expired') throw new ArtifactStoreError('EXPIRED', 'Artifact has expired.');
-    if (lifecycle === 'deleted') throw new ArtifactStoreError('DELETED', 'Artifact was deleted.');
-    const fact = await this.#findCreatedFact(ref.artifactId);
-    if (fact === undefined) {
-      throw new ArtifactStoreError('NOT_FOUND', 'Artifact has no committed Journal reference.');
-    }
-    if (fact.payload.availability === 'legacy-unavailable') {
-      throw new ArtifactStoreError('LEGACY_UNAVAILABLE', 'Legacy artifact content is unavailable.');
-    }
-    if (ref.availability === 'legacy-unavailable') {
-      throw new ArtifactStoreError('LEGACY_UNAVAILABLE', 'Legacy artifact content is unavailable.');
-    }
-    assertMatchingFact(fact, ref, fact.runId);
-    let metadata = await this.#readCommittedMetadata(ref.artifactId);
-    if (metadata === undefined) {
-      const gate = await this.#acquireMutationGate();
-      try {
+    const gates = await this.#acquireLifecycleGates();
+    let file: FileHandle | undefined;
+    let baseline: Awaited<ReturnType<FileHandle['stat']>> | undefined;
+    try {
+      const lifecycle = await this.#artifactLifecycle(ref.artifactId, new Date(this.#now()));
+      if (lifecycle === 'expired') throw new ArtifactStoreError('EXPIRED', 'Artifact has expired.');
+      if (lifecycle === 'deleted') throw new ArtifactStoreError('DELETED', 'Artifact was deleted.');
+      const fact = await this.#findCreatedFact(ref.artifactId);
+      if (fact === undefined) {
+        throw new ArtifactStoreError('NOT_FOUND', 'Artifact has no committed Journal reference.');
+      }
+      if (fact.payload.availability === 'legacy-unavailable' ||
+        ref.availability === 'legacy-unavailable') {
+        throw new ArtifactStoreError('LEGACY_UNAVAILABLE', 'Legacy artifact content is unavailable.');
+      }
+      assertMatchingFact(fact, ref, fact.runId);
+      let metadata = await this.#readCommittedMetadata(ref.artifactId);
+      if (metadata === undefined) {
         metadata = await this.#readCommittedMetadata(ref.artifactId);
         if (metadata === undefined) {
           const staged = await this.#readStagedMetadata(ref.artifactId);
@@ -320,44 +316,70 @@ export class ProjectArtifactStore implements AgentArtifactStore {
           await this.#promote(publicStaged(staged), fact.occurredAt);
           metadata = await this.#readCommittedMetadata(ref.artifactId);
         }
-      } finally {
-        gate.close();
       }
-    }
-    if (metadata === undefined) {
-      throw new ArtifactStoreError('CORRUPT', 'Committed artifact metadata is missing after promotion.');
-    }
-    assertPersistedArtifact(metadata, this.#projectId);
-    assertArtifactInput(metadata, ref);
-    const objectPath = this.#objectPath(ref.checksum);
-    let file: FileHandle | undefined;
-    try {
+      if (metadata === undefined) {
+        throw new ArtifactStoreError('CORRUPT', 'Committed artifact metadata is missing after promotion.');
+      }
+      assertPersistedArtifact(metadata, this.#projectId);
+      assertArtifactInput(metadata, ref);
+      const objectPath = this.#objectPath(ref.checksum);
       file = await open(objectPath, 'r');
       await verifyOpenFile(file, ref.checksum, ref.byteSize);
+      baseline = await file.stat();
       await this.#afterOpenVerified?.(objectPath);
     } catch (error) {
       await file?.close().catch(() => undefined);
       throw normalizeArtifactReadError(error);
+    } finally {
+      gates.close();
     }
+    if (file === undefined || baseline === undefined) {
+      throw new ArtifactStoreError('CORRUPT', 'Artifact stream was not initialized.');
+    }
+    const verifiedFile = file;
+    const verifiedBaseline = baseline;
     let position = 0;
     let closed = false;
+    const hash = createHash('sha256');
     const closeFile = async (): Promise<void> => {
       if (closed) return;
       closed = true;
-      await file.close();
+      await verifiedFile.close();
+    };
+    const finish = async (): Promise<void> => {
+      const extra = new Uint8Array(1);
+      const extraRead = await verifiedFile.read(extra, 0, 1, ref.byteSize);
+      const after = await verifiedFile.stat();
+      if (extraRead.bytesRead !== 0 || !sameFileGeneration(verifiedBaseline, after) ||
+        after.size !== ref.byteSize || hash.digest('hex') !== ref.checksum) {
+        throw new ArtifactStoreError(
+          'CORRUPT',
+          'Artifact bytes changed or failed terminal integrity validation.',
+        );
+      }
+      await closeFile();
     };
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
-          const buffer = new Uint8Array(64 * 1024);
-          const { bytesRead } = await file.read(buffer, 0, buffer.byteLength, position);
-          if (bytesRead === 0) {
-            await closeFile();
+          if (position === ref.byteSize) {
+            await finish();
             controller.close();
             return;
           }
+          const buffer = new Uint8Array(Math.min(64 * 1024, ref.byteSize - position));
+          const { bytesRead } = await verifiedFile.read(buffer, 0, buffer.byteLength, position);
+          if (bytesRead === 0) {
+            throw new ArtifactStoreError('CORRUPT', 'Artifact ended before its declared byte size.');
+          }
           position += bytesRead;
-          controller.enqueue(buffer.subarray(0, bytesRead));
+          const emitted = buffer.subarray(0, bytesRead);
+          hash.update(emitted);
+          controller.enqueue(emitted);
+          if (position === ref.byteSize) {
+            await finish();
+            controller.close();
+          }
         } catch (error) {
           await closeFile();
           controller.error(normalizeArtifactReadError(error));
@@ -370,18 +392,28 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   }
 
   async expire(ref: ArtifactRef, context: ArtifactJournalContext): Promise<void> {
-    await this.#commitLifecycle('artifact.expired', ref, context);
+    const gates = await this.#acquireLifecycleGates();
+    try {
+      await this.#commitLifecycle('artifact.expired', ref, context);
+    } finally {
+      gates.close();
+    }
   }
 
   async delete(ref: ArtifactRef, context: ArtifactJournalContext): Promise<void> {
-    await this.#commitLifecycle('artifact.deleted', ref, context);
+    const gates = await this.#acquireLifecycleGates();
+    try {
+      await this.#commitLifecycle('artifact.deleted', ref, context);
+    } finally {
+      gates.close();
+    }
   }
 
   async collectGarbage(now: Date): Promise<ArtifactGcReport> {
     if (!Number.isFinite(now.getTime())) {
       throw new ArtifactStoreError('INVALID_ARGUMENT', 'GC time must be valid.');
     }
-    const gate = await this.#acquireMutationGate();
+    const gate = await this.#acquireLifecycleGates();
     try {
       return await this.#collectGarbageWithGate(now);
     } finally {
@@ -456,6 +488,36 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       throw new ArtifactStoreError(
         'STORE_BUSY',
         `Artifact mutation gate failed${errorCode(error) === undefined ? '' : ` (${errorCode(error)})`}.`,
+      );
+    }
+  }
+
+  async #acquireLifecycleGates() {
+    let stateGate: ReturnType<typeof acquireSharedStateWriterGate> | undefined;
+    try {
+      stateGate = acquireSharedStateWriterGate(legacyProjectDirForArtifactRoot(this.#rootDir));
+      const artifactGate = await this.#acquireMutationGate();
+      let closed = false;
+      return {
+        close() {
+          if (closed) return;
+          closed = true;
+          try {
+            artifactGate.close();
+          } finally {
+            stateGate!.close();
+          }
+        },
+      };
+    } catch (error) {
+      stateGate?.close();
+      if (error instanceof StateWriterGateError) {
+        throw new ArtifactStoreError('STATE_MIGRATION_ACTIVE', error.message);
+      }
+      if (error instanceof ArtifactStoreError) throw error;
+      throw new ArtifactStoreError(
+        'STORE_BUSY',
+        `Artifact lifecycle gate failed${errorCode(error) === undefined ? '' : ` (${errorCode(error)})`}.`,
       );
     }
   }
@@ -873,6 +935,14 @@ async function verifyOpenFile(
     before.mtimeMs !== after.mtimeMs || actualSize !== byteSize || hash.digest('hex') !== checksum) {
     throw new ArtifactStoreError('CORRUPT', 'Artifact checksum or exact byte size is invalid.');
   }
+}
+
+function sameFileGeneration(
+  before: { dev: number; ino: number; size: number; mtimeMs: number },
+  after: { dev: number; ino: number; size: number; mtimeMs: number },
+): boolean {
+  return before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
+    before.mtimeMs === after.mtimeMs;
 }
 
 function normalizeArtifactReadError(error: unknown): ArtifactStoreError {

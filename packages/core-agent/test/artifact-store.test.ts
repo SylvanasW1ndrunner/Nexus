@@ -1,6 +1,18 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  truncate,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -247,6 +259,30 @@ describe('ProjectArtifactStore', () => {
     await expect(fixture.store.open(committed)).rejects.toMatchObject({ code: 'CORRUPT' });
   });
 
+  it.each(['append', 'truncate'] as const)(
+    'rejects a same-inode %s after verification with a terminal typed integrity error',
+    async (mutation) => {
+      const fixture = await createFixture();
+      const original = Buffer.from('same-inode-stream-integrity');
+      const staged = await fixture.store.stage({ mediaType: 'text/plain', source: chunks(original) });
+      const committed = await fixture.store.commit({
+        staged, journal: fixture.context(`same-inode-${mutation}`), summary: mutation,
+      });
+      const objectPath = await findFileContaining(fixture.artifactRoot, original.toString('utf8'));
+      const mutatingStore = new ProjectArtifactStore({
+        projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+        afterOpenVerified: async () => {
+          if (mutation === 'append') await appendFile(objectPath, '-appended');
+          else await truncate(objectPath, 5);
+        },
+      });
+
+      await expect(readStream(await mutatingStore.open(committed))).rejects.toMatchObject({
+        code: 'CORRUPT',
+      });
+    },
+  );
+
   it('holds a cross-process-safe mutation gate from verified commit bytes through promotion against GC', async () => {
     const fixture = await createFixture();
     const staged = await fixture.store.stage({
@@ -308,7 +344,7 @@ describe('ProjectArtifactStore', () => {
       const commitInput = {
         staged, journal: fixture.context(`child-commit-${killCommit}`), summary: 'child mutation race',
       };
-      const commit = spawnArtifactWorker(fixture.directory, 'commit', commitInput);
+      const commit = spawnArtifactWorker(fixture.directory, 'commit', commitInput, true);
       await waitForPath(join(fixture.directory, 'artifact-commit-ready'));
       const gc = spawnArtifactWorker(fixture.directory, 'gc');
       await waitForPath(join(fixture.directory, 'artifact-gc-started'));
@@ -331,6 +367,105 @@ describe('ProjectArtifactStore', () => {
       }
       expect(await readFile(join(fixture.directory, 'artifact-gc-completed'), 'utf8'))
         .toBe('completed');
+    },
+    20_000,
+  );
+
+  it.each([false, true])(
+    'protects a live child stage from GC and recovers the lease after SIGKILL=%s',
+    async (killStage) => {
+      const fixture = await createFixture();
+      const stage = spawnArtifactWorker(fixture.directory, 'stage', undefined, true);
+      await waitForPath(join(fixture.directory, 'artifact-stage-ready'));
+      const temporaryName = (await readdir(join(fixture.artifactRoot, 'staged')))
+        .find((name) => name.startsWith('.stage-'));
+      expect(temporaryName).toBeDefined();
+      const temporaryPath = join(fixture.artifactRoot, 'staged', temporaryName!);
+      const old = new Date('2026-08-09T11:00:00.000Z');
+      await utimes(temporaryPath, old, old);
+
+      const gc = spawnArtifactWorker(fixture.directory, 'gc');
+      await waitForPath(join(fixture.directory, 'artifact-gc-started'));
+      await delay(250);
+      const gcWasBlocked = gc.exitCode === null;
+
+      if (killStage) {
+        stage.kill('SIGKILL');
+      } else {
+        await writeFile(join(fixture.directory, 'artifact-stage-release'), 'release');
+      }
+      await waitForExit(stage);
+      await waitForExit(gc);
+      expect(gcWasBlocked).toBe(true);
+    },
+    20_000,
+  );
+
+  it.each(['stage', 'commit', 'open', 'expire', 'delete', 'gc'] as const)(
+    'blocks child %s throughout the exclusive state final-cut gate and resumes after release',
+    async (mode) => {
+      const fixture = await createFixture();
+      const input = await prepareChildArtifactOperation(fixture, mode);
+      const holder = spawnArtifactWorker(fixture.directory, 'hold-state');
+      await waitForPath(join(fixture.directory, 'artifact-state-holder-ready'));
+      const operation = spawnArtifactWorker(fixture.directory, mode, input);
+      await waitForPath(join(fixture.directory, `artifact-${mode}-started`));
+      await delay(250);
+      const operationWasBlocked = operation.exitCode === null;
+
+      await writeFile(join(fixture.directory, 'artifact-state-holder-release'), 'release');
+      expect(await waitForExit(holder)).toBe(0);
+      const exit = await waitForExit(operation);
+      if (exit !== 0) {
+        throw new Error(await readFile(join(fixture.directory, `artifact-${mode}-error`), 'utf8'));
+      }
+      expect(operationWasBlocked).toBe(true);
+    },
+    20_000,
+  );
+
+  it.each(['stage', 'commit', 'open', 'expire', 'delete', 'gc'] as const)(
+    'releases the exclusive state final-cut gate for child %s after holder SIGKILL',
+    async (mode) => {
+      const fixture = await createFixture();
+      const input = await prepareChildArtifactOperation(fixture, mode);
+      const holder = spawnArtifactWorker(fixture.directory, 'hold-state');
+      await waitForPath(join(fixture.directory, 'artifact-state-holder-ready'));
+      const operation = spawnArtifactWorker(fixture.directory, mode, input);
+      await waitForPath(join(fixture.directory, `artifact-${mode}-started`));
+      await delay(250);
+      const operationWasBlocked = operation.exitCode === null;
+
+      holder.kill('SIGKILL');
+      await waitForExit(holder);
+      const exit = await waitForExit(operation);
+      if (exit !== 0) {
+        throw new Error(await readFile(join(fixture.directory, `artifact-${mode}-error`), 'utf8'));
+      }
+      expect(operationWasBlocked).toBe(true);
+    },
+    20_000,
+  );
+
+  it.each(['stage', 'commit', 'open', 'expire', 'delete', 'gc'] as const)(
+    'rejects child %s with a typed error after migration activation',
+    async (mode) => {
+      const fixture = await createFixture();
+      const input = await prepareChildArtifactOperation(fixture, mode);
+      const database = new DatabaseSync(fixture.journalPath);
+      try {
+        database.exec(`
+          CREATE TABLE schema_migrations (status TEXT NOT NULL);
+          INSERT INTO schema_migrations (status) VALUES ('active');
+        `);
+      } finally {
+        database.close();
+      }
+
+      const operation = spawnArtifactWorker(fixture.directory, mode, input);
+      expect(await waitForExit(operation)).toBe(1);
+      expect(await readFile(join(fixture.directory, `artifact-${mode}-error`), 'utf8'))
+        .toContain('STATE_MIGRATION_ACTIVE');
     },
     20_000,
   );
@@ -763,8 +898,9 @@ async function createRunContext(journal: SqliteAgentJournal, suffix: string) {
 
 function spawnArtifactWorker(
   projectDir: string,
-  mode: 'commit' | 'gc',
-  commitInput?: unknown,
+  mode: 'hold-state' | 'stage' | 'commit' | 'open' | 'expire' | 'delete' | 'gc',
+  operationInput?: unknown,
+  commitBarrier = false,
 ) {
   const viteNode = join(
     process.cwd(),
@@ -784,12 +920,39 @@ function spawnArtifactWorker(
       ...process.env,
       DBAGENT_ARTIFACT_CHILD_PROJECT: projectDir,
       DBAGENT_ARTIFACT_WORKER_MODE: mode,
-      ...(commitInput === undefined ? {} : {
-        DBAGENT_ARTIFACT_COMMIT_INPUT: JSON.stringify(commitInput),
+      ...(operationInput === undefined ? {} : {
+        DBAGENT_ARTIFACT_OPERATION_INPUT: JSON.stringify(operationInput),
       }),
+      ...(commitBarrier && mode === 'commit' ? { DBAGENT_ARTIFACT_COMMIT_BARRIER: '1' } : {}),
+      ...(commitBarrier && mode === 'stage' ? { DBAGENT_ARTIFACT_STAGE_BARRIER: '1' } : {}),
     },
     stdio: 'ignore',
   });
+}
+
+async function prepareChildArtifactOperation(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  mode: 'stage' | 'commit' | 'open' | 'expire' | 'delete' | 'gc',
+): Promise<unknown> {
+  if (mode === 'stage' || mode === 'gc') return undefined;
+  const staged = await fixture.store.stage({
+    mediaType: 'text/plain',
+    source: chunks(Buffer.from(`state-gate-${mode}`)),
+  });
+  if (mode === 'commit') {
+    return {
+      staged,
+      journal: fixture.context(`state-gate-${mode}`),
+      summary: `state gate ${mode}`,
+    };
+  }
+  const ref = await fixture.store.commit({
+    staged,
+    journal: fixture.context(`state-gate-${mode}-seed`),
+    summary: `state gate ${mode}`,
+  });
+  if (mode === 'open') return ref;
+  return { ref, context: fixture.context(`state-gate-${mode}`) };
 }
 
 async function waitForPath(path: string): Promise<void> {

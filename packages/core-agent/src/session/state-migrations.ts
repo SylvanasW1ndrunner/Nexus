@@ -340,9 +340,16 @@ export class StateMigrationRunner {
           'Legacy archive bytes failed verification.',
         );
       }
+      const verifiedDetails = await file.stat();
+      if (!sameFileGeneration(details, verifiedDetails)) {
+        throw new StateMigrationError(
+          'MIGRATION_VALIDATION_FAILED',
+          'Legacy archive bytes changed during verification.',
+        );
+      }
       const verified = file;
       file = undefined;
-      return streamFileHandle(verified, ref.byteSize);
+      return streamFileHandle(verified, ref.byteSize, ref.checksum, verifiedDetails);
     } catch (error) {
       await file?.close().catch(() => undefined);
       if (error instanceof StateMigrationError) throw error;
@@ -2523,8 +2530,11 @@ async function hashFileHandle(file: FileHandle): Promise<string> {
 async function* streamFileHandle(
   file: FileHandle,
   expectedByteSize: number,
+  expectedChecksum: string,
+  baseline: Awaited<ReturnType<FileHandle['stat']>>,
 ): AsyncIterable<Uint8Array> {
   const buffer = Buffer.allocUnsafe(64 * 1024);
+  const hash = createHash('sha256');
   let position = 0;
   try {
     while (position < expectedByteSize) {
@@ -2537,11 +2547,43 @@ async function* streamFileHandle(
         );
       }
       position += bytesRead;
-      yield new Uint8Array(buffer.subarray(0, bytesRead));
+      const emitted = buffer.subarray(0, bytesRead);
+      hash.update(emitted);
+      yield new Uint8Array(emitted);
     }
+    const extra = Buffer.allocUnsafe(1);
+    const extraRead = await file.read(extra, 0, 1, expectedByteSize);
+    const after = await file.stat();
+    if (extraRead.bytesRead !== 0 || !sameFileGeneration(baseline, after) ||
+      after.size !== expectedByteSize || hash.digest('hex') !== expectedChecksum) {
+      throw new StateMigrationError(
+        'MIGRATION_VALIDATION_FAILED',
+        'Legacy archive bytes changed or failed terminal integrity validation.',
+      );
+    }
+  } catch (error) {
+    if (error instanceof StateMigrationError) throw error;
+    throw new StateMigrationError(
+      'MIGRATION_VALIDATION_FAILED',
+      `Legacy archive bytes could not be streamed: ${error instanceof Error ? error.message : String(error)}`,
+    );
   } finally {
     await file.close();
   }
+}
+
+function sameFileGeneration(
+  before: {
+    dev: number | bigint; ino: number | bigint; size: number | bigint;
+    mtimeMs: number | bigint;
+  },
+  after: {
+    dev: number | bigint; ino: number | bigint; size: number | bigint;
+    mtimeMs: number | bigint;
+  },
+): boolean {
+  return before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
+    before.mtimeMs === after.mtimeMs;
 }
 
 async function fsyncFile(path: string): Promise<void> {

@@ -1,5 +1,16 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-return */
-import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  truncate,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -290,6 +301,34 @@ describe('StateMigrationRunner', () => {
     await expect(migrated.readLegacyArchive(ref, { maxBytes: ref.byteSize - 1 }))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
+
+  it.each(['append', 'truncate'] as const)(
+    'rejects a same-inode legacy archive %s after verification',
+    async (mutation) => {
+      const projectDir = await createLegacyProject();
+      const migrated = await StateMigrationRunner.open(projectDir, {
+        targetSchemaVersion: 2, migratorRevision: `task-4-r4-archive-${mutation}`,
+      });
+      const ref = (await migrated.listLegacyArchives()).find(
+        ({ relativePath }) => relativePath === 'legacy-artifacts/output.txt',
+      )!;
+      const objectRelativePath = withTestDatabase(join(projectDir, 'state.db'), (database) =>
+        (database.prepare(`
+          SELECT object_relative_path FROM legacy_archives
+          WHERE archive_handle = ? AND relative_path = ?
+        `).get(ref.archiveHandle, ref.relativePath) as { object_relative_path: string })
+          .object_relative_path,
+      );
+      const objectPath = join(projectDir, ...objectRelativePath.split('/'));
+      const stream = await migrated.openLegacyArchive(ref);
+      if (mutation === 'append') await appendFile(objectPath, '-appended');
+      else await truncate(objectPath, 5);
+
+      await expect(readChunks(stream)).rejects.toMatchObject({
+        code: 'MIGRATION_VALIDATION_FAILED',
+      });
+    },
+  );
 
   it('issues migration authority once per unsealed Shadow and rejects sealed or active state', async () => {
     const migrationId = 'a'.repeat(64);
