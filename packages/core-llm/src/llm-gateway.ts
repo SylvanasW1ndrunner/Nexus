@@ -1274,12 +1274,12 @@ function validateDecodedModelAttempt(attempt: DecodedModelAttempt): ValidatedMod
       'Model attempt did not contain protocol-recognized terminal framing.',
     );
   }
-  const validated = Object.freeze({
+  const validated = deepFreeze({
     ...attempt,
-    origin: Object.freeze({ ...attempt.origin }),
-    blocks: Object.freeze(attempt.blocks.map(cloneDecodedBlock)),
-    opaqueBlockRefs: Object.freeze([...attempt.opaqueBlockRefs]),
-    ...(attempt.usage === undefined ? {} : { usage: Object.freeze({ ...attempt.usage }) }),
+    origin: { ...attempt.origin },
+    blocks: attempt.blocks.map(cloneDecodedBlock),
+    opaqueBlockRefs: [...attempt.opaqueBlockRefs],
+    ...(attempt.usage === undefined ? {} : { usage: { ...attempt.usage } }),
     terminal: true as const,
     validation: 'validated' as const,
   }) as unknown as ValidatedModelAttempt;
@@ -1544,6 +1544,13 @@ function boundedModelAttemptInteger(
 
 function cloneDecodedBlock(block: DecodedModelContentBlock): DecodedModelContentBlock {
   return structuredClone(block);
+}
+
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if (typeof value !== 'object' || value === null || seen.has(value)) return value;
+  seen.add(value);
+  for (const nested of Object.values(value)) deepFreeze(nested, seen);
+  return Object.freeze(value);
 }
 
 function freezeDiscardedAttempt(attempt: DiscardedModelAttempt): DiscardedModelAttempt {

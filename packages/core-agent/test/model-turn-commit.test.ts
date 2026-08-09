@@ -15,11 +15,21 @@ afterEach(async () => {
 });
 
 describe('RunEventCommitter', () => {
+  it('keeps preparation private and makes SqliteAgentJournal the final validated-attempt authority', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    expect(Object.getOwnPropertySymbols(SqliteAgentJournal.prototype)).toEqual([]);
+    expect(typeof journal.commitValidatedAttempt).toBe('function');
+    const command = await commitCommand(journal);
+    const committed = await journal.commitValidatedAttempt(command);
+    await expect(journal.getCommittedTurn(command.turnId)).resolves.toEqual(committed.turn);
+  });
   it('atomically materializes ordered drafts, current wire identities, and opaque refs', async () => {
     const journal = new SqliteAgentJournal({ filePath: await journalPath() });
     const command = await commitCommand(journal);
 
     const committed = await new RunEventCommitter(journal).commitValidatedAttempt(command);
+
+    await expect(journal.getRunProjection(command.runId)).resolves.toMatchObject({ revision: 4 });
 
     expect(committed.turn.blocks.map((block) => block.type)).toEqual([
       'text',
@@ -143,7 +153,26 @@ describe('RunEventCommitter', () => {
     expect(replayed.validatedAttempts).toEqual([command.attempt]);
   });
 
-  it('rebuilds wiped Turn, Attempt, Envelope, and Invocation tables from events alone', async () => {
+  it('stores one canonical validated attempt and accepts a bounded 90 KiB model event', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const command = await commitCommand(journal);
+    command.attempt = await validatedAttemptFixture('attempt-current', 90 * 1024);
+
+    await expect(journal.commitValidatedAttempt(command)).resolves.toBeDefined();
+    const event = (await journal.readProject('project-a', 0, 100)).find(
+      ({ type }) => type === 'model_attempt_committed',
+    );
+    expect(event?.payload && Object.keys(event.payload).sort()).toEqual([
+      'protocolEnvelope', 'turn', 'validatedAttempt',
+    ]);
+    expect(event?.payload).toMatchObject({
+      turn: { protocolEnvelopeRef: 'protocol-envelope:turn-current' },
+      protocolEnvelope: { schemaVersion: 1 },
+    });
+    expect(JSON.stringify(event?.payload).match(/"padding"/gu)).toHaveLength(1);
+  });
+
+  it('rebuilds every Task3 projection table from events alone in dependency order', async () => {
     const filePath = await journalPath();
     const journal = new SqliteAgentJournal({ filePath });
     const command = await commitCommand(journal);
@@ -152,8 +181,10 @@ describe('RunEventCommitter', () => {
       DatabaseSync: new (path: string) => DatabaseSync;
     };
     const database = new Database(filePath);
-    database.exec(`DELETE FROM agent_invocations; DELETE FROM agent_protocol_envelopes;
-      DELETE FROM agent_turns; DELETE FROM agent_attempts;`);
+    database.exec(`PRAGMA foreign_keys=OFF; DELETE FROM agent_invocations;
+      DELETE FROM agent_protocol_envelopes; DELETE FROM agent_turns; DELETE FROM agent_attempts;
+      DELETE FROM agent_turn_lifecycles; DELETE FROM agent_run_leases; DELETE FROM agent_runs;
+      PRAGMA foreign_keys=ON;`);
     database.close();
 
     await journal.rebuildProjectProjections('project-a');
@@ -161,6 +192,13 @@ describe('RunEventCommitter', () => {
     await expect(journal.getCommittedTurn(command.turnId)).resolves.toEqual(committed.turn);
     await expect(journal.getProtocolEnvelope(command.turnId)).resolves.toEqual(committed.envelope);
     await expect(journal.listInvocations(command.runId)).resolves.toEqual(committed.invocations);
+    await expect(journal.getRunProjection(command.runId)).resolves.toMatchObject({
+      projectId: 'project-a', sessionId: 'session-a', revision: 4,
+    });
+    const verify = new Database(filePath);
+    expect(verify.prepare('SELECT revision, status FROM agent_turn_lifecycles WHERE turn_id = ?')
+      .get(command.turnId)).toEqual({ revision: 2, status: 'committed' });
+    verify.close();
   });
 });
 
@@ -194,7 +232,7 @@ async function commitCommand(journal: SqliteAgentJournal) {
     turnId: 'turn-current',
     commandId: 'commit-current',
     lease: leaseRef,
-    expectedRunRevision: 2,
+    expectedRunRevision: 3,
     expectedTurnRevision: 1,
     attempt: await modelAttempt(),
   };

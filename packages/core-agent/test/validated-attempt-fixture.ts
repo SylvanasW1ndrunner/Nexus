@@ -10,6 +10,7 @@ import {
 
 export async function validatedAttemptFixture(
   attemptId = 'attempt-current',
+  argumentPadding = 0,
 ): Promise<ValidatedModelAttempt> {
   const response = {
     id: `response-${attemptId}`,
@@ -20,7 +21,10 @@ export async function validatedAttemptFixture(
         { type: 'output_text', text: 'I will inspect it.' },
       ] },
       { id: 'item-current-a', type: 'function_call', call_id: 'wire-current-a',
-        name: 'query_database', arguments: '{"sql":"select 1"}' },
+        name: 'query_database', arguments: JSON.stringify({
+          sql: 'select 1',
+          ...(argumentPadding === 0 ? {} : { padding: 'x'.repeat(argumentPadding) }),
+        }) },
       { id: 'reasoning-current', type: 'reasoning', summary: [], encrypted_content: 'opaque-current' },
       { id: 'item-current-b', type: 'function_call', call_id: 'wire-current-b',
         name: 'read_result', arguments: '{"resultRef":"result-current"}' },

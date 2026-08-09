@@ -1,8 +1,6 @@
 import type {
-  ModelContentBlock, ModelFinishReason, ModelProtocolEnvelope, ModelTokenUsage,
-  ValidatedModelAttempt,
+  DecodedModelContentBlock, ModelFinishReason, ModelTokenUsage,
 } from '@dbagent/core-llm';
-import type { AgentTurnProjection } from './event-projectors.js';
 import type { PortableValue } from '@dbagent/shared';
 
 export const AGENT_EVENT_TYPES = [
@@ -81,10 +79,20 @@ export type AgentRunState =
 
 type EmptyPayload = Record<string, never>;
 type ToolTerminalPayload = {
-  invocationId: string;
   summary: string;
   resultRefs: string[];
-  errorCode?: string;
+};
+
+export type PersistedValidatedAttempt = {
+  attemptId: string;
+  origin: { connectionId: string; model: string; protocol: string };
+  blocks: DecodedModelContentBlock[];
+  terminal: true;
+  validation: 'validated';
+  finishReason?: ModelFinishReason;
+  usage?: ModelTokenUsage;
+  providerResponseId?: string;
+  opaqueBlockRefs: string[];
 };
 
 export interface AgentEventPayloadMap {
@@ -102,7 +110,7 @@ export interface AgentEventPayloadMap {
   'run.limit_reached': { limit: string; value?: number };
   'run.completed': {
     finalContentRef: string;
-    deliveryStatus: string;
+    deliveryStatus: 'delivered' | 'pending' | 'failed';
     evidenceRefs: string[];
   };
   'run.failed': { code: string; detail?: PortableValue };
@@ -115,14 +123,17 @@ export interface AgentEventPayloadMap {
   model_delta_batch: { blocks: PortableValue[] };
   model_block_completed: { draftCallKey?: string; block: PortableValue };
   model_attempt_committed: {
-    attemptId: string;
-    blocks: ModelContentBlock[];
-    finishReason: ModelFinishReason;
-    usage?: ModelTokenUsage;
-    protocolEnvelopeRef: string;
-    validatedAttempt: ValidatedModelAttempt;
-    turn: AgentTurnProjection;
-    protocolEnvelope: ModelProtocolEnvelope;
+    validatedAttempt: PersistedValidatedAttempt;
+    turn: { protocolEnvelopeRef: string };
+    protocolEnvelope: {
+      schemaVersion: 1;
+      correlations: Array<{
+        callId: string;
+        draftCallKey: string;
+        wireIdentity?: { callId?: string; providerItemId?: string };
+        replay: 'same-connection-only' | 'compatible-protocol';
+      }>;
+    };
   };
   model_attempt_discarded: { reason: string };
   model_failed: { code: string; retryable: boolean; detail?: PortableValue };
@@ -161,7 +172,12 @@ export interface AgentEventPayloadMap {
   'subagent.completed': { subagentId: string; summary: string; refs: string[] };
   'subagent.failed': { subagentId: string; code: string; summary: string };
   'subagent.cancelled': { subagentId: string; reason: string };
-  'usage.recorded': { scope: string; inputTokens: number; outputTokens: number; totalTokens: number };
+  'usage.recorded': {
+    scope: 'run' | 'turn' | 'attempt' | 'tool';
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
 }
 
 type AgentEventShape<T extends AgentEventType> = {

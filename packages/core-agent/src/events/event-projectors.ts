@@ -1,9 +1,8 @@
 import type {
   ModelContentBlock, ModelFinishReason, ModelProtocolEnvelope, ModelTokenUsage,
-  ValidatedModelAttempt,
 } from '@dbagent/core-llm';
 import type { PortableValue } from '@dbagent/shared';
-import type { AgentEvent, AgentRunState } from './agent-event.js';
+import type { AgentEvent, AgentRunState, PersistedValidatedAttempt } from './agent-event.js';
 
 export type AgentRunProjection = {
   projectId: string;
@@ -61,7 +60,7 @@ export type AgentReplayProjection = {
   attempts: AgentAttemptProjection[];
   invocations: AgentInvocationProjection[];
   envelopes: ModelProtocolEnvelope[];
-  validatedAttempts: ValidatedModelAttempt[];
+  validatedAttempts: PersistedValidatedAttempt[];
   lastSequenceByProject: Record<string, number>;
 };
 
@@ -87,7 +86,7 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
   const attempts = new Map<string, AgentAttemptProjection>();
   const invocations = new Map<string, AgentInvocationProjection>();
   const envelopes = new Map<string, ModelProtocolEnvelope>();
-  const validatedAttempts = new Map<string, ValidatedModelAttempt>();
+  const validatedAttempts = new Map<string, PersistedValidatedAttempt>();
   const lastSequenceByProject: Record<string, number> = {};
 
   for (const event of ordered) {
@@ -120,15 +119,54 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         run.updatedAt = event.occurredAt;
       }
     }
+    if (event.type === 'turn.started' || event.type === 'model_attempt_committed') {
+      const run = runs.get(event.runId);
+      if (run !== undefined) {
+        run.revision += 1;
+        run.updatedAt = event.occurredAt;
+      }
+    }
     if (event.type === 'model_attempt_committed' && event.turnId !== undefined) {
-      turns.set(event.turnId, structuredClone(event.payload.turn));
-      envelopes.set(event.turnId, structuredClone(event.payload.protocolEnvelope));
-      validatedAttempts.set(event.payload.attemptId, structuredClone(event.payload.validatedAttempt));
-      attempts.set(event.payload.attemptId, {
+      const validatedAttempt = structuredClone(event.payload.validatedAttempt);
+      const correlations = structuredClone(event.payload.protocolEnvelope.correlations);
+      const callIds = new Map(correlations.map((item) => [item.draftCallKey, item.callId]));
+      const blocks: ModelContentBlock[] = validatedAttempt.blocks.map((block) => {
+        if (block.type !== 'tool-call-draft') return structuredClone(block);
+        const callId = callIds.get(block.draftCallKey);
+        if (callId === undefined) {
+          throw new TypeError(`Missing protocol correlation for ${block.draftCallKey}.`);
+        }
+        return {
+          type: 'tool-call', callId, name: block.name, arguments: structuredClone(block.arguments),
+        };
+      });
+      turns.set(event.turnId, {
+        projectId: event.projectId,
+        sessionId: event.sessionId,
+        runId: event.runId,
+        turnId: event.turnId,
+        attemptId: validatedAttempt.attemptId,
+        blocks,
+        finishReason: validatedAttempt.finishReason ?? 'unknown',
+        ...(validatedAttempt.usage === undefined
+          ? {}
+          : { usage: structuredClone(validatedAttempt.usage) }),
+        protocolEnvelopeRef: event.payload.turn.protocolEnvelopeRef,
+        committedAt: event.occurredAt,
+      });
+      envelopes.set(event.turnId, {
+        schemaVersion: 1,
+        attemptId: validatedAttempt.attemptId,
+        origin: structuredClone(validatedAttempt.origin),
+        correlations,
+        opaqueBlockRefs: [...validatedAttempt.opaqueBlockRefs],
+      });
+      validatedAttempts.set(validatedAttempt.attemptId, validatedAttempt);
+      attempts.set(validatedAttempt.attemptId, {
         projectId: event.projectId,
         runId: event.runId,
         turnId: event.turnId,
-        attemptId: event.payload.attemptId,
+        attemptId: validatedAttempt.attemptId,
         status: 'committed',
         committedAt: event.occurredAt,
       });

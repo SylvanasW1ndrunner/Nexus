@@ -27,6 +27,42 @@ describe('ModelExecutionGateway attempt boundary', () => {
     expect(() => assertAuthenticValidatedModelAttempt(structuredClone(result.attempt)))
       .toThrow(/authentic/i);
   });
+
+  it('recursively freezes every mutable nested attempt value before authenticity minting', async () => {
+    const result = await gateway().executeAttempt(
+      responsesSession(new ScriptedModelClient([{
+        kind: 'json',
+        response: {
+          id: 'nested-authentic', status: 'completed', output: [
+            { id: 'tool-nested', type: 'function_call', call_id: 'wire-nested',
+              name: 'inspect', arguments: '{"nested":{"limit":3}}' },
+            { id: 'reasoning-nested', type: 'reasoning', summary: [],
+              encrypted_content: { nested: { token: 'opaque' } } },
+          ],
+        },
+      }])),
+      request(),
+    );
+    const tool = result.attempt.blocks[0];
+    expect(tool?.type).toBe('tool-call-draft');
+    if (tool?.type !== 'tool-call-draft') throw new Error('Expected tool draft');
+    expect(Object.isFrozen(tool)).toBe(true);
+    expect(Object.isFrozen(tool.arguments)).toBe(true);
+    expect(Object.isFrozen((tool.arguments as { nested: object }).nested)).toBe(true);
+    expect(Object.isFrozen(tool.wireIdentity)).toBe(true);
+    const opaque = result.attempt.blocks.find((block) => block.type === 'provider-opaque');
+    expect(opaque?.type).toBe('provider-opaque');
+    if (opaque?.type !== 'provider-opaque') throw new Error('Expected provider opaque block');
+    expect(Object.isFrozen(opaque.value)).toBe(true);
+    expect(Reflect.set((tool.arguments as { nested: object }).nested, 'limit', 99)).toBe(false);
+    expect(Reflect.set(tool.wireIdentity as object, 'callId', 'mutated-wire')).toBe(false);
+    expect(Reflect.set(
+      (opaque.value as { encrypted_content: { nested: object } }).encrypted_content.nested,
+      'token',
+      'mutated-opaque',
+    )).toBe(false);
+    expect(() => assertAuthenticValidatedModelAttempt(result.attempt)).not.toThrow();
+  });
   it('discards a partial attempt before retrying and commits only one validated attempt', async () => {
     const client = new ScriptedModelClient([
       streamResponse(async function* () {
@@ -339,6 +375,15 @@ function session(
     route: route(overrides),
     generation: {},
     codec: openAIChatCodec,
+    client,
+  });
+}
+
+function responsesSession(client: ModelClient): ModelSession {
+  return createModelSession({
+    route: route({ protocol: 'openai-responses', codecRevision: 'openai-responses@1' }),
+    generation: {},
+    codec: openAIResponsesCodec,
     client,
   });
 }

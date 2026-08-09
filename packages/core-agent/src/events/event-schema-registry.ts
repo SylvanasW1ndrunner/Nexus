@@ -23,6 +23,7 @@ const USER = ['internal', 'user', 'audit'] as const;
 function descriptor<T extends AgentEventType>(options?: {
   audience?: readonly AgentEventAudience[];
   persistence?: AgentEventPersistence;
+  maxPayloadBytes?: number;
   validate?: (payload: unknown) => void;
 }): AgentEventSchemaDescriptor<T> {
   return Object.freeze({
@@ -32,7 +33,7 @@ function descriptor<T extends AgentEventType>(options?: {
     validate(payload: unknown): void {
       assertPortableValue(payload);
       assertNoSecretMaterial(payload);
-      assertJournalPayloadSafety(payload);
+      assertJournalPayloadSafety(payload, options?.maxPayloadBytes ?? 256 * 1024);
       options?.validate?.(payload);
     },
     redact(payload: AgentEventPayloadMap[T]): AgentEventPayloadMap[T] {
@@ -41,9 +42,9 @@ function descriptor<T extends AgentEventType>(options?: {
   });
 }
 
-function assertJournalPayloadSafety(payload: unknown): void {
-  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > 256 * 1024) {
-    throw new TypeError('Event payload exceeds the 256 KiB journal limit.');
+function assertJournalPayloadSafety(payload: unknown, maxPayloadBytes: number): void {
+  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > maxPayloadBytes) {
+    throw new TypeError(`Event payload exceeds the ${maxPayloadBytes} byte journal limit.`);
   }
   const visit = (value: unknown): void => {
     if (value === null || typeof value !== 'object') return;
@@ -53,7 +54,10 @@ function assertJournalPayloadSafety(payload: unknown): void {
     }
     for (const [key, item] of Object.entries(value)) {
       const normalized = key.replaceAll(/[-_]/gu, '').toLowerCase();
-      if (['authorization', 'proxyauthorization', 'xapikey', 'credential'].includes(normalized)) {
+      if (
+        normalized.endsWith('password') || normalized.endsWith('authorization') ||
+        normalized.endsWith('credential') || normalized.endsWith('apikey')
+      ) {
         throw new TypeError(`Credential-bearing journal field ${key} is forbidden.`);
       }
       visit(item);
@@ -76,6 +80,45 @@ function requireString(record: Record<string, unknown>, key: string): void {
   }
 }
 
+function requireBoundedString(record: Record<string, unknown>, key: string, maximum = 4_096): void {
+  requireString(record, key);
+  if ((record[key] as string).length > maximum) {
+    throw new TypeError(`Event payload ${key} exceeds ${maximum} characters.`);
+  }
+}
+
+function optionalString(record: Record<string, unknown>, key: string): void {
+  if (record[key] !== undefined) requireString(record, key);
+}
+
+function requireLiteral(record: Record<string, unknown>, key: string, value: unknown): void {
+  if (record[key] !== value) throw new TypeError(`Event payload ${key} must be ${String(value)}.`);
+}
+
+function requireEnum(record: Record<string, unknown>, key: string, values: readonly string[]): void {
+  if (typeof record[key] !== 'string' || !values.includes(record[key])) {
+    throw new TypeError(`Event payload ${key} must be one of ${values.join(', ')}.`);
+  }
+}
+
+function requireNonNegativeInteger(record: Record<string, unknown>, key: string): void {
+  if (!Number.isSafeInteger(record[key]) || Number(record[key]) < 0) {
+    throw new TypeError(`Event payload ${key} must be a non-negative integer.`);
+  }
+}
+
+function requireStringArray(record: Record<string, unknown>, key: string): void {
+  const value = record[key];
+  if (!Array.isArray(value) || value.length > 256) {
+    throw new TypeError(`Event payload ${key} must be a string array with at most 256 refs.`);
+  }
+  value.forEach((item, index) => {
+    if (typeof item !== 'string' || item.length === 0 || item.length > 2_048) {
+      throw new TypeError(`Event payload ${key}[${index}] must be a bounded non-empty string.`);
+    }
+  });
+}
+
 function validateShape(
   payload: unknown,
   keys: readonly string[],
@@ -86,14 +129,9 @@ function validateShape(
   const record = requireRecord(payload);
   exactKeys(record, keys);
   requiredStrings.forEach((key) => requireString(record, key));
-  for (const key of requiredArrays) {
-    if (!Array.isArray(record[key])) throw new TypeError(`Event payload ${key} must be an array.`);
-  }
-  for (const key of requiredNumbers) {
-    if (typeof record[key] !== 'number' || !Number.isFinite(record[key])) {
-      throw new TypeError(`Event payload ${key} must be a finite number.`);
-    }
-  }
+  requiredArrays.forEach((key) => requireStringArray(record, key));
+  requiredNumbers.forEach((key) => requireNonNegativeInteger(record, key));
+  if (Object.hasOwn(record, 'summary')) requireBoundedString(record, 'summary');
 }
 
 function validateInput(payload: unknown): void {
@@ -101,6 +139,11 @@ function validateInput(payload: unknown): void {
   exactKeys(record, ['clientRequestId', 'content', 'steeringTarget']);
   requireString(record, 'clientRequestId');
   if (!Object.hasOwn(record, 'content')) throw new TypeError('Event payload content is required.');
+  if (record.steeringTarget !== undefined) {
+    const target = requireRecord(record.steeringTarget);
+    exactKeys(target, ['runId']);
+    requireString(target, 'runId');
+  }
 }
 
 function validateRunCreated(payload: unknown): void {
@@ -115,19 +158,158 @@ function validateRunFailure(payload: unknown): void {
   requireString(record, 'code');
 }
 
+function validateOriginPayload(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['origin']);
+  const origin = requireRecord(record.origin);
+  exactKeys(origin, ['connectionId', 'model', 'protocol']);
+  requireString(origin, 'connectionId');
+  requireString(origin, 'model');
+  requireEnum(origin, 'protocol', [
+    'openai-chat', 'openai-responses', 'anthropic-messages', 'ollama-chat', 'legacy-normalized',
+  ]);
+}
+
+function validateModelDeltaBatch(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['blocks']);
+  if (!Array.isArray(record.blocks)) throw new TypeError('Model delta blocks must be an array.');
+  record.blocks.forEach((block) => assertPortableValue(block));
+}
+
+function validateModelBlockCompleted(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['draftCallKey', 'block']);
+  optionalString(record, 'draftCallKey');
+  if (!Object.hasOwn(record, 'block')) throw new TypeError('Completed model block is required.');
+}
+
+function validateModelFailure(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['code', 'retryable', 'detail']);
+  requireString(record, 'code');
+  if (typeof record.retryable !== 'boolean') {
+    throw new TypeError('Event payload retryable must be a boolean.');
+  }
+}
+
+function validateRunCompleted(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['finalContentRef', 'deliveryStatus', 'evidenceRefs']);
+  requireString(record, 'finalContentRef');
+  requireEnum(record, 'deliveryStatus', ['delivered', 'pending', 'failed']);
+  requireStringArray(record, 'evidenceRefs');
+}
+
+function validateUsageRecorded(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['scope', 'inputTokens', 'outputTokens', 'totalTokens']);
+  requireEnum(record, 'scope', ['run', 'turn', 'attempt', 'tool']);
+  ['inputTokens', 'outputTokens', 'totalTokens'].forEach((key) =>
+    requireNonNegativeInteger(record, key));
+}
+
 function validateCommittedAttempt(payload: unknown): void {
   const record = requireRecord(payload);
-  exactKeys(record, [
-    'attemptId', 'blocks', 'finishReason', 'usage', 'protocolEnvelopeRef',
-    'validatedAttempt', 'turn', 'protocolEnvelope',
+  exactKeys(record, ['validatedAttempt', 'turn', 'protocolEnvelope']);
+  validatePersistedAttempt(record.validatedAttempt);
+  const turn = requireRecord(record.turn);
+  exactKeys(turn, ['protocolEnvelopeRef']);
+  requireString(turn, 'protocolEnvelopeRef');
+  const envelope = requireRecord(record.protocolEnvelope);
+  exactKeys(envelope, ['schemaVersion', 'correlations']);
+  requireLiteral(envelope, 'schemaVersion', 1);
+  if (!Array.isArray(envelope.correlations)) {
+    throw new TypeError('Protocol Envelope correlations must be an array.');
+  }
+  envelope.correlations.forEach(validateCorrelation);
+}
+
+function validatePersistedAttempt(value: unknown): void {
+  const attempt = requireRecord(value);
+  exactKeys(attempt, [
+    'attemptId', 'origin', 'blocks', 'terminal', 'validation', 'finishReason', 'usage',
+    'providerResponseId', 'opaqueBlockRefs',
   ]);
-  requireString(record, 'attemptId');
-  requireString(record, 'finishReason');
-  requireString(record, 'protocolEnvelopeRef');
-  if (!Array.isArray(record.blocks)) throw new TypeError('Committed blocks must be an array.');
-  requireRecord(record.validatedAttempt);
-  requireRecord(record.turn);
-  requireRecord(record.protocolEnvelope);
+  requireString(attempt, 'attemptId');
+  requireLiteral(attempt, 'terminal', true);
+  requireLiteral(attempt, 'validation', 'validated');
+  optionalString(attempt, 'providerResponseId');
+  const origin = requireRecord(attempt.origin);
+  exactKeys(origin, ['connectionId', 'model', 'protocol']);
+  requireString(origin, 'connectionId');
+  requireString(origin, 'model');
+  requireEnum(origin, 'protocol', [
+    'openai-chat', 'openai-responses', 'anthropic-messages', 'ollama-chat', 'legacy-normalized',
+  ]);
+  if (!Array.isArray(attempt.blocks)) throw new TypeError('Validated attempt blocks must be an array.');
+  attempt.blocks.forEach(validateDecodedBlock);
+  requireStringArray(attempt, 'opaqueBlockRefs');
+  if (attempt.finishReason !== undefined) {
+    requireEnum(attempt, 'finishReason', [
+      'stop', 'tool-calls', 'length', 'content-filter', 'error', 'unknown',
+    ]);
+  }
+  if (attempt.usage !== undefined) validateUsage(attempt.usage);
+}
+
+function validateUsage(value: unknown): void {
+  const usage = requireRecord(value);
+  exactKeys(usage, ['inputTokens', 'outputTokens', 'totalTokens', 'cachedInputTokens']);
+  ['inputTokens', 'outputTokens', 'totalTokens'].forEach((key) =>
+    requireNonNegativeInteger(usage, key));
+  if (usage.cachedInputTokens !== undefined) requireNonNegativeInteger(usage, 'cachedInputTokens');
+}
+
+function validateDecodedBlock(value: unknown): void {
+  const block = requireRecord(value);
+  requireString(block, 'type');
+  switch (block.type) {
+    case 'text':
+      exactKeys(block, ['type', 'text']); requireString(block, 'text'); return;
+    case 'resource-ref':
+      exactKeys(block, ['type', 'artifactId', 'mediaType', 'purpose']);
+      requireString(block, 'artifactId'); requireString(block, 'mediaType');
+      requireEnum(block, 'purpose', ['input', 'output']); return;
+    case 'reasoning-summary':
+      exactKeys(block, ['type', 'text', 'derivedFromOpaqueRef']);
+      requireString(block, 'text'); optionalString(block, 'derivedFromOpaqueRef'); return;
+    case 'provider-opaque': {
+      exactKeys(block, ['type', 'opaqueRef', 'protocol', 'origin', 'replay', 'value']);
+      requireString(block, 'opaqueRef'); requireString(block, 'protocol');
+      requireEnum(block, 'replay', ['same-connection-only', 'compatible-protocol']);
+      const origin = requireRecord(block.origin);
+      exactKeys(origin, ['connectionId', 'model']);
+      requireString(origin, 'connectionId'); requireString(origin, 'model');
+      if (!Object.hasOwn(block, 'value')) throw new TypeError('Provider opaque value is required.');
+      return;
+    }
+    case 'tool-call-draft':
+      exactKeys(block, ['type', 'draftCallKey', 'wireIdentity', 'name', 'arguments']);
+      requireString(block, 'draftCallKey'); requireString(block, 'name');
+      if (!Object.hasOwn(block, 'arguments')) throw new TypeError('Tool arguments are required.');
+      if (block.wireIdentity !== undefined) validateWireIdentity(block.wireIdentity);
+      return;
+    default:
+      throw new TypeError(`Unknown validated attempt block type: ${String(block.type)}.`);
+  }
+}
+
+function validateWireIdentity(value: unknown): void {
+  const identity = requireRecord(value);
+  exactKeys(identity, ['callId', 'providerItemId']);
+  optionalString(identity, 'callId'); optionalString(identity, 'providerItemId');
+  if (identity.callId === undefined && identity.providerItemId === undefined) {
+    throw new TypeError('wireIdentity requires callId or providerItemId.');
+  }
+}
+
+function validateCorrelation(value: unknown): void {
+  const correlation = requireRecord(value);
+  exactKeys(correlation, ['callId', 'draftCallKey', 'wireIdentity', 'replay']);
+  requireString(correlation, 'callId'); requireString(correlation, 'draftCallKey');
+  requireEnum(correlation, 'replay', ['same-connection-only', 'compatible-protocol']);
+  if (correlation.wireIdentity !== undefined) validateWireIdentity(correlation.wireIdentity);
 }
 
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): void {
@@ -150,8 +332,8 @@ function validateToolProposed(payload: unknown): void {
 function validateToolTerminal(payload: unknown): void {
   validateShape(
     payload,
-    ['invocationId', 'summary', 'resultRefs', 'errorCode'],
-    ['invocationId', 'summary'],
+    ['summary', 'resultRefs'],
+    ['summary'],
     ['resultRefs'],
   );
 }
@@ -165,19 +347,23 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   'run.input_requested': descriptor({ audience: USER, validate: (p) => validateShape(p, ['reason', 'connectionId'], ['reason']) }),
   'run.cancel_requested': descriptor({ validate: (p) => validateShape(p, ['reason']) }),
   'run.limit_reached': descriptor({ audience: USER, validate: (p) => validateShape(p, ['limit', 'value'], ['limit']) }),
-  'run.completed': descriptor({ audience: USER, validate: (p) => validateShape(p, ['finalContentRef', 'deliveryStatus', 'evidenceRefs'], ['finalContentRef', 'deliveryStatus'], ['evidenceRefs']) }),
+  'run.completed': descriptor({ audience: USER, validate: validateRunCompleted }),
   'run.failed': descriptor({ audience: USER, validate: validateRunFailure }),
   'run.cancelled': descriptor({ audience: USER, validate: (p) => validateShape(p, ['reason']) }),
   'run.interrupted': descriptor({ audience: USER, validate: validateRunFailure }),
   'turn.started': descriptor({ validate: (p) => validateShape(p, ['turnSnapshotId']) }),
   'turn.context_compiled': descriptor({ validate: (p) => validateShape(p, ['contextRef', 'tokenEstimate']) }),
   'turn.no_progress': descriptor({ audience: MODEL, validate: (p) => validateShape(p, ['fingerprint'], ['fingerprint']) }),
-  model_attempt_started: descriptor({ validate: (p) => validateShape(p, ['origin']) }),
-  model_delta_batch: descriptor({ persistence: 'diagnostic', validate: (p) => validateShape(p, ['blocks'], [], ['blocks']) }),
-  model_block_completed: descriptor({ persistence: 'diagnostic', validate: (p) => validateShape(p, ['draftCallKey', 'block']) }),
-  model_attempt_committed: descriptor({ audience: MODEL, validate: validateCommittedAttempt }),
+  model_attempt_started: descriptor({ validate: validateOriginPayload }),
+  model_delta_batch: descriptor({ persistence: 'diagnostic', validate: validateModelDeltaBatch }),
+  model_block_completed: descriptor({ persistence: 'diagnostic', validate: validateModelBlockCompleted }),
+  model_attempt_committed: descriptor({
+    audience: MODEL,
+    maxPayloadBytes: 16 * 1024 * 1024,
+    validate: validateCommittedAttempt,
+  }),
   model_attempt_discarded: descriptor({ persistence: 'diagnostic', validate: (p) => validateShape(p, ['reason'], ['reason']) }),
-  model_failed: descriptor({ persistence: 'diagnostic', validate: (p) => validateShape(p, ['code', 'retryable', 'detail'], ['code']) }),
+  model_failed: descriptor({ persistence: 'diagnostic', validate: validateModelFailure }),
   'turn.closed': descriptor({ validate: (p) => validateShape(p, ['reason'], ['reason']) }),
   'tool.proposed': descriptor({ audience: MODEL, validate: validateToolProposed }),
   'tool.validated': descriptor({ validate: (p) => validateShape(p, ['toolRevision', 'normalizedArgumentsDigest'], ['toolRevision', 'normalizedArgumentsDigest']) }),
@@ -207,7 +393,7 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   'subagent.completed': descriptor({ audience: USER, validate: (p) => validateShape(p, ['subagentId', 'summary', 'refs'], ['subagentId', 'summary'], ['refs']) }),
   'subagent.failed': descriptor({ audience: USER, validate: (p) => validateShape(p, ['subagentId', 'code', 'summary'], ['subagentId', 'code', 'summary']) }),
   'subagent.cancelled': descriptor({ audience: USER, validate: (p) => validateShape(p, ['subagentId', 'reason'], ['subagentId', 'reason']) }),
-  'usage.recorded': descriptor({ validate: (p) => validateShape(p, ['scope', 'inputTokens', 'outputTokens', 'totalTokens'], ['scope'], [], ['inputTokens', 'outputTokens', 'totalTokens']) }),
+  'usage.recorded': descriptor({ validate: validateUsageRecorded }),
 } satisfies AgentEventSchemaRegistry);
 
 export function isAgentEventType(value: string): value is AgentEventType {
