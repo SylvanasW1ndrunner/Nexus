@@ -116,6 +116,57 @@ describe('version 1 canonical stream contract', () => {
     expect(completedCall.arguments).toEqual({ table: 'a' });
   });
 
+  it('yields a Responses tentative delta before a truncated source reports incompleteness', async () => {
+    const iterator = openAIResponsesCodec.decodeStream(
+      streamOf(
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'message', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
+        { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'tentative' },
+      ),
+      context('openai-responses'),
+    )[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'text-delta', blockOrdinal: 0, text: 'tentative' },
+    });
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'INCOMPLETE_MODEL_ATTEMPT' });
+  });
+
+  it('does not read ahead or accumulate pending events across a long Responses delta stream', async () => {
+    let deltaPulls = 0;
+    const deltaCount = 128;
+    const source: AsyncIterable<unknown> = {
+      async *[Symbol.asyncIterator]() {
+        yield await Promise.resolve({ type: 'response.output_item.added', output_index: 0, item: { id: 'message', type: 'message', content: [] } });
+        yield { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } };
+        for (let index = 0; index < deltaCount; index += 1) {
+          deltaPulls += 1;
+          yield { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'x' };
+        }
+        const text = 'x'.repeat(deltaCount);
+        yield { type: 'response.output_text.done', output_index: 0, content_index: 0, text };
+        yield { type: 'response.content_part.done', output_index: 0, content_index: 0, part: { type: 'output_text', text } };
+        yield { type: 'response.output_item.done', output_index: 0, item: { id: 'message', type: 'message', content: [{ type: 'output_text', text }] } };
+        yield { type: 'response.completed', response: { status: 'completed' } };
+      },
+    };
+    const iterator = openAIResponsesCodec.decodeStream(
+      source,
+      context('openai-responses'),
+    )[Symbol.asyncIterator]();
+
+    for (let index = 0; index < deltaCount; index += 1) {
+      const event = await iterator.next();
+      expect(event).toEqual({
+        done: false,
+        value: { type: 'text-delta', blockOrdinal: 0, text: 'x' },
+      });
+      expect(deltaPulls).toBe(index + 1);
+    }
+    expect((await collectFromIterator(iterator)).at(-1)?.type).toBe('finish');
+  });
+
   it('rejects Responses completion while an output item is still incomplete', async () => {
     await expectIncomplete(
       openAIResponsesCodec.decodeStream(
@@ -247,6 +298,15 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   const result: T[] = [];
   for await (const event of iterable) result.push(event);
   return result;
+}
+
+async function collectFromIterator<T>(iterator: AsyncIterator<T>): Promise<T[]> {
+  const result: T[] = [];
+  while (true) {
+    const event = await iterator.next();
+    if (event.done) return result;
+    result.push(event.value);
+  }
 }
 
 async function expectIncomplete(iterable: AsyncIterable<unknown>): Promise<void> {

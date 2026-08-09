@@ -11,7 +11,6 @@ import {
   draftToolCall,
   ModelProtocolError,
   normalizedUsage,
-  normalizeFinishReason,
   opaqueBlockRef,
   providerOpaqueBlock,
   records,
@@ -24,13 +23,13 @@ import {
   type ModelProtocolCodec,
   type ProtocolEncodeSession,
 } from '../codec.js';
+import type { ModelFinishReason } from '../envelope.js';
 import type { DecodedModelStreamEvent } from '../model-stream.js';
 
 type ResponseStreamState =
   | {
       kind: 'text';
       ordinal: number;
-      orderKey: readonly [number, number, number];
       text: string;
       textDone: boolean;
       complete: boolean;
@@ -38,7 +37,6 @@ type ResponseStreamState =
   | {
       kind: 'reasoning-summary';
       ordinal: number;
-      orderKey: readonly [number, number, number];
       text: string;
       textDone: boolean;
       derivedFromOpaqueRef: string;
@@ -47,7 +45,6 @@ type ResponseStreamState =
   | {
       kind: 'tool';
       ordinal: number;
-      orderKey: readonly [number, number, number];
       name: string;
       argumentsText: string;
       wireIdentity?: ModelWireIdentity;
@@ -57,9 +54,16 @@ type ResponseStreamState =
   | {
       kind: 'opaque';
       ordinal: number;
-      orderKey: readonly [number, number, number];
       opaqueRef: string;
       value: Record<string, unknown>;
+      complete: boolean;
+    }
+  | {
+      kind: 'refusal';
+      ordinal: number;
+      opaqueRef: string;
+      refusal: string;
+      refusalDone: boolean;
       complete: boolean;
     };
 
@@ -80,7 +84,8 @@ type ResponseStreamStateInput =
   | Omit<Extract<ResponseStreamState, { kind: 'text' }>, 'ordinal'>
   | Omit<Extract<ResponseStreamState, { kind: 'reasoning-summary' }>, 'ordinal'>
   | Omit<Extract<ResponseStreamState, { kind: 'tool' }>, 'ordinal'>
-  | Omit<Extract<ResponseStreamState, { kind: 'opaque' }>, 'ordinal'>;
+  | Omit<Extract<ResponseStreamState, { kind: 'opaque' }>, 'ordinal'>
+  | Omit<Extract<ResponseStreamState, { kind: 'refusal' }>, 'ordinal'>;
 
 export class OpenAIResponsesCodec implements ModelProtocolCodec {
   readonly protocol = 'openai-responses' as const;
@@ -121,16 +126,14 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
         ? undefined
         : asRecord(usage.input_tokens_details, 'Responses input token details');
     const status = requiredString(root.status, 'OpenAI Responses status');
-    const terminal = status === 'completed' || status === 'failed' || status === 'cancelled';
+    const terminal = ['completed', 'incomplete', 'failed', 'cancelled'].includes(status);
     if (!terminal) {
       throw new ModelProtocolError(
         'INCOMPLETE_MODEL_ATTEMPT',
         `OpenAI Responses static response is not terminal: ${status}`,
       );
     }
-    const finishReason = normalizeFinishReason(
-      status === 'completed' ? 'completed' : root.incomplete_details === undefined ? status : 'incomplete',
-    );
+    const finishReason = responsesFinishReason(status, root.incomplete_details);
     return createDecodedAttempt(context, blocks, {
       terminal,
       ...(finishReason === undefined ? {} : { finishReason }),
@@ -159,11 +162,13 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
     const itemLifecycles = new Map<number, ResponseItemLifecycle>();
     const contentLifecycles = new Map<string, ResponsePartLifecycle>();
     const summaryLifecycles = new Map<string, ResponsePartLifecycle>();
-    const pendingEvents: Array<() => DecodedModelStreamEvent> = [];
+    const lastContentIndices = new Map<number, number>();
+    const lastSummaryIndices = new Map<number, number>();
+    let lastOutputIndex: number | undefined;
     let providerResponseId: string | undefined;
     let usage: ReturnType<typeof normalizedUsage>;
     let terminal = false;
-    let finishReason: ReturnType<typeof normalizeFinishReason>;
+    let finishReason: ModelFinishReason | undefined;
 
     const allocate = (state: ResponseStreamStateInput): ResponseStreamState => {
       const value = { ...state, ordinal: states.length };
@@ -179,7 +184,6 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       }
       const created = allocate({
         kind: 'text',
-        orderKey: [outputIndex, 0, contentIndex],
         text: '',
         textDone: false,
         complete: false,
@@ -198,7 +202,6 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       const lifecycle = requireItemLifecycle(itemLifecycles, outputIndex, 'reasoning');
       const created = allocate({
         kind: 'reasoning-summary',
-        orderKey: [outputIndex, 0, summaryIndex],
         text: '',
         textDone: false,
         derivedFromOpaqueRef: lifecycle.opaqueRef,
@@ -216,7 +219,6 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       }
       const created = allocate({
         kind: 'tool',
-        orderKey: [outputIndex, 0, 0],
         name: '',
         argumentsText: '',
         argumentsDone: false,
@@ -226,30 +228,43 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       itemStates.set(outputIndex, created);
       return created;
     };
-    const queueComplete = (state: ResponseStreamState): void => {
-      if (state.complete) invalid('Responses canonical block completed more than once');
-      state.complete = true;
-      pendingEvents.push(() => ({
-        type: 'block-complete',
-        blockOrdinal: state.ordinal,
-        block: streamBlock(state, context),
-      }));
+    const currentItemLifecycle = (
+      outputIndex: number,
+      expectedType: string,
+    ): ResponseItemLifecycle => {
+      if (lastOutputIndex !== undefined && outputIndex < lastOutputIndex) {
+        invalid('Responses event output_index moved backwards');
+      }
+      return requireItemLifecycle(itemLifecycles, outputIndex, expectedType);
     };
 
     for await (const eventValue of stream) {
       const event = asRecord(eventValue, 'OpenAI Responses stream event');
       const type = requiredString(event.type, 'Responses event type');
       if (terminal) invalid('Responses stream emitted an event after its terminal response');
-      if (type === 'response.created' || type === 'response.in_progress') {
+      if (
+        type === 'response.created' ||
+        type === 'response.queued' ||
+        type === 'response.in_progress'
+      ) {
         const response = asRecord(event.response, 'Responses stream response');
         providerResponseId ??= stringValue(response.id);
         continue;
       }
       if (type === 'response.output_item.added') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
+        if (lastOutputIndex !== undefined) {
+          if (outputIndex <= lastOutputIndex) {
+            invalid('Responses output item indexes must be strictly increasing');
+          }
+          if (!itemLifecycles.get(lastOutputIndex)?.done) {
+            invalid('Responses output item started before the previous item was done');
+          }
+        }
         if (itemLifecycles.has(outputIndex)) {
           invalid('Responses output item index started more than once');
         }
+        lastOutputIndex = outputIndex;
         const item = asRecord(event.item, 'Responses output item');
         const itemType = requiredString(item.type, 'Responses output item type');
         const providerItemId = optionalString(item.id, 'Responses output item id');
@@ -273,7 +288,12 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       if (type === 'response.content_part.added') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const contentIndex = requiredIndex(event.content_index, 'Responses content_index');
-        requireItemLifecycle(itemLifecycles, outputIndex, 'message');
+        currentItemLifecycle(outputIndex, 'message');
+        const previousContentIndex = lastContentIndices.get(outputIndex);
+        if (previousContentIndex !== undefined && contentIndex <= previousContentIndex) {
+          invalid('Responses message content indexes must be strictly increasing');
+        }
+        lastContentIndices.set(outputIndex, contentIndex);
         const key = `${outputIndex}:${contentIndex}`;
         if (contentLifecycles.has(key)) invalid('Responses content part index started more than once');
         const part = asRecord(event.part, 'Responses content part');
@@ -284,11 +304,18 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
             part.text,
             'Responses output text',
           );
-        }
-        else if (part.type !== undefined) {
+        } else if (partType === 'refusal') {
+          const state = allocate({
+            kind: 'refusal',
+            opaqueRef: opaqueBlockRef(context, `content:${outputIndex}:${contentIndex}`),
+            refusal: requiredStringAllowEmpty(part.refusal, 'Responses refusal'),
+            refusalDone: false,
+            complete: false,
+          });
+          contentStates.set(key, state);
+        } else {
           const state = allocate({
             kind: 'opaque',
-            orderKey: [outputIndex, 0, contentIndex],
             opaqueRef: opaqueBlockRef(context, `content:${outputIndex}:${contentIndex}`),
             value: part,
             complete: false,
@@ -300,6 +327,7 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       if (type === 'response.output_text.delta') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const contentIndex = requiredIndex(event.content_index, 'Responses content_index');
+        currentItemLifecycle(outputIndex, 'message');
         requirePartLifecycle(contentLifecycles, `${outputIndex}:${contentIndex}`, 'output_text');
         const state = textState(outputIndex, contentIndex);
         if (state.textDone || state.complete) {
@@ -307,12 +335,13 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
         }
         const delta = requiredStringAllowEmpty(event.delta, 'Responses output text delta');
         state.text += delta;
-        pendingEvents.push(() => ({ type: 'text-delta', blockOrdinal: state.ordinal, text: delta }));
+        yield { type: 'text-delta', blockOrdinal: state.ordinal, text: delta };
         continue;
       }
       if (type === 'response.output_text.done') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const contentIndex = requiredIndex(event.content_index, 'Responses content_index');
+        currentItemLifecycle(outputIndex, 'message');
         requirePartLifecycle(contentLifecycles, `${outputIndex}:${contentIndex}`, 'output_text');
         const state = textState(outputIndex, contentIndex);
         if (state.textDone || state.complete) invalid('Responses output text completed more than once');
@@ -323,6 +352,7 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       if (type === 'response.content_part.done') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const contentIndex = requiredIndex(event.content_index, 'Responses content_index');
+        currentItemLifecycle(outputIndex, 'message');
         const key = `${outputIndex}:${contentIndex}`;
         const part = asRecord(event.part, 'Responses completed content part');
         const partType = requiredString(part.type, 'Responses completed content part type');
@@ -332,17 +362,66 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
         if (state === undefined) invalid('Responses content part completion has no canonical state');
         if (state.kind === 'text') {
           if (!state.textDone) invalid('Responses content part completed before output_text.done');
-          state.text = requiredStringAllowEmpty(part.text, 'Responses output text');
+          const finalText = requiredStringAllowEmpty(part.text, 'Responses output text');
+          if (state.text !== finalText) {
+            invalid('Responses content part text conflicts with output_text.done');
+          }
+        } else if (state.kind === 'refusal') {
+          if (!state.refusalDone) invalid('Responses refusal part completed before refusal.done');
+          const finalRefusal = requiredStringAllowEmpty(part.refusal, 'Responses refusal');
+          if (state.refusal !== finalRefusal) {
+            invalid('Responses content part refusal conflicts with refusal.done');
+          }
         } else if (state.kind === 'opaque') state.value = part;
         else invalid('Responses content part changed canonical block type');
         lifecycle.done = true;
-        queueComplete(state);
+        yield completeState(state, context);
+        continue;
+      }
+      if (type === 'response.refusal.delta') {
+        const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
+        const contentIndex = requiredIndex(event.content_index, 'Responses content_index');
+        currentItemLifecycle(outputIndex, 'message');
+        requirePartLifecycle(contentLifecycles, `${outputIndex}:${contentIndex}`, 'refusal');
+        const state = contentStates.get(`${outputIndex}:${contentIndex}`);
+        if (state?.kind !== 'refusal') invalid('Responses refusal index changed block type');
+        if (state.refusalDone || state.complete) {
+          invalid('Responses refusal delta followed leaf completion');
+        }
+        const delta = requiredStringAllowEmpty(event.delta, 'Responses refusal delta');
+        state.refusal += delta;
+        yield {
+          type: 'provider-opaque-delta',
+          blockOrdinal: state.ordinal,
+          opaqueRef: state.opaqueRef,
+          protocol: this.protocol,
+          fragment: { type: 'refusal', refusal: delta },
+        };
+        continue;
+      }
+      if (type === 'response.refusal.done') {
+        const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
+        const contentIndex = requiredIndex(event.content_index, 'Responses content_index');
+        currentItemLifecycle(outputIndex, 'message');
+        requirePartLifecycle(contentLifecycles, `${outputIndex}:${contentIndex}`, 'refusal');
+        const state = contentStates.get(`${outputIndex}:${contentIndex}`);
+        if (state?.kind !== 'refusal') invalid('Responses refusal index changed block type');
+        if (state.refusalDone || state.complete) {
+          invalid('Responses refusal completed more than once');
+        }
+        state.refusal = requiredStringAllowEmpty(event.refusal, 'Responses refusal');
+        state.refusalDone = true;
         continue;
       }
       if (type === 'response.reasoning_summary_part.added') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const summaryIndex = requiredIndex(event.summary_index, 'Responses summary_index');
-        requireItemLifecycle(itemLifecycles, outputIndex, 'reasoning');
+        currentItemLifecycle(outputIndex, 'reasoning');
+        const previousSummaryIndex = lastSummaryIndices.get(outputIndex);
+        if (previousSummaryIndex !== undefined && summaryIndex <= previousSummaryIndex) {
+          invalid('Responses reasoning summary indexes must be strictly increasing');
+        }
+        lastSummaryIndices.set(outputIndex, summaryIndex);
         const key = `summary:${outputIndex}:${summaryIndex}`;
         if (summaryLifecycles.has(key)) invalid('Responses reasoning summary part started more than once');
         const part = asRecord(event.part, 'Responses reasoning summary part');
@@ -355,6 +434,7 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       if (type === 'response.reasoning_summary_text.delta') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const summaryIndex = requiredIndex(event.summary_index, 'Responses summary_index');
+        currentItemLifecycle(outputIndex, 'reasoning');
         requirePartLifecycle(
           summaryLifecycles,
           `summary:${outputIndex}:${summaryIndex}`,
@@ -366,16 +446,17 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
         }
         const delta = requiredStringAllowEmpty(event.delta, 'Responses reasoning summary delta');
         state.text += delta;
-        pendingEvents.push(() => ({
+        yield {
           type: 'reasoning-summary-delta',
           blockOrdinal: state.ordinal,
           text: delta,
-        }));
+        };
         continue;
       }
       if (type === 'response.reasoning_summary_text.done') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const summaryIndex = requiredIndex(event.summary_index, 'Responses summary_index');
+        currentItemLifecycle(outputIndex, 'reasoning');
         requirePartLifecycle(
           summaryLifecycles,
           `summary:${outputIndex}:${summaryIndex}`,
@@ -392,6 +473,7 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       if (type === 'response.reasoning_summary_part.done') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const summaryIndex = requiredIndex(event.summary_index, 'Responses summary_index');
+        currentItemLifecycle(outputIndex, 'reasoning');
         const key = `summary:${outputIndex}:${summaryIndex}`;
         const part = asRecord(event.part, 'Responses reasoning summary part');
         if (part.type !== 'summary_text') invalid('Known Responses reasoning summary part type is invalid');
@@ -401,33 +483,36 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
         if (!state.textDone) {
           invalid('Responses reasoning summary part completed before reasoning_summary_text.done');
         }
-        state.text = requiredStringAllowEmpty(part.text, 'Responses reasoning summary text');
+        const finalText = requiredStringAllowEmpty(part.text, 'Responses reasoning summary text');
+        if (state.text !== finalText) {
+          invalid('Responses summary part text conflicts with reasoning_summary_text.done');
+        }
         lifecycle.done = true;
-        queueComplete(state);
+        yield completeState(state, context);
         continue;
       }
       if (type === 'response.function_call_arguments.delta') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
-        requireItemLifecycle(itemLifecycles, outputIndex, 'function_call');
+        currentItemLifecycle(outputIndex, 'function_call');
         const state = toolState(outputIndex);
         if (state.argumentsDone || state.complete) {
           invalid('Responses function arguments delta followed completion');
         }
         const delta = requiredStringAllowEmpty(event.delta, 'Responses function arguments delta');
         state.argumentsText += delta;
-        pendingEvents.push(() => ({
+        yield {
           type: 'tool-call-delta',
           blockOrdinal: state.ordinal,
           draftCallKey: `${context.attemptId}:${state.ordinal}`,
           ...(state.wireIdentity === undefined ? {} : { wireIdentity: state.wireIdentity }),
           ...(state.name.length === 0 ? {} : { name: state.name }),
           argumentsDelta: delta,
-        }));
+        };
         continue;
       }
       if (type === 'response.function_call_arguments.done') {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
-        requireItemLifecycle(itemLifecycles, outputIndex, 'function_call');
+        currentItemLifecycle(outputIndex, 'function_call');
         const state = toolState(outputIndex);
         if (state.argumentsDone || state.complete) {
           invalid('Responses function arguments completed more than once');
@@ -440,7 +525,7 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
         const outputIndex = requiredIndex(event.output_index, 'Responses output_index');
         const item = asRecord(event.item, 'Responses completed output item');
         const itemType = requiredString(item.type, 'Responses completed output item type');
-        const lifecycle = requireItemLifecycle(itemLifecycles, outputIndex, itemType);
+        const lifecycle = currentItemLifecycle(outputIndex, itemType);
         if (lifecycle.done) invalid('Responses output item completed more than once');
         validateCompletedItem(lifecycle, item);
         if (itemType === 'function_call') {
@@ -449,7 +534,7 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
             invalid('Responses function item completed before function_call_arguments.done');
           }
           hydrateTool(state, item, true);
-          queueComplete(state);
+          yield completeState(state, context);
         } else if (itemType === 'message') {
           const parts = requiredRecords(item.content, 'Responses message content');
           const lifecycles = [...contentLifecycles.entries()]
@@ -474,6 +559,14 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
               }
               const finalText = requiredStringAllowEmpty(part.text, 'Responses output text');
               if (state.text !== finalText) invalid('Responses completed message text conflicts with its part');
+            } else if (partType === 'refusal') {
+              if (state?.kind !== 'refusal' || !state.refusalDone || !state.complete) {
+                invalid('Responses completed message content lacks one completed refusal state');
+              }
+              const finalRefusal = requiredStringAllowEmpty(part.refusal, 'Responses refusal');
+              if (state.refusal !== finalRefusal) {
+                invalid('Responses completed message refusal conflicts with its part');
+              }
             } else {
               if (state?.kind !== 'opaque' || !state.complete) {
                 invalid('Responses completed message content lacks one completed opaque state');
@@ -486,8 +579,7 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
             .filter(([key, state]) =>
               key.startsWith(`summary:${outputIndex}:`) && state.kind === 'reasoning-summary',
             )
-            .map(([, state]) => state)
-            .sort((left, right) => left.orderKey[2] - right.orderKey[2]);
+            .map(([, state]) => state);
           const summaries = records(item.summary, 'Responses reasoning summary');
           if (summaries.length !== streamedSummaries.length) {
             invalid('Responses completed reasoning summary does not match started parts');
@@ -503,21 +595,19 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
           }
           const opaque = allocate({
             kind: 'opaque',
-            orderKey: [outputIndex, 1, 0],
             opaqueRef: lifecycle.opaqueRef,
             value: item,
             complete: false,
           });
-          queueComplete(opaque);
+          yield completeState(opaque, context);
         } else {
           const opaque = allocate({
             kind: 'opaque',
-            orderKey: [outputIndex, 0, 0],
             opaqueRef: lifecycle.opaqueRef,
             value: item,
             complete: false,
           });
-          queueComplete(opaque);
+          yield completeState(opaque, context);
         }
         lifecycle.done = true;
         continue;
@@ -526,7 +616,11 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
         const response = asRecord(event.response, 'Responses terminal response');
         providerResponseId ??= stringValue(response.id);
         terminal = true;
-        finishReason = normalizeFinishReason(type === 'response.completed' ? 'completed' : 'incomplete');
+        finishReason = type === 'response.completed'
+          ? 'stop'
+          : type === 'response.incomplete'
+            ? responsesFinishReason('incomplete', response.incomplete_details)
+            : 'error';
         if (response.usage !== undefined) {
           const rawUsage = asRecord(response.usage, 'Responses terminal usage');
           const details = rawUsage.input_tokens_details === undefined ? undefined : asRecord(rawUsage.input_tokens_details);
@@ -559,8 +653,6 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
         'OpenAI Responses stream ended before every content block completed',
       );
     }
-    states.sort(compareResponseOrder);
-    for (const [ordinal, state] of states.entries()) state.ordinal = ordinal;
     const blocks = states.map((state) => streamBlock(state, context));
     const attempt = createDecodedAttempt(context, blocks, {
       terminal: true,
@@ -568,7 +660,6 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       ...(usage === undefined ? {} : { usage }),
       ...(providerResponseId === undefined ? {} : { providerResponseId }),
     });
-    for (const pendingEvent of pendingEvents) yield pendingEvent();
     if (usage !== undefined) yield { type: 'usage', usage };
     yield { type: 'finish', attempt };
   }
@@ -720,6 +811,13 @@ function streamBlock(
   if (state.kind === 'opaque') {
     return providerOpaqueBlock(context, state.value, state.opaqueRef);
   }
+  if (state.kind === 'refusal') {
+    return providerOpaqueBlock(
+      context,
+      { type: 'refusal', refusal: state.refusal },
+      state.opaqueRef,
+    );
+  }
   return draftToolCall(
     context,
     state.ordinal,
@@ -729,10 +827,28 @@ function streamBlock(
   );
 }
 
-function compareResponseOrder(left: ResponseStreamState, right: ResponseStreamState): number {
-  return left.orderKey[0] - right.orderKey[0]
-    || left.orderKey[1] - right.orderKey[1]
-    || left.orderKey[2] - right.orderKey[2];
+function completeState(
+  state: ResponseStreamState,
+  context: AttemptDecodeContext,
+): Extract<DecodedModelStreamEvent, { type: 'block-complete' }> {
+  if (state.complete) invalid('Responses canonical block completed more than once');
+  state.complete = true;
+  return {
+    type: 'block-complete',
+    blockOrdinal: state.ordinal,
+    block: streamBlock(state, context),
+  };
+}
+
+function responsesFinishReason(status: string, incompleteDetails: unknown): ModelFinishReason {
+  if (status === 'completed') return 'stop';
+  if (status !== 'incomplete') return 'error';
+  if (incompleteDetails === undefined || incompleteDetails === null) return 'error';
+  const details = asRecord(incompleteDetails, 'Responses incomplete details');
+  const reason = optionalString(details.reason, 'Responses incomplete reason');
+  if (reason === 'max_output_tokens') return 'length';
+  if (reason === 'content_filter') return 'content-filter';
+  return 'error';
 }
 
 function contentIndexFromKey(key: string): number {

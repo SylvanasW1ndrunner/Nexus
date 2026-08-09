@@ -42,11 +42,57 @@ describe('version 2 strict native protocol contract', () => {
     );
   });
 
-  it('rejects a nonterminal Responses static payload as incomplete', () => {
+  it.each(['queued', 'in_progress'] as const)('rejects nonterminal Responses static status %s as incomplete', (status) => {
     expectSyncError(
-      () => openAIResponsesCodec.decode({ status: 'in_progress', output: [] }, context('openai-responses')),
+      () => openAIResponsesCodec.decode({ status, output: [] }, context('openai-responses')),
       'INCOMPLETE_MODEL_ATTEMPT',
     );
+  });
+
+  it('accepts Responses queued and in-progress stream framing before completion', async () => {
+    const events = await collect(openAIResponsesCodec.decodeStream(
+      streamOf(
+        { type: 'response.queued', response: { id: 'response-1', status: 'queued' } },
+        { type: 'response.in_progress', response: { id: 'response-1', status: 'in_progress' } },
+        { type: 'response.completed', response: { id: 'response-1', status: 'completed' } },
+      ),
+      context('openai-responses'),
+    ));
+
+    expect(events.at(-1)).toEqual(expect.objectContaining({ type: 'finish' }));
+  });
+
+  it.each([
+    { reason: 'max_output_tokens', finishReason: 'length' },
+    { reason: 'content_filter', finishReason: 'content-filter' },
+    { reason: 'server_error', finishReason: 'error' },
+  ] as const)('maps static Responses incomplete reason $reason', ({ reason, finishReason }) => {
+    const attempt = openAIResponsesCodec.decode({
+      status: 'incomplete',
+      incomplete_details: { reason },
+      output: [],
+    }, context('openai-responses'));
+
+    expect(attempt).toEqual(expect.objectContaining({ terminal: true, finishReason }));
+  });
+
+  it.each([
+    { reason: 'max_output_tokens', finishReason: 'length' },
+    { reason: 'content_filter', finishReason: 'content-filter' },
+    { reason: 'server_error', finishReason: 'error' },
+  ] as const)('maps streamed Responses incomplete reason $reason', async ({ reason, finishReason }) => {
+    const events = await collect(openAIResponsesCodec.decodeStream(
+      streamOf({
+        type: 'response.incomplete',
+        response: { status: 'incomplete', incomplete_details: { reason } },
+      }),
+      context('openai-responses'),
+    ));
+    const finish = events.at(-1);
+
+    expect(finish?.type).toBe('finish');
+    if (finish?.type !== 'finish') throw new Error('Expected Responses finish');
+    expect(finish.attempt).toEqual(expect.objectContaining({ terminal: true, finishReason }));
   });
 
   it('rejects a non-boolean Ollama static done field', () => {
@@ -68,6 +114,37 @@ describe('version 2 strict native protocol contract', () => {
     {
       name: 'non-integer content_index',
       events: [{ type: 'response.content_part.added', output_index: 0, content_index: 1.5, part: { type: 'output_text', text: '' } }],
+    },
+    {
+      name: 'decreasing output item index',
+      events: [
+        { type: 'response.output_item.added', output_index: 4, item: { id: 'msg-4', type: 'message', content: [] } },
+        { type: 'response.output_item.done', output_index: 4, item: { id: 'msg-4', type: 'message', content: [] } },
+        { type: 'response.output_item.added', output_index: 2, item: { id: 'msg-2', type: 'message', content: [] } },
+      ],
+    },
+    {
+      name: 'next output item before the previous item is done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg-0', type: 'message', content: [] } },
+        { type: 'response.output_item.added', output_index: 1, item: { id: 'msg-1', type: 'message', content: [] } },
+      ],
+    },
+    {
+      name: 'decreasing message content index',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 2, part: { type: 'refusal', refusal: '' } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 1, part: { type: 'refusal', refusal: '' } },
+      ],
+    },
+    {
+      name: 'decreasing reasoning summary index',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'reasoning', type: 'reasoning', summary: [] } },
+        { type: 'response.reasoning_summary_part.added', output_index: 0, summary_index: 2, part: { type: 'summary_text', text: '' } },
+        { type: 'response.reasoning_summary_part.added', output_index: 0, summary_index: 1, part: { type: 'summary_text', text: '' } },
+      ],
     },
   ])('rejects Responses $name', async ({ events }) => {
     await expectStreamError(
@@ -213,39 +290,25 @@ describe('version 2 strict native protocol contract', () => {
     ), 'INVALID_WIRE_RESPONSE');
   });
 
-  it('uses native Responses indexes for canonical order under reversed and interleaved arrival', async () => {
-    const events = await collect(openAIResponsesCodec.decodeStream(
+  it('rejects reversed and interleaved Responses output item arrival', async () => {
+    await expectStreamError(openAIResponsesCodec.decodeStream(
       streamOf(
         { type: 'response.output_item.added', output_index: 11, item: { id: 'tool-11', type: 'function_call', call_id: 'call-11', name: 'inspect', arguments: '' } },
         { type: 'response.function_call_arguments.delta', output_index: 11, delta: '{}' },
         { type: 'response.output_item.added', output_index: 7, item: { id: 'msg-7', type: 'message', content: [] } },
-        { type: 'response.content_part.added', output_index: 7, content_index: 3, part: { type: 'output_text', text: '' } },
-        { type: 'response.output_text.delta', output_index: 7, content_index: 3, delta: 'hello' },
-        { type: 'response.function_call_arguments.done', output_index: 11, arguments: '{}' },
-        { type: 'response.output_text.done', output_index: 7, content_index: 3, text: 'hello' },
-        { type: 'response.content_part.done', output_index: 7, content_index: 3, part: { type: 'output_text', text: 'hello' } },
-        { type: 'response.output_item.done', output_index: 11, item: { id: 'tool-11', type: 'function_call', call_id: 'call-11', name: 'inspect', arguments: '{}' } },
-        { type: 'response.output_item.done', output_index: 7, item: { id: 'msg-7', type: 'message', content: [{ type: 'output_text', text: 'hello' }] } },
-        { type: 'response.completed', response: { status: 'completed' } },
       ),
       context('openai-responses'),
-    ));
-
-    expect(events.filter(
-      (event) => event.type === 'text-delta' || event.type === 'tool-call-delta',
-    ).map((event) => event.blockOrdinal)).toEqual([1, 0]);
-    const finish = events.at(-1);
-    expect(finish?.type).toBe('finish');
-    if (finish?.type !== 'finish') throw new Error('Expected Responses finish');
-    expect(finish.attempt.blocks.map((block) => block.type)).toEqual(['text', 'tool-call-draft']);
+    ), 'INVALID_WIRE_RESPONSE');
   });
 
-  it('preserves an opaque Responses message content part through item completion', async () => {
+  it('streams and preserves a Responses refusal as provider-opaque content', async () => {
     const refusal = { type: 'refusal', refusal: 'cannot comply' };
     const events = await collect(openAIResponsesCodec.decodeStream(
       streamOf(
         { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
-        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: refusal },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'refusal', refusal: '' } },
+        { type: 'response.refusal.delta', output_index: 0, content_index: 0, delta: 'cannot comply' },
+        { type: 'response.refusal.done', output_index: 0, content_index: 0, refusal: 'cannot comply' },
         { type: 'response.content_part.done', output_index: 0, content_index: 0, part: refusal },
         { type: 'response.output_item.done', output_index: 0, item: { id: 'msg', type: 'message', content: [refusal] } },
         { type: 'response.completed', response: { status: 'completed' } },
@@ -253,10 +316,74 @@ describe('version 2 strict native protocol contract', () => {
       context('openai-responses'),
     ));
 
+    expect(events[0]).toEqual({
+      type: 'provider-opaque-delta',
+      blockOrdinal: 0,
+      opaqueRef: 'strict-openai-responses:opaque:content:0:0',
+      protocol: 'openai-responses',
+      fragment: { type: 'refusal', refusal: 'cannot comply' },
+    });
     const complete = events.find((event) => event.type === 'block-complete');
     expect(complete?.type).toBe('block-complete');
     if (complete?.type !== 'block-complete') throw new Error('Expected opaque completion');
     expect(complete.block.type).toBe('provider-opaque');
+  });
+
+  it.each([
+    {
+      name: 'refusal part completion before refusal.done',
+      message: 'before refusal.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'refusal', refusal: '' } },
+        { type: 'response.content_part.done', output_index: 0, content_index: 0, part: { type: 'refusal', refusal: '' } },
+      ],
+    },
+    {
+      name: 'duplicate refusal.done',
+      message: 'completed more than once',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'refusal', refusal: '' } },
+        { type: 'response.refusal.done', output_index: 0, content_index: 0, refusal: '' },
+        { type: 'response.refusal.done', output_index: 0, content_index: 0, refusal: '' },
+      ],
+    },
+    {
+      name: 'refusal.done conflicting with content_part.done',
+      message: 'conflicts with refusal.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'refusal', refusal: '' } },
+        { type: 'response.refusal.done', output_index: 0, content_index: 0, refusal: 'first' },
+        { type: 'response.content_part.done', output_index: 0, content_index: 0, part: { type: 'refusal', refusal: 'changed' } },
+      ],
+    },
+    {
+      name: 'output_text.done conflicting with content_part.done',
+      message: 'conflicts with output_text.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
+        { type: 'response.output_text.done', output_index: 0, content_index: 0, text: 'first' },
+        { type: 'response.content_part.done', output_index: 0, content_index: 0, part: { type: 'output_text', text: 'changed' } },
+      ],
+    },
+    {
+      name: 'reasoning_summary_text.done conflicting with summary part done',
+      message: 'conflicts with reasoning_summary_text.done',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'reasoning', type: 'reasoning', summary: [] } },
+        { type: 'response.reasoning_summary_part.added', output_index: 0, summary_index: 0, part: { type: 'summary_text', text: '' } },
+        { type: 'response.reasoning_summary_text.done', output_index: 0, summary_index: 0, text: 'first' },
+        { type: 'response.reasoning_summary_part.done', output_index: 0, summary_index: 0, part: { type: 'summary_text', text: 'changed' } },
+      ],
+    },
+  ])('rejects Responses $name', async ({ events, message }) => {
+    await expectStreamErrorMessage(
+      openAIResponsesCodec.decodeStream(streamOf(...events), context('openai-responses')),
+      message,
+    );
   });
 
   it.each([
@@ -415,6 +542,21 @@ async function expectStreamError(
   }
   expect(thrown).toBeInstanceOf(ModelProtocolError);
   expect((thrown as ModelProtocolError).code).toBe(code);
+}
+
+async function expectStreamErrorMessage(
+  iterable: AsyncIterable<DecodedModelStreamEvent>,
+  message: string,
+): Promise<void> {
+  let thrown: unknown;
+  try {
+    await collect(iterable);
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeInstanceOf(ModelProtocolError);
+  expect((thrown as ModelProtocolError).code).toBe('INVALID_WIRE_RESPONSE');
+  expect((thrown as ModelProtocolError).message).toContain(message);
 }
 
 function expectSyncError(operation: () => unknown, code: ModelProtocolError['code']): void {
