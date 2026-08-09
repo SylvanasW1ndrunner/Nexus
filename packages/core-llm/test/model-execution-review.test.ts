@@ -31,7 +31,7 @@ afterEach(async () => {
 });
 
 describe('Task 2 independent review contracts', () => {
-  it('binds multi-envelope same-connection replay and returns its committable protocol envelope', async () => {
+  it('binds multi-envelope same-connection replay without publishing a response envelope', async () => {
     const client = new RecordingClient(chatResponse('done'));
     const envelopes = [
       envelope('old-a', 'call-a', 'wire-a'),
@@ -50,13 +50,7 @@ describe('Task 2 independent review contracts', () => {
 
     expect(wire.match(/wire-a/g)).toHaveLength(2);
     expect(wire.match(/wire-b/g)).toHaveLength(2);
-    expect(result.protocolEnvelope).toMatchObject({
-      schemaVersion: 1,
-      correlations: [
-        expect.objectContaining({ callId: 'call-a', wireIdentity: { callId: 'wire-a' } }),
-        expect.objectContaining({ callId: 'call-b', wireIdentity: { callId: 'wire-b' } }),
-      ],
-    });
+    expect(result).not.toHaveProperty('protocolEnvelope');
   });
 
   it('projects opaque state only when a digest-bound compatible fallback is in the prepared bundle', async () => {

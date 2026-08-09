@@ -307,7 +307,7 @@ class CapabilityProvider implements LlmProvider {
   readonly id = 'placeholder';
   readonly name = 'Capability provider';
   readonly mode = 'private' as const;
-  readonly protocol = 'capability-test';
+  readonly protocol = 'legacy-normalized';
   readonly capabilities = {
     chat: 'supported' as const,
     streaming: 'supported' as const,
@@ -364,7 +364,7 @@ function capabilityPlugin(provider = new CapabilityProvider()): LlmProviderPlugi
       id: 'capability-test',
       name: 'Capability test',
       version: '1.0.0',
-      protocol: 'capability-test',
+      protocol: 'legacy-normalized',
       priority: 100,
     },
     match: () => ({ score: 100, evidence: [] }),

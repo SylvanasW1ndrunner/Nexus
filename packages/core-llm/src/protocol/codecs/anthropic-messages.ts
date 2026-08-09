@@ -19,6 +19,7 @@ import {
   type ModelProtocolCodec,
   type ProtocolEncodeSession,
 } from '../codec.js';
+import { bindModelProtocolCodec } from '../codec-authenticity.js';
 import type { DecodedModelContentBlock } from '../content.js';
 import type { DecodedModelStreamEvent } from '../model-stream.js';
 
@@ -37,6 +38,11 @@ type AnthropicStreamBlock =
 
 export class AnthropicMessagesCodec implements ModelProtocolCodec {
   readonly protocol = 'anthropic-messages' as const;
+  readonly revision = 'anthropic-messages@1' as const;
+
+  constructor() {
+    bindModelProtocolCodec(this);
+  }
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
     const session = createProtocolEncodeSession(context, this.protocol, request);

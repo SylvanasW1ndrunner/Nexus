@@ -22,17 +22,16 @@ import { LlmResponseCache } from './response-cache.js';
 import {
   createModelSession,
   createModelSessionBundle,
+  isAuthenticModelSession,
   isAuthenticModelSessionBundle,
-  MODEL_PROTOCOL_CODEC_REVISIONS,
   ModelClientError,
   type ModelClient,
   type ModelSessionBundle,
   type ModelSession,
 } from './model-client.js';
 import {
-  LegacyProviderCodec,
+  legacyProviderCodec,
   LegacyProviderModelClient,
-  canonicalLegacyProtocol,
   legacyAttemptToResponse,
   legacyRequestToCanonical,
 } from './legacy-model-compatibility.js';
@@ -42,7 +41,6 @@ import {
 } from './protocol/codec.js';
 import type {
   DecodedModelAttempt,
-  ModelProtocolEnvelope,
   ValidatedModelAttempt,
 } from './protocol/envelope.js';
 import type { DecodedModelContentBlock } from './protocol/content.js';
@@ -120,7 +118,6 @@ export type DiscardedModelAttempt = {
 
 export type ModelAttemptExecution = {
   attempt: ValidatedModelAttempt;
-  protocolEnvelope: ModelProtocolEnvelope;
   session: ModelSession;
   discardedAttempts: readonly DiscardedModelAttempt[];
 };
@@ -130,7 +127,8 @@ export type ModelGatewayErrorCode =
   | 'MODEL_CANCELLED'
   | 'MODEL_PROTOCOL_FAILED'
   | 'MODEL_TRANSPORT_FAILED'
-  | 'MODEL_FALLBACK_INCOMPATIBLE';
+  | 'MODEL_FALLBACK_INCOMPATIBLE'
+  | 'MODEL_SESSION_INVALID';
 
 export class ModelGatewayError extends Error {
   constructor(
@@ -221,6 +219,13 @@ export class ModelExecutionGateway {
       );
     }
     const session = bundle?.primary ?? sessionOrBundle as ModelSession;
+    if (bundle === undefined && !isAuthenticModelSession(session)) {
+      throw new ModelGatewayError(
+        'MODEL_SESSION_INVALID',
+        'The supplied ModelSession is not a factory-bound or rehydrated binding.',
+        false,
+      );
+    }
     if (request.model !== session.route.modelId) {
       throw new ModelGatewayError(
         'MODEL_PROTOCOL_FAILED',
@@ -242,7 +247,7 @@ export class ModelExecutionGateway {
         const attemptId = this.createAttemptId();
         const tentativeBlocks: DecodedModelContentBlock[] = [];
         try {
-          const execution = await this.executeOne(
+          const attempt = await this.executeOne(
             candidate,
             request,
             attemptId,
@@ -251,8 +256,7 @@ export class ModelExecutionGateway {
             tentativeBlocks,
           );
           return Object.freeze({
-            attempt: execution.attempt,
-            protocolEnvelope: execution.protocolEnvelope,
+            attempt,
             session: candidate,
             discardedAttempts: Object.freeze(discarded.map(freezeDiscardedAttempt)),
           });
@@ -312,7 +316,7 @@ export class ModelExecutionGateway {
     timeouts: ModelAttemptTimeouts,
     sourceSignal: AbortSignal | undefined,
     tentativeBlocks: DecodedModelContentBlock[],
-  ): Promise<{ attempt: ValidatedModelAttempt; protocolEnvelope: ModelProtocolEnvelope }> {
+  ): Promise<ValidatedModelAttempt> {
     const controller = new AbortController();
     const abortFromSource = () => controller.abort(sourceSignal?.reason);
     sourceSignal?.addEventListener('abort', abortFromSource, { once: true });
@@ -386,24 +390,20 @@ export class ModelExecutionGateway {
       return validateDecodedModelAttempt(finished);
     };
 
+    const runPromise = run();
     try {
       const attempt = await raceModelDeadline(
-        run(),
+        runPromise,
         timeouts.totalMs,
         'total',
         controller,
         sourceSignal,
       );
-      return {
-        attempt,
-        protocolEnvelope: freezeProtocolEnvelope({
-          schemaVersion: 1,
-          attemptId: attempt.attemptId,
-          origin: attempt.origin,
-          correlations: encoded.correlations,
-          opaqueBlockRefs: encoded.opaqueBlockRefs,
-        }),
-      };
+      return attempt;
+    } catch (error) {
+      if (!controller.signal.aborted) controller.abort(error);
+      await boundedAttemptSettlement(runPromise);
+      throw error;
     } finally {
       sourceSignal?.removeEventListener('abort', abortFromSource);
     }
@@ -425,6 +425,8 @@ export type LlmGatewayChatInput = {
   timeoutMs?: number;
   maxRetries?: number;
   maxFallbacks?: number;
+  /** Enables explicitly prepared cross-provider/model fallback candidates. */
+  allowCrossProviderFallbacks?: boolean;
   maxStructuredCorrections?: number;
   /** Compatibility escape hatch for runtimes that apply their own tool permission checks. */
   validateToolCalls?: boolean;
@@ -757,7 +759,6 @@ export class LlmGateway {
     const fallbackIds = candidates.slice(1).map((candidate) => candidate.id);
     const makeSession = (candidate: RegisteredLlmModel, fallback: boolean): ModelSession => {
       const provider = this.requireProvider(candidate.providerId);
-      const protocol = canonicalLegacyProtocol(provider.protocol);
       const baseClient = new LegacyProviderModelClient(provider, streaming);
       const client: ModelClient = {
         execute: async (request) => {
@@ -796,8 +797,8 @@ export class LlmGateway {
           connectionId: `legacy:${candidate.providerId}`,
           providerId: candidate.providerId,
           modelId: candidate.model,
-          protocol,
-          codecRevision: MODEL_PROTOCOL_CODEC_REVISIONS[protocol],
+          protocol: legacyProviderCodec.protocol,
+          codecRevision: legacyProviderCodec.revision,
           capabilities: { ...candidate.capabilities },
           generationParameters: { ...candidate.generationParameters },
           contextTokens: candidate.limits.contextTokens,
@@ -811,23 +812,24 @@ export class LlmGateway {
           allowedFallbackRouteIds: fallback ? [] : fallbackIds,
           compatibility: {
             mode: 'compatible-protocol',
-            family: 'legacy-provider-normalized-v1',
+            family: legacyCompatibilityFamily(input),
           },
         },
         generation: generationConfigFromRequest(
           withSelectedModel(input.request, candidate.model),
         ),
-        codec: new LegacyProviderCodec(protocol),
+        codec: legacyProviderCodec,
         client,
-        replay: fallback
-          ? { mode: 'compatible-protocol', envelopes: [] }
-          : { mode: 'new' },
+        replay: { mode: 'new' },
       });
     };
     return createModelSessionBundle({
       primary: makeSession(primary, false),
       fallbacks: candidates.slice(1).map((candidate) => makeSession(candidate, true)),
-      policy: { allowCrossConnection: true, allowCrossModel: true },
+      policy: {
+        allowCrossConnection: input.allowCrossProviderFallbacks ?? false,
+        allowCrossModel: input.allowCrossProviderFallbacks ?? false,
+      },
     });
   }
 
@@ -1008,10 +1010,12 @@ export class LlmGateway {
       requestedOutputTokens,
     });
     const maxFallbacks = boundedInteger(input.maxFallbacks ?? 2, 0, 10, 'maxFallbacks');
-    const candidates = [
-      route.selected.model,
-      ...route.fallbacks.slice(0, maxFallbacks).map((item) => item.model),
-    ];
+    const candidates = input.allowCrossProviderFallbacks === true
+      ? [
+          route.selected.model,
+          ...route.fallbacks.slice(0, maxFallbacks).map((item) => item.model),
+        ]
+      : [route.selected.model];
     const requestId = input.context.requestId ?? this.createRequestId();
     const traceId = input.context.traceId ?? requestId;
     const baseEvent = {
@@ -1252,21 +1256,6 @@ function unsupportedGenerationParameter(message: string): string | undefined {
   return match?.[1] ?? match?.[2];
 }
 
-function freezeProtocolEnvelope(envelope: ModelProtocolEnvelope): ModelProtocolEnvelope {
-  return Object.freeze({
-    schemaVersion: 1 as const,
-    attemptId: envelope.attemptId,
-    origin: Object.freeze({ ...envelope.origin }),
-    correlations: Object.freeze(envelope.correlations.map((correlation) => Object.freeze({
-      ...correlation,
-      ...(correlation.wireIdentity === undefined
-        ? {}
-        : { wireIdentity: Object.freeze({ ...correlation.wireIdentity }) }),
-    }))),
-    opaqueBlockRefs: Object.freeze([...envelope.opaqueBlockRefs]),
-  }) as unknown as ModelProtocolEnvelope;
-}
-
 function withDiscardedModelAttempts(
   error: ModelGatewayError,
   attempts: readonly DiscardedModelAttempt[],
@@ -1343,9 +1332,9 @@ function raceModelDeadline<T>(
   controller: AbortController,
   sourceSignal?: AbortSignal,
 ): Promise<T> {
-  if (sourceSignal?.aborted) {
+  if (controller.signal.aborted) {
     void operation.catch(() => undefined);
-    return Promise.reject(modelCancelledError(sourceSignal.reason));
+    return Promise.reject(modelAttemptAbortError(controller.signal.reason, sourceSignal));
   }
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -1363,17 +1352,43 @@ function raceModelDeadline<T>(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      sourceSignal?.removeEventListener('abort', cancel);
+      controller.signal.removeEventListener('abort', cancel);
       callback();
     };
-    const cancel = () => finish(() => reject(modelCancelledError(sourceSignal?.reason)));
-    sourceSignal?.addEventListener('abort', cancel, { once: true });
+    const cancel = () => finish(() => reject(
+      modelAttemptAbortError(controller.signal.reason, sourceSignal),
+    ));
+    controller.signal.addEventListener('abort', cancel, { once: true });
     void operation.then(
       (value) => finish(() => resolve(value)),
       (error: unknown) =>
         finish(() => reject(error instanceof Error ? error : new Error(String(error)))),
     );
   });
+}
+
+async function boundedAttemptSettlement(operation: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      operation.then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 75);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function modelAttemptAbortError(
+  reason: unknown,
+  sourceSignal?: AbortSignal,
+): Error {
+  if (sourceSignal?.aborted) return modelCancelledError(sourceSignal.reason);
+  return reason instanceof Error
+    ? reason
+    : new ModelGatewayError('MODEL_TRANSPORT_FAILED', 'Model attempt aborted.', true, { cause: reason });
 }
 
 function trackTentativeBlocks(
@@ -1683,6 +1698,17 @@ function findProviderError(error: unknown): LlmProviderError | undefined {
 
 function hashTenant(tenantId: string): string {
   return createHash('sha256').update(tenantId).digest('hex').slice(0, 24);
+}
+
+function legacyCompatibilityFamily(input: LlmGatewayChatInput): string {
+  const contract = JSON.stringify({
+    tools: (input.request.tools ?? []).map((tool) => ({
+      name: tool.name,
+      inputSchema: tool.inputSchema,
+    })),
+    responseFormat: input.request.responseFormat ?? { type: 'text' },
+  });
+  return `legacy-normalized:v1:${createHash('sha256').update(contract).digest('hex')}`;
 }
 
 function asyncJobOwnerKey(tenantId: string, ownerId?: string): string {

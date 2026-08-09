@@ -18,6 +18,7 @@ describe('LLM fault injection', () => {
       context: { tenantId: 'fault', taskType: 'fault-injection' },
       maxRetries: 1,
       maxFallbacks: 1,
+      allowCrossProviderFallbacks: true,
     });
     expect(result.providerId).toBe('backup');
     expect(primaryCalls).toBe(2);

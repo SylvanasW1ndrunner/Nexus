@@ -8,6 +8,7 @@ import {
   openAIResponsesCodec,
   type AttemptDecodeContext,
   type CanonicalModelRequest,
+  type CanonicalModelProtocol,
   type DecodedModelAttempt,
   type ModelContentBlock,
   type ModelEncodeContext,
@@ -18,7 +19,7 @@ import {
 } from '../../src/types.js';
 
 type CorpusCase = {
-  protocol: ModelProtocol;
+  protocol: CanonicalModelProtocol;
   response: unknown;
   expectedWireIdentity: ModelWireIdentity;
 };
@@ -27,7 +28,7 @@ const corpus = JSON.parse(
   readFileSync(new URL('./fixtures/v1/codec-replay-corpus.json', import.meta.url), 'utf8'),
 ) as { schemaVersion: number; cases: CorpusCase[] };
 
-const codecs: Record<ModelProtocol, ModelProtocolCodec> = {
+const codecs: Record<CanonicalModelProtocol, ModelProtocolCodec> = {
   'openai-chat': openAIChatCodec,
   'openai-responses': openAIResponsesCodec,
   'anthropic-messages': anthropicMessagesCodec,

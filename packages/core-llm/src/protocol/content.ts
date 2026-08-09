@@ -4,7 +4,10 @@ export type ModelProtocol =
   | 'openai-chat'
   | 'openai-responses'
   | 'anthropic-messages'
-  | 'ollama-chat';
+  | 'ollama-chat'
+  | 'legacy-normalized';
+
+export type CanonicalModelProtocol = Exclude<ModelProtocol, 'legacy-normalized'>;
 
 export type ModelOrigin = {
   connectionId: string;

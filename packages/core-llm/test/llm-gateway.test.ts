@@ -98,6 +98,7 @@ describe('LlmGateway', () => {
       budget: { maxScopeTokens: 10_000, maxRequestTokens: 1_000 },
       maxRetries: 0,
       maxFallbacks: 1,
+      allowCrossProviderFallbacks: true,
       maxStructuredCorrections: 0,
     });
 
@@ -259,6 +260,7 @@ describe('LlmGateway', () => {
       budget: { maxScopeTokens: 100_000, maxRequestTokens: 100_000 },
       maxRetries: 0,
       maxFallbacks: 1,
+      allowCrossProviderFallbacks: true,
       cache: { enabled: true },
     };
 
@@ -313,6 +315,7 @@ describe('LlmGateway', () => {
       context: { tenantId: 'tenant-recovery', taskType: 'chat' },
       maxRetries: 0,
       maxFallbacks: 1,
+      allowCrossProviderFallbacks: true,
       cache: { enabled: true },
     };
 
@@ -360,6 +363,7 @@ describe('LlmGateway', () => {
           context: { tenantId: 't', taskType: 'stream' },
           maxRetries: 0,
           maxFallbacks: 1,
+          allowCrossProviderFallbacks: true,
         })) {
           if (event.type === 'text-delta') received.push(event.text);
         }

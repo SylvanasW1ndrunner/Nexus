@@ -57,6 +57,7 @@ export interface ModelProtocolCodec<
   TWireEvent = unknown,
 > {
   readonly protocol: ModelProtocol;
+  readonly revision: string;
   encode(
     request: CanonicalModelRequest,
     context: ModelEncodeContext,

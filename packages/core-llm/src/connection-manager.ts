@@ -15,7 +15,6 @@ import {
 import {
   createModelSessionBundle,
   createModelSession,
-  MODEL_PROTOCOL_CODEC_REVISIONS,
   type ModelClient,
   type ModelReplayBinding,
   type ModelSession,
@@ -27,6 +26,7 @@ import { openAIResponsesCodec } from './protocol/codecs/openai-responses.js';
 import { anthropicMessagesCodec } from './protocol/codecs/anthropic-messages.js';
 import { ollamaChatCodec } from './protocol/codecs/ollama-chat.js';
 import type { ModelProtocolCodec } from './protocol/codec.js';
+import { ModelCodecRegistryError } from './protocol/codec-registry.js';
 import {
   LlmGateway,
   ModelExecutionGateway,
@@ -38,9 +38,8 @@ import {
 import {
   legacyAttemptToResponse,
   legacyRequestToCanonical,
-  LegacyProviderCodec,
+  legacyProviderCodec,
   LegacyProviderModelClient,
-  canonicalLegacyProtocol,
 } from './legacy-model-compatibility.js';
 import { assertNoTextualToolInvocation } from './tool-protocol.js';
 import { LlmTaskRouter } from './routing.js';
@@ -400,9 +399,13 @@ export class LlmConnectionManager {
       candidate: LlmConnectionResolution,
       fallback: boolean,
     ): ModelSession => {
-      const canonicalProtocol = canonicalLegacyProtocol(candidate.protocol);
       const candidateCodec = canonicalCodec(candidate.protocol) ??
-        new LegacyProviderCodec(canonicalProtocol);
+        (candidate.protocol === 'legacy-normalized'
+          ? legacyProviderCodec
+          : undefined);
+      if (candidateCodec === undefined) {
+        throw new ModelCodecRegistryError(candidate.protocol, `${candidate.protocol}@1`);
+      }
       const candidateRouteId = modelSessionRouteId(candidate, selection.modelId);
       const provider = runtime.providers.get(candidate.pluginId);
       if (provider === undefined) {
@@ -410,14 +413,16 @@ export class LlmConnectionManager {
           `Resolved Provider Plugin ${candidate.pluginId} has no prepared Provider client.`,
         );
       }
-      const replay = fallback
+      const replay = fallback && candidateCodec.protocol !== 'legacy-normalized'
         ? {
             mode: 'compatible-protocol' as const,
             envelopes: options.replay?.mode !== undefined && options.replay.mode !== 'new'
               ? options.replay.envelopes
               : [],
           }
-        : options.replay;
+        : candidateCodec.protocol === 'legacy-normalized'
+          ? { mode: 'new' as const }
+          : options.replay;
       return createModelSession({
         route: {
           routeId: candidateRouteId,
@@ -425,7 +430,7 @@ export class LlmConnectionManager {
           providerId: candidate.providerId,
           modelId: selection.modelId,
           protocol: candidateCodec.protocol,
-          codecRevision: MODEL_PROTOCOL_CODEC_REVISIONS[candidateCodec.protocol],
+          codecRevision: candidateCodec.revision,
           capabilities: Object.fromEntries(
             Object.entries(prepared.model.capabilities).map(([name, metadata]) => [
               name,

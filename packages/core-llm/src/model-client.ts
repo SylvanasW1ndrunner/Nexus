@@ -8,6 +8,15 @@ import { validateLlmGenerationConfig } from './generation-config.js';
 import type { ModelEncodeContext, ModelProtocolCodec } from './protocol/codec.js';
 import type { ModelProtocol } from './protocol/content.js';
 import type { ModelProtocolEnvelope } from './protocol/envelope.js';
+import { isAuthenticModelProtocolCodec } from './protocol/codec-authenticity.js';
+import { resolveModelProtocolCodec } from './protocol/codec-registry.js';
+
+export {
+  MODEL_PROTOCOL_CODEC_REGISTRY,
+  MODEL_PROTOCOL_CODEC_REVISIONS,
+  ModelCodecRegistryError,
+  resolveModelProtocolCodec,
+} from './protocol/codec-registry.js';
 
 export type ModelRouteMetadata = {
   source: string;
@@ -139,15 +148,8 @@ const SESSION_PRIVATE = new WeakMap<
   ModelSession,
   { codec: ModelProtocolCodec; client: ModelClient }
 >();
+const AUTHENTIC_SESSIONS = new WeakSet<ModelSession>();
 const AUTHENTIC_BUNDLES = new WeakSet<ModelSessionBundle>();
-
-export const MODEL_PROTOCOL_CODEC_REVISIONS: Readonly<Record<ModelProtocol, string>> =
-  Object.freeze({
-    'openai-chat': 'openai-chat@1',
-    'openai-responses': 'openai-responses@1',
-    'anthropic-messages': 'anthropic-messages@1',
-    'ollama-chat': 'ollama-chat@1',
-  });
 
 export function createModelSession(input: {
   route: ModelRouteSnapshotInput;
@@ -156,16 +158,27 @@ export function createModelSession(input: {
   client: ModelClient;
   replay?: ModelReplayBinding;
 }): ModelSession {
+  if (!isAuthenticModelProtocolCodec(input.codec)) {
+    throw new Error('ModelSession requires a registered codec implementation.');
+  }
   if (input.codec.protocol !== input.route.protocol) {
     throw new Error(
       `ModelSession codec protocol ${input.codec.protocol} does not match route protocol ${input.route.protocol}.`,
     );
   }
-  const expectedRevision = MODEL_PROTOCOL_CODEC_REVISIONS[input.codec.protocol];
-  if (input.route.codecRevision !== expectedRevision) {
+  const codec = input.codec.protocol === 'legacy-normalized'
+    ? input.codec
+    : resolveModelProtocolCodec(input.codec.protocol, input.codec.revision);
+  if (
+    input.route.codecRevision !== codec.revision ||
+    input.codec.revision !== codec.revision
+  ) {
     throw new Error(
-      `ModelSession codec revision ${input.route.codecRevision} does not match registered codec revision ${expectedRevision}.`,
+      `ModelSession codec revision ${input.route.codecRevision} does not match registered codec revision ${codec.revision}.`,
     );
+  }
+  if (codec.protocol === 'legacy-normalized' && input.replay?.mode !== undefined && input.replay.mode !== 'new') {
+    throw new Error('The legacy-normalized edge does not support replay.');
   }
   assertRoute(input.route);
   const validated = validateSessionGeneration(input.generation, input.route);
@@ -191,7 +204,8 @@ export function createModelSession(input: {
     codec: { enumerable: false, get: () => SESSION_PRIVATE.get(session)!.codec },
     client: { enumerable: false, get: () => SESSION_PRIVATE.get(session)!.client },
   });
-  SESSION_PRIVATE.set(session, { codec: input.codec, client: input.client });
+  SESSION_PRIVATE.set(session, { codec, client: input.client });
+  AUTHENTIC_SESSIONS.add(session);
   return Object.freeze(session);
 }
 
@@ -200,6 +214,11 @@ export function createModelSessionBundle(input: {
   fallbacks?: readonly ModelSession[];
   policy?: Partial<ModelFallbackPolicy>;
 }): ModelSessionBundle {
+  for (const session of [input.primary, ...(input.fallbacks ?? [])]) {
+    if (!isAuthenticModelSession(session)) {
+      throw new Error('Model Session bundles require factory-bound or rehydrated Sessions.');
+    }
+  }
   const fallbacks = [...(input.fallbacks ?? [])];
   const policy = Object.freeze({
     allowCrossConnection: input.policy?.allowCrossConnection ?? false,
@@ -231,6 +250,118 @@ export function isAuthenticModelSessionBundle(value: unknown): value is ModelSes
   return typeof value === 'object' && value !== null && AUTHENTIC_BUNDLES.has(value as ModelSessionBundle);
 }
 
+export function isAuthenticModelSession(value: unknown): value is ModelSession {
+  return typeof value === 'object' && value !== null && AUTHENTIC_SESSIONS.has(value as ModelSession);
+}
+
+export type PersistedModelSessionDescriptor = Readonly<{
+  route: ModelRouteSnapshotInput;
+  generation: LlmGenerationConfig;
+  replay: ModelReplayBinding;
+  bindingDigest: string;
+}>;
+
+export function describeModelSession(session: ModelSession): PersistedModelSessionDescriptor {
+  if (!isAuthenticModelSession(session)) {
+    throw new Error('Only an authentic Model Session can be persisted.');
+  }
+  return Object.freeze({
+    route: routeDescriptor(session.route),
+    generation: generationDescriptor(session.generation),
+    replay: freezeReplay(session.replay),
+    bindingDigest: session.bindingDigest,
+  });
+}
+
+export function rehydrateModelSession(input: {
+  descriptor: PersistedModelSessionDescriptor;
+  expectedRouteDigest: string;
+  expectedSessionDigest: string;
+  expectedCodecRevision: string;
+  client: ModelClient;
+}): ModelSession {
+  const { descriptor } = input;
+  if (
+    descriptor.route.metadata.digest !== input.expectedRouteDigest ||
+    descriptor.bindingDigest !== input.expectedSessionDigest ||
+    descriptor.route.codecRevision !== input.expectedCodecRevision
+  ) {
+    throw new Error('Persisted Model Session digest or codec revision does not match expectations.');
+  }
+  const codec = resolveModelProtocolCodec(
+    descriptor.route.protocol,
+    input.expectedCodecRevision,
+  );
+  const session = createModelSession({
+    route: descriptor.route,
+    generation: descriptor.generation,
+    replay: descriptor.replay,
+    codec,
+    client: input.client,
+  });
+  if (
+    session.route.metadata.digest !== input.expectedRouteDigest ||
+    session.bindingDigest !== input.expectedSessionDigest
+  ) {
+    throw new Error('Persisted Model Session failed digest verification during rehydration.');
+  }
+  return session;
+}
+
+export type PersistedModelSessionBundleDescriptor = Readonly<{
+  primary: PersistedModelSessionDescriptor;
+  fallbacks: readonly PersistedModelSessionDescriptor[];
+  policy: Readonly<ModelFallbackPolicy>;
+  bindingDigest: string;
+}>;
+
+export type ModelSessionRehydrationBinding = Readonly<{
+  expectedRouteDigest: string;
+  expectedSessionDigest: string;
+  expectedCodecRevision: string;
+  client: ModelClient;
+}>;
+
+export function describeModelSessionBundle(
+  bundle: ModelSessionBundle,
+): PersistedModelSessionBundleDescriptor {
+  if (!isAuthenticModelSessionBundle(bundle)) {
+    throw new Error('Only an authentic Model Session bundle can be persisted.');
+  }
+  return Object.freeze({
+    primary: describeModelSession(bundle.primary),
+    fallbacks: Object.freeze(bundle.fallbacks.map(describeModelSession)),
+    policy: Object.freeze({ ...bundle.policy }),
+    bindingDigest: bundle.bindingDigest,
+  });
+}
+
+export function rehydrateModelSessionBundle(input: {
+  descriptor: PersistedModelSessionBundleDescriptor;
+  expectedBundleDigest: string;
+  bindings: Readonly<Record<string, ModelSessionRehydrationBinding>>;
+}): ModelSessionBundle {
+  if (input.descriptor.bindingDigest !== input.expectedBundleDigest) {
+    throw new Error('Persisted Model Session bundle digest does not match expectations.');
+  }
+  const bind = (descriptor: PersistedModelSessionDescriptor): ModelSession => {
+    const binding = input.bindings[descriptor.route.routeId];
+    if (binding === undefined) {
+      throw new Error(`No private client binding was supplied for route ${descriptor.route.routeId}.`);
+    }
+    return rehydrateModelSession({ descriptor, ...binding });
+  };
+  const bundle = createModelSessionBundle({
+    primary: bind(input.descriptor.primary),
+    fallbacks: input.descriptor.fallbacks.map(bind),
+    policy: input.descriptor.policy,
+  });
+  if (bundle.bindingDigest !== input.expectedBundleDigest) {
+    throw new Error('Persisted Model Session bundle failed digest verification during rehydration.');
+  }
+  return bundle;
+}
+
 function assertBundleFallback(
   primary: ModelSession,
   fallback: ModelSession,
@@ -245,7 +376,9 @@ function assertBundleFallback(
     primaryCompatibility?.mode === 'compatible-protocol' &&
     fallbackCompatibility?.mode === 'compatible-protocol' &&
     primaryCompatibility.family === fallbackCompatibility.family &&
-    fallback.replay.mode === 'compatible-protocol';
+    (primary.route.protocol === 'legacy-normalized'
+      ? fallback.route.protocol === 'legacy-normalized' && fallback.replay.mode === 'new'
+      : fallback.replay.mode === 'compatible-protocol');
   if (!declared || !compatible) {
     throw new Error(
       `Fallback route ${fallback.route.routeId} is not an explicit digest-bound compatible candidate of ${primary.route.routeId}.`,
@@ -319,6 +452,36 @@ function freezeEnvelope(envelope: ModelProtocolEnvelope): ModelProtocolEnvelope 
     }))),
     opaqueBlockRefs: Object.freeze([...envelope.opaqueBlockRefs]),
   }) as unknown as ModelProtocolEnvelope;
+}
+
+function routeDescriptor(route: ModelRouteSnapshot): ModelRouteSnapshotInput {
+  return Object.freeze({
+    routeId: route.routeId,
+    connectionId: route.connectionId,
+    providerId: route.providerId,
+    modelId: route.modelId,
+    protocol: route.protocol,
+    codecRevision: route.codecRevision,
+    capabilities: Object.freeze({ ...route.capabilities }),
+    generationParameters: Object.freeze({ ...route.generationParameters }),
+    contextTokens: route.contextTokens,
+    maxInputTokens: route.maxInputTokens,
+    maxOutputTokens: route.maxOutputTokens,
+    metadata: Object.freeze({ ...route.metadata }),
+    allowedFallbackRouteIds: Object.freeze([...route.allowedFallbackRouteIds]),
+    ...(route.compatibility === undefined
+      ? {}
+      : { compatibility: Object.freeze({ ...route.compatibility }) }),
+  });
+}
+
+function generationDescriptor(generation: ValidatedGenerationConfig): LlmGenerationConfig {
+  return Object.freeze({
+    ...generation,
+    ...(generation.stop === undefined
+      ? {}
+      : { stop: Object.freeze([...generation.stop]) }),
+  }) as unknown as LlmGenerationConfig;
 }
 
 function validateSessionGeneration(

@@ -19,6 +19,7 @@ import {
   type ModelProtocolCodec,
   type ProtocolEncodeSession,
 } from '../codec.js';
+import { bindModelProtocolCodec } from '../codec-authenticity.js';
 import type { DecodedModelContentBlock } from '../content.js';
 import type { DecodedModelStreamEvent } from '../model-stream.js';
 
@@ -38,6 +39,11 @@ type OllamaStreamBlock =
 
 export class OllamaChatCodec implements ModelProtocolCodec {
   readonly protocol = 'ollama-chat' as const;
+  readonly revision = 'ollama-chat@1' as const;
+
+  constructor() {
+    bindModelProtocolCodec(this);
+  }
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
     const session = createProtocolEncodeSession(context, this.protocol, request);

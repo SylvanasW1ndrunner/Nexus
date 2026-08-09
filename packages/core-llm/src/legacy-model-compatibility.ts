@@ -1,3 +1,4 @@
+import type { PortableValue } from '@dbagent/shared';
 import {
   ModelClientError,
   type ModelClient,
@@ -5,7 +6,9 @@ import {
   type ModelClientResponse,
 } from './model-client.js';
 import {
+  assertContextProtocol,
   createDecodedAttempt,
+  ModelProtocolError,
   normalizeFinishReason,
   type AttemptDecodeContext,
   type CanonicalModelRequest,
@@ -13,7 +16,8 @@ import {
   type ModelProtocolCodec,
   type ModelProtocolEncodeResult,
 } from './protocol/codec.js';
-import type { DecodedModelContentBlock, ModelProtocol } from './protocol/content.js';
+import { bindModelProtocolCodec } from './protocol/codec-authenticity.js';
+import type { DecodedModelContentBlock } from './protocol/content.js';
 import type { ModelMessage as CanonicalModelMessage } from './protocol/content.js';
 import type { DecodedModelStreamEvent } from './protocol/model-stream.js';
 import {
@@ -61,13 +65,23 @@ export class LegacyProviderCodec implements ModelProtocolCodec<
   LlmChatResponse,
   LlmChatStreamEvent
 > {
-  constructor(readonly protocol: ModelProtocol) {}
+  readonly protocol = 'legacy-normalized' as const;
+  readonly revision = 'legacy-normalized@1' as const;
+
+  constructor() {
+    bindModelProtocolCodec(this);
+  }
 
   encode(
     request: CanonicalModelRequest,
     context: ModelEncodeContext,
   ): ModelProtocolEncodeResult<LlmChatRequest> {
-    void context;
+    if (context.target.protocol !== this.protocol) {
+      throw new Error('The normalized legacy codec may only execute legacy-normalized routes.');
+    }
+    if (context.replay.mode !== 'new') {
+      throw new Error('The legacy-normalized edge does not support protocol replay.');
+    }
     return {
       wireRequest: canonicalToLegacyRequest(request),
       correlations: [],
@@ -76,6 +90,7 @@ export class LegacyProviderCodec implements ModelProtocolCodec<
   }
 
   decode(response: LlmChatResponse, context: AttemptDecodeContext) {
+    assertContextProtocol(context, this.protocol);
     const blocks: DecodedModelContentBlock[] = [];
     if (response.text) blocks.push({ type: 'text', text: response.text });
     for (const [index, call] of response.toolCalls.entries()) {
@@ -112,6 +127,8 @@ export class LegacyProviderCodec implements ModelProtocolCodec<
     stream: AsyncIterable<LlmChatStreamEvent>,
     context: AttemptDecodeContext,
   ): AsyncIterable<DecodedModelStreamEvent> {
+    assertContextProtocol(context, this.protocol);
+    let completedToolCalls = 0;
     for await (const event of stream) {
       if (event.type === 'text-delta') {
         yield { type: 'text-delta', blockOrdinal: 0, text: event.text };
@@ -127,12 +144,14 @@ export class LegacyProviderCodec implements ModelProtocolCodec<
             : { argumentsDelta: event.argumentsDelta }),
         };
       } else if (event.type === 'tool-call') {
+        const ordinal = completedToolCalls + 1;
+        completedToolCalls += 1;
         yield {
           type: 'block-complete',
-          blockOrdinal: 1,
+          blockOrdinal: ordinal,
           block: {
             type: 'tool-call-draft',
-            draftCallKey: `${context.attemptId}:0`,
+            draftCallKey: `${context.attemptId}:${ordinal - 1}`,
             wireIdentity: { callId: event.toolCall.id },
             name: event.toolCall.name,
             arguments: event.toolCall.arguments as PortableValue,
@@ -157,12 +176,7 @@ export class LegacyProviderCodec implements ModelProtocolCodec<
   }
 }
 
-export function canonicalLegacyProtocol(protocol: string | undefined): ModelProtocol {
-  if (protocol === 'openai-responses') return 'openai-responses';
-  if (protocol === 'anthropic' || protocol === 'anthropic-messages') return 'anthropic-messages';
-  if (protocol === 'ollama' || protocol === 'ollama-chat') return 'ollama-chat';
-  return 'openai-chat';
-}
+export const legacyProviderCodec = new LegacyProviderCodec();
 
 export function legacyRequestToCanonical(
   request: Omit<LlmChatRequest, 'model'> & { model?: string },
@@ -221,6 +235,14 @@ export function legacyAttemptToResponse(
 function canonicalToLegacyRequest(request: CanonicalModelRequest): LlmChatRequest {
   const messages: LlmMessage[] = [];
   for (const message of request.messages) {
+    for (const block of message.content) {
+      if (block.type === 'resource-ref' || block.type === 'provider-opaque') {
+        throw new ModelProtocolError(
+          'UNREPRESENTABLE_CANONICAL_BLOCK',
+          `The legacy-normalized edge cannot preserve canonical ${block.type} content.`,
+        );
+      }
+    }
     const text = message.content
       .filter((block) => block.type === 'text' || block.type === 'reasoning-summary')
       .map((block) => block.text)
@@ -349,4 +371,3 @@ function legacyClientError(error: unknown, signal?: AbortSignal): ModelClientErr
     { cause: error },
   );
 }
-import type { PortableValue } from '@dbagent/shared';
