@@ -220,7 +220,7 @@ describe('SqliteAgentJournal', () => {
         toolCallId: 'call-a', toolName: 'lookup',
       },
     ];
-    const roles = records.map((record, index) => upcastAgentEvent({
+    const events = records.map((record, index) => upcastAgentEvent({
       eventId: `legacy-role-${index}`, projectId: 'project-a', sequence: index + 1,
       schemaVersion: 1, sessionId: 'session-a', runId: 'carrier-a',
       occurredAt: '2026-08-09T00:00:00.000Z', type: 'legacy.imported' as const,
@@ -228,8 +228,13 @@ describe('SqliteAgentJournal', () => {
         entityType: 'message', legacyId: `session-a:${index}`, messageIndex: index,
         ...(record as Record<string, PortableValue>),
       },
-    }).payload);
-    expect(roles.map((payload) => payload.entityType === 'message' && payload.record.role))
+    }));
+    expect(events.map((event) => {
+      if (event.type !== 'legacy.imported' || event.payload.entityType !== 'message') {
+        throw new Error('Expected an upcast legacy message event');
+      }
+      return event.payload.record.role;
+    }))
       .toEqual(['user', 'system', 'assistant', 'tool']);
   });
 
