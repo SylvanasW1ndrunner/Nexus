@@ -56,7 +56,9 @@ function assertJournalPayloadSafety(payload: unknown, maxPayloadBytes: number): 
       const normalized = key.replaceAll(/[-_]/gu, '').toLowerCase();
       if (
         normalized.endsWith('password') || normalized.endsWith('authorization') ||
-        normalized.endsWith('credential') || normalized.endsWith('apikey')
+        normalized.endsWith('credential') || normalized.endsWith('apikey') ||
+        normalized.endsWith('token') || normalized.endsWith('secret') ||
+        normalized.endsWith('privatekey')
       ) {
         throw new TypeError(`Credential-bearing journal field ${key} is forbidden.`);
       }
@@ -88,7 +90,15 @@ function requireBoundedString(record: Record<string, unknown>, key: string, maxi
 }
 
 function optionalString(record: Record<string, unknown>, key: string): void {
-  if (record[key] !== undefined) requireString(record, key);
+  if (Object.hasOwn(record, key)) requireString(record, key);
+}
+
+function optionalNonNegativeInteger(record: Record<string, unknown>, key: string): void {
+  if (Object.hasOwn(record, key)) requireNonNegativeInteger(record, key);
+}
+
+function requirePresent(record: Record<string, unknown>, key: string): void {
+  if (!Object.hasOwn(record, key)) throw new TypeError(`Event payload ${key} is required.`);
 }
 
 function requireLiteral(record: Record<string, unknown>, key: string, value: unknown): void {
@@ -158,6 +168,52 @@ function validateRunFailure(payload: unknown): void {
   requireString(record, 'code');
 }
 
+function validateRunSteered(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['clientRequestId', 'content']);
+  requireString(record, 'clientRequestId');
+  requirePresent(record, 'content');
+}
+
+function validateRunResumed(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['reason']);
+  optionalString(record, 'reason');
+}
+
+function validateRunInputRequested(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['reason', 'connectionId']);
+  requireString(record, 'reason');
+  optionalString(record, 'connectionId');
+}
+
+function validateOptionalReason(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['reason']);
+  optionalString(record, 'reason');
+}
+
+function validateRunLimitReached(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['limit', 'value']);
+  requireString(record, 'limit');
+  optionalNonNegativeInteger(record, 'value');
+}
+
+function validateTurnStarted(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['turnSnapshotId']);
+  optionalString(record, 'turnSnapshotId');
+}
+
+function validateTurnContextCompiled(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['contextRef', 'tokenEstimate']);
+  optionalString(record, 'contextRef');
+  optionalNonNegativeInteger(record, 'tokenEstimate');
+}
+
 function validateOriginPayload(payload: unknown): void {
   const record = requireRecord(payload);
   exactKeys(record, ['origin']);
@@ -225,7 +281,7 @@ function validateCommittedAttempt(payload: unknown): void {
   envelope.correlations.forEach(validateCorrelation);
 }
 
-function validatePersistedAttempt(value: unknown): void {
+export function validatePersistedAttempt(value: unknown): void {
   const attempt = requireRecord(value);
   exactKeys(attempt, [
     'attemptId', 'origin', 'blocks', 'terminal', 'validation', 'finishReason', 'usage',
@@ -342,17 +398,17 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   'input.received': descriptor({ audience: USER, validate: validateInput }),
   'run.created': descriptor({ validate: validateRunCreated }),
   'run.started': descriptor({ validate: (p) => validateShape(p, []) }),
-  'run.resumed': descriptor({ validate: (p) => validateShape(p, ['reason']) }),
-  'run.steered': descriptor({ audience: USER, validate: (p) => validateShape(p, ['clientRequestId', 'content'], ['clientRequestId']) }),
-  'run.input_requested': descriptor({ audience: USER, validate: (p) => validateShape(p, ['reason', 'connectionId'], ['reason']) }),
-  'run.cancel_requested': descriptor({ validate: (p) => validateShape(p, ['reason']) }),
-  'run.limit_reached': descriptor({ audience: USER, validate: (p) => validateShape(p, ['limit', 'value'], ['limit']) }),
+  'run.resumed': descriptor({ validate: validateRunResumed }),
+  'run.steered': descriptor({ audience: USER, validate: validateRunSteered }),
+  'run.input_requested': descriptor({ audience: USER, validate: validateRunInputRequested }),
+  'run.cancel_requested': descriptor({ validate: validateOptionalReason }),
+  'run.limit_reached': descriptor({ audience: USER, validate: validateRunLimitReached }),
   'run.completed': descriptor({ audience: USER, validate: validateRunCompleted }),
   'run.failed': descriptor({ audience: USER, validate: validateRunFailure }),
-  'run.cancelled': descriptor({ audience: USER, validate: (p) => validateShape(p, ['reason']) }),
+  'run.cancelled': descriptor({ audience: USER, validate: validateOptionalReason }),
   'run.interrupted': descriptor({ audience: USER, validate: validateRunFailure }),
-  'turn.started': descriptor({ validate: (p) => validateShape(p, ['turnSnapshotId']) }),
-  'turn.context_compiled': descriptor({ validate: (p) => validateShape(p, ['contextRef', 'tokenEstimate']) }),
+  'turn.started': descriptor({ validate: validateTurnStarted }),
+  'turn.context_compiled': descriptor({ validate: validateTurnContextCompiled }),
   'turn.no_progress': descriptor({ audience: MODEL, validate: (p) => validateShape(p, ['fingerprint'], ['fingerprint']) }),
   model_attempt_started: descriptor({ validate: validateOriginPayload }),
   model_delta_batch: descriptor({ persistence: 'diagnostic', validate: validateModelDeltaBatch }),

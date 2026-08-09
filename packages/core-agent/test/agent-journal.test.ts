@@ -247,6 +247,29 @@ describe('SqliteAgentJournal', () => {
     })).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
   });
 
+  it('reserves input.received for createRun even when a generic producer holds the lease', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'input-authority',
+      input: { text: 'original' },
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+
+    await expect(journal.commit({
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      commandId: 'forge-second-input',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 1,
+      events: [{
+        type: 'input.received',
+        payload: { clientRequestId: 'forged-request', content: { text: 'forged' } },
+      }],
+    })).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
+    await expect(journal.countEvents('input.received', 'project-a')).resolves.toBe(1);
+  });
+
   it('does not expose the prepared model-attempt persistence primitive', async () => {
     const journal = new SqliteAgentJournal({ filePath: await journalPath() });
     expect('commitPreparedModelAttempt' in journal).toBe(false);

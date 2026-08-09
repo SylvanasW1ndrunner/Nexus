@@ -108,6 +108,46 @@ describe('RunEventCommitter', () => {
     expect(await journal.countEvents('model_attempt_committed', 'project-a')).toBe(0);
   });
 
+  it('rejects a Proxy whose second attempt read swaps authenticity before the first write', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const command = await commitCommand(journal);
+    let attemptReads = 0;
+    const attack = new Proxy(command, {
+      get(target, property) {
+        if (property !== 'attempt') return target[property as keyof typeof target];
+        attemptReads += 1;
+        return attemptReads === 1 ? target.attempt : structuredClone(target.attempt);
+      },
+    });
+
+    await expect(journal.commitValidatedAttempt(attack))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(attemptReads).toBeLessThanOrEqual(1);
+    await expect(journal.getCommittedTurn(command.turnId)).resolves.toBeNull();
+    await expect(journal.countEvents('model_attempt_committed', 'project-a')).resolves.toBe(0);
+  });
+
+  it('rejects accessor commands and non-canonical whitespace identities before preparation', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const command = await commitCommand(journal);
+    let getterReads = 0;
+    const accessorCommand = { ...command } as Record<string, unknown>;
+    Object.defineProperty(accessorCommand, 'attempt', {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return getterReads === 1 ? command.attempt : structuredClone(command.attempt);
+      },
+    });
+
+    await expect(journal.commitValidatedAttempt(accessorCommand as never))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(getterReads).toBe(0);
+    await expect(journal.commitValidatedAttempt({ ...command, commandId: ' commit-with-space' }))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(journal.countEvents('model_attempt_committed', 'project-a')).resolves.toBe(0);
+  });
+
   it('requires a causally started Turn and matching run/turn revisions', async () => {
     const journal = new SqliteAgentJournal({ filePath: await journalPath() });
     const created = await journal.createRun({

@@ -96,6 +96,79 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
     database.close();
   });
 
+  it('enforces the project/run tuple on leases with a composite foreign key', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'lease-tuple', input: 'go',
+    });
+    const database = openDatabase(filePath);
+
+    let rejected = false;
+    try {
+      database.prepare(
+        `INSERT INTO agent_run_leases
+         (project_id, run_id, owner_id, expires_at_ms, fencing_token)
+         VALUES ('project-b', ?, 'worker-b', 1, 1)`,
+      ).run(created.runId);
+    } catch {
+      rejected = true;
+    } finally {
+      database.close();
+    }
+    expect(rejected).toBe(true);
+  });
+
+  it('migrates the legacy run-only lease foreign key without losing valid leases', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'lease-migration', input: 'go',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 60_000,
+    });
+    const database = openDatabase(filePath);
+    database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE');
+    database.exec(`
+      ALTER TABLE agent_run_leases RENAME TO agent_run_leases_scoped;
+      CREATE TABLE agent_run_leases (
+        project_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+        PRIMARY KEY (project_id, run_id),
+        FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
+      );
+      INSERT INTO agent_run_leases SELECT * FROM agent_run_leases_scoped;
+      DROP TABLE agent_run_leases_scoped;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    database.close();
+
+    const reopened = new SqliteAgentJournal({ filePath });
+    await expect(reopened.renewRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: lease.ownerId,
+      ttlMs: 60_000, fencingToken: lease.fencingToken,
+    })).resolves.toMatchObject({ projectId: 'project-a', runId: created.runId });
+    const migrated = openDatabase(filePath);
+    let rejected = false;
+    try {
+      migrated.prepare(
+        `INSERT INTO agent_run_leases
+         (project_id, run_id, owner_id, expires_at_ms, fencing_token)
+         VALUES ('project-b', ?, 'worker-b', 1, 1)`,
+      ).run(created.runId);
+    } catch {
+      rejected = true;
+    } finally {
+      migrated.close();
+    }
+    expect(rejected).toBe(true);
+  });
+
   it('classifies invalid event metadata and required causal IDs as CORRUPT_EVENT', async () => {
     const filePath = await journalPath();
     const journal = new SqliteAgentJournal({ filePath });
@@ -117,6 +190,57 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       .rejects.toMatchObject({ code: 'CORRUPT_EVENT' });
   });
 
+  it('cross-checks event outer IDs with payload IDs and rejects empty optional causal IDs', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath });
+    const { runId, lease } = await createLeasedRun(journal);
+    await journal.commitValidatedAttempt({
+      projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a',
+      commandId: 'outer-payload-seed',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 3, expectedTurnRevision: 1, attempt: await modelAttempt(),
+    });
+    const database = openDatabase(filePath);
+    database.prepare(
+      "UPDATE agent_events SET attempt_id = 'attempt-other' WHERE event_type = 'model_attempt_committed'",
+    ).run();
+    database.close();
+    await expect(journal.readProject('project-a', 0, 100))
+      .rejects.toMatchObject({ code: 'CORRUPT_EVENT' });
+
+    const secondPath = await journalPath();
+    const second = new SqliteAgentJournal({ filePath: secondPath });
+    await second.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'empty-causal', input: 'go',
+    });
+    const secondDatabase = openDatabase(secondPath);
+    secondDatabase.prepare(
+      "UPDATE agent_events SET turn_id = '' WHERE event_type = 'run.created'",
+    ).run();
+    secondDatabase.close();
+    await expect(second.readProject('project-a', 0, 100))
+      .rejects.toMatchObject({ code: 'CORRUPT_EVENT' });
+  });
+
+  it('rejects a parent event from a later sequence during reads', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath });
+    await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'future-parent', input: 'go',
+    });
+    const database = openDatabase(filePath);
+    const later = database.prepare(
+      "SELECT event_id FROM agent_events WHERE event_type = 'run.created'",
+    ).get() as { event_id: string };
+    database.prepare(
+      "UPDATE agent_events SET parent_event_id = ? WHERE event_type = 'input.received'",
+    ).run(later.event_id);
+    database.close();
+
+    await expect(journal.readProject('project-a', 0, 100))
+      .rejects.toMatchObject({ code: 'CORRUPT_EVENT' });
+  });
+
   it('runtime-validates projection JSON and classifies corruption consistently', async () => {
     const filePath = await journalPath();
     const journal = new SqliteAgentJournal({ filePath });
@@ -132,6 +256,67 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
     database.close();
 
     await expect(journal.getCommittedTurn('turn-a'))
+      .rejects.toMatchObject({ code: 'PROJECTION_CORRUPT' });
+  });
+
+  it('cross-checks every projection JSON identity against its columns', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath });
+    const { runId, lease } = await createLeasedRun(journal);
+    const committed = await journal.commitValidatedAttempt({
+      projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a',
+      commandId: 'projection-identity-seed',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 3, expectedTurnRevision: 1, attempt: await modelAttempt(),
+    });
+    const database = openDatabase(filePath);
+    database.prepare("UPDATE agent_turns SET payload_json = json_set(payload_json, '$.projectId', 'project-b')")
+      .run();
+    database.close();
+    await expect(journal.getCommittedTurn('turn-a'))
+      .rejects.toMatchObject({ code: 'PROJECTION_CORRUPT' });
+
+    const restore = openDatabase(filePath);
+    restore.prepare('UPDATE agent_turns SET payload_json = ?').run(JSON.stringify(committed.turn));
+    restore.prepare(
+      "UPDATE agent_protocol_envelopes SET envelope_json = json_set(envelope_json, '$.attemptId', 'attempt-other')",
+    ).run();
+    restore.prepare(
+      "UPDATE agent_invocations SET payload_json = json_set(payload_json, '$.sessionId', 'session-other')",
+    ).run();
+    restore.close();
+    await expect(journal.getProtocolEnvelope('turn-a'))
+      .rejects.toMatchObject({ code: 'PROJECTION_CORRUPT' });
+    await expect(journal.listInvocations(runId))
+      .rejects.toMatchObject({ code: 'PROJECTION_CORRUPT' });
+  });
+
+  it('strictly validates projected ModelContentBlock and correlation unions', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath });
+    const { runId, lease } = await createLeasedRun(journal);
+    const committed = await journal.commitValidatedAttempt({
+      projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a',
+      commandId: 'projection-union-seed',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 3, expectedTurnRevision: 1, attempt: await modelAttempt(),
+    });
+    const database = openDatabase(filePath);
+    const badTurn = { ...committed.turn, blocks: [{ type: 'invented', data: 'unsafe' }] };
+    database.prepare('UPDATE agent_turns SET payload_json = ?').run(JSON.stringify(badTurn));
+    const badEnvelope = {
+      ...committed.envelope,
+      correlations: [{
+        callId: 'call-a', draftCallKey: 'draft-a', replay: 'invented', injected: true,
+      }],
+    };
+    database.prepare('UPDATE agent_protocol_envelopes SET envelope_json = ?')
+      .run(JSON.stringify(badEnvelope));
+    database.close();
+
+    await expect(journal.getCommittedTurn('turn-a'))
+      .rejects.toMatchObject({ code: 'PROJECTION_CORRUPT' });
+    await expect(journal.getProtocolEnvelope('turn-a'))
       .rejects.toMatchObject({ code: 'PROJECTION_CORRUPT' });
   });
 
@@ -261,6 +446,39 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       worker.once('error', reject);
     });
     await expect(journal.countEvents(undefined, 'project-a')).resolves.toBe(2);
+  });
+
+  it('maps initialization PRAGMA and DDL lock failures to JOURNAL_BUSY', async () => {
+    const filePath = await journalPath();
+    const worker = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(workerData);
+      db.exec('BEGIN IMMEDIATE');
+      parentPort.postMessage('locked');
+      parentPort.once('message', () => { db.exec('ROLLBACK'); db.close(); });
+    `, { eval: true, workerData: filePath });
+    await new Promise<void>((resolveReady, reject) => {
+      worker.once('message', () => resolveReady());
+      worker.once('error', reject);
+    });
+    const journal = new SqliteAgentJournal({ filePath, busyTimeoutMs: 75 });
+
+    let error: unknown;
+    try {
+      await journal.createRun({
+        projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'ddl-busy', input: 'go',
+      });
+    } catch (caught) {
+      error = caught;
+    } finally {
+      worker.postMessage('release');
+      await new Promise<void>((resolveExit, reject) => {
+        worker.once('exit', () => resolveExit());
+        worker.once('error', reject);
+      });
+    }
+    expect(error).toMatchObject({ code: 'JOURNAL_BUSY' });
   });
 
   it('uses a barrier for two real Journal writers racing the same command and Turn', async () => {

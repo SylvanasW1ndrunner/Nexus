@@ -89,4 +89,29 @@ describe('agent event runtime schemas', () => {
       summary: 'query completed', resultRefs: [], rawResult: { rows: [{ value: 'data' }] },
     })).toThrow(/unknown/iu);
   });
+
+  it.each([
+    ['run.resumed', { reason: 1 }, 'reason'],
+    ['run.input_requested', { reason: 'need input', connectionId: 1 }, 'connectionId'],
+    ['run.limit_reached', { limit: 'rounds', value: '9' }, 'value'],
+    ['turn.started', { turnSnapshotId: 1 }, 'turnSnapshotId'],
+    ['turn.context_compiled', { contextRef: 'context:a', tokenEstimate: '100' }, 'tokenEstimate'],
+  ] as const)('validates optional %s fields when present', (type, payload, field) => {
+    expect(() => validateAndRedactEventPayload(type, payload)).toThrow(new RegExp(field, 'iu'));
+  });
+
+  it('requires run.steered content instead of accepting a metadata-only steering fact', () => {
+    expect(() => validateAndRedactEventPayload('run.steered', {
+      clientRequestId: 'request-a',
+    })).toThrow(/content|required/iu);
+  });
+
+  it.each([
+    'accessToken', 'refreshToken', 'authToken', 'clientSecret', 'privateKey',
+    'databaseSigningSecret', 'x-auth-token',
+  ])('rejects normalized credential field %s at arbitrary depth', (key) => {
+    expect(() => validateAndRedactEventPayload('run.failed', {
+      code: 'AUTH', detail: { nested: { [key]: 'plain-credential-material' } },
+    })).toThrow(/secret|credential/iu);
+  });
 });
