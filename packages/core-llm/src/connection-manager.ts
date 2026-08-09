@@ -235,7 +235,25 @@ export class LlmConnectionManager {
   replaceConnections(inputs: readonly (LlmConnectionInput | LlmConnection)[]): LlmConnection[] {
     const next = new Map<string, LlmConnection>();
     for (const input of inputs) {
-      const candidate = isResolvedConnection(input) ? input : createLlmConnection(input);
+      let candidate = isResolvedConnection(input) ? input : createLlmConnection(input);
+      if (!isResolvedConnection(input)) {
+        const existing = this.configuredConnections.get(candidate.id);
+        if (existing !== undefined) {
+          candidate = createLlmConnection({
+            ...input,
+            connectionConfigurationRevision:
+              input.connectionConfigurationRevision ??
+              (sameNonSecretConnection(existing, candidate)
+                ? existing.connectionConfigurationRevision
+                : candidate.connectionConfigurationRevision),
+            credentialRevision:
+              input.credentialRevision ??
+              (sameCredentialValues(existing, candidate)
+                ? existing.credentialRevision
+                : candidate.credentialRevision),
+          });
+        }
+      }
       const previous = this.configuredConnections.get(candidate.id);
       const connection = previous && sameConnection(previous, candidate) ? previous : candidate;
       if (next.has(connection.id)) {
@@ -1025,15 +1043,23 @@ function canonicalModelHeaders(
 
 function sameConnection(left: LlmConnection, right: LlmConnection): boolean {
   if (
-    left.id !== right.id ||
-    left.name !== right.name ||
-    left.endpoint !== right.endpoint ||
+    !sameNonSecretConnection(left, right) ||
     left.connectionConfigurationRevision !== right.connectionConfigurationRevision ||
     left.credentialRevision !== right.credentialRevision ||
-    left.credentialScope !== right.credentialScope
+    left.credentialScope !== right.credentialScope ||
+    !sameCredentialValues(left, right)
   ) {
     return false;
   }
+  return true;
+}
+
+function sameNonSecretConnection(left: LlmConnection, right: LlmConnection): boolean {
+  return left.id === right.id && left.name === right.name && left.endpoint === right.endpoint;
+}
+
+function sameCredentialValues(left: LlmConnection, right: LlmConnection): boolean {
+  if (left.apiKey !== right.apiKey) return false;
   const leftHeaders = Object.entries(left.headers).sort(([a], [b]) => a.localeCompare(b));
   const rightHeaders = Object.entries(right.headers).sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify(leftHeaders) === JSON.stringify(rightHeaders);
