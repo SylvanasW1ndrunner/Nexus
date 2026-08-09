@@ -379,6 +379,17 @@ describe('version 2 strict native protocol contract', () => {
         { type: 'response.reasoning_summary_part.done', output_index: 0, summary_index: 0, part: { type: 'summary_text', text: 'changed' } },
       ],
     },
+    {
+      name: 'opaque content_part.done conflicting with output_item.done',
+      message: 'conflicts with completed content part',
+      events: [
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg', type: 'message', content: [] } },
+        { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'custom', payload: { phase: 'added' } } },
+        { type: 'response.content_part.done', output_index: 0, content_index: 0, part: { type: 'custom', payload: { phase: 'part-final' } } },
+        { type: 'response.output_item.done', output_index: 0, item: { id: 'msg', type: 'message', content: [{ type: 'custom', payload: { phase: 'item-final' } }] } },
+        { type: 'response.completed', response: { status: 'completed' } },
+      ],
+    },
   ])('rejects Responses $name', async ({ events, message }) => {
     await expectStreamErrorMessage(
       openAIResponsesCodec.decodeStream(streamOf(...events), context('openai-responses')),

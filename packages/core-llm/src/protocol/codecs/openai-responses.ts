@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type {
   DecodedModelContentBlock,
   ModelMessage,
@@ -571,7 +572,9 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
               if (state?.kind !== 'opaque' || !state.complete) {
                 invalid('Responses completed message content lacks one completed opaque state');
               }
-              state.value = part;
+              if (!isDeepStrictEqual(state.value, part)) {
+                invalid('Responses completed message opaque content conflicts with completed content part');
+              }
             }
           }
         } else if (itemType === 'reasoning') {
