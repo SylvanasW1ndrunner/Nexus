@@ -12,13 +12,12 @@ import type {
 } from '../src/index.js';
 
 type RebindingApi = {
-  getModelClientBindingCapability(session: ModelSession): unknown;
   rehydrateModelSession(input: {
     descriptor: PersistedModelSessionDescriptor;
     expectedRouteDigest: string;
     expectedSessionDigest: string;
     expectedCodecRevision: string;
-    capability?: unknown;
+    bindingSession?: ModelSession;
     client?: ModelClient;
   }): ModelSession;
 };
@@ -32,20 +31,23 @@ afterEach(async () => {
 });
 
 describe('Task 2 round-three authenticated client rebinding', () => {
-  it('rehydrates with a fresh capability prepared for the exact same route and config', async () => {
-    const manager = await createManager('first-secret');
+  it('rehydrates with a fresh trusted Session prepared for the exact same route and config', async () => {
+    const manager = await createManager({
+      apiKey: 'first-secret',
+      credentialRevision: 'credential-v1',
+      clientTexts: ['original', 'fresh'],
+    });
     const selection = selectionFor(manager);
-    const original = await manager.prepareModelSession(selection, { client: client('original') });
-    const fresh = await manager.prepareModelSession(selection, { client: client('fresh') });
+    const original = await manager.prepareModelSession(selection, {});
+    const fresh = await manager.prepareModelSession(selection, {});
     const descriptor = core.describeModelSession(original);
-    const capability = rebinding.getModelClientBindingCapability(fresh);
 
     const rebound = rebinding.rehydrateModelSession({
       descriptor,
       expectedRouteDigest: original.route.metadata.digest,
       expectedSessionDigest: original.bindingDigest,
       expectedCodecRevision: 'openai-chat@1',
-      capability,
+      bindingSession: fresh,
     });
     const result = await new core.ModelExecutionGateway().executeAttempt(rebound, {
       model: selection.modelId,
@@ -56,53 +58,56 @@ describe('Task 2 round-three authenticated client rebinding', () => {
     expect(JSON.stringify(descriptor)).not.toContain('first-secret');
   });
 
-  it('rejects a capability prepared for another model route', async () => {
-    const manager = await createManager('secret');
-    const original = await manager.prepareModelSession(selectionFor(manager), { client: client('a') });
+  it('rejects a trusted binding Session prepared for another model route', async () => {
+    const manager = await createManager({ apiKey: 'secret', clientTexts: ['a', 'b'] });
+    const original = await manager.prepareModelSession(selectionFor(manager), {});
     const other = await manager.prepareModelSession(
       { ...selectionFor(manager), modelId: 'model-b' },
-      { client: client('b') },
+      {},
     );
     const descriptor = core.describeModelSession(original);
 
     expectErrorCode(
-      () => rehydrate(original, descriptor, rebinding.getModelClientBindingCapability(other)),
+      () => rehydrate(original, descriptor, other),
       'MODEL_CLIENT_BINDING_MISMATCH',
     );
   });
 
   it('rejects endpoint credential/config drift even when connection and route ids are stable', async () => {
-    const oldManager = await createManager('old-secret');
-    const newManager = await createManager('new-secret');
-    const original = await oldManager.prepareModelSession(selectionFor(oldManager), { client: client('old') });
-    const drifted = await newManager.prepareModelSession(selectionFor(newManager), { client: client('new') });
+    const oldManager = await createManager({
+      apiKey: 'old-secret', credentialRevision: 'credential-v1', clientTexts: ['old'],
+    });
+    const newManager = await createManager({
+      apiKey: 'new-secret', credentialRevision: 'credential-v2', clientTexts: ['new'],
+    });
+    const original = await oldManager.prepareModelSession(selectionFor(oldManager), {});
+    const drifted = await newManager.prepareModelSession(selectionFor(newManager), {});
     const descriptor = core.describeModelSession(original);
 
     expectErrorCode(
-      () => rehydrate(original, descriptor, rebinding.getModelClientBindingCapability(drifted)),
+      () => rehydrate(original, descriptor, drifted),
       'MODEL_CLIENT_BINDING_MISMATCH',
     );
   });
 
   it('rejects a tampered route even with a genuine capability', async () => {
-    const manager = await createManager('secret');
-    const original = await manager.prepareModelSession(selectionFor(manager), { client: client('a') });
+    const manager = await createManager({ apiKey: 'secret', clientTexts: ['a'] });
+    const original = await manager.prepareModelSession(selectionFor(manager), {});
     const descriptor = core.describeModelSession(original);
-    const capability = rebinding.getModelClientBindingCapability(original);
     const tampered = {
       ...descriptor,
       route: { ...descriptor.route, providerId: 'forged-provider' },
     };
 
     expectErrorCode(
-      () => rehydrate(original, tampered, capability),
+      () => rehydrate(original, tampered, original),
       'MODEL_CLIENT_BINDING_MISMATCH',
     );
   });
 
   it('rejects missing, forged, and raw-client handles with a typed binding-required error', async () => {
-    const manager = await createManager('secret');
-    const original = await manager.prepareModelSession(selectionFor(manager), { client: client('a') });
+    const manager = await createManager({ apiKey: 'secret', clientTexts: ['a'] });
+    const original = await manager.prepareModelSession(selectionFor(manager), {});
     const descriptor = core.describeModelSession(original);
     const base = {
       descriptor,
@@ -116,7 +121,7 @@ describe('Task 2 round-three authenticated client rebinding', () => {
       'MODEL_CLIENT_BINDING_REQUIRED',
     );
     expectErrorCode(
-      () => rebinding.rehydrateModelSession({ ...base, capability: {} }),
+      () => rebinding.rehydrateModelSession({ ...base, bindingSession: {} as ModelSession }),
       'MODEL_CLIENT_BINDING_REQUIRED',
     );
     expectErrorCode(
@@ -126,8 +131,8 @@ describe('Task 2 round-three authenticated client rebinding', () => {
   });
 
   it('reports a missing bundle capability binding with the same typed error', async () => {
-    const manager = await createManager('secret');
-    const session = await manager.prepareModelSession(selectionFor(manager), { client: client('a') });
+    const manager = await createManager({ apiKey: 'secret', clientTexts: ['a'] });
+    const session = await manager.prepareModelSession(selectionFor(manager), {});
     const bundle = core.createModelSessionBundle({
       primary: session,
       fallbacks: [],
@@ -160,28 +165,43 @@ function expectErrorCode(operation: () => unknown, code: string): void {
 function rehydrate(
   original: ModelSession,
   descriptor: PersistedModelSessionDescriptor,
-  capability: unknown,
+  bindingSession: ModelSession,
 ): ModelSession {
   return rebinding.rehydrateModelSession({
     descriptor,
     expectedRouteDigest: original.route.metadata.digest,
     expectedSessionDigest: original.bindingDigest,
     expectedCodecRevision: 'openai-chat@1',
-    capability,
+    bindingSession,
   });
 }
 
-async function createManager(apiKey: string): Promise<core.LlmConnectionManager> {
+async function createManager(options: {
+  apiKey: string;
+  credentialRevision?: string;
+  clientTexts: string[];
+}): Promise<core.LlmConnectionManager> {
   const cacheDirectory = await mkdtemp(join(tmpdir(), 'core-llm-rebind-'));
   directories.push(cacheDirectory);
+  let clientIndex = 0;
   const manager = new core.LlmConnectionManager({
     cacheDirectory,
     plugins: [formalPlugin()],
+    trustedModelClientFactory: ({ connection, resolution }) => ({
+      client: client(options.clientTexts[clientIndex++] ?? 'default'),
+      bindingEvidence: {
+        connectionResolutionRevision: resolution.revision,
+        connectionConfigurationRevision: connection.connectionConfigurationRevision,
+        credentialRevision: connection.credentialRevision,
+      },
+    }),
   });
   manager.replaceConnections([{
     name: 'stable',
     endpoint: 'http://127.0.0.1:8999',
-    apiKey,
+    apiKey: options.apiKey,
+    connectionConfigurationRevision: 'config-v1',
+    credentialRevision: options.credentialRevision ?? 'credential-v1',
   }]);
   await manager.discover(manager.connections()[0]!.id);
   return manager;

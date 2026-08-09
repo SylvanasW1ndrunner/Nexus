@@ -286,6 +286,13 @@ function assertLegacyRepresentableRequest(request: CanonicalModelRequest): void 
       throw unrepresentableLegacyBlock('developer role');
     }
     const blockTypes = new Set(message.content.map((block) => block.type));
+    const textBlocks = message.content.filter((block) => block.type === 'text');
+    if (textBlocks.length > 1) {
+      throw unrepresentableLegacyBlock('multiple Text blocks');
+    }
+    if (textBlocks.some((block) => block.text.length === 0)) {
+      throw unrepresentableLegacyBlock('empty Text block');
+    }
     for (const block of message.content) {
       if (
         block.type === 'reasoning-summary' ||

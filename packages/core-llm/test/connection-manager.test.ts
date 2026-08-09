@@ -279,7 +279,13 @@ describe('LlmConnectionManager', () => {
       return Promise.resolve(['chat-model', 'embedding-model', 'rerank-model']);
     };
     const manager = await createManager({ plugins: [capabilityPlugin(provider)] });
-    const input = { name: 'local', endpoint: 'http://127.0.0.1:8999', apiKey: 'first' };
+    const input = {
+      name: 'local',
+      endpoint: 'http://127.0.0.1:8999',
+      apiKey: 'first',
+      connectionConfigurationRevision: 'config-v1',
+      credentialRevision: 'credential-v1',
+    };
     const [connection] = manager.replaceConnections([input]);
     await manager.discover(connection!.id);
 

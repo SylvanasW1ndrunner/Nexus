@@ -8,7 +8,8 @@ export type ModelClientBindingCapability = Readonly<{
 
 export type ModelClientBindingMetadata = Readonly<{
   connectionResolutionRevision: string;
-  connectionConfigurationDigest: string;
+  connectionConfigurationRevision: string;
+  credentialRevision: string;
 }>;
 
 export type ModelClientBindingErrorCode =
@@ -40,13 +41,17 @@ const CAPABILITY_PAYLOADS = new WeakMap<object, ModelClientBindingPayload>();
 const SESSION_CAPABILITIES = new WeakMap<ModelSession, ModelClientBindingCapability>();
 
 /** Trusted ConnectionManager preparation hook; unavailable from the package root. */
-export function bindPreparedModelSessionClient(
+export function bindTrustedModelSessionClient(
   session: ModelSession,
   metadata: ModelClientBindingMetadata,
 ): void {
   if (
     metadata.connectionResolutionRevision !== session.route.metadata.revision ||
-    metadata.connectionConfigurationDigest.length === 0
+    metadata.connectionConfigurationRevision !==
+      session.route.metadata.connectionConfigurationRevision ||
+    metadata.credentialRevision !== session.route.metadata.credentialRevision ||
+    metadata.connectionConfigurationRevision.length === 0 ||
+    metadata.credentialRevision.length === 0
   ) {
     throw new ModelClientBindingError(
       'MODEL_CLIENT_BINDING_MISMATCH',
@@ -64,7 +69,8 @@ export function bindPreparedModelSessionClient(
     protocol: session.route.protocol,
     codecRevision: session.route.codecRevision,
     connectionResolutionRevision: metadata.connectionResolutionRevision,
-    connectionConfigurationDigest: metadata.connectionConfigurationDigest,
+    connectionConfigurationRevision: metadata.connectionConfigurationRevision,
+    credentialRevision: metadata.credentialRevision,
     client: session.client,
   }));
   SESSION_CAPABILITIES.set(session, capability);

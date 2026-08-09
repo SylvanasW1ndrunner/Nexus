@@ -1,10 +1,14 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export type LlmConnectionInput = {
   name?: string;
   endpoint: string;
   apiKey?: string;
   headers?: Record<string, string>;
+  /** Opaque revision persisted by the settings store when connection configuration changes. */
+  connectionConfigurationRevision?: string;
+  /** Opaque revision persisted by the secret store when credentials change. */
+  credentialRevision?: string;
 };
 
 export type LlmConnection = {
@@ -13,6 +17,9 @@ export type LlmConnection = {
   endpoint: string;
   apiKey?: string;
   headers: Readonly<Record<string, string>>;
+  connectionConfigurationRevision: string;
+  credentialRevision: string;
+  /** Compatibility alias. This is an opaque revision, never a secret-derived hash. */
   credentialScope: string;
 };
 
@@ -25,20 +32,20 @@ export function createLlmConnection(input: LlmConnectionInput): LlmConnection {
     endpoint,
     ...(explicitName === undefined ? {} : { name: explicitName }),
   });
-  const credentialScope = createHash('sha256')
-    .update(endpoint)
-    .update('\0')
-    .update(input.apiKey?.trim() ?? '')
-    .update('\0')
-    .update(stableHeaderText(headers))
-    .digest('hex');
+  const connectionConfigurationRevision = opaqueRevision(
+    input.connectionConfigurationRevision,
+    'connectionConfigurationRevision',
+  );
+  const credentialRevision = opaqueRevision(input.credentialRevision, 'credentialRevision');
   return Object.freeze({
     id,
     name,
     endpoint,
     ...(input.apiKey?.trim() ? { apiKey: input.apiKey.trim() } : {}),
     headers: Object.freeze(headers),
-    credentialScope,
+    connectionConfigurationRevision,
+    credentialRevision,
+    credentialScope: credentialRevision,
   });
 }
 
@@ -101,10 +108,9 @@ function normalizeHeaders(input?: Record<string, string>): Record<string, string
   return result;
 }
 
-function stableHeaderText(headers: Readonly<Record<string, string>>): string {
-  return Object.entries(headers)
-    .map(([name, value]) => [name.toLocaleLowerCase(), value] as const)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([name, value]) => `${name}:${value}`)
-    .join('\n');
+function opaqueRevision(input: string | undefined, name: string): string {
+  if (input === undefined) return randomUUID();
+  const revision = input.trim();
+  if (revision.length === 0) throw new Error(`${name} must not be empty.`);
+  return revision;
 }

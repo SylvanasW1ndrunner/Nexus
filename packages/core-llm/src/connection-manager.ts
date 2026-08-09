@@ -27,7 +27,10 @@ import { anthropicMessagesCodec } from './protocol/codecs/anthropic-messages.js'
 import { ollamaChatCodec } from './protocol/codecs/ollama-chat.js';
 import type { ModelProtocolCodec } from './protocol/codec.js';
 import { ModelCodecRegistryError } from './protocol/codec-registry.js';
-import { bindPreparedModelSessionClient } from './model-client-binding.js';
+import {
+  bindTrustedModelSessionClient,
+  type ModelClientBindingMetadata,
+} from './model-client-binding.js';
 import {
   LlmGateway,
   ModelExecutionGateway,
@@ -155,6 +158,21 @@ export type LlmConnectionManagerChatResult = {
   gateway: LlmGatewayResult;
 };
 
+export type LlmTrustedModelClientFactoryContext = Readonly<{
+  connection: LlmConnection;
+  resolution: LlmConnectionResolution;
+  fetch?: LlmFetch;
+}>;
+
+export type LlmTrustedModelClientBinding = Readonly<{
+  client: ModelClient;
+  bindingEvidence: ModelClientBindingMetadata;
+}>;
+
+export type LlmTrustedModelClientFactory = (
+  context: LlmTrustedModelClientFactoryContext,
+) => LlmTrustedModelClientBinding | undefined;
+
 export type LlmConnectionManagerOptions = {
   cacheDirectory: string;
   plugins?: readonly LlmProviderPlugin[];
@@ -164,6 +182,8 @@ export type LlmConnectionManagerOptions = {
   projectParameters?: LlmGenerationConfig;
   gateway?: LlmGateway;
   catalogManager?: LlmModelCatalogManager;
+  /** Host-owned factory; public per-call clients never receive persistence authority. */
+  trustedModelClientFactory?: LlmTrustedModelClientFactory;
 };
 
 type ConnectionRuntime = {
@@ -183,10 +203,13 @@ export class LlmConnectionManager {
   private readonly runtimes = new Map<string, ConnectionRuntime>();
   private readonly connectionOperationTails = new Map<string, Promise<void>>();
   private readonly fetchImpl: LlmFetch | undefined;
+  private readonly trustedModelClientFactory: LlmTrustedModelClientFactory;
   private projectParameters: LlmGenerationConfig;
 
   constructor(options: LlmConnectionManagerOptions) {
     this.fetchImpl = options.fetch;
+    this.trustedModelClientFactory =
+      options.trustedModelClientFactory ?? defaultTrustedModelClientFactory;
     this.registry = new LlmProviderPluginRegistry(
       options.plugins ?? createBuiltinLlmProviderPlugins(),
     );
@@ -424,9 +447,16 @@ export class LlmConnectionManager {
         : candidateCodec.protocol === 'legacy-normalized'
           ? { mode: 'new' as const }
           : options.replay;
-      const client = options.clients?.[candidateRouteId] ??
-        (!fallback ? options.client : undefined) ??
-        defaultModelClient(runtime.connection, candidate, this.fetchImpl) ??
+      const injectedClient = options.clients?.[candidateRouteId] ??
+        (!fallback ? options.client : undefined);
+      const trustedBinding = injectedClient === undefined
+        ? this.trustedModelClientFactory({
+            connection: runtime.connection,
+            resolution: candidate,
+            ...(this.fetchImpl === undefined ? {} : { fetch: this.fetchImpl }),
+          })
+        : undefined;
+      const client = injectedClient ?? trustedBinding?.client ??
         new LegacyProviderModelClient(provider, false);
       const session = createModelSession({
         route: {
@@ -454,6 +484,9 @@ export class LlmConnectionManager {
           metadata: {
             source: prepared.model.contextTokens.source,
             revision: candidate.revision,
+            connectionConfigurationRevision:
+              runtime.connection.connectionConfigurationRevision,
+            credentialRevision: runtime.connection.credentialRevision,
             digest: 'computed-by-createModelSession',
           },
           allowedFallbackRouteIds: fallback ? [] : allowedFallbackRouteIds,
@@ -467,10 +500,9 @@ export class LlmConnectionManager {
         client,
         ...(replay === undefined ? {} : { replay }),
       });
-      bindPreparedModelSessionClient(session, {
-        connectionResolutionRevision: candidate.revision,
-        connectionConfigurationDigest: runtime.connection.credentialScope,
-      });
+      if (trustedBinding !== undefined) {
+        bindTrustedModelSessionClient(session, trustedBinding.bindingEvidence);
+      }
       return session;
     };
     const primarySession = createBoundSession(resolution, false);
@@ -945,11 +977,10 @@ function modelSessionRouteId(
   return `${resolution.connectionId}:${modelId}:${resolution.pluginId}:${resolution.revision}`;
 }
 
-function defaultModelClient(
-  connection: LlmConnection,
-  resolution: LlmConnectionResolution,
-  fetchImpl?: LlmFetch,
-): ModelClient | undefined {
+function defaultTrustedModelClientFactory(
+  context: LlmTrustedModelClientFactoryContext,
+): LlmTrustedModelClientBinding | undefined {
+  const { connection, resolution } = context;
   const path = resolution.protocol === 'openai-chat'
     ? '/chat/completions'
     : resolution.protocol === 'openai-responses'
@@ -962,11 +993,18 @@ function defaultModelClient(
   if (path === undefined) {
     return undefined;
   }
-  return new HttpJsonTransport({
-    url: appendLlmEndpointPath(resolution.providerBaseUrl, path),
-    headers: canonicalModelHeaders(connection, resolution.protocol),
-    ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }),
-  });
+  return {
+    client: new HttpJsonTransport({
+      url: appendLlmEndpointPath(resolution.providerBaseUrl, path),
+      headers: canonicalModelHeaders(connection, resolution.protocol),
+      ...(context.fetch === undefined ? {} : { fetch: context.fetch }),
+    }),
+    bindingEvidence: {
+      connectionResolutionRevision: resolution.revision,
+      connectionConfigurationRevision: connection.connectionConfigurationRevision,
+      credentialRevision: connection.credentialRevision,
+    },
+  };
 }
 
 function canonicalModelHeaders(
@@ -990,6 +1028,8 @@ function sameConnection(left: LlmConnection, right: LlmConnection): boolean {
     left.id !== right.id ||
     left.name !== right.name ||
     left.endpoint !== right.endpoint ||
+    left.connectionConfigurationRevision !== right.connectionConfigurationRevision ||
+    left.credentialRevision !== right.credentialRevision ||
     left.credentialScope !== right.credentialScope
   ) {
     return false;
@@ -1068,5 +1108,8 @@ function cloneGenerationConfig(config: LlmGenerationConfig): LlmGenerationConfig
 function isResolvedConnection(
   input: LlmConnectionInput | LlmConnection,
 ): input is LlmConnection {
-  return 'id' in input && 'credentialScope' in input;
+  return 'id' in input &&
+    'connectionConfigurationRevision' in input &&
+    'credentialRevision' in input &&
+    'credentialScope' in input;
 }

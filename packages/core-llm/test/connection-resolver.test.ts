@@ -186,15 +186,20 @@ describe('LlmConnectionResolver', () => {
       name: 'team',
       endpoint: 'HTTPS://Relay.Example:443/v1/',
       apiKey: 'key-one',
+      connectionConfigurationRevision: 'config-v1',
+      credentialRevision: 'credential-v1',
     });
     const rotated = createLlmConnection({
       name: 'team',
       endpoint: 'https://relay.example/v1',
       apiKey: 'key-two',
+      connectionConfigurationRevision: 'config-v1',
+      credentialRevision: 'credential-v2',
     });
 
     expect(first.id).toBe(rotated.id);
     expect(first.credentialScope).not.toBe(rotated.credentialScope);
+    expect(first.credentialScope).toBe(first.credentialRevision);
     expect(first.endpoint).toBe('https://relay.example/v1');
   });
 

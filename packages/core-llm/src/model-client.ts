@@ -28,7 +28,6 @@ export {
 } from './protocol/codec-registry.js';
 export {
   ModelClientBindingError,
-  type ModelClientBindingCapability,
   type ModelClientBindingErrorCode,
   type ModelClientBindingMetadata,
 } from './model-client-binding.js';
@@ -36,6 +35,8 @@ export {
 export type ModelRouteMetadata = {
   source: string;
   revision: string;
+  connectionConfigurationRevision?: string;
+  credentialRevision?: string;
   digest: string;
 };
 
@@ -285,18 +286,6 @@ export type PersistedModelSessionDescriptor = Readonly<{
   bindingDigest: string;
 }>;
 
-export function getModelClientBindingCapability(
-  session: ModelSession,
-): ModelClientBindingCapability {
-  if (session.route.protocol === 'legacy-normalized') {
-    throw new ModelClientBindingError(
-      'MODEL_SESSION_NOT_PERSISTABLE',
-      'legacy-normalized Sessions cannot be persisted or rehydrated.',
-    );
-  }
-  return requireModelClientBindingCapability(session);
-}
-
 export function describeModelSession(session: ModelSession): PersistedModelSessionDescriptor {
   if (!isAuthenticModelSession(session)) {
     throw new Error('Only an authentic Model Session can be persisted.');
@@ -315,7 +304,8 @@ export function describeModelSession(session: ModelSession): PersistedModelSessi
     replay: freezeReplay(session.replay),
     clientBinding: Object.freeze({
       connectionResolutionRevision: payload.connectionResolutionRevision,
-      connectionConfigurationDigest: payload.connectionConfigurationDigest,
+      connectionConfigurationRevision: payload.connectionConfigurationRevision,
+      credentialRevision: payload.credentialRevision,
     }),
     bindingDigest: session.bindingDigest,
   });
@@ -326,10 +316,20 @@ export function rehydrateModelSession(input: {
   expectedRouteDigest: string;
   expectedSessionDigest: string;
   expectedCodecRevision: string;
-  capability?: ModelClientBindingCapability;
+  bindingSession?: ModelSession;
 }): ModelSession {
   const { descriptor } = input;
-  const payload = requireModelClientBindingPayload(input.capability);
+  const clientBinding = validatePersistedClientBinding(descriptor);
+  const capability = input.bindingSession === undefined
+    ? undefined
+    : modelClientBindingCapabilityForSession(input.bindingSession);
+  if (capability === undefined) {
+    throw new ModelClientBindingError(
+      'MODEL_CLIENT_BINDING_REQUIRED',
+      'A trusted connection-bound Model Session is required for rehydration.',
+    );
+  }
+  const payload = requireModelClientBindingPayload(capability);
   if (
     descriptor.route.metadata.digest !== input.expectedRouteDigest ||
     descriptor.bindingDigest !== input.expectedSessionDigest ||
@@ -341,8 +341,13 @@ export function rehydrateModelSession(input: {
     payload.protocol !== descriptor.route.protocol ||
     payload.codecRevision !== descriptor.route.codecRevision ||
     payload.connectionResolutionRevision !== descriptor.route.metadata.revision ||
-    payload.connectionResolutionRevision !== descriptor.clientBinding.connectionResolutionRevision ||
-    payload.connectionConfigurationDigest !== descriptor.clientBinding.connectionConfigurationDigest
+    payload.connectionConfigurationRevision !==
+      descriptor.route.metadata.connectionConfigurationRevision ||
+    payload.credentialRevision !== descriptor.route.metadata.credentialRevision ||
+    payload.connectionResolutionRevision !== clientBinding.connectionResolutionRevision ||
+    payload.connectionConfigurationRevision !==
+      clientBinding.connectionConfigurationRevision ||
+    payload.credentialRevision !== clientBinding.credentialRevision
   ) {
     throw new ModelClientBindingError(
       'MODEL_CLIENT_BINDING_MISMATCH',
@@ -369,7 +374,7 @@ export function rehydrateModelSession(input: {
       'Persisted Model Session failed digest verification during rehydration.',
     );
   }
-  attachModelClientBindingCapability(session, input.capability!);
+  attachModelClientBindingCapability(session, capability);
   return session;
 }
 
@@ -384,7 +389,7 @@ export type ModelSessionRehydrationBinding = Readonly<{
   expectedRouteDigest: string;
   expectedSessionDigest: string;
   expectedCodecRevision: string;
-  capability?: ModelClientBindingCapability;
+  bindingSession?: ModelSession;
 }>;
 
 export function describeModelSessionBundle(
@@ -473,7 +478,19 @@ function freezeRoute(input: ModelRouteSnapshotInput): ModelRouteSnapshot {
     contextTokens: input.contextTokens,
     maxInputTokens: input.maxInputTokens,
     maxOutputTokens: input.maxOutputTokens,
-    metadata: { source: input.metadata.source, revision: input.metadata.revision },
+    metadata: {
+      source: input.metadata.source,
+      revision: input.metadata.revision,
+      ...(input.metadata.connectionConfigurationRevision === undefined
+        ? {}
+        : {
+            connectionConfigurationRevision:
+              input.metadata.connectionConfigurationRevision,
+          }),
+      ...(input.metadata.credentialRevision === undefined
+        ? {}
+        : { credentialRevision: input.metadata.credentialRevision }),
+    },
     allowedFallbackRouteIds,
     compatibility,
   });
@@ -492,6 +509,15 @@ function freezeRoute(input: ModelRouteSnapshotInput): ModelRouteSnapshot {
     metadata: Object.freeze({
       source: input.metadata.source,
       revision: input.metadata.revision,
+      ...(input.metadata.connectionConfigurationRevision === undefined
+        ? {}
+        : {
+            connectionConfigurationRevision:
+              input.metadata.connectionConfigurationRevision,
+          }),
+      ...(input.metadata.credentialRevision === undefined
+        ? {}
+        : { credentialRevision: input.metadata.credentialRevision }),
       digest: digestValue,
     }),
     allowedFallbackRouteIds,
@@ -541,6 +567,38 @@ function routeDescriptor(route: ModelRouteSnapshot): ModelRouteSnapshotInput {
       ? {}
       : { compatibility: Object.freeze({ ...route.compatibility }) }),
   });
+}
+
+function validatePersistedClientBinding(
+  descriptor: PersistedModelSessionDescriptor,
+): ModelClientBindingMetadata {
+  const value = (descriptor as { readonly clientBinding?: unknown }).clientBinding;
+  if (value === undefined) {
+    throw new ModelClientBindingError(
+      'MODEL_CLIENT_BINDING_REQUIRED',
+      'The persisted Model Session has no client binding metadata.',
+    );
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ModelClientBindingError(
+      'MODEL_CLIENT_BINDING_MISMATCH',
+      'The persisted Model Session client binding metadata is malformed.',
+    );
+  }
+  const candidate = value as Record<string, unknown>;
+  for (const name of [
+    'connectionResolutionRevision',
+    'connectionConfigurationRevision',
+    'credentialRevision',
+  ] as const) {
+    if (typeof candidate[name] !== 'string' || candidate[name].trim().length === 0) {
+      throw new ModelClientBindingError(
+        'MODEL_CLIENT_BINDING_MISMATCH',
+        `The persisted Model Session client binding ${name} is malformed.`,
+      );
+    }
+  }
+  return candidate as ModelClientBindingMetadata;
 }
 
 function generationDescriptor(generation: ValidatedGenerationConfig): LlmGenerationConfig {
@@ -594,6 +652,14 @@ function assertRoute(route: ModelRouteSnapshotInput): void {
     ['metadata.revision', route.metadata.revision],
   ] as const) {
     if (!value.trim()) throw new Error(`Model route ${name} must not be empty.`);
+  }
+  for (const [name, value] of [
+    ['metadata.connectionConfigurationRevision', route.metadata.connectionConfigurationRevision],
+    ['metadata.credentialRevision', route.metadata.credentialRevision],
+  ] as const) {
+    if (value !== undefined && !value.trim()) {
+      throw new Error(`Model route ${name} must not be empty when supplied.`);
+    }
   }
   for (const [name, value] of [
     ['contextTokens', route.contextTokens],

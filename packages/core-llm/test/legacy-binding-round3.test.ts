@@ -47,6 +47,17 @@ describe('Task 2 round-three normalized legacy boundary', () => {
         { type: 'text', text: 'after' },
       ] }],
     },
+    {
+      name: 'multiple Text blocks that would be merged',
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'first' },
+        { type: 'text', text: 'second' },
+      ] }],
+    },
+    {
+      name: 'empty Text blocks that would be dropped',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '' }] }],
+    },
   ] as const)('rejects unrepresentable $name', async ({ messages }) => {
     const session = core.createModelSession({
       route: legacyRoute(),
