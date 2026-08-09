@@ -209,44 +209,29 @@ export type MigrationValidationDiagnostics = {
   maxActiveProjectionAccumulators: number;
 };
 
-export class StateMigrationRunner {
+const STATE_MIGRATION_CONSTRUCTION_TOKEN = Symbol('state-migration-construction');
+const STATE_MIGRATION_HANDLE_BRAND: unique symbol = Symbol('state-migration-handle');
+
+class StateMigrationHandleImpl {
+  readonly [STATE_MIGRATION_HANDLE_BRAND] = true as const;
   readonly #projectDir: string;
   readonly #intent: MigrationIntent;
 
-  constructor(projectDir: string, intent: MigrationIntent) {
+  private constructor(
+    projectDir: string,
+    intent: MigrationIntent,
+    token: typeof STATE_MIGRATION_CONSTRUCTION_TOKEN,
+  ) {
+    if (token !== STATE_MIGRATION_CONSTRUCTION_TOKEN) {
+      throw new StateMigrationError('INVALID_ARGUMENT', 'Migration construction authority is invalid.');
+    }
     this.#projectDir = projectDir;
     this.#intent = intent;
   }
 
-  static async open(
-    projectDir: string,
-    options: StateMigrationOptions = {},
-  ): Promise<StateMigrationRunner> {
-    const normalizedDir = resolve(requireText(projectDir, 'projectDir'));
-    const targetSchemaVersion = options.targetSchemaVersion ?? 2;
-    const migratorRevision = requireText(options.migratorRevision ?? 'task-4-r1', 'migratorRevision');
-    if (!Number.isSafeInteger(targetSchemaVersion) || targetSchemaVersion < 2) {
-      throw new StateMigrationError('INVALID_ARGUMENT', 'targetSchemaVersion must be at least 2.');
-    }
-    await mkdir(normalizedDir, { recursive: true });
-    let lock;
-    try {
-      lock = acquireMigrationOwnerGate(normalizedDir);
-    } catch (error) {
-      if (isDatabaseLocked(error)) {
-        throw new StateMigrationError('MIGRATION_LOCKED', 'Another migration owns this Project.');
-      }
-      throw error;
-    }
-    try {
-      return await migrateLocked(normalizedDir, {
-        targetSchemaVersion,
-        migratorRevision,
-        ...(options.crashAt === undefined ? {} : { crashAt: options.crashAt }),
-      });
-    } finally {
-      lock.close();
-    }
+  static create(projectDir: string, intent: MigrationIntent): StateMigrationHandleImpl {
+    assertDerivedMigrationIntent(projectDir, intent);
+    return new StateMigrationHandleImpl(projectDir, intent, STATE_MIGRATION_CONSTRUCTION_TOKEN);
   }
 
   activeSchemaVersion(): Promise<number> {
@@ -470,11 +455,55 @@ export class StateMigrationRunner {
   }
 }
 
+export type StateMigrationHandle = Pick<
+  StateMigrationHandleImpl,
+  | 'activeSchemaVersion'
+  | 'countLegacyImports'
+  | 'listLegacyArchives'
+  | 'openLegacyArchive'
+  | 'readLegacyArchive'
+  | 'inspect'
+> & { readonly [STATE_MIGRATION_HANDLE_BRAND]: true };
+
+/** @internal Package tests and migration diagnostics only. */
+export type InternalStateMigrationHandle = StateMigrationHandleImpl;
+
+export async function openProjectStateMigration(
+  projectDir: string,
+  options: StateMigrationOptions = {},
+): Promise<StateMigrationHandle> {
+  const normalizedDir = resolve(requireText(projectDir, 'projectDir'));
+  const targetSchemaVersion = options.targetSchemaVersion ?? 2;
+  const migratorRevision = requireText(options.migratorRevision ?? 'task-4-r1', 'migratorRevision');
+  if (!Number.isSafeInteger(targetSchemaVersion) || targetSchemaVersion < 2) {
+    throw new StateMigrationError('INVALID_ARGUMENT', 'targetSchemaVersion must be at least 2.');
+  }
+  await mkdir(normalizedDir, { recursive: true });
+  let lock;
+  try {
+    lock = acquireMigrationOwnerGate(normalizedDir);
+  } catch (error) {
+    if (isDatabaseLocked(error)) {
+      throw new StateMigrationError('MIGRATION_LOCKED', 'Another migration owns this Project.');
+    }
+    throw error;
+  }
+  try {
+    return await migrateLocked(normalizedDir, {
+      targetSchemaVersion,
+      migratorRevision,
+      ...(options.crashAt === undefined ? {} : { crashAt: options.crashAt }),
+    });
+  } finally {
+    lock.close();
+  }
+}
+
 async function migrateLocked(
   projectDir: string,
   options: Required<Pick<StateMigrationOptions, 'targetSchemaVersion' | 'migratorRevision'>> &
     Pick<StateMigrationOptions, 'crashAt'>,
-): Promise<StateMigrationRunner> {
+): Promise<StateMigrationHandleImpl> {
   const finalPath = join(projectDir, 'state.db');
   const existingIntent = await readIntent(projectDir);
   let shadowCandidates = await listShadowCandidates(projectDir);
@@ -505,7 +534,7 @@ async function migrateLocked(
     await setMigrationActive(finalPath, reconstructed.migrationId);
     const completed = { ...reconstructed, status: 'completed' as const };
     await writeIntent(projectDir, completed);
-    return new StateMigrationRunner(projectDir, completed);
+    return StateMigrationHandleImpl.create(projectDir, completed);
   }
 
   if (shadowCandidates.length === 1) {
@@ -745,7 +774,7 @@ async function activate(
   projectDir: string,
   intent: MigrationIntent,
   crashAt: MigrationCrashPoint | undefined,
-): Promise<StateMigrationRunner> {
+): Promise<StateMigrationHandleImpl> {
   const writerGate = acquireExclusiveStateWriterGate(projectDir);
   let ownsPromotedSource = false;
   try {
@@ -803,7 +832,7 @@ async function activate(
     await writeIntent(projectDir, completed);
     await rm(intent.shadowPath, { force: true });
     await fsyncDirectory(projectDir);
-    return new StateMigrationRunner(projectDir, completed);
+    return StateMigrationHandleImpl.create(projectDir, completed);
   } catch (error) {
     if (!(error instanceof StateMigrationError && error.code === 'INJECTED_CRASH')) {
       await rollbackFailedActivation(projectDir, intent, ownsPromotedSource);
@@ -1976,6 +2005,20 @@ function migrationPaths(projectDir: string, migrationId: string) {
     shadowPath: contained(`state.v2.${migrationId}.db.tmp`),
     finalPath: contained('state.db'),
   };
+}
+
+function assertDerivedMigrationIntent(projectDir: string, intent: MigrationIntent): void {
+  const expected = migrationPaths(resolve(projectDir), intent.migrationId);
+  for (const key of [
+    'sourcePath', 'sourceSnapshotPath', 'sourceBackupPath', 'shadowPath', 'finalPath',
+  ] as const) {
+    if (resolve(intent[key]) !== expected[key]) {
+      throw new StateMigrationError(
+        'MIGRATION_STATE_CONFLICT',
+        `Migration ${key} was not derived from the authenticated Project identity.`,
+      );
+    }
+  }
 }
 
 function isSha256(value: unknown): value is string {

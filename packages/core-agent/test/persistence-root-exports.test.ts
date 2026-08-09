@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,7 @@ import {
   AgentSessionStore,
   JournalSessionStore,
   ProjectArtifactStore,
-  StateMigrationRunner,
+  openProjectStateMigration,
   createAgentSession,
   projectSession,
 } from '../src/index.js';
@@ -25,7 +25,7 @@ describe('persistence root exports', () => {
     expect(AgentSessionStore).toBeTypeOf('function');
     expect(JournalSessionStore).toBeTypeOf('function');
     expect(ProjectArtifactStore).toBeTypeOf('function');
-    expect(StateMigrationRunner).toBeTypeOf('function');
+    expect(openProjectStateMigration).toBeTypeOf('function');
     expect(projectSession).toBeTypeOf('function');
   });
 
@@ -39,9 +39,45 @@ describe('persistence root exports', () => {
 
       const rootImport = await runConsumer(consumerRoot, `
         const api = await import('@dbagent/core-agent');
-        console.log(typeof api.StateMigrationRunner, typeof api.SqliteAgentJournal);
+        console.log(
+          typeof api.openProjectStateMigration,
+          typeof api.StateMigrationRunner,
+          typeof api.SqliteAgentJournal,
+        );
       `);
-      expect(rootImport.stdout.trim()).toBe('function function');
+      expect(rootImport.stdout.trim()).toBe('function undefined function');
+
+      const constructorForgery = await runConsumer(consumerRoot, `
+        const api = await import('@dbagent/core-agent');
+        try {
+          new api.StateMigrationRunner(${JSON.stringify(consumerRoot)}, {
+            finalPath: ${JSON.stringify(join(consumerRoot, '..', 'outside.db'))},
+          });
+          console.log('FORGED');
+        } catch (error) {
+          console.log(error.name);
+        }
+      `);
+      expect(constructorForgery.stdout.trim()).toBe('TypeError');
+
+      await writeFile(join(consumerRoot, 'consumer.mts'), `
+        import { StateMigrationRunner, type StateMigrationHandle } from '@dbagent/core-agent';
+        new StateMigrationRunner('project', {});
+        const forged: StateMigrationHandle = {
+          activeSchemaVersion: async () => 999,
+        };
+        void forged;
+      `);
+      await writeFile(join(consumerRoot, 'tsconfig.json'), JSON.stringify({
+        compilerOptions: {
+          target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext',
+          strict: true, noEmit: true, skipLibCheck: true,
+        },
+        files: ['./consumer.mts'],
+      }));
+      const compileFailure = await runConsumerCompileFailure(consumerRoot);
+      expect(compileFailure).toMatch(/has no exported member (?:named )?'StateMigrationRunner'/u);
+      expect(compileFailure).toMatch(/not assignable to type 'StateMigrationHandle'|is missing the following/u);
 
       const deepImport = await runConsumer(consumerRoot, `
         try {
@@ -91,6 +127,23 @@ function runConsumer(cwd: string, source: string): Promise<{ stdout: string; std
         return;
       }
       resolve({ stdout, stderr });
+    });
+  });
+}
+
+function runConsumerCompileFailure(cwd: string): Promise<string> {
+  const compiler = join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath, [compiler, '--project', 'tsconfig.json'], { cwd }, (
+      error,
+      stdout,
+      stderr,
+    ) => {
+      if (error === null) {
+        reject(new Error('Forged migration consumer unexpectedly compiled.'));
+        return;
+      }
+      resolve(`${stdout}${stderr}`);
     });
   });
 }

@@ -26,14 +26,18 @@ import {
   ProjectArtifactStore,
   SqliteAgentJournal,
   StateMigrationError,
-  StateMigrationRunner,
+  openProjectStateMigration,
+  type StateMigrationHandle,
   type AgentRunRecord,
   type AgentSession,
   type AgentSubagentRecord,
-  type ImportedLegacyState,
-  type MigrationCrashPoint,
-  type MigrationInspection,
 } from '../src/index.js';
+import type {
+  ImportedLegacyState,
+  InternalStateMigrationHandle,
+  MigrationCrashPoint,
+  MigrationInspection,
+} from '../src/session/state-migrations.js';
 import { createLegacyMigrationWriter } from '../src/internal/legacy-migration-writer.js';
 
 const temporaryDirectories: string[] = [];
@@ -55,11 +59,11 @@ afterEach(async () => {
   );
 });
 
-describe('StateMigrationRunner', () => {
+describe('project state migration authority', () => {
   it('migrates the complete contract emitted only by public production stores', async () => {
     const fixture = await createPublicLegacyProject();
 
-    const migrated = await StateMigrationRunner.open(fixture.projectDir, {
+    const migrated = await openProjectStateMigration(fixture.projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r3-public-contract',
     });
@@ -201,7 +205,7 @@ describe('StateMigrationRunner', () => {
       },
     });
 
-    await expect(StateMigrationRunner.open(projectDir, {
+    await expect(openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r3-tool-causality',
     })).rejects.toMatchObject({ code: 'MIGRATION_VALIDATION_FAILED' });
@@ -251,7 +255,7 @@ describe('StateMigrationRunner', () => {
       },
     });
 
-    const migrated = await StateMigrationRunner.open(projectDir, {
+    const migrated = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r4-tool-identity',
     });
     const diagnostics = (await readAllImportedLegacyState(migrated)).diagnostics;
@@ -278,11 +282,11 @@ describe('StateMigrationRunner', () => {
       },
     });
 
-    const migrated = await StateMigrationRunner.open(projectDir, {
+    const migrated = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r3-scale',
     });
     expect((await readAllImportedLegacyState(migrated)).sessions[0]?.messages).toHaveLength(1_205);
-    await expect(migrated.validationDiagnostics()).resolves.toEqual({
+    await expect(migrationDiagnostics(migrated)).resolves.toEqual({
       projectPasses: 1,
       maxPageSize: 1_000,
       importBatches: 3,
@@ -313,10 +317,10 @@ describe('StateMigrationRunner', () => {
         },
       });
     }
-    const migrated = await StateMigrationRunner.open(projectDir, {
+    const migrated = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r4-many-sessions',
     });
-    await expect(migrated.validationDiagnostics()).resolves.toMatchObject({
+    await expect(migrationDiagnostics(migrated)).resolves.toMatchObject({
       maxImportBatchSize: 2,
       maxActiveProjectionSessions: 1,
       maxActiveProjectionAccumulators: 3,
@@ -326,7 +330,7 @@ describe('StateMigrationRunner', () => {
   it('keeps equal-byte archives independently addressable by source path', async () => {
     const projectDir = await createLegacyProject();
     await writeFile(join(projectDir, 'legacy-artifacts', 'output-copy.txt'), 'legacy artifact\n');
-    const migrated = await StateMigrationRunner.open(projectDir, {
+    const migrated = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r3-reference-identity',
     });
 
@@ -349,7 +353,7 @@ describe('StateMigrationRunner', () => {
 
   it('streams the verified descriptor after pathname replacement and bounds convenience reads', async () => {
     const projectDir = await createLegacyProject();
-    const migrated = await StateMigrationRunner.open(projectDir, {
+    const migrated = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r3-archive-descriptor',
     });
     const ref = (await listAllLegacyArchives(migrated)).find(
@@ -384,7 +388,7 @@ describe('StateMigrationRunner', () => {
     'rejects a same-inode legacy archive %s after verification',
     async (mutation) => {
       const projectDir = await createLegacyProject();
-      const migrated = await StateMigrationRunner.open(projectDir, {
+    const migrated = await openProjectStateMigration(projectDir, {
         targetSchemaVersion: 2, migratorRevision: `task-4-r4-archive-${mutation}`,
       });
       const ref = (await listAllLegacyArchives(migrated)).find(
@@ -457,19 +461,19 @@ describe('StateMigrationRunner', () => {
   it.each(crashPoints)('recovers a real on-disk cut at %s without duplicate import', async (cut) => {
     const projectDir = await createLegacyProject();
     await expect(
-      StateMigrationRunner.open(projectDir, {
+      openProjectStateMigration(projectDir, {
         targetSchemaVersion: 2,
         migratorRevision: 'task-4-r1',
         crashAt: cut,
       }),
     ).rejects.toMatchObject({ code: 'INJECTED_CRASH', crashPoint: cut });
 
-    const first = await StateMigrationRunner.open(projectDir, {
+    const first = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r1',
     });
     const firstState = await readAllImportedLegacyState(first);
-    const reopened = await StateMigrationRunner.open(projectDir, {
+    const reopened = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r1',
     });
@@ -559,7 +563,7 @@ describe('StateMigrationRunner', () => {
     });
     await waitForPath(join(projectDir, 'migration-barrier-ready'));
 
-    await expect(StateMigrationRunner.open(projectDir, {
+    await expect(openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r2',
     })).rejects.toMatchObject({
@@ -569,10 +573,10 @@ describe('StateMigrationRunner', () => {
 
     child.kill('SIGKILL');
     await waitForExit(child);
-    await expect(StateMigrationRunner.open(projectDir, {
+    await expect(openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r2',
-    })).resolves.toBeInstanceOf(StateMigrationRunner);
+    })).resolves.toMatchObject({ activeSchemaVersion: expect.any(Function) });
   }, 20_000);
 
   it('holds an exclusive writer gate across the final live recheck and promotion', async () => {
@@ -593,7 +597,7 @@ describe('StateMigrationRunner', () => {
     await writeFile(join(projectDir, 'migration-barrier-release'), 'release');
     await expect(waitForExit(migration)).resolves.toBe(0);
     await expect(waitForExit(writer)).resolves.not.toBe(0);
-    const migrated = await StateMigrationRunner.open(projectDir, {
+    const migrated = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r2',
     });
@@ -619,7 +623,7 @@ describe('StateMigrationRunner', () => {
     await writeFile(join(projectDir, 'migration-barrier-release'), 'release');
     expect(await waitForExit(migration)).not.toBe(0);
 
-    const recovered = await StateMigrationRunner.open(projectDir, {
+    const recovered = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r2',
     });
     expect((await readAllImportedLegacyState(recovered)).sessions[0]?.title)
@@ -646,7 +650,7 @@ describe('StateMigrationRunner', () => {
     });
     await writeFile(join(projectDir, 'migration-barrier-release'), 'release');
     expect(await waitForExit(migration)).not.toBe(0);
-    const recovered = await StateMigrationRunner.open(projectDir, {
+    const recovered = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r2',
     });
     expect(await recovered.activeSchemaVersion()).toBe(2);
@@ -745,7 +749,7 @@ describe('StateMigrationRunner', () => {
       child.once('exit', resolveExit);
     });
     expect(exitCode).not.toBe(0);
-    const recovered = await StateMigrationRunner.open(projectDir, {
+    const recovered = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
     });
     expect(await recovered.countLegacyImports()).toBe(1);
@@ -801,7 +805,7 @@ describe('StateMigrationRunner', () => {
         UPDATE agent_events SET payload_json = ? WHERE project_id = ? AND sequence = ?
       `).run(JSON.stringify(payload), row.project_id, row.sequence);
     });
-    await expect(StateMigrationRunner.open(journalTamperDir, {
+    await expect(openProjectStateMigration(journalTamperDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
     })).rejects.toMatchObject({ code: 'MIGRATION_VALIDATION_FAILED' });
 
@@ -816,7 +820,7 @@ describe('StateMigrationRunner', () => {
       join(archiveTamperDir, archive.object_relative_path),
       new Uint8Array(archive.byte_size).fill(0x78),
     );
-    await expect(StateMigrationRunner.open(archiveTamperDir, {
+    await expect(openProjectStateMigration(archiveTamperDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
     })).rejects.toMatchObject({ code: 'MIGRATION_VALIDATION_FAILED' });
   });
@@ -838,7 +842,7 @@ describe('StateMigrationRunner', () => {
         'call-1', 'lookup', null);
     });
 
-    const migrated = await StateMigrationRunner.open(projectDir);
+    const migrated = await openProjectStateMigration(projectDir);
     const inspection = await migrated.inspect();
     const journal = new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') });
     const store = new JournalSessionStore(journal, inspection.projectId);
@@ -886,7 +890,7 @@ describe('StateMigrationRunner', () => {
     const firstBytes = await migrated.readLegacyArchive(archives[0]!, {
       maxBytes: archives[0]!.byteSize,
     });
-    const reopened = await StateMigrationRunner.open(projectDir);
+    const reopened = await openProjectStateMigration(projectDir);
     await expect(reopened.readLegacyArchive(archives[0]!, {
       maxBytes: archives[0]!.byteSize,
     })).resolves.toEqual(firstBytes);
@@ -894,7 +898,7 @@ describe('StateMigrationRunner', () => {
 
   it('uses the cursor only for output and hides the durable carrier from late views', async () => {
     const projectDir = await createLegacyProject();
-    const migrated = await StateMigrationRunner.open(projectDir);
+    const migrated = await openProjectStateMigration(projectDir);
     const inspection = await migrated.inspect();
     const carrier = withTestDatabase(join(projectDir, 'state.db'), (database) =>
       database.prepare(`
@@ -924,34 +928,34 @@ describe('StateMigrationRunner', () => {
 
   it('rechecks the live semantic source immediately before activation', async () => {
     const projectDir = await createLegacyProject();
-    await StateMigrationRunner.open(projectDir, {
+    await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1', crashAt: 'after-intent-fsync',
     }).catch(() => undefined);
     withTestDatabase(join(projectDir, 'state.db'), (database) => {
       database.prepare('UPDATE agent_sessions SET title = ? WHERE id = ?')
         .run('changed-after-validation', 'session-a');
     });
-    await expect(StateMigrationRunner.open(projectDir, {
+    await expect(openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
     })).rejects.toMatchObject({ code: 'MIGRATION_STATE_CONFLICT' });
   });
 
   it('rejects path-bearing or non-strict migration intents', async () => {
     const projectDir = await createLegacyProject();
-    await StateMigrationRunner.open(projectDir, {
+    await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1', crashAt: 'after-intent-fsync',
     }).catch(() => undefined);
     const intentPath = join(projectDir, 'state.migration.json');
     const intent = JSON.parse(await readFile(intentPath, 'utf8')) as Record<string, unknown>;
     intent.sourcePath = '..\\forged.db';
     await writeFile(intentPath, JSON.stringify(intent));
-    await expect(StateMigrationRunner.open(projectDir)).rejects.toMatchObject({
+    await expect(openProjectStateMigration(projectDir)).rejects.toMatchObject({
       code: 'MIGRATION_STATE_CONFLICT',
     });
     delete intent.sourcePath;
     intent.migrationId = '..\\not-a-digest';
     await writeFile(intentPath, JSON.stringify(intent));
-    await expect(StateMigrationRunner.open(projectDir)).rejects.toMatchObject({
+    await expect(openProjectStateMigration(projectDir)).rejects.toMatchObject({
       code: 'MIGRATION_STATE_CONFLICT',
     });
   });
@@ -964,7 +968,7 @@ describe('StateMigrationRunner', () => {
       database.prepare('UPDATE agent_sessions SET payload_json = ? WHERE id = ?')
         .run(JSON.stringify({ projectKey: 'child', projectRoot: 'C:/projects/child' }), 'session-b');
     });
-    const migrated = await StateMigrationRunner.open(projectDir);
+    const migrated = await openProjectStateMigration(projectDir);
     const inspection = await migrated.inspect();
     expect(inspection.projectIds).toHaveLength(2);
     const journal = new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') });
@@ -995,14 +999,14 @@ describe('StateMigrationRunner', () => {
 
   it('reconstructs a missing intent only from a validated shadow and preserves the source backup', async () => {
     const projectDir = await createLegacyProject();
-    await StateMigrationRunner.open(projectDir, {
+    await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1', crashAt: 'after-shadow-validated',
     }).catch(() => undefined);
     await expect(readFile(join(projectDir, 'state.migration.json'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
 
-    const recovered = await StateMigrationRunner.open(projectDir, {
+    const recovered = await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
     });
     const inspection = await recovered.inspect();
@@ -1013,8 +1017,8 @@ describe('StateMigrationRunner', () => {
 
   it('stops on competing shadows, digest conflict and corrupt legacy SQLite', async () => {
     const projectDir = await createLegacyProject();
-    let cutInspection: Awaited<ReturnType<StateMigrationRunner['inspect']>> | undefined;
-    await StateMigrationRunner.open(projectDir, {
+    let cutInspection: Awaited<ReturnType<StateMigrationHandle['inspect']>> | undefined;
+    await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1', crashAt: 'after-shadow-validated',
     }).catch((error: unknown) => {
       if (error instanceof StateMigrationError) cutInspection = error.inspection;
@@ -1024,14 +1028,14 @@ describe('StateMigrationRunner', () => {
       cutInspection.shadowPath,
       join(projectDir, `state.v2.${cutInspection.migrationId}.duplicate.db.tmp`),
     );
-    await expect(StateMigrationRunner.open(projectDir, {
+    await expect(openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
     })).rejects.toMatchObject({ code: 'MIGRATION_STATE_CONFLICT' });
 
     const corruptDir = await mkdtemp(join(tmpdir(), 'dbagent-legacy-corrupt-'));
     temporaryDirectories.push(corruptDir);
     await writeFile(join(corruptDir, 'state.db'), 'not a sqlite database');
-    await expect(StateMigrationRunner.open(corruptDir, {
+    await expect(openProjectStateMigration(corruptDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
     })).rejects.toMatchObject({ code: 'MIGRATION_SOURCE_CORRUPT' });
   });
@@ -1039,7 +1043,7 @@ describe('StateMigrationRunner', () => {
 
 async function captureCrashInspection(projectDir: string): Promise<MigrationInspection> {
   try {
-    await StateMigrationRunner.open(projectDir, {
+    await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r1',
       crashAt: 'after-shadow-validated',
@@ -1391,14 +1395,15 @@ function withTestDatabase<T>(path: string, operation: (database: NodeDatabaseSyn
 }
 
 async function readAllImportedLegacyState(
-  runner: StateMigrationRunner,
+  runner: StateMigrationHandle,
 ): Promise<ImportedLegacyState> {
   const state: ImportedLegacyState = {
     sessions: [], runs: [], plan: null, preferences: [], checkpoints: [], subagents: [], diagnostics: [],
   };
   let cursor: string | null = null;
   while (true) {
-    const page = await runner.readImportedLegacyStatePage({ cursor, limit: 127 });
+    const page = await (runner as InternalStateMigrationHandle)
+      .readImportedLegacyStatePage({ cursor, limit: 127 });
     for (const payload of page.items) {
       switch (payload.entityType) {
         case 'session':
@@ -1455,10 +1460,14 @@ async function readAllImportedLegacyState(
   }
 }
 
+function migrationDiagnostics(runner: StateMigrationHandle) {
+  return (runner as InternalStateMigrationHandle).validationDiagnostics();
+}
+
 async function listAllLegacyArchives(
-  runner: StateMigrationRunner,
-): Promise<Awaited<ReturnType<StateMigrationRunner['listLegacyArchives']>>['items']> {
-  const items: Awaited<ReturnType<StateMigrationRunner['listLegacyArchives']>>['items'] = [];
+  runner: StateMigrationHandle,
+): Promise<Awaited<ReturnType<StateMigrationHandle['listLegacyArchives']>>['items']> {
+  const items: Awaited<ReturnType<StateMigrationHandle['listLegacyArchives']>>['items'] = [];
   let afterRelativePath: string | null = null;
   while (true) {
     const page = await runner.listLegacyArchives({ afterRelativePath, limit: 2 });

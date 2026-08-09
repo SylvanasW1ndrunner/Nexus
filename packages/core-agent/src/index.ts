@@ -2,6 +2,8 @@ export * from './audit-log-store.js';
 export * from './approval-broker.js';
 export * from './behavior-evaluation.js';
 export * from './checkpoint-store.js';
+export * from './capability-control-plane.js';
+export * from './capability-types.js';
 export * from './context-manager.js';
 export * from './completion-verifier.js';
 export * from './completion-controller.js';
@@ -22,7 +24,13 @@ export * from './run-coordinator.js';
 export * from './session.js';
 export * from './session-store.js';
 export * from './session/session-projection.js';
-export * from './session/state-migrations.js';
+export {
+  StateMigrationError,
+  openProjectStateMigration,
+  type LegacyArchiveRef,
+  type StateMigrationHandle,
+  type StateMigrationOptions,
+} from './session/state-migrations.js';
 export * from './artifacts/project-artifact-store.js';
 export * from './stream-store.js';
 export * from './subagent-pool.js';

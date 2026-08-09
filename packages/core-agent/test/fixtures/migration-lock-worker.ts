@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { AgentSessionStore } from '../../src/session-store.js';
-import { StateMigrationRunner } from '../../src/session/state-migrations.js';
+import { openProjectStateMigration } from '../../src/session/state-migrations.js';
 import { AgentAuditLogStore } from '../../src/audit-log-store.js';
 import { AgentCheckpointStore } from '../../src/checkpoint-store.js';
 import { AgentStreamStore } from '../../src/stream-store.js';
@@ -14,7 +14,7 @@ if (projectDir === undefined || mode === undefined) throw new Error('Migration w
 
 try {
   if (mode === 'migrate') {
-    await StateMigrationRunner.open(projectDir, {
+    await openProjectStateMigration(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r2',
     });
