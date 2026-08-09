@@ -9,7 +9,7 @@ import {
   rename,
   rm,
   stat,
-  unlink,
+  writeFile,
 } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
@@ -18,6 +18,10 @@ import type { PortableValue } from '@dbagent/shared';
 import { SqliteAgentJournal } from '../events/sqlite-agent-journal.js';
 import type { AgentEventDraft, AgentEventPayloadMap } from '../events/agent-event.js';
 import { LEGACY_MIGRATION_WRITER_AUTHORITY } from './legacy-migration-writer.js';
+import {
+  acquireExclusiveStateWriterGate,
+  acquireMigrationOwnerGate,
+} from './state-writer-gate.js';
 
 type NodeSqlite = {
   DatabaseSync: new (path: string) => NodeDatabaseSync;
@@ -176,8 +180,15 @@ export class StateMigrationRunner {
       throw new StateMigrationError('INVALID_ARGUMENT', 'targetSchemaVersion must be at least 2.');
     }
     await mkdir(normalizedDir, { recursive: true });
-    const lockPath = join(normalizedDir, 'state.migration.lock');
-    const lock = await acquireMigrationLock(lockPath);
+    let lock;
+    try {
+      lock = acquireMigrationOwnerGate(normalizedDir);
+    } catch (error) {
+      if (isDatabaseLocked(error)) {
+        throw new StateMigrationError('MIGRATION_LOCKED', 'Another migration owns this Project.');
+      }
+      throw error;
+    }
     try {
       return await migrateLocked(normalizedDir, {
         targetSchemaVersion,
@@ -185,8 +196,7 @@ export class StateMigrationRunner {
         ...(options.crashAt === undefined ? {} : { crashAt: options.crashAt }),
       });
     } finally {
-      await lock.close();
-      await unlink(lockPath).catch(() => undefined);
+      lock.close();
     }
   }
 
@@ -295,6 +305,7 @@ async function migrateLocked(
     await fsyncDirectory(projectDir);
     throw error;
   }
+  await migrationBarrier(projectDir, 'after-shadow-validated');
   crashIf(options.crashAt, 'after-shadow-validated', inspectionFromIntent(intent, 'missing'));
   await writeIntent(projectDir, intent);
   crashIf(options.crashAt, 'after-intent-fsync', inspectionFromIntent(intent, intent.status));
@@ -480,52 +491,58 @@ async function activate(
   intent: MigrationIntent,
   crashAt: MigrationCrashPoint | undefined,
 ): Promise<StateMigrationRunner> {
-  await validateIntentAndShadow(intent);
-  const currentRow = await readMigrationRowIfNew(intent.finalPath);
-  if (currentRow === undefined) {
-    if (await pathExists(intent.sourcePath)) {
-      if (await pathExists(intent.sourceBackupPath)) {
-        throw new StateMigrationError(
-          'MIGRATION_STATE_CONFLICT',
-          'Both active source and versioned source backup exist.',
-          inspectionFromIntent(intent, intent.status),
-        );
+  const writerGate = acquireExclusiveStateWriterGate(projectDir);
+  try {
+    await validateIntentAndShadow(intent);
+    const currentRow = await readMigrationRowIfNew(intent.finalPath);
+    if (currentRow === undefined) {
+      if (await pathExists(intent.sourcePath)) {
+        if (await pathExists(intent.sourceBackupPath)) {
+          throw new StateMigrationError(
+            'MIGRATION_STATE_CONFLICT',
+            'Both active source and versioned source backup exist.',
+            inspectionFromIntent(intent, intent.status),
+          );
+        }
+        await assertSourceDigestStillMatches(projectDir, intent);
+        await assertLiveLegacyStillMatches(projectDir, intent);
+        await migrationBarrier(projectDir, 'after-live-recheck');
+        await rename(intent.sourcePath, intent.sourceBackupPath);
+        await fsyncDirectory(projectDir);
+        crashIf(crashAt, 'after-source-renamed', inspectionFromIntent(intent, intent.status));
       }
-      await assertSourceDigestStillMatches(projectDir, intent);
-      await assertLiveLegacyStillMatches(projectDir, intent);
-      await rename(intent.sourcePath, intent.sourceBackupPath);
-      await fsyncDirectory(projectDir);
-      crashIf(crashAt, 'after-source-renamed', inspectionFromIntent(intent, intent.status));
-    }
-    if (!(await pathExists(intent.finalPath))) {
-      if (!(await pathExists(intent.shadowPath))) {
-        throw new StateMigrationError(
-          'MIGRATION_STATE_CONFLICT',
-          'Validated Shadow is missing during activation.',
-          inspectionFromIntent(intent, intent.status),
-        );
+      if (!(await pathExists(intent.finalPath))) {
+        if (!(await pathExists(intent.shadowPath))) {
+          throw new StateMigrationError(
+            'MIGRATION_STATE_CONFLICT',
+            'Validated Shadow is missing during activation.',
+            inspectionFromIntent(intent, intent.status),
+          );
+        }
+        await rename(intent.shadowPath, intent.finalPath);
+        await fsyncDirectory(projectDir);
+        crashIf(crashAt, 'after-shadow-promoted', inspectionFromIntent(intent, intent.status));
       }
-      await rename(intent.shadowPath, intent.finalPath);
-      await fsyncDirectory(projectDir);
-      crashIf(crashAt, 'after-shadow-promoted', inspectionFromIntent(intent, intent.status));
+    } else if (
+      currentRow.migration_id !== intent.migrationId ||
+      currentRow.source_digest !== intent.sourceDigest ||
+      currentRow.validation_digest !== intent.validationDigest
+    ) {
+      throw new StateMigrationError(
+        'MIGRATION_STATE_CONFLICT',
+        'Current new database does not match activation intent.',
+        inspectionFromIntent(intent, intent.status),
+      );
     }
-  } else if (
-    currentRow.migration_id !== intent.migrationId ||
-    currentRow.source_digest !== intent.sourceDigest ||
-    currentRow.validation_digest !== intent.validationDigest
-  ) {
-    throw new StateMigrationError(
-      'MIGRATION_STATE_CONFLICT',
-      'Current new database does not match activation intent.',
-      inspectionFromIntent(intent, intent.status),
-    );
+    await setMigrationActive(intent.finalPath, intent.migrationId);
+    const completed = { ...intent, status: 'completed' as const };
+    await writeIntent(projectDir, completed);
+    await rm(intent.shadowPath, { force: true });
+    await fsyncDirectory(projectDir);
+    return new StateMigrationRunner(projectDir, completed);
+  } finally {
+    writerGate.close();
   }
-  await setMigrationActive(intent.finalPath, intent.migrationId);
-  const completed = { ...intent, status: 'completed' as const };
-  await writeIntent(projectDir, completed);
-  await rm(intent.shadowPath, { force: true });
-  await fsyncDirectory(projectDir);
-  return new StateMigrationRunner(projectDir, completed);
 }
 
 function readLegacyState(path: string): ImportedLegacyState {
@@ -1012,52 +1029,13 @@ function crashIf(
   }
 }
 
-async function acquireMigrationLock(lockPath: string) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const lock = await open(lockPath, 'wx', 0o600);
-      await lock.writeFile(`${canonicalJson({
-        schemaVersion: 1,
-        pid: process.pid,
-        nonce: sha256(`${process.pid}\0${Date.now()}\0${Math.random()}`),
-      })}\n`, 'utf8');
-      await lock.sync();
-      return lock;
-    } catch (error) {
-      if (errorCode(error) !== 'EEXIST') throw error;
-      const owner = await readLockOwner(lockPath);
-      if (owner !== undefined && isProcessAlive(owner.pid)) {
-        throw new StateMigrationError('MIGRATION_LOCKED', 'Another migration owns this Project.');
-      }
-      const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}`;
-      try {
-        await rename(lockPath, stalePath);
-        await unlink(stalePath).catch(() => undefined);
-      } catch (renameError) {
-        if (!['ENOENT', 'EACCES', 'EPERM'].includes(errorCode(renameError) ?? '')) throw renameError;
-      }
-    }
-  }
-  throw new StateMigrationError('MIGRATION_LOCKED', 'Migration lock takeover did not converge.');
-}
-
-async function readLockOwner(path: string): Promise<{ pid: number } | undefined> {
-  try {
-    const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
-    return Number.isSafeInteger(value.pid) && Number(value.pid) > 0
-      ? { pid: Number(value.pid) }
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return errorCode(error) === 'EPERM';
+async function migrationBarrier(projectDir: string, point: string): Promise<void> {
+  if (process.env.DBAGENT_MIGRATION_BARRIER_POINT !== point) return;
+  const ready = join(projectDir, 'migration-barrier-ready');
+  const release = join(projectDir, 'migration-barrier-release');
+  await writeFile(ready, point);
+  while (!(await pathExists(release))) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
   }
 }
 
@@ -1468,4 +1446,8 @@ function errorCode(error: unknown): string | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isDatabaseLocked(error: unknown): boolean {
+  return /database is locked|SQLITE_BUSY/iu.test(errorMessage(error));
 }

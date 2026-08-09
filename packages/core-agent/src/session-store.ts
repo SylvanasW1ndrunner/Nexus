@@ -9,6 +9,7 @@ import {
   assertSameAgentProject,
 } from './project-context.js';
 import { redactPersistedAgentValue } from './redaction.js';
+import { acquireSharedStateWriterGate } from './session/state-writer-gate.js';
 import type {
   AgentContextCheckpoint,
   AgentMessage,
@@ -732,20 +733,26 @@ export class AgentSessionStore implements AgentSessionWriter, AgentSubagentStore
   }
 
   private withDatabaseSync<T>(operation: (database: NodeDatabaseSync) => T): T {
-    const database = openDatabaseSync(this.filePath);
+    const gate = acquireSharedStateWriterGate(dirname(this.filePath));
+    let database: NodeDatabaseSync | undefined;
     try {
+      database = openDatabaseSync(this.filePath);
       return operation(database);
     } finally {
-      database.close();
+      database?.close();
+      gate.close();
     }
   }
 
   private async withDatabase<T>(operation: (database: NodeDatabaseSync) => T): Promise<T> {
-    const database = await openDatabase(this.filePath);
+    const gate = acquireSharedStateWriterGate(dirname(this.filePath));
+    let database: NodeDatabaseSync | undefined;
     try {
+      database = await openDatabase(this.filePath);
       return operation(database);
     } finally {
-      database.close();
+      database?.close();
+      gate.close();
     }
   }
 }
@@ -759,6 +766,7 @@ function openDatabaseSync(filePath: string): NodeDatabaseSync {
   let database: NodeDatabaseSync | undefined;
   try {
     database = new DatabaseSync(filePath);
+    assertLegacyStoreDatabase(database);
     initializeDatabase(database);
     return database;
   } catch (error) {
@@ -785,6 +793,7 @@ async function openDatabase(filePath: string): Promise<NodeDatabaseSync> {
   let database: NodeDatabaseSync | undefined;
   try {
     database = new DatabaseSync(filePath);
+    assertLegacyStoreDatabase(database);
     initializeDatabase(database);
     return database;
   } catch (error) {
@@ -930,6 +939,15 @@ function initializeDatabase(database: NodeDatabaseSync): void {
   migrateLegacySessionPayloads(database);
   migrateLegacySubagentContextStrategy(database);
   migrateLegacySqlToolResults(database);
+}
+
+function assertLegacyStoreDatabase(database: NodeDatabaseSync): void {
+  const metadata = database.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'state_metadata'",
+  ).get();
+  if (metadata !== undefined) {
+    throw new Error('Legacy AgentSessionStore cannot mutate migrated Journal state.');
+  }
 }
 
 function migrateNullableContextWindows(database: NodeDatabaseSync): void {

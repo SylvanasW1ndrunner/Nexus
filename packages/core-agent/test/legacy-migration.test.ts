@@ -13,6 +13,7 @@ import {
 } from '../src/session/state-migrations.js';
 import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
 import { JournalSessionStore } from '../src/journal-session-store.js';
+import { AgentSessionStore } from '../src/session-store.js';
 
 const temporaryDirectories: string[] = [];
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
@@ -132,21 +133,74 @@ describe('StateMigrationRunner', () => {
     }
   });
 
-  it('takes over a stale owner lock but rejects a live owner lock', async () => {
+  it('uses a live cross-process owner gate that cannot be stolen and is released by SIGKILL', async () => {
     const projectDir = await createLegacyProject();
-    const lockPath = join(projectDir, 'state.migration.lock');
-    await writeFile(lockPath, JSON.stringify({ schemaVersion: 1, pid: 2_147_483_647, nonce: 'dead' }));
-    await expect(StateMigrationRunner.open(projectDir)).resolves.toBeInstanceOf(StateMigrationRunner);
+    const child = spawnMigrationWorker(projectDir, 'migrate', {
+      DBAGENT_MIGRATION_BARRIER_POINT: 'after-shadow-validated',
+    });
+    await waitForPath(join(projectDir, 'migration-barrier-ready'));
 
-    const otherProject = await createLegacyProject();
-    await writeFile(
-      join(otherProject, 'state.migration.lock'),
-      JSON.stringify({ schemaVersion: 1, pid: process.pid, nonce: 'live' }),
-    );
-    await expect(StateMigrationRunner.open(otherProject)).rejects.toMatchObject({
+    await expect(StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2,
+      migratorRevision: 'task-4-r2',
+    })).rejects.toMatchObject({
       code: 'MIGRATION_LOCKED',
     });
-  });
+    expect(child.exitCode).toBeNull();
+
+    child.kill('SIGKILL');
+    await waitForExit(child);
+    await expect(StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2,
+      migratorRevision: 'task-4-r2',
+    })).resolves.toBeInstanceOf(StateMigrationRunner);
+  }, 20_000);
+
+  it('holds an exclusive writer gate across the final live recheck and promotion', async () => {
+    const projectDir = await createLegacyWriterProject();
+    const migration = spawnMigrationWorker(projectDir, 'migrate', {
+      DBAGENT_MIGRATION_BARRIER_POINT: 'after-live-recheck',
+    });
+    await waitForPath(join(projectDir, 'migration-barrier-ready'));
+
+    const writer = spawnMigrationWorker(projectDir, 'write');
+    await waitForPath(join(projectDir, 'legacy-writer-started'));
+    await delay(250);
+    expect(writer.exitCode).toBeNull();
+    await expect(stat(join(projectDir, 'legacy-writer-completed'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+
+    await writeFile(join(projectDir, 'migration-barrier-release'), 'release');
+    await expect(waitForExit(migration)).resolves.toBe(0);
+    await expect(waitForExit(writer)).resolves.not.toBe(0);
+    const migrated = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2,
+      migratorRevision: 'task-4-r2',
+    });
+    expect((await migrated.readImportedLegacyState()).sessions[0]?.title)
+      .not.toBe('writer-won-the-race');
+  }, 20_000);
+
+  it('releases the exclusive activation writer gate when the migration process is killed', async () => {
+    const projectDir = await createLegacyWriterProject();
+    const migration = spawnMigrationWorker(projectDir, 'migrate', {
+      DBAGENT_MIGRATION_BARRIER_POINT: 'after-live-recheck',
+    });
+    await waitForPath(join(projectDir, 'migration-barrier-ready'));
+    const writer = spawnMigrationWorker(projectDir, 'write');
+    await waitForPath(join(projectDir, 'legacy-writer-started'));
+    await delay(250);
+    expect(writer.exitCode).toBeNull();
+
+    migration.kill('SIGKILL');
+    await waitForExit(migration);
+    const writerExit = await waitForExit(writer);
+    if (writerExit !== 0) {
+      throw new Error(await readFile(join(projectDir, 'write-worker-error'), 'utf8'));
+    }
+    expect(await readFile(join(projectDir, 'legacy-writer-completed'), 'utf8')).toBe('completed');
+  }, 20_000);
 
   it.each(crashPoints)('recovers after an uncatchable child termination at %s', async (cut) => {
     const projectDir = await createLegacyProject();
@@ -170,7 +224,6 @@ describe('StateMigrationRunner', () => {
       child.once('exit', resolveExit);
     });
     expect(exitCode).not.toBe(0);
-    expect(await readFile(join(projectDir, 'state.migration.lock'), 'utf8')).toContain('"pid"');
     const recovered = await StateMigrationRunner.open(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r1',
     });
@@ -457,6 +510,30 @@ async function createLegacyProject(): Promise<string> {
   return projectDir;
 }
 
+async function createLegacyWriterProject(): Promise<string> {
+  const projectDir = await mkdtemp(join(tmpdir(), 'dbagent-legacy-writer-project-'));
+  temporaryDirectories.push(projectDir);
+  const store = new AgentSessionStore(join(projectDir, 'state.db'));
+  await store.save({
+    now: '2026-08-08T00:01:00.000Z',
+    session: {
+      id: 'session-a',
+      title: 'before-writer-race',
+      userId: 'user-a',
+      mode: 'read',
+      messages: [
+        { role: 'user', content: 'race', createdAt: '2026-08-08T00:00:00.000Z' },
+      ],
+      tokenUsage: { promptTokens: 1, completionTokens: 0, totalTokens: 1 },
+      aborted: false,
+    },
+  });
+  withTestDatabase(join(projectDir, 'state.db'), (database) => {
+    database.exec('ALTER TABLE agent_runs ADD COLUMN plan_json TEXT');
+  });
+  return projectDir;
+}
+
 function withTestDatabase<T>(path: string, operation: (database: NodeDatabaseSync) => T): T {
   const database = new DatabaseSync(path);
   try {
@@ -464,4 +541,53 @@ function withTestDatabase<T>(path: string, operation: (database: NodeDatabaseSyn
   } finally {
     database.close();
   }
+}
+
+function spawnMigrationWorker(
+  projectDir: string,
+  mode: 'migrate' | 'write',
+  environment: Record<string, string> = {},
+) {
+  const viteNode = join(
+    process.cwd(), 'node_modules', '.pnpm', 'vite-node@2.1.9_@types+node@22.19.20',
+    'node_modules', 'vite-node', 'vite-node.mjs',
+  );
+  const helper = join(process.cwd(), 'packages', 'core-agent', 'test', 'fixtures',
+    'migration-lock-worker.ts');
+  return spawn(process.execPath, [viteNode, helper], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      DBAGENT_MIGRATION_CHILD_PROJECT: projectDir,
+      DBAGENT_MIGRATION_LOCK_WORKER_MODE: mode,
+      ...environment,
+    },
+    stdio: 'ignore',
+  });
+}
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      await stat(path);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for ${path}.`);
+}
+
+async function waitForExit(child: ReturnType<typeof spawn>): Promise<number | null> {
+  if (child.exitCode !== null) return child.exitCode;
+  return await new Promise((resolveExit, rejectExit) => {
+    child.once('error', rejectExit);
+    child.once('exit', resolveExit);
+  });
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
