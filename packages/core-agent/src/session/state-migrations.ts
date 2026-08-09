@@ -1572,7 +1572,7 @@ function parseLegacyToolCalls(value: string): NonNullable<Extract<
     return {
       id: record.id,
       name: record.name,
-      arguments: structuredClone(record.arguments) as Record<string, PortableValue>,
+      arguments: structuredClone(record.arguments),
     };
   });
 }

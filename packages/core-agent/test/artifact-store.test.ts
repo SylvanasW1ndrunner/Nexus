@@ -11,7 +11,6 @@ import {
   ProjectArtifactStore,
   type ArtifactJournalContext,
 } from '../src/artifacts/project-artifact-store.js';
-import type { AgentJournal, JournalCommand } from '../src/events/agent-journal.js';
 import type { AgentEvent } from '../src/events/agent-event.js';
 import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
 
@@ -611,33 +610,6 @@ async function createFixture() {
     runId: created.runId,
     store,
     context,
-  };
-}
-
-function withArtifactCommitBarrier(delegate: AgentJournal): AgentJournal {
-  let arrivals = 0;
-  let release = (): void => undefined;
-  const barrier = new Promise<void>((resolve) => { release = resolve; });
-  return {
-    createRun: async (command) => await delegate.createRun(command),
-    startRun: async (command) => await delegate.startRun(command),
-    startTurn: async (command) => await delegate.startTurn(command),
-    async commit(command: JournalCommand) {
-      if (command.events.some(({ type }) => type === 'artifact.created')) {
-        arrivals += 1;
-        if (arrivals === 2) release();
-        else await barrier;
-      }
-      return await delegate.commit(command);
-    },
-    readProject: async (projectId, afterSequence, limit) =>
-      await delegate.readProject(projectId, afterSequence, limit),
-    acquireRunLease: async (input) => await delegate.acquireRunLease(input),
-    renewRunLease: async (input) => await delegate.renewRunLease(input),
-    getRunProjection: async (runId) => await delegate.getRunProjection(runId),
-    countEvents: async (type, projectId) => await delegate.countEvents(type, projectId),
-    rebuildProjectProjections: async (projectId) =>
-      await delegate.rebuildProjectProjections(projectId),
   };
 }
 
