@@ -1,0 +1,12 @@
+{
+  "id": "msg-1",
+  "model": "claude-test",
+  "role": "assistant",
+  "content": [
+    { "type": "text", "text": "I will inspect it." },
+    { "type": "thinking", "thinking": "private reasoning", "signature": "signed-token" },
+    { "type": "tool_use", "id": "tool-a", "name": "inspect", "input": { "table": "a" } }
+  ],
+  "stop_reason": "tool_use",
+  "usage": { "input_tokens": 9, "output_tokens": 4, "cache_read_input_tokens": 2 }
+}

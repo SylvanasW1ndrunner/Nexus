@@ -1,0 +1,32 @@
+{
+  "id": "resp-1",
+  "model": "m1",
+  "status": "completed",
+  "output": [
+    {
+      "id": "msg-1",
+      "type": "message",
+      "role": "assistant",
+      "content": [{ "type": "output_text", "text": "Checking." }]
+    },
+    {
+      "id": "reasoning-1",
+      "type": "reasoning",
+      "summary": [{ "type": "summary_text", "text": "I should inspect the table." }],
+      "encrypted_content": "opaque-token"
+    },
+    {
+      "id": "item-1",
+      "type": "function_call",
+      "call_id": "call-r",
+      "name": "inspect",
+      "arguments": "{\"table\":\"r\"}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 13,
+    "output_tokens": 8,
+    "total_tokens": 21,
+    "input_tokens_details": { "cached_tokens": 4 }
+  }
+}

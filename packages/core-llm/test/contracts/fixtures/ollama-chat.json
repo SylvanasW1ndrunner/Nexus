@@ -1,0 +1,16 @@
+{
+  "model": "qwen:14b",
+  "created_at": "2026-08-09T00:00:00Z",
+  "message": {
+    "role": "assistant",
+    "thinking": "private reasoning",
+    "content": "Checking.",
+    "tool_calls": [
+      { "id": "ollama-a", "function": { "name": "inspect", "arguments": { "table": "a" } } }
+    ]
+  },
+  "done": true,
+  "done_reason": "stop",
+  "prompt_eval_count": 5,
+  "eval_count": 3
+}

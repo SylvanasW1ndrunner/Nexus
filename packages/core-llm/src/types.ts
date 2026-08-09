@@ -295,3 +295,12 @@ export class LlmProviderError extends Error {
 export function isLlmProviderError(value: unknown): value is LlmProviderError {
   return value instanceof LlmProviderError;
 }
+
+export * from './protocol/content.js';
+export * from './protocol/codec.js';
+export * from './protocol/envelope.js';
+export * from './protocol/model-stream.js';
+export * from './protocol/codecs/openai-chat.js';
+export * from './protocol/codecs/openai-responses.js';
+export * from './protocol/codecs/anthropic-messages.js';
+export * from './protocol/codecs/ollama-chat.js';
