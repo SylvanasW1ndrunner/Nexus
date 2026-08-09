@@ -35,6 +35,7 @@ describe('ProjectArtifactStore', () => {
     const artifactRoot = join(directory, 'untouched-artifacts');
     let sourceReads = 0;
     const source = (async function* () {
+      await Promise.resolve();
       sourceReads += 1;
       yield Buffer.from('must not be read');
     })();

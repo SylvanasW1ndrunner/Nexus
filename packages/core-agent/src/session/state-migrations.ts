@@ -1150,12 +1150,6 @@ function parseStrictPortableJson(value: string, label: string): PortableValue {
   return parsed;
 }
 
-function toPortableLegacyValue(value: unknown): PortableValue {
-  const snapshot = structuredClone(value) as unknown;
-  assertPortableValue(snapshot);
-  return snapshot;
-}
-
 function requireLegacyRecord(value: unknown, label: string): Record<string, PortableValue> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object.`);
@@ -1416,8 +1410,11 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
             };
             projections.set(event.sessionId, projection);
           }
+          const currentProjection = projection;
           projection.accumulators.forEach((accumulator, index) => {
-            if (projection!.active[index]) projection!.active[index] = accumulator.accept(event);
+            if (currentProjection.active[index]) {
+              currentProjection.active[index] = accumulator.accept(event);
+            }
           });
         }
       }
@@ -2239,7 +2236,9 @@ function parseLegacyToolCalls(value: string): NonNullable<Extract<
 function legacyMessageRecord(
   message: AgentMessage & { messageIndex: number; sourceRunId?: string },
 ): AgentMessage {
-  const { messageIndex: _messageIndex, sourceRunId: _sourceRunId, ...record } = message;
+  const { messageIndex, sourceRunId, ...record } = message;
+  void messageIndex;
+  void sourceRunId;
   return structuredClone(record);
 }
 

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-return */
 import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1194,6 +1195,7 @@ async function createPublicLegacyProject(): Promise<{
   });
   const staged = await artifactStore.stage({
     mediaType: 'text/plain', source: (async function* () {
+      await Promise.resolve();
       yield new TextEncoder().encode('legacy artifact\n');
     })(),
   });

@@ -50,6 +50,7 @@ try {
       });
       await store.stage({
         mediaType: 'text/plain', source: (async function* () {
+          await Promise.resolve();
           yield new TextEncoder().encode('writer artifact');
         })(),
       });

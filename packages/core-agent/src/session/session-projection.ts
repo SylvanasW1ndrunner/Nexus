@@ -1,5 +1,10 @@
 import { assertPortableValue, type PortableValue } from '@dbagent/shared';
-import type { AgentMessage } from '../types.js';
+import type {
+  AgentMessage,
+  AgentRunRecord,
+  AgentRunRecordStatus,
+  AgentSession,
+} from '../types.js';
 import type { AgentEvent, AgentEventType } from '../events/agent-event.js';
 import {
   AGENT_EVENT_SCHEMA_REGISTRY,
@@ -47,11 +52,11 @@ export type SessionProjectionRun = {
   createdAt: string;
   updatedAt: string;
   terminal?: boolean;
-  legacyRecord?: import('../types.js').AgentRunRecord;
+  legacyRecord?: AgentRunRecord;
 };
 
 export type SessionProjectionLegacySession = {
-  session: import('../types.js').AgentSession;
+  session: AgentSession;
   archived: boolean;
   createdAt: string;
   updatedAt: string;
@@ -850,7 +855,7 @@ function legacySessionMessage(
   };
 }
 
-function legacyRunRecordState(status: import('../types.js').AgentRunRecordStatus): string {
+function legacyRunRecordState(status: AgentRunRecordStatus): string {
   switch (status) {
     case 'done': return 'Completed';
     case 'aborted': return 'Cancelled';

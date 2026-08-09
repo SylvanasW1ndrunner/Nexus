@@ -87,7 +87,7 @@ function runConsumer(cwd: string, source: string): Promise<{ stdout: string; std
   return new Promise((resolve, reject) => {
     execFile(process.execPath, ['--input-type=module', '-e', source], { cwd }, (error, stdout, stderr) => {
       if (error) {
-        reject(Object.assign(error, { stdout, stderr }));
+        reject(new Error(error.message, { cause: Object.assign(error, { stdout, stderr }) }));
         return;
       }
       resolve({ stdout, stderr });
