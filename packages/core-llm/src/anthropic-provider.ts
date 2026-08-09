@@ -41,6 +41,7 @@ export type AnthropicProviderConfig = {
   timeoutMs?: number;
   maxResponseBytes?: number;
   streamLimits?: LlmStreamLimitOptions;
+  defaultHeaders?: Record<string, string>;
   fetch?: FetchLike;
 };
 
@@ -101,6 +102,7 @@ export class AnthropicProvider implements LlmProvider {
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
   private readonly streamLimits: LlmStreamLimits;
+  private readonly defaultHeaders: Record<string, string>;
   private readonly fetchImpl: FetchLike;
 
   constructor(config: AnthropicProviderConfig) {
@@ -121,6 +123,7 @@ export class AnthropicProvider implements LlmProvider {
     this.timeoutMs = config.timeoutMs ?? 60_000;
     this.maxResponseBytes = resolveLlmMaxResponseBytes(config.maxResponseBytes);
     this.streamLimits = resolveLlmStreamLimits(config.streamLimits);
+    this.defaultHeaders = { ...(config.defaultHeaders ?? {}) };
     this.fetchImpl = config.fetch ?? fetch;
   }
 
@@ -131,6 +134,7 @@ export class AnthropicProvider implements LlmProvider {
       text: parsed.text,
       toolCalls: parsed.toolCalls,
       toolsRequested: Boolean(request.tools?.length),
+      toolNames: request.tools?.map((tool) => tool.name) ?? [],
       protocol: 'Anthropic Messages',
     });
     return parsed;
@@ -261,6 +265,7 @@ export class AnthropicProvider implements LlmProvider {
       text: final.text,
       toolCalls: final.toolCalls,
       toolsRequested: Boolean(request.tools?.length),
+      toolNames: request.tools?.map((tool) => tool.name) ?? [],
       protocol: 'Anthropic Messages',
     });
     yield {
@@ -345,6 +350,7 @@ export class AnthropicProvider implements LlmProvider {
       const response = await this.fetchImpl(`${this.baseUrl}/models`, {
         method: 'GET',
         headers: {
+          ...this.defaultHeaders,
           'x-api-key': this.apiKey,
           'anthropic-version': this.apiVersion,
         },
@@ -436,6 +442,7 @@ export class AnthropicProvider implements LlmProvider {
       const response = await this.fetchImpl(`${this.baseUrl}/messages`, {
         method: 'POST',
         headers: {
+          ...this.defaultHeaders,
           'content-type': 'application/json',
           'x-api-key': this.apiKey,
           'anthropic-version': this.apiVersion,

@@ -1,6 +1,11 @@
 /* eslint-disable @typescript-eslint/require-await -- Fetch test doubles implement async contracts. */
 import { describe, expect, it } from 'vitest';
-import { AnthropicProvider, OpenAICompatibleProvider, createProviderFromPreset } from '../src/index.js';
+import {
+  AnthropicProvider,
+  OllamaProvider,
+  OpenAICompatibleProvider,
+  type LlmChatStreamEvent,
+} from '../src/index.js';
 
 describe('provider adapters beyond basic connectivity', () => {
   it('preserves OpenAI assistant tool calls and tool results in native message fields', async () => {
@@ -177,6 +182,66 @@ describe('provider adapters beyond basic connectivity', () => {
     expect(fetchCount).toBe(1);
   });
 
+  it('rejects a known requested tool serialized as plain JSON text', async () => {
+    const provider = new OpenAICompatibleProvider({
+      id: 'relay',
+      name: 'Compatible relay',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'test-key',
+      fetch: async () =>
+        jsonResponse({
+          choices: [
+            {
+              message: {
+                content: '{"name":"lookup_metric","arguments":{"name":"orders"}}',
+              },
+              finish_reason: 'stop',
+            },
+          ],
+        }),
+    });
+
+    await expect(
+      provider.chat({
+        model: 'vendor/model',
+        messages: [{ role: 'user', content: 'read the orders metric' }],
+        tools: [
+          {
+            name: 'lookup_metric',
+            description: 'Return one named metric.',
+            inputSchema: { type: 'object' },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'TOOL_PROTOCOL_MISMATCH', retryable: false });
+  });
+
+  it('preserves ordinary JSON that does not name a requested tool', async () => {
+    const content = '{"name":"report","arguments":{"format":"json"}}';
+    const provider = new OpenAICompatibleProvider({
+      id: 'relay',
+      name: 'Compatible relay',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'test-key',
+      fetch: async () =>
+        jsonResponse({ choices: [{ message: { content }, finish_reason: 'stop' }] }),
+    });
+
+    await expect(
+      provider.chat({
+        model: 'vendor/model',
+        messages: [{ role: 'user', content: 'return a report descriptor' }],
+        tools: [
+          {
+            name: 'lookup_metric',
+            description: 'Return one named metric.',
+            inputSchema: { type: 'object' },
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ text: content, toolCalls: [] });
+  });
+
   it('maps structured chat, models, embedding and rerank on OpenAI-compatible endpoints', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const provider = new OpenAICompatibleProvider({
@@ -239,7 +304,10 @@ describe('provider adapters beyond basic connectivity', () => {
 
   it('discovers Ollama model capabilities from metadata without generating a message', async () => {
     const calls: Array<{ url: string; method: string }> = [];
-    const provider = createProviderFromPreset('ollama', {
+    const provider = new OllamaProvider({
+      id: 'ollama-fixture',
+      name: 'Ollama fixture',
+      baseUrl: 'http://127.0.0.1:11434',
       fetch: async (input, init) => {
         const url = String(input);
         calls.push({ url, method: init?.method ?? 'GET' });
@@ -284,6 +352,77 @@ describe('provider adapters beyond basic connectivity', () => {
       { url: 'http://127.0.0.1:11434/api/show', method: 'POST' },
     ]);
     expect(calls.some((call) => call.url.includes('/chat/completions'))).toBe(false);
+  });
+
+  it('normalizes native Ollama NDJSON streaming text, tools, usage and finish', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const provider = new OllamaProvider({
+      fetch: async (_input, init) => {
+        requestBody = JSON.parse(requireStringBody(init?.body)) as Record<string, unknown>;
+        return new Response(
+          ndjsonStream([
+            { model: 'qwen:14b', message: { role: 'assistant', content: 'hello ' }, done: false },
+            {
+              model: 'qwen:14b',
+              message: {
+                role: 'assistant',
+                content: 'world',
+                tool_calls: [{ function: { name: 'query', arguments: { sql: 'select 1' } } }],
+              },
+              done: false,
+            },
+            {
+              model: 'qwen:14b',
+              message: { role: 'assistant', content: '' },
+              done: true,
+              done_reason: 'stop',
+              prompt_eval_count: 5,
+              eval_count: 3,
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/x-ndjson' } },
+        );
+      },
+    });
+
+    const events: LlmChatStreamEvent[] = [];
+    for await (const event of provider.stream({
+      model: 'qwen:14b',
+      messages: [{ role: 'user', content: 'query' }],
+      tools: [
+        {
+          name: 'query',
+          description: 'Run SQL',
+          inputSchema: { type: 'object', properties: { sql: { type: 'string' } } },
+        },
+      ],
+    })) {
+      events.push(event);
+    }
+
+    expect(requestBody).toMatchObject({ stream: true, model: 'qwen:14b' });
+    expect(events).toEqual(
+      expect.arrayContaining([
+        { type: 'text-delta', text: 'hello ' },
+        { type: 'text-delta', text: 'world' },
+        { type: 'usage', usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 } },
+      ]),
+    );
+    const toolCallEvent = events.find((event) => event.type === 'tool-call');
+    if (!toolCallEvent || toolCallEvent.type !== 'tool-call') {
+      throw new Error('Expected an Ollama tool-call event.');
+    }
+    expect(toolCallEvent.toolCall).toMatchObject({
+      name: 'query',
+      arguments: { sql: 'select 1' },
+    });
+    const finishEvent = events.at(-1);
+    if (!finishEvent || finishEvent.type !== 'finish') {
+      throw new Error('Expected an Ollama finish event.');
+    }
+    expect(finishEvent.response.text).toBe('hello world');
+    expect(finishEvent.response.toolCalls[0]?.name).toBe('query');
+    expect(finishEvent.response.finishReason).toBe('stop');
   });
 
   it('discovers context and output limits from an OpenAI-compatible model catalog', async () => {
@@ -438,6 +577,20 @@ function sseStream(events: unknown[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     start(controller) {
       for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+}
+
+function ndjsonStream(events: unknown[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(events.map((event) => JSON.stringify(event)).join('\n') + '\n');
+  const split = Math.max(1, Math.floor(encoded.byteLength / 3));
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoded.subarray(0, split));
+      controller.enqueue(encoded.subarray(split, split * 2));
+      controller.enqueue(encoded.subarray(split * 2));
       controller.close();
     },
   });

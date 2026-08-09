@@ -24,7 +24,6 @@ import { redactKnownSecrets, sanitizeKnownSecretError } from './known-secret-san
 import {
   RETRYABLE_LLM_HTTP_STATUSES,
   retryAfterMilliseconds,
-  retryDelayFromError,
 } from './retry-policy.js';
 import {
   addStreamBytes,
@@ -189,11 +188,6 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
-  private readonly maxRetries: number;
-  private readonly retryDelayBaseMs: number;
-  private readonly retryMaxDelayMs: number;
-  private readonly retryJitterRatio: number;
-  private readonly random: () => number;
   private readonly streamTimeouts: Required<LlmStreamTimeoutOptions>;
   private readonly embeddingsPath: string;
   private readonly rerankPath: string;
@@ -216,11 +210,6 @@ export class OpenAICompatibleProvider implements LlmProvider {
     this.apiKey = config.apiKey?.trim() ?? '';
     this.baseUrl = normalizeBaseUrl(config.baseUrl);
     this.timeoutMs = config.timeoutMs ?? 60_000;
-    this.maxRetries = config.maxRetries ?? 2;
-    this.retryDelayBaseMs = config.retryDelayBaseMs ?? 100;
-    this.retryMaxDelayMs = config.retryMaxDelayMs ?? 5_000;
-    this.retryJitterRatio = config.retryJitterRatio ?? 0.2;
-    this.random = config.random ?? Math.random;
     this.streamTimeouts = {
       firstEventMs: config.streamTimeouts?.firstEventMs ?? this.timeoutMs,
       firstOutputMs: config.streamTimeouts?.firstOutputMs ?? this.timeoutMs,
@@ -263,6 +252,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       text: parsed.text,
       toolCalls: parsed.toolCalls,
       toolsRequested: Boolean(request.tools?.length),
+      toolNames: request.tools?.map((tool) => tool.name) ?? [],
       protocol: 'OpenAI-compatible',
     });
     return parsed;
@@ -375,7 +365,6 @@ export class OpenAICompatibleProvider implements LlmProvider {
       `${ollamaApiRoot(this.baseUrl)}/api/show`,
       { model },
       signal,
-      { maxRetries: 0 },
     );
     return parseOllamaModelMetadata(model, response, this.capabilities);
   }
@@ -418,6 +407,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
             text: response.text,
             toolCalls: response.toolCalls,
             toolsRequested: Boolean(request.tools?.length),
+            toolNames: request.tools?.map((tool) => tool.name) ?? [],
             protocol: 'OpenAI-compatible',
           });
           yield finishEvent(response, state.finishReason);
@@ -509,6 +499,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       text: response.text,
       toolCalls: response.toolCalls,
       toolsRequested: Boolean(request.tools?.length),
+      toolNames: request.tools?.map((tool) => tool.name) ?? [],
       protocol: 'OpenAI-compatible',
     });
     yield finishEvent(response, state.finishReason);
@@ -539,22 +530,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
     path: string,
     payload: Record<string, unknown>,
     signal?: AbortSignal,
-    options?: { maxRetries?: number },
   ): Promise<T> {
-    const maxRetries = options?.maxRetries ?? this.maxRetries;
-    let lastError: unknown;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      try {
-        return await this.requestOnce<T>(path, payload, signal);
-      } catch (error) {
-        lastError = error;
-        if (!isRetryable(error) || attempt === maxRetries) throw error;
-        await sleep(this.retryDelay(error, attempt), signal);
-      }
-    }
-
-    throw lastError;
+    return await this.requestOnce<T>(path, payload, signal);
   }
 
   private async requestOnce<T>(
@@ -624,20 +601,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private async requestGetJson<T>(
     path: string,
     signal?: AbortSignal,
-    options?: { maxRetries?: number },
   ): Promise<T> {
-    const maxRetries = options?.maxRetries ?? this.maxRetries;
-    let lastError: unknown;
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      try {
-        return await this.requestGetOnce<T>(path, signal);
-      } catch (error) {
-        lastError = error;
-        if (!isRetryable(error) || attempt === maxRetries) throw error;
-        await sleep(this.retryDelay(error, attempt), signal);
-      }
-    }
-    throw lastError;
+    return await this.requestGetOnce<T>(path, signal);
   }
 
   private async requestGetOnce<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -699,32 +664,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
     };
   }
 
-  private retryDelay(error: unknown, attempt: number): number {
-    return retryDelayFromError(error, {
-      attempt,
-      baseDelayMs: this.retryDelayBaseMs,
-      maxDelayMs: this.retryMaxDelayMs,
-      jitterRatio: this.retryJitterRatio,
-      random: this.random,
-    });
-  }
-
   private async requestStream(
     path: string,
     payload: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<StreamResponse> {
-    let lastError: unknown;
-    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
-      try {
-        return await this.requestStreamOnce(path, payload, signal);
-      } catch (error) {
-        lastError = error;
-        if (!isRetryable(error) || attempt === this.maxRetries) throw error;
-        await sleep(this.retryDelay(error, attempt), signal);
-      }
-    }
-    throw lastError;
+    return await this.requestStreamOnce(path, payload, signal);
   }
 
   private async requestStreamOnce(
@@ -1317,10 +1262,6 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
-function isRetryable(error: unknown): boolean {
-  return error instanceof LlmProviderError && error.retryable;
-}
-
 async function nextStreamEvent(input: {
   iterator: AsyncIterator<string>;
   streamStartedAt: number;
@@ -1405,23 +1346,5 @@ async function nextStreamEvent(input: {
         reject(error instanceof Error ? error : new Error('LLM stream iterator failed.'));
       },
     );
-  });
-}
-
-async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted)
-    throw new LlmProviderError('LLM_ABORTED', 'LLM retry wait was aborted by the user.', false);
-  await new Promise<void>((resolve, reject) => {
-    const cleanup = () => signal?.removeEventListener('abort', abort);
-    const timeout = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-    const abort = () => {
-      clearTimeout(timeout);
-      cleanup();
-      reject(new LlmProviderError('LLM_ABORTED', 'LLM retry wait was aborted by the user.', false));
-    };
-    signal?.addEventListener('abort', abort, { once: true });
   });
 }

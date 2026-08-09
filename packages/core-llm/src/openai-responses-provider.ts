@@ -134,6 +134,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
       text: response.text,
       toolCalls: response.toolCalls,
       toolsRequested: Boolean(request.tools?.length),
+      toolNames: request.tools?.map((tool) => tool.name) ?? [],
       protocol: 'OpenAI Responses',
     });
     return response;

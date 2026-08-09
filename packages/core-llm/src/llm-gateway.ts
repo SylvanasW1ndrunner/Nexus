@@ -22,6 +22,21 @@ import {
 import { LlmReliabilityController, type LlmReliabilityConfig } from './reliability.js';
 import { LlmResponseCache } from './response-cache.js';
 import {
+  ModelClientError,
+  type ModelSession,
+} from './model-client.js';
+import {
+  ModelProtocolError,
+  type CanonicalModelRequest,
+} from './protocol/codec.js';
+import type {
+  DecodedModelAttempt,
+  ValidatedModelAttempt,
+} from './protocol/envelope.js';
+import type { DecodedModelContentBlock } from './protocol/content.js';
+import type { DecodedModelStreamEvent } from './protocol/model-stream.js';
+import { retryAfterMilliseconds, retryDelayFromError } from './retry-policy.js';
+import {
   estimateModelCost,
   LlmTaskRouter,
   type LlmPolicyLayers,
@@ -59,6 +74,286 @@ export type LlmGatewayContext = {
   requestId?: string;
   traceId?: string;
 };
+
+export type ModelAttemptTimeouts = {
+  connectMs: number;
+  firstEventMs: number;
+  idleMs: number;
+  totalMs: number;
+};
+
+export type ModelAttemptRetryPolicy = {
+  baseDelayMs: number;
+  maxDelayMs: number;
+  jitterRatio: number;
+};
+
+export type ModelTimeoutPhase = 'connect' | 'first-event' | 'idle' | 'total';
+
+export type ModelAttemptOptions = {
+  signal?: AbortSignal;
+  maxRetries?: number;
+  retry?: Partial<ModelAttemptRetryPolicy>;
+  timeouts?: Partial<ModelAttemptTimeouts>;
+  fallbacks?: readonly ModelSession[];
+};
+
+export type DiscardedModelAttempt = {
+  attemptId: string;
+  routeId: string;
+  reason: string;
+  blocks: readonly DecodedModelContentBlock[];
+  discardedAt: number;
+};
+
+export type ModelAttemptExecution = {
+  attempt: ValidatedModelAttempt;
+  session: ModelSession;
+  discardedAttempts: readonly DiscardedModelAttempt[];
+};
+
+export type ModelGatewayErrorCode =
+  | 'MODEL_TIMEOUT'
+  | 'MODEL_CANCELLED'
+  | 'MODEL_PROTOCOL_FAILED'
+  | 'MODEL_TRANSPORT_FAILED'
+  | 'MODEL_FALLBACK_INCOMPATIBLE';
+
+export class ModelGatewayError extends Error {
+  constructor(
+    readonly code: ModelGatewayErrorCode,
+    message: string,
+    readonly retryable: boolean,
+    readonly options: {
+      phase?: ModelTimeoutPhase;
+      statusCode?: number;
+      retryAfterMs?: number;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = 'ModelGatewayError';
+  }
+
+  get phase(): ModelTimeoutPhase | undefined {
+    return this.options.phase;
+  }
+
+  get statusCode(): number | undefined {
+    return this.options.statusCode;
+  }
+
+  get retryAfterMs(): number | undefined {
+    return this.options.retryAfterMs;
+  }
+}
+
+export type ModelGatewayClock = {
+  now(): number;
+  sleep(milliseconds: number, signal?: AbortSignal): Promise<void>;
+};
+
+export type ModelExecutionGatewayOptions = {
+  clock?: ModelGatewayClock;
+  random?: () => number;
+  createAttemptId?: () => string;
+};
+
+const DEFAULT_MODEL_ATTEMPT_TIMEOUTS: ModelAttemptTimeouts = {
+  connectMs: 30_000,
+  firstEventMs: 30_000,
+  idleMs: 30_000,
+  totalMs: 120_000,
+};
+
+const DEFAULT_MODEL_ATTEMPT_RETRY: ModelAttemptRetryPolicy = {
+  baseDelayMs: 100,
+  maxDelayMs: 5_000,
+  jitterRatio: 0.2,
+};
+
+/** The sole owner of canonical model attempt retry, fallback and discard. */
+export class ModelExecutionGateway {
+  private readonly clock: ModelGatewayClock;
+  private readonly random: () => number;
+  private readonly createAttemptId: () => string;
+
+  constructor(options: ModelExecutionGatewayOptions = {}) {
+    this.clock = options.clock ?? { now: Date.now, sleep: modelAttemptDelay };
+    this.random = options.random ?? Math.random;
+    this.createAttemptId = options.createAttemptId ?? randomUUID;
+  }
+
+  async executeAttempt(
+    session: ModelSession,
+    request: CanonicalModelRequest,
+    options: ModelAttemptOptions = {},
+  ): Promise<ModelAttemptExecution> {
+    if (request.model !== session.route.modelId) {
+      throw new ModelGatewayError(
+        'MODEL_PROTOCOL_FAILED',
+        `Canonical request model ${request.model} does not match frozen route ${session.route.modelId}.`,
+        false,
+      );
+    }
+    const fallbacks = [...(options.fallbacks ?? [])];
+    assertCompatibleFallbacks(session, fallbacks);
+    const maxRetries = boundedModelAttemptInteger(options.maxRetries ?? 1, 0, 10, 'maxRetries');
+    const timeouts = modelAttemptTimeouts(options.timeouts);
+    const retry = modelAttemptRetry(options.retry);
+    const discarded: DiscardedModelAttempt[] = [];
+    let terminalError: ModelGatewayError | undefined;
+
+    for (const candidate of [session, ...fallbacks]) {
+      for (let retryIndex = 0; retryIndex <= maxRetries; retryIndex += 1) {
+        const attemptId = this.createAttemptId();
+        const tentativeBlocks: DecodedModelContentBlock[] = [];
+        try {
+          const attempt = await this.executeOne(
+            candidate,
+            request,
+            attemptId,
+            timeouts,
+            options.signal,
+            tentativeBlocks,
+          );
+          return Object.freeze({
+            attempt,
+            session: candidate,
+            discardedAttempts: Object.freeze(discarded.map(freezeDiscardedAttempt)),
+          });
+        } catch (error) {
+          terminalError = classifyModelAttemptError(error, options.signal, this.clock.now());
+          if (terminalError.code === 'MODEL_CANCELLED') throw terminalError;
+          discarded.push({
+            attemptId,
+            routeId: candidate.route.routeId,
+            reason: discardReason(error, terminalError),
+            blocks: tentativeBlocks.map(cloneDecodedBlock),
+            discardedAt: this.clock.now(),
+          });
+          if (!terminalError.retryable) throw terminalError;
+          if (retryIndex < maxRetries) {
+            const delay = retryDelayFromError(
+              modelRetryError(terminalError),
+              {
+                attempt: retryIndex,
+                baseDelayMs: retry.baseDelayMs,
+                maxDelayMs: retry.maxDelayMs,
+                jitterRatio: retry.jitterRatio,
+                random: this.random,
+              },
+            );
+            try {
+              await this.clock.sleep(delay, options.signal);
+            } catch (error) {
+              throw classifyModelAttemptError(error, options.signal, this.clock.now());
+            }
+          }
+        }
+      }
+    }
+    throw terminalError ?? new ModelGatewayError(
+      'MODEL_TRANSPORT_FAILED',
+      'No model attempt was executed.',
+      false,
+    );
+  }
+
+  private async executeOne(
+    session: ModelSession,
+    request: CanonicalModelRequest,
+    attemptId: string,
+    timeouts: ModelAttemptTimeouts,
+    sourceSignal: AbortSignal | undefined,
+    tentativeBlocks: DecodedModelContentBlock[],
+  ): Promise<ValidatedModelAttempt> {
+    const controller = new AbortController();
+    const abortFromSource = () => controller.abort(sourceSignal?.reason);
+    sourceSignal?.addEventListener('abort', abortFromSource, { once: true });
+    if (sourceSignal?.aborted) controller.abort(sourceSignal.reason);
+    const canonicalRequest = applySessionGeneration(request, session);
+    let encoded: ReturnType<ModelSession['codec']['encode']>;
+    try {
+      encoded = session.codec.encode(canonicalRequest, {
+        requestId: attemptId,
+        target: {
+          connectionId: session.route.connectionId,
+          model: session.route.modelId,
+          protocol: session.route.protocol,
+        },
+        replay: { mode: 'new' },
+      });
+    } catch (error) {
+      sourceSignal?.removeEventListener('abort', abortFromSource);
+      throw error;
+    }
+
+    const run = async (): Promise<ValidatedModelAttempt> => {
+      const response = await raceModelDeadline(
+        session.client.execute({
+          attemptId,
+          route: session.route,
+          wireRequest: encoded.wireRequest,
+          signal: controller.signal,
+        }),
+        timeouts.connectMs,
+        'connect',
+        controller,
+        sourceSignal,
+      );
+      const context = {
+        attemptId,
+        origin: {
+          connectionId: session.route.connectionId,
+          model: session.route.modelId,
+          protocol: session.route.protocol,
+        },
+      };
+      if (response.kind === 'json') {
+        return validateDecodedModelAttempt(session.codec.decode(response.response, context));
+      }
+      const guardedEvents = guardModelStream(
+        response.events,
+        timeouts,
+        controller,
+        sourceSignal,
+      );
+      let finished: DecodedModelAttempt | undefined;
+      for await (const event of session.codec.decodeStream(guardedEvents, context)) {
+        trackTentativeBlocks(tentativeBlocks, event);
+        if (event.type === 'finish') {
+          if (finished !== undefined) {
+            throw new ModelProtocolError(
+              'INVALID_WIRE_RESPONSE',
+              'Codec emitted more than one terminal model attempt.',
+            );
+          }
+          finished = event.attempt;
+        }
+      }
+      if (finished === undefined) {
+        throw new ModelProtocolError(
+          'INCOMPLETE_MODEL_ATTEMPT',
+          'Codec stream ended without a terminal model attempt.',
+        );
+      }
+      return validateDecodedModelAttempt(finished);
+    };
+
+    try {
+      return await raceModelDeadline(
+        run(),
+        timeouts.totalMs,
+        'total',
+        controller,
+        sourceSignal,
+      );
+    } finally {
+      sourceSignal?.removeEventListener('abort', abortFromSource);
+    }
+  }
+}
 
 export type LlmGatewayChatRequest = Omit<LlmChatRequest, 'model'> & { model?: string };
 
@@ -106,6 +401,27 @@ export type LlmGatewayOptions = {
 };
 
 type AttemptUsage = { model: RegisteredLlmModel; usage: LlmUsage };
+
+export type LlmCompatibilityFallbackResult<TCandidate, TResult> = {
+  candidate: TCandidate;
+  result: TResult;
+  attempts: readonly string[];
+};
+
+export type LlmCompatibilityFallbackInput<TCandidate, TResult> = {
+  candidates: readonly TCandidate[];
+  candidateId: (candidate: TCandidate) => string;
+  execute: (candidate: TCandidate) => Promise<TResult>;
+  classifyError: (candidate: TCandidate, error: unknown) => LlmProviderError;
+  shouldFallback: (error: LlmProviderError) => boolean;
+};
+
+export type LlmCompatibilityStreamFallbackInput<TCandidate, TEvent> = Omit<
+  LlmCompatibilityFallbackInput<TCandidate, never>,
+  'execute'
+> & {
+  stream: (candidate: TCandidate) => AsyncIterable<TEvent>;
+};
 
 export class LlmGateway {
   readonly registry: LlmModelRegistry;
@@ -177,6 +493,63 @@ export class LlmGateway {
 
   configureReliability(providerId: string, config: Partial<LlmReliabilityConfig>): void {
     this.reliability.configure(providerId, config);
+  }
+
+  /**
+   * Compatibility boundary for the legacy connection/provider API. Protocol fallback stays in
+   * the Gateway while callers migrate to ModelExecutionGateway and immutable ModelSessions.
+   */
+  async executeCompatibilityFallback<TCandidate, TResult>(
+    input: LlmCompatibilityFallbackInput<TCandidate, TResult>,
+  ): Promise<LlmCompatibilityFallbackResult<TCandidate, TResult>> {
+    const attempts: string[] = [];
+    let lastError: LlmProviderError | undefined;
+    for (let index = 0; index < input.candidates.length; index += 1) {
+      const candidate = input.candidates[index]!;
+      attempts.push(input.candidateId(candidate));
+      try {
+        return Object.freeze({
+          candidate,
+          result: await input.execute(candidate),
+          attempts: Object.freeze([...attempts]),
+        });
+      } catch (error) {
+        lastError = input.classifyError(candidate, error);
+        if (index + 1 >= input.candidates.length || !input.shouldFallback(lastError)) {
+          throw lastError;
+        }
+      }
+    }
+    throw lastError ?? new LlmProviderError('LLM_NO_ROUTE', 'No usable LLM route exists.', false);
+  }
+
+  /** Gateway-owned streaming counterpart to executeCompatibilityFallback. */
+  async *streamCompatibilityFallback<TCandidate, TEvent>(
+    input: LlmCompatibilityStreamFallbackInput<TCandidate, TEvent>,
+  ): AsyncIterable<TEvent> {
+    let lastError: LlmProviderError | undefined;
+    for (let index = 0; index < input.candidates.length; index += 1) {
+      const candidate = input.candidates[index]!;
+      let responseStarted = false;
+      try {
+        for await (const event of input.stream(candidate)) {
+          responseStarted = true;
+          yield event;
+        }
+        return;
+      } catch (error) {
+        lastError = input.classifyError(candidate, error);
+        if (
+          responseStarted ||
+          index + 1 >= input.candidates.length ||
+          !input.shouldFallback(lastError)
+        ) {
+          throw lastError;
+        }
+      }
+    }
+    throw lastError ??
+      new LlmProviderError('LLM_NO_ROUTE', 'No usable LLM streaming route exists.', false);
   }
 
   async chat(input: LlmGatewayChatInput): Promise<LlmChatResponse> {
@@ -477,6 +850,7 @@ export class LlmGateway {
     let attempts = 0;
     let lastError: unknown;
     let visibleOutput = false;
+    let responseStarted = false;
     try {
       for (
         let candidateIndex = 0;
@@ -525,6 +899,7 @@ export class LlmGateway {
               ? provider.stream({ ...request, signal: deadline.signal })
               : emulateStream(await provider.chat({ ...request, signal: deadline.signal }));
             for await (const event of iterable) {
+              responseStarted = true;
               if (event.type === 'finish') finalResponse = event.response;
               const contentEvent =
                 event.type === 'text-delta' ||
@@ -573,7 +948,9 @@ export class LlmGateway {
             lastError = deadline.timedOut()
               ? timeoutError(input.timeoutMs)
               : normalizeProviderError(error);
-            if (visibleOutput || isAborted(lastError)) throw lastError;
+            if (responseStarted || isAborted(lastError)) {
+              throw responseStarted ? markStreamResponseStarted(lastError) : lastError;
+            }
             if (isRetryable(lastError)) {
               attemptUsages.push({
                 model: candidate,
@@ -918,6 +1295,7 @@ export class LlmGateway {
       text: response.text,
       toolCalls: response.toolCalls,
       toolsRequested: Boolean(request.tools?.length),
+      toolNames: request.tools?.map((tool) => tool.name) ?? [],
       protocol: 'the configured Provider protocol',
     });
     if (validateToolCalls && request.tools)
@@ -1002,6 +1380,301 @@ export class LlmGateway {
       ...(input.policies === undefined ? {} : { policies: input.policies }),
     }).selected.model;
   }
+}
+
+function applySessionGeneration(
+  request: CanonicalModelRequest,
+  session: ModelSession,
+): CanonicalModelRequest {
+  return {
+    ...request,
+    model: session.route.modelId,
+    ...(session.generation.temperature === undefined
+      ? {}
+      : { temperature: session.generation.temperature }),
+    ...(session.generation.topP === undefined ? {} : { topP: session.generation.topP }),
+    ...(session.generation.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: session.generation.maxOutputTokens }),
+    ...(session.generation.stop === undefined ? {} : { stop: [...session.generation.stop] }),
+  };
+}
+
+function validateDecodedModelAttempt(attempt: DecodedModelAttempt): ValidatedModelAttempt {
+  if (!attempt.terminal) {
+    throw new ModelProtocolError(
+      'INCOMPLETE_MODEL_ATTEMPT',
+      'Model attempt did not contain protocol-recognized terminal framing.',
+    );
+  }
+  return Object.freeze({
+    ...attempt,
+    origin: Object.freeze({ ...attempt.origin }),
+    blocks: Object.freeze(attempt.blocks.map(cloneDecodedBlock)),
+    opaqueBlockRefs: Object.freeze([...attempt.opaqueBlockRefs]),
+    ...(attempt.usage === undefined ? {} : { usage: Object.freeze({ ...attempt.usage }) }),
+    terminal: true as const,
+    validation: 'validated' as const,
+  }) as unknown as ValidatedModelAttempt;
+}
+
+async function* guardModelStream(
+  events: AsyncIterable<unknown>,
+  timeouts: ModelAttemptTimeouts,
+  controller: AbortController,
+  sourceSignal?: AbortSignal,
+): AsyncIterable<unknown> {
+  const iterator = events[Symbol.asyncIterator]();
+  let first = true;
+  try {
+    while (true) {
+      const next = await raceModelDeadline(
+        iterator.next(),
+        first ? timeouts.firstEventMs : timeouts.idleMs,
+        first ? 'first-event' : 'idle',
+        controller,
+        sourceSignal,
+      );
+      if (next.done) return;
+      first = false;
+      yield next.value;
+    }
+  } finally {
+    // A transport iterator may be stalled inside next(). Abort is authoritative;
+    // cleanup must not hide the phase timeout behind the outer total deadline.
+    void iterator.return?.().catch(() => undefined);
+  }
+}
+
+function raceModelDeadline<T>(
+  operation: Promise<T>,
+  milliseconds: number,
+  phase: ModelTimeoutPhase,
+  controller: AbortController,
+  sourceSignal?: AbortSignal,
+): Promise<T> {
+  if (sourceSignal?.aborted) return Promise.reject(modelCancelledError(sourceSignal.reason));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      const error = new ModelGatewayError(
+        'MODEL_TIMEOUT',
+        `Model attempt timed out during ${phase}.`,
+        true,
+        { phase },
+      );
+      finish(() => reject(error));
+      controller.abort(error);
+    }, milliseconds);
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sourceSignal?.removeEventListener('abort', cancel);
+      callback();
+    };
+    const cancel = () => finish(() => reject(modelCancelledError(sourceSignal?.reason)));
+    sourceSignal?.addEventListener('abort', cancel, { once: true });
+    void operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) =>
+        finish(() => reject(error instanceof Error ? error : new Error(String(error)))),
+    );
+  });
+}
+
+function trackTentativeBlocks(
+  blocks: DecodedModelContentBlock[],
+  event: DecodedModelStreamEvent,
+): void {
+  if (event.type === 'block-complete') {
+    blocks[event.blockOrdinal] = cloneDecodedBlock(event.block);
+    return;
+  }
+  if (event.type === 'text-delta' || event.type === 'reasoning-summary-delta') {
+    const expectedType = event.type === 'text-delta' ? 'text' : 'reasoning-summary';
+    const current = blocks[event.blockOrdinal];
+    if (current === undefined) {
+      blocks[event.blockOrdinal] = { type: expectedType, text: event.text };
+    } else if (current.type === expectedType) {
+      current.text += event.text;
+    }
+  }
+}
+
+function classifyModelAttemptError(
+  error: unknown,
+  sourceSignal?: AbortSignal,
+  nowMs = Date.now(),
+): ModelGatewayError {
+  if (sourceSignal?.aborted) return modelCancelledError(sourceSignal.reason);
+  if (error instanceof ModelGatewayError) return error;
+  if (error instanceof ModelProtocolError) {
+    return new ModelGatewayError('MODEL_PROTOCOL_FAILED', error.message, false, { cause: error });
+  }
+  if (error instanceof ModelClientError) {
+    const retryAfterMs = error.retryAfterMs ?? retryAfterMilliseconds(error.retryAfter, nowMs);
+    const retryableHttp =
+      error.statusCode === 429 ||
+      error.statusCode === 502 ||
+      error.statusCode === 503 ||
+      error.statusCode === 504;
+    const retryableTransport =
+      error.statusCode === undefined &&
+      (error.code === 'CONNECT_FAILED' || error.code === 'STREAM_DISCONNECTED') &&
+      error.retryable;
+    return new ModelGatewayError(
+      'MODEL_TRANSPORT_FAILED',
+      error.message,
+      retryableHttp || retryableTransport,
+      {
+        ...(error.statusCode === undefined ? {} : { statusCode: error.statusCode }),
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+        cause: error,
+      },
+    );
+  }
+  return new ModelGatewayError(
+    'MODEL_TRANSPORT_FAILED',
+    error instanceof Error ? error.message : String(error),
+    false,
+    { cause: error },
+  );
+}
+
+function modelCancelledError(cause: unknown): ModelGatewayError {
+  return new ModelGatewayError(
+    'MODEL_CANCELLED',
+    'Model attempt was cancelled by the user.',
+    false,
+    { cause },
+  );
+}
+
+function discardReason(error: unknown, normalized: ModelGatewayError): string {
+  if (error instanceof ModelClientError) {
+    if (error.statusCode !== undefined) return `HTTP_${error.statusCode}`;
+    return error.code;
+  }
+  if (error instanceof ModelProtocolError) return error.code;
+  if (normalized.code === 'MODEL_TIMEOUT') return `TIMEOUT_${normalized.phase ?? 'unknown'}`;
+  return normalized.code;
+}
+
+function modelRetryError(error: ModelGatewayError): LlmProviderError {
+  return new LlmProviderError(
+    'LLM_PROVIDER_ERROR',
+    error.message,
+    error.retryable,
+    error.statusCode,
+    error.retryAfterMs === undefined ? undefined : { retryAfterMs: error.retryAfterMs },
+  );
+}
+
+function assertCompatibleFallbacks(
+  primary: ModelSession,
+  fallbacks: readonly ModelSession[],
+): void {
+  for (const fallback of fallbacks) {
+    const declared = primary.route.allowedFallbackRouteIds.includes(fallback.route.routeId);
+    const primaryCompatibility = primary.route.compatibility;
+    const fallbackCompatibility = fallback.route.compatibility;
+    const compatible =
+      primaryCompatibility?.mode === 'compatible-protocol' &&
+      fallbackCompatibility?.mode === 'compatible-protocol' &&
+      primaryCompatibility.family === fallbackCompatibility.family;
+    if (!declared || !compatible) {
+      throw new ModelGatewayError(
+        'MODEL_FALLBACK_INCOMPATIBLE',
+        `Fallback route ${fallback.route.routeId} is not an explicit compatible-protocol candidate of ${primary.route.routeId}.`,
+        false,
+      );
+    }
+  }
+}
+
+function modelAttemptTimeouts(input: Partial<ModelAttemptTimeouts> = {}): ModelAttemptTimeouts {
+  return {
+    connectMs: positiveModelAttemptInteger(
+      input.connectMs ?? DEFAULT_MODEL_ATTEMPT_TIMEOUTS.connectMs,
+      'connectMs',
+    ),
+    firstEventMs: positiveModelAttemptInteger(
+      input.firstEventMs ?? DEFAULT_MODEL_ATTEMPT_TIMEOUTS.firstEventMs,
+      'firstEventMs',
+    ),
+    idleMs: positiveModelAttemptInteger(
+      input.idleMs ?? DEFAULT_MODEL_ATTEMPT_TIMEOUTS.idleMs,
+      'idleMs',
+    ),
+    totalMs: positiveModelAttemptInteger(
+      input.totalMs ?? DEFAULT_MODEL_ATTEMPT_TIMEOUTS.totalMs,
+      'totalMs',
+    ),
+  };
+}
+
+function modelAttemptRetry(input: Partial<ModelAttemptRetryPolicy> = {}): ModelAttemptRetryPolicy {
+  const baseDelayMs = positiveModelAttemptInteger(
+    input.baseDelayMs ?? DEFAULT_MODEL_ATTEMPT_RETRY.baseDelayMs,
+    'baseDelayMs',
+  );
+  const maxDelayMs = positiveModelAttemptInteger(
+    input.maxDelayMs ?? DEFAULT_MODEL_ATTEMPT_RETRY.maxDelayMs,
+    'maxDelayMs',
+  );
+  const jitterRatio = input.jitterRatio ?? DEFAULT_MODEL_ATTEMPT_RETRY.jitterRatio;
+  if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
+    throw new Error('jitterRatio must be between 0 and 1.');
+  }
+  return { baseDelayMs, maxDelayMs, jitterRatio };
+}
+
+function positiveModelAttemptInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive safe integer.`);
+  }
+  return value;
+}
+
+function boundedModelAttemptInteger(
+  value: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}.`);
+  }
+  return value;
+}
+
+function cloneDecodedBlock(block: DecodedModelContentBlock): DecodedModelContentBlock {
+  return structuredClone(block);
+}
+
+function freezeDiscardedAttempt(attempt: DiscardedModelAttempt): DiscardedModelAttempt {
+  return Object.freeze({
+    ...attempt,
+    blocks: Object.freeze(attempt.blocks.map(cloneDecodedBlock)),
+  });
+}
+
+async function modelAttemptDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw modelCancelledError(signal.reason);
+  await new Promise<void>((resolve, reject) => {
+    const finish = () => {
+      signal?.removeEventListener('abort', cancel);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    const cancel = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      reject(modelCancelledError(signal?.reason));
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+  });
 }
 
 function validateGatewayInput(input: LlmGatewayChatInput): void {
@@ -1123,6 +1796,17 @@ function normalizeProviderError(error: unknown): LlmProviderError {
     'LLM_PROVIDER_ERROR',
     error instanceof Error ? error.message : String(error),
     true,
+  );
+}
+
+function markStreamResponseStarted(error: unknown): LlmProviderError {
+  const normalized = normalizeProviderError(error);
+  return new LlmProviderError(
+    normalized.code,
+    normalized.message,
+    normalized.retryable,
+    normalized.statusCode,
+    { ...(normalized.detail ?? {}), responseStarted: true },
   );
 }
 

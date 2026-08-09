@@ -1,6 +1,6 @@
 import { LlmProviderError } from './types.js';
 
-export const RETRYABLE_LLM_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
+export const RETRYABLE_LLM_HTTP_STATUSES = new Set([429, 502, 503, 504]);
 
 export function retryAfterMilliseconds(
   value: string | null | undefined,

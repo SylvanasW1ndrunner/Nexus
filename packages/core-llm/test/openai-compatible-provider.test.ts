@@ -348,7 +348,7 @@ describe('OpenAICompatibleProvider', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('retries retryable provider failures', async () => {
+  it('reports retryable provider failures without retrying inside the adapter', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(503, { error: { message: 'busy' } }))
@@ -372,11 +372,11 @@ describe('OpenAICompatibleProvider', () => {
         model: 'deepseek-ai/DeepSeek-V4-Pro',
         messages: [{ role: 'user', content: 'ping' }],
       }),
-    ).resolves.toMatchObject({ text: 'ok' });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    ).rejects.toMatchObject({ statusCode: 503, retryable: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('retries transient failures by default and carries Retry-After diagnostics', async () => {
+  it('carries Retry-After diagnostics to the gateway without retrying', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -408,8 +408,12 @@ describe('OpenAICompatibleProvider', () => {
         model: 'test',
         messages: [{ role: 'user', content: 'ping' }],
       }),
-    ).resolves.toMatchObject({ text: 'recovered' });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    ).rejects.toMatchObject({
+      statusCode: 503,
+      retryable: true,
+      detail: { retryAfterMs: 0 },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -491,34 +495,7 @@ describe('OpenAICompatibleProvider', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('stops retry backoff immediately when the user aborts', async () => {
-    const abortController = new AbortController();
-    const fetchMock = vi.fn<TestFetch>(() => Promise.resolve(jsonResponse(503, { error: { message: 'busy' } })));
-    const provider = new OpenAICompatibleProvider({
-      id: 'test',
-      name: 'Test Provider',
-      apiKey: 'test-key',
-      baseUrl: 'https://example.test/v1',
-      maxRetries: 2,
-      retryDelayBaseMs: 10_000,
-      fetch: fetchMock,
-    });
-
-    const promise = provider.chat({
-      model: 'deepseek-ai/DeepSeek-V4-Pro',
-      messages: [{ role: 'user', content: 'ping' }],
-      signal: abortController.signal,
-    });
-    setTimeout(() => abortController.abort(), 5);
-
-    await expect(promise).rejects.toMatchObject({
-      code: 'LLM_ABORTED',
-      retryable: false,
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('retries initial stream connection failures before yielding events', async () => {
+  it('reports initial stream connection failures without retrying inside the adapter', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(429, { error: { message: 'rate limit' } }))
@@ -535,18 +512,12 @@ describe('OpenAICompatibleProvider', () => {
       fetch: fetchMock,
     });
 
-    const events = await collect(
-      provider.stream({
+    await expect(collect(provider.stream({
         model: 'deepseek-ai/DeepSeek-V4-Pro',
         messages: [{ role: 'user', content: 'ping' }],
-      }),
-    );
+      }))).rejects.toMatchObject({ statusCode: 429, retryable: true });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(events).toMatchObject([
-      { type: 'text-delta', text: 'ok' },
-      { type: 'finish', reason: 'stop', response: { text: 'ok' } },
-    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('exposes a SiliconFlow OpenAI-compatible provider preset', () => {
