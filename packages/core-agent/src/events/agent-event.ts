@@ -162,7 +162,25 @@ export interface AgentEventPayloadMap {
   'context.compaction_started': { checkpointId: string };
   'context.compacted': { checkpointId: string; summaryRef: string; coveredSequence: number };
   'context.compaction_failed': { checkpointId: string; code: string };
-  'artifact.created': { artifactId: string; mediaType: string; summary: string };
+  'artifact.created':
+    | {
+        artifactId: string;
+        handle: string;
+        checksum: string;
+        byteSize: number;
+        mediaType: string;
+        availability: 'available';
+        summary: string;
+      }
+    | {
+        artifactId: string;
+        handle: string;
+        checksum: null;
+        byteSize: null;
+        mediaType: string;
+        availability: 'legacy-unavailable';
+        summary: string;
+      };
   'artifact.expired': { artifactId: string };
   'artifact.deleted': { artifactId: string };
   'skill.activated': { skillId: string; revision: string };
@@ -184,7 +202,7 @@ type AgentEventShape<T extends AgentEventType> = {
   eventId: string;
   projectId: string;
   sequence: number;
-  schemaVersion: 1;
+  schemaVersion: number;
   sessionId: string;
   runId: string;
   turnId?: string;

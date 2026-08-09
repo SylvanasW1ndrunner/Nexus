@@ -310,7 +310,18 @@ describe('SqliteAgentJournal', () => {
       get() {
         eventReads += 1;
         return eventReads === 1
-          ? [{ type: 'artifact.created', payload: { artifactId: 'a', mediaType: 'text/plain', summary: 'ok' } }]
+          ? [{
+              type: 'artifact.created',
+              payload: {
+                artifactId: 'a',
+                handle: 'agent-artifact:a',
+                checksum: 'a'.repeat(64),
+                byteSize: 2,
+                mediaType: 'text/plain',
+                availability: 'available',
+                summary: 'ok',
+              },
+            }]
           : [{ type: 'input.received', payload: { clientRequestId: 'forged', content: 'forged' } }];
       },
     });
@@ -331,7 +342,15 @@ describe('SqliteAgentJournal', () => {
     });
     const draft = new Proxy({
       type: 'artifact.created' as const,
-      payload: { artifactId: 'artifact-a', mediaType: 'text/plain', summary: 'safe' },
+      payload: {
+        artifactId: 'artifact-a',
+        handle: 'agent-artifact:artifact-a',
+        checksum: 'a'.repeat(64),
+        byteSize: 4,
+        mediaType: 'text/plain',
+        availability: 'available' as const,
+        summary: 'safe',
+      },
     }, {});
 
     await expect(journal.commit({
@@ -359,7 +378,15 @@ describe('SqliteAgentJournal', () => {
       expectedRunRevision: 1,
       events: [{
         type: 'artifact.created',
-        payload: { artifactId: 'artifact-a', mediaType: 'text/plain', summary: 'safe' },
+        payload: {
+          artifactId: 'artifact-a',
+          handle: 'agent-artifact:artifact-a',
+          checksum: 'a'.repeat(64),
+          byteSize: 4,
+          mediaType: 'text/plain',
+          availability: 'available',
+          summary: 'safe',
+        },
       }],
     })).resolves.toMatchObject({ events: [{ type: 'artifact.created' }] });
   });

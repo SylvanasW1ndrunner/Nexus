@@ -5,7 +5,7 @@ export type AgentEventAudience = 'internal' | 'model' | 'user' | 'audit';
 export type AgentEventPersistence = 'durable' | 'diagnostic';
 
 export type AgentEventSchemaDescriptor<T extends AgentEventType> = {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: number;
   readonly audience: readonly AgentEventAudience[];
   readonly persistence: AgentEventPersistence;
   validate(payload: unknown): void;
@@ -21,13 +21,14 @@ const MODEL = ['internal', 'model', 'audit'] as const;
 const USER = ['internal', 'user', 'audit'] as const;
 
 function descriptor<T extends AgentEventType>(options?: {
+  schemaVersion?: number;
   audience?: readonly AgentEventAudience[];
   persistence?: AgentEventPersistence;
   maxPayloadBytes?: number;
   validate?: (payload: unknown) => void;
 }): AgentEventSchemaDescriptor<T> {
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: options?.schemaVersion ?? 1,
     audience: Object.freeze([...(options?.audience ?? INTERNAL)]),
     persistence: options?.persistence ?? 'durable',
     validate(payload: unknown): void {
@@ -439,7 +440,25 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   'context.compaction_started': descriptor({ validate: (p) => validateShape(p, ['checkpointId'], ['checkpointId']) }),
   'context.compacted': descriptor({ validate: (p) => validateShape(p, ['checkpointId', 'summaryRef', 'coveredSequence'], ['checkpointId', 'summaryRef'], [], ['coveredSequence']) }),
   'context.compaction_failed': descriptor({ validate: (p) => validateShape(p, ['checkpointId', 'code'], ['checkpointId', 'code']) }),
-  'artifact.created': descriptor({ audience: USER, validate: (p) => validateShape(p, ['artifactId', 'mediaType', 'summary'], ['artifactId', 'mediaType', 'summary']) }),
+  'artifact.created': descriptor({
+    schemaVersion: 2,
+    audience: USER,
+    validate: (payload) => {
+      const record = requireRecord(payload);
+      validateShape(
+        payload,
+        ['artifactId', 'handle', 'checksum', 'byteSize', 'mediaType', 'availability', 'summary'],
+        ['artifactId', 'handle', 'mediaType', 'availability', 'summary'],
+      );
+      requireEnum(record, 'availability', ['available', 'legacy-unavailable']);
+      if (record.availability === 'available') {
+        requireString(record, 'checksum');
+        requireNonNegativeInteger(record, 'byteSize');
+      } else if (record.checksum !== null || record.byteSize !== null) {
+        throw new TypeError('Legacy unavailable artifacts cannot claim checksum or size.');
+      }
+    },
+  }),
   'artifact.expired': descriptor({ audience: USER, validate: (p) => validateShape(p, ['artifactId'], ['artifactId']) }),
   'artifact.deleted': descriptor({ audience: USER, validate: (p) => validateShape(p, ['artifactId'], ['artifactId']) }),
   'skill.activated': descriptor({ validate: (p) => validateShape(p, ['skillId', 'revision'], ['skillId', 'revision']) }),

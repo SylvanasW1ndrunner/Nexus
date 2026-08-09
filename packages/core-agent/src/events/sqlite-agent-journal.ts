@@ -1632,23 +1632,23 @@ function eventFromRow(row: EventRow): AgentEvent {
     );
   }
   try {
-    payload = validateAndRedactEventPayload(row.event_type, payload);
-    assertEventOuterPayloadConsistency(row, payload);
-    return upcastAgentEvent({
-    eventId: row.event_id,
-    projectId: row.project_id,
-    sequence: Number(row.sequence),
-    schemaVersion: Number(row.schema_version),
-    sessionId: row.session_id,
-    runId: row.run_id,
-    ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
-    ...(row.parent_event_id === null ? {} : { parentEventId: row.parent_event_id }),
-    ...(row.invocation_id === null ? {} : { invocationId: row.invocation_id }),
-    ...(row.attempt_id === null ? {} : { attemptId: row.attempt_id }),
-    type: row.event_type,
-    occurredAt: row.occurred_at,
+    const event = upcastAgentEvent({
+      eventId: row.event_id,
+      projectId: row.project_id,
+      sequence: Number(row.sequence),
+      schemaVersion: Number(row.schema_version),
+      sessionId: row.session_id,
+      runId: row.run_id,
+      ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
+      ...(row.parent_event_id === null ? {} : { parentEventId: row.parent_event_id }),
+      ...(row.invocation_id === null ? {} : { invocationId: row.invocation_id }),
+      ...(row.attempt_id === null ? {} : { attemptId: row.attempt_id }),
+      type: row.event_type,
+      occurredAt: row.occurred_at,
       payload,
     });
+    assertEventOuterPayloadConsistency(row, event.payload);
+    return event;
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('UNSUPPORTED_EVENT_SCHEMA:')) {
       throw new AgentJournalError('UNSUPPORTED_EVENT_SCHEMA', error.message);

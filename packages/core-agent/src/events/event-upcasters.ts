@@ -22,6 +22,28 @@ export type AgentEventUpcasterRegistry = {
 function currentVersionUpcaster<T extends AgentEventType>(type: T): AgentEventUpcaster<T> {
   return (schemaVersion, payload) => {
     const current = AGENT_EVENT_SCHEMA_REGISTRY[type].schemaVersion;
+    if (type === 'artifact.created' && schemaVersion === 1) {
+      if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('CORRUPT_EVENT:artifact.created legacy payload is invalid.');
+      }
+      const legacy = payload as Record<string, unknown>;
+      if (
+        typeof legacy.artifactId !== 'string' ||
+        typeof legacy.mediaType !== 'string' ||
+        typeof legacy.summary !== 'string'
+      ) {
+        throw new Error('CORRUPT_EVENT:artifact.created legacy payload is incomplete.');
+      }
+      return validateAndRedactEventPayload(type, {
+        artifactId: legacy.artifactId,
+        handle: `legacy-agent-artifact:${legacy.artifactId}`,
+        checksum: null,
+        byteSize: null,
+        mediaType: legacy.mediaType,
+        availability: 'legacy-unavailable',
+        summary: legacy.summary,
+      });
+    }
     if (schemaVersion !== current) {
       throw new Error(`UNSUPPORTED_EVENT_SCHEMA:${type}:${schemaVersion}`);
     }
