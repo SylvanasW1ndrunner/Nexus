@@ -30,6 +30,7 @@ import {
   type AgentRunRecord,
   type AgentSession,
   type AgentSubagentRecord,
+  type ImportedLegacyState,
   type MigrationCrashPoint,
   type MigrationInspection,
 } from '../src/index.js';
@@ -90,15 +91,15 @@ describe('StateMigrationRunner', () => {
         legacyRecord: fixture.run,
       })],
     });
-    await expect(publicStore.preferences(fixture.session.id)).resolves.toEqual([
-      fixture.preference,
-    ]);
-    await expect(publicStore.checkpoints(fixture.session.id)).resolves.toEqual([
-      fixture.session.contextCheckpoint,
-    ]);
-    await expect(publicStore.subagents(fixture.session.id)).resolves.toEqual([
-      fixture.subagent,
-    ]);
+    await expect(publicStore.preferences(
+      fixture.session.id, { afterSequence: 0, limit: 100 },
+    )).resolves.toMatchObject({ items: [fixture.preference] });
+    await expect(publicStore.checkpoints(
+      fixture.session.id, { afterSequence: 0, limit: 100 },
+    )).resolves.toMatchObject({ items: [fixture.session.contextCheckpoint] });
+    await expect(publicStore.subagents(
+      fixture.session.id, { afterSequence: 0, limit: 100 },
+    )).resolves.toMatchObject({ items: [fixture.subagent] });
     for (const [readPage, expected] of [
       [(options: { afterSequence: number; limit: number }) =>
         publicStore.preferences(fixture.session.id, options), fixture.preference],
@@ -138,8 +139,8 @@ describe('StateMigrationRunner', () => {
         detail: { entityType: 'run', record: fixture.run },
       }),
     ]));
-    expect((await migrated.readImportedLegacyState()).runs).toEqual([fixture.run]);
-    expect((await migrated.listLegacyArchives()).length).toBeGreaterThanOrEqual(4);
+    expect((await readAllImportedLegacyState(migrated)).runs).toEqual([fixture.run]);
+    expect((await listAllLegacyArchives(migrated)).length).toBeGreaterThanOrEqual(4);
   });
 
   it.each([
@@ -253,7 +254,7 @@ describe('StateMigrationRunner', () => {
     const migrated = await StateMigrationRunner.open(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r4-tool-identity',
     });
-    const diagnostics = (await migrated.readImportedLegacyState()).diagnostics;
+    const diagnostics = (await readAllImportedLegacyState(migrated)).diagnostics;
     expect(diagnostics.some(({ code, evidence }) =>
       code === 'LEGACY_TOOL_OUTCOME_UNKNOWN' && evidence.includes('call-pending')))
       .toBe(expectsOutcomeUnknown);
@@ -280,12 +281,45 @@ describe('StateMigrationRunner', () => {
     const migrated = await StateMigrationRunner.open(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r3-scale',
     });
-    expect((await migrated.readImportedLegacyState()).sessions[0]?.messages).toHaveLength(1_205);
+    expect((await readAllImportedLegacyState(migrated)).sessions[0]?.messages).toHaveLength(1_205);
     await expect(migrated.validationDiagnostics()).resolves.toEqual({
       projectPasses: 1,
       maxPageSize: 1_000,
       importBatches: 3,
       carrierLeaseRenewals: 3,
+      maxImportBatchSize: 500,
+      maxActiveProjectionSessions: 1,
+      maxActiveProjectionAccumulators: 3,
+    });
+  });
+
+  it('releases validation state across many small Sessions', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'dbagent-public-many-session-migration-'));
+    temporaryDirectories.push(projectDir);
+    const project = { rootPath: projectDir, configDirectory: '.dbagent' };
+    const store = new AgentSessionStore(join(projectDir, 'state.db'), project);
+    for (let index = 0; index < 75; index += 1) {
+      await store.save({
+        now: '2026-08-08T05:00:00.000Z',
+        session: {
+          id: `many-session-${String(index).padStart(3, '0')}`,
+          title: `Many Session ${index}`, mode: 'read', project,
+          messages: [{
+            role: 'user', content: `message-${index}`,
+            createdAt: '2026-08-08T04:00:00.000Z',
+          }],
+          tokenUsage: { promptTokens: 1, completionTokens: 0, totalTokens: 1 },
+          aborted: false,
+        },
+      });
+    }
+    const migrated = await StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-r4-many-sessions',
+    });
+    await expect(migrated.validationDiagnostics()).resolves.toMatchObject({
+      maxImportBatchSize: 2,
+      maxActiveProjectionSessions: 1,
+      maxActiveProjectionAccumulators: 3,
     });
   });
 
@@ -296,7 +330,7 @@ describe('StateMigrationRunner', () => {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r3-reference-identity',
     });
 
-    const matching = (await migrated.listLegacyArchives()).filter(
+    const matching = (await listAllLegacyArchives(migrated)).filter(
       ({ relativePath }) => relativePath.startsWith('legacy-artifacts/output'),
     );
     expect(matching.map(({ relativePath }) => relativePath)).toEqual([
@@ -318,7 +352,7 @@ describe('StateMigrationRunner', () => {
     const migrated = await StateMigrationRunner.open(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r3-archive-descriptor',
     });
-    const ref = (await migrated.listLegacyArchives()).find(
+    const ref = (await listAllLegacyArchives(migrated)).find(
       ({ relativePath }) => relativePath === 'legacy-artifacts/output.txt',
     )!;
     const objectRelativePath = withTestDatabase(join(projectDir, 'state.db'), (database) =>
@@ -353,7 +387,7 @@ describe('StateMigrationRunner', () => {
       const migrated = await StateMigrationRunner.open(projectDir, {
         targetSchemaVersion: 2, migratorRevision: `task-4-r4-archive-${mutation}`,
       });
-      const ref = (await migrated.listLegacyArchives()).find(
+      const ref = (await listAllLegacyArchives(migrated)).find(
         ({ relativePath }) => relativePath === 'legacy-artifacts/output.txt',
       )!;
       const objectRelativePath = withTestDatabase(join(projectDir, 'state.db'), (database) =>
@@ -434,12 +468,12 @@ describe('StateMigrationRunner', () => {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r1',
     });
-    const firstState = await first.readImportedLegacyState();
+    const firstState = await readAllImportedLegacyState(first);
     const reopened = await StateMigrationRunner.open(projectDir, {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r1',
     });
-    const secondState = await reopened.readImportedLegacyState();
+    const secondState = await readAllImportedLegacyState(reopened);
 
     expect(await reopened.activeSchemaVersion()).toBe(2);
     expect(await reopened.countLegacyImports()).toBe(1);
@@ -563,7 +597,7 @@ describe('StateMigrationRunner', () => {
       targetSchemaVersion: 2,
       migratorRevision: 'task-4-r2',
     });
-    expect((await migrated.readImportedLegacyState()).sessions[0]?.title)
+    expect((await readAllImportedLegacyState(migrated)).sessions[0]?.title)
       .not.toBe('writer-won-the-race');
   }, 20_000);
 
@@ -588,7 +622,7 @@ describe('StateMigrationRunner', () => {
     const recovered = await StateMigrationRunner.open(projectDir, {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r2',
     });
-    expect((await recovered.readImportedLegacyState()).sessions[0]?.title)
+    expect((await readAllImportedLegacyState(recovered)).sessions[0]?.title)
       .toBe('changed-at-final-cut');
   }, 20_000);
 
@@ -616,7 +650,7 @@ describe('StateMigrationRunner', () => {
       targetSchemaVersion: 2, migratorRevision: 'task-4-r2',
     });
     expect(await recovered.activeSchemaVersion()).toBe(2);
-    expect((await recovered.readImportedLegacyState()).sessions.map(({ id }) => id))
+    expect((await readAllImportedLegacyState(recovered)).sessions.map(({ id }) => id))
       .toEqual(['session-a', 'session-b']);
   }, 20_000);
 
@@ -823,13 +857,13 @@ describe('StateMigrationRunner', () => {
     expect(child.runs).toEqual(expect.arrayContaining([
       expect.objectContaining({ runId: 'legacy-run-running', state: 'Interrupted' }),
     ]));
-    expect(await store.preferences('session-a')).toEqual([
+    expect((await store.preferences('session-a', { afterSequence: 0, limit: 100 })).items).toEqual([
       expect.objectContaining({ id: 'preference-language', key: 'language' }),
     ]);
-    expect(await store.checkpoints('session-a')).toEqual([
+    expect((await store.checkpoints('session-a', { afterSequence: 0, limit: 100 })).items).toEqual([
       expect.objectContaining({ sequence: 7 }),
     ]);
-    expect(await store.subagents('session-a')).toEqual([
+    expect((await store.subagents('session-a', { afterSequence: 0, limit: 100 })).items).toEqual([
       expect.objectContaining({ id: 'subagent-a', childSessionId: 'session-b' }),
     ]);
 
@@ -847,7 +881,7 @@ describe('StateMigrationRunner', () => {
         .get() as { sealed: number },
     ).sealed).toBe(1);
 
-    const archives = await migrated.listLegacyArchives();
+    const archives = await listAllLegacyArchives(migrated);
     expect(archives).toHaveLength(4);
     const firstBytes = await migrated.readLegacyArchive(archives[0]!, {
       maxBytes: archives[0]!.byteSize,
@@ -1353,6 +1387,84 @@ function withTestDatabase<T>(path: string, operation: (database: NodeDatabaseSyn
     return operation(database);
   } finally {
     database.close();
+  }
+}
+
+async function readAllImportedLegacyState(
+  runner: StateMigrationRunner,
+): Promise<ImportedLegacyState> {
+  const state: ImportedLegacyState = {
+    sessions: [], runs: [], plan: null, preferences: [], checkpoints: [], subagents: [], diagnostics: [],
+  };
+  let cursor: string | null = null;
+  while (true) {
+    const page = await runner.readImportedLegacyStatePage({ cursor, limit: 127 });
+    for (const payload of page.items) {
+      switch (payload.entityType) {
+        case 'session':
+          state.sessions.push({
+            id: payload.legacyId, projectKey: payload.projectKey,
+            projectRoot: payload.projectRoot, title: payload.record.session.title,
+            userId: payload.record.session.userId ?? null, mode: payload.record.session.mode,
+            messages: [], record: structuredClone(payload.record.session),
+            archived: payload.record.archived, createdAt: payload.record.createdAt,
+            updatedAt: payload.record.updatedAt, lastMessageAt: payload.record.lastMessageAt,
+          });
+          break;
+        case 'message': {
+          const sessionId = payload.legacyId.slice(0, payload.legacyId.lastIndexOf(':'));
+          const session = state.sessions.find(({ id }) => id === sessionId);
+          session?.messages.push({
+            ...structuredClone(payload.record), messageIndex: payload.messageIndex,
+            sourceRunId: payload.sourceRunId,
+          });
+          if (session?.record !== undefined) {
+            session.record.messages.push(structuredClone(payload.record));
+          }
+          break;
+        }
+        case 'run':
+          state.runs.push(structuredClone(payload.record));
+          state.plan ??= structuredClone(payload.legacyPlan);
+          break;
+        case 'preference':
+          state.preferences.push({
+            ...structuredClone(payload.record),
+            sourceSessionId: payload.record.sourceSessionId ?? null,
+          });
+          break;
+        case 'checkpoint':
+          state.checkpoints.push({
+            sessionId: payload.sessionId, sequence: payload.record.sequence,
+            summary: payload.record.summary, createdAt: payload.record.createdAt,
+            record: structuredClone(payload.record),
+          });
+          break;
+        case 'subagent':
+          state.subagents.push(structuredClone(payload.record));
+          break;
+        case 'diagnostic':
+          state.diagnostics.push({ code: payload.code, evidence: payload.evidence });
+          break;
+        case 'archive':
+          break;
+      }
+    }
+    if (page.nextCursor === null) return state;
+    cursor = page.nextCursor;
+  }
+}
+
+async function listAllLegacyArchives(
+  runner: StateMigrationRunner,
+): Promise<Awaited<ReturnType<StateMigrationRunner['listLegacyArchives']>>['items']> {
+  const items: Awaited<ReturnType<StateMigrationRunner['listLegacyArchives']>>['items'] = [];
+  let afterRelativePath: string | null = null;
+  while (true) {
+    const page = await runner.listLegacyArchives({ afterRelativePath, limit: 2 });
+    items.push(...page.items);
+    if (page.nextCursor === null) return items;
+    afterRelativePath = page.nextCursor;
   }
 }
 

@@ -67,79 +67,31 @@ export class JournalSessionStore {
     }, true));
   }
 
-  preferences(sessionId: string): Promise<LegacyPreferenceProjection[]>;
-  preferences(
-    sessionId: string,
-    options: LegacyPageOptions,
-  ): Promise<ProjectionPage<LegacyPreferenceProjection>>;
   async preferences(
     sessionId: string,
-    options?: LegacyPageOptions,
-  ): Promise<LegacyPreferenceProjection[] | ProjectionPage<LegacyPreferenceProjection>> {
+    options: LegacyPageOptions,
+  ): Promise<ProjectionPage<LegacyPreferenceProjection>> {
     requireSessionId(sessionId);
-    if (options !== undefined) {
-      return await this.#legacyPage(sessionId, options, (event) =>
-        event.payload.entityType === 'preference' ? structuredClone(event.payload.record) : undefined);
-    }
-    const facts = await this.#legacyFacts(sessionId);
-    return facts.flatMap(({ payload }) => payload.entityType === 'preference'
-      ? [structuredClone(payload.record)]
-      : []);
+    return await this.#legacyPage(sessionId, options, (event) =>
+      event.payload.entityType === 'preference' ? structuredClone(event.payload.record) : undefined);
   }
 
-  checkpoints(sessionId: string): Promise<LegacyCheckpointProjection[]>;
-  checkpoints(
-    sessionId: string,
-    options: LegacyPageOptions,
-  ): Promise<ProjectionPage<LegacyCheckpointProjection>>;
   async checkpoints(
     sessionId: string,
-    options?: LegacyPageOptions,
-  ): Promise<LegacyCheckpointProjection[] | ProjectionPage<LegacyCheckpointProjection>> {
+    options: LegacyPageOptions,
+  ): Promise<ProjectionPage<LegacyCheckpointProjection>> {
     requireSessionId(sessionId);
-    if (options !== undefined) {
-      return await this.#legacyPage(sessionId, options, (event) =>
-        event.payload.entityType === 'checkpoint' ? structuredClone(event.payload.record) : undefined);
-    }
-    const facts = await this.#legacyFacts(sessionId);
-    return facts.flatMap(({ payload }) => payload.entityType === 'checkpoint'
-      ? [structuredClone(payload.record)]
-      : []);
+    return await this.#legacyPage(sessionId, options, (event) =>
+      event.payload.entityType === 'checkpoint' ? structuredClone(event.payload.record) : undefined);
   }
 
-  subagents(sessionId: string): Promise<LegacySubagentProjection[]>;
-  subagents(
-    sessionId: string,
-    options: LegacyPageOptions,
-  ): Promise<ProjectionPage<LegacySubagentProjection>>;
   async subagents(
     sessionId: string,
-    options?: LegacyPageOptions,
-  ): Promise<LegacySubagentProjection[] | ProjectionPage<LegacySubagentProjection>> {
+    options: LegacyPageOptions,
+  ): Promise<ProjectionPage<LegacySubagentProjection>> {
     requireSessionId(sessionId);
-    if (options !== undefined) {
-      return await this.#legacyPage(sessionId, options, (event) =>
-        event.payload.entityType === 'subagent' ? structuredClone(event.payload.record) : undefined);
-    }
-    const facts = await this.#legacyFacts(sessionId);
-    return facts.flatMap(({ payload }) => payload.entityType === 'subagent'
-      ? [structuredClone(payload.record)]
-      : []);
-  }
-
-  async #legacyFacts(
-    sessionId: string,
-  ): Promise<Array<Extract<AgentEvent, { type: 'legacy.imported' }>>> {
-    const result: Array<Extract<AgentEvent, { type: 'legacy.imported' }>> = [];
-    let cursor = 0;
-    while (true) {
-      const page = await this.journal.readProject(this.projectId, cursor, 1_000);
-      if (page.length === 0) return result;
-      for (const event of page) {
-        cursor = event.sequence;
-        if (event.sessionId === sessionId && event.type === 'legacy.imported') result.push(event);
-      }
-    }
+    return await this.#legacyPage(sessionId, options, (event) =>
+      event.payload.entityType === 'subagent' ? structuredClone(event.payload.record) : undefined);
   }
 
   async #legacyPage<T>(

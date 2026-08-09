@@ -307,8 +307,11 @@ export class ProjectionEventValidator {
     return resolved.text;
   }
 
-  releaseTerminal(event: AgentEvent): TerminalProjectionSnapshot | undefined {
-    if (!this.#trustedJournal || !isTerminalRunEvent(event.type)) return undefined;
+  releaseTerminal(
+    event: AgentEvent,
+    releaseUntrusted = false,
+  ): TerminalProjectionSnapshot | undefined {
+    if ((!this.#trustedJournal && !releaseUntrusted) || !isTerminalRunEvent(event.type)) return undefined;
     const snapshot: TerminalProjectionSnapshot = {
       run: this.#runs.get(event.runId),
       finalText: event.type === 'run.completed' ? this.resolveFinalText(event) : undefined,
