@@ -98,6 +98,99 @@ describe('SqliteAgentJournal', () => {
     expect(upcastAgentEvent(event)).not.toBe(event);
   });
 
+  it('golden-upcasts every historical v1 legacy entity through the version discriminant', () => {
+    const base = {
+      eventId: 'legacy-event-1', projectId: 'project-a', sequence: 9, schemaVersion: 1,
+      sessionId: 'session-a', runId: 'carrier-a', occurredAt: '2026-08-09T00:00:00.000Z',
+      type: 'legacy.imported' as const,
+    };
+    const payloads: PortableValue[] = [
+      {
+        entityType: 'session', legacyId: 'session-a', projectKey: 'project-a', projectRoot: '/project-a',
+        title: 'Historical', userId: 'user-a', mode: 'read',
+      },
+      {
+        entityType: 'message', legacyId: 'session-a:2', messageIndex: 2,
+        role: 'assistant', content: 'Calling lookup', createdAt: '2026-08-08T00:00:02.000Z',
+        toolCalls: [{ id: 'call-a', name: 'lookup', arguments: { id: 7 } }],
+      },
+      {
+        entityType: 'run', legacyId: 'run-a', sessionId: 'session-a', status: 'completed',
+        plan: { steps: ['inspect'] }, createdAt: '2026-08-08T00:00:00.000Z',
+        updatedAt: '2026-08-08T00:00:03.000Z',
+      },
+      {
+        entityType: 'preference', legacyId: 'preference-a', userId: 'user-a', key: 'language',
+        value: 'English', confidence: 0.75, sourceSessionId: 'session-a',
+      },
+      {
+        entityType: 'checkpoint', legacyId: 'session-a:4', sessionId: 'session-a', sequence: 4,
+        summary: 'Historical summary', createdAt: '2026-08-08T00:00:04.000Z',
+      },
+      {
+        entityType: 'subagent', legacyId: 'subagent-a', parentSessionId: 'session-a',
+        childSessionId: 'session-b', status: 'completed', depth: 1,
+      },
+    ];
+
+    expect(payloads.map((payload, index) => upcastAgentEvent({
+      ...base, eventId: `legacy-event-${index + 1}`, sequence: index + 1, payload,
+    }).payload)).toEqual([
+      {
+        entityType: 'session', legacyId: 'session-a', projectKey: 'project-a', projectRoot: '/project-a',
+        record: {
+          session: {
+            id: 'session-a', title: 'Historical', userId: 'user-a', mode: 'read', messages: [],
+            tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, aborted: false,
+          },
+          archived: false, createdAt: '1970-01-01T00:00:00.000Z',
+          updatedAt: '1970-01-01T00:00:00.000Z', lastMessageAt: null,
+        },
+      },
+      {
+        entityType: 'message', legacyId: 'session-a:2', messageIndex: 2,
+        sourceRunId: 'legacy-session:session-a',
+        record: {
+          role: 'assistant', content: 'Calling lookup', createdAt: '2026-08-08T00:00:02.000Z',
+          toolCalls: [{ id: 'call-a', name: 'lookup', arguments: { id: 7 } }],
+        },
+      },
+      {
+        entityType: 'run', legacyId: 'run-a', sourceStatus: 'done', legacyPlan: { steps: ['inspect'] },
+        record: {
+          runId: 'run-a', sessionId: 'session-a', status: 'done', phase: 'done', iteration: 0,
+          finalText: '', toolExecutions: [], createdAt: '2026-08-08T00:00:00.000Z',
+          updatedAt: '2026-08-08T00:00:03.000Z',
+        },
+      },
+      {
+        entityType: 'preference', legacyId: 'preference-a',
+        record: {
+          id: 'preference-a', userId: 'user-a', key: 'language', value: 'English', confidence: 0.75,
+          sourceSessionId: 'session-a', createdAt: '1970-01-01T00:00:00.000Z',
+          updatedAt: '1970-01-01T00:00:00.000Z',
+        },
+      },
+      {
+        entityType: 'checkpoint', legacyId: 'session-a:4', sessionId: 'session-a',
+        record: {
+          version: 1, sequence: 4, trigger: 'auto', method: 'deterministic-fallback',
+          summary: 'Historical summary', coveredConversationMessageCount: 0,
+          sourceTokenEstimate: 0, summaryTokenEstimate: 0, modelContextTokens: null,
+          createdAt: '2026-08-08T00:00:04.000Z',
+        },
+      },
+      {
+        entityType: 'subagent', legacyId: 'subagent-a',
+        record: {
+          id: 'subagent-a', parentSessionId: 'session-a', childSessionId: 'session-b',
+          task: 'Legacy subagent task unavailable', contextStrategy: 'fresh', status: 'completed', depth: 1,
+          createdAt: '1970-01-01T00:00:00.000Z', updatedAt: '1970-01-01T00:00:00.000Z',
+        },
+      },
+    ]);
+  });
+
   it('rejects producer-controlled metadata, unknown schemas, secrets, and non-portable payloads', async () => {
     const journal = new SqliteAgentJournal({ filePath: await journalPath() });
     const created = await journal.createRun({

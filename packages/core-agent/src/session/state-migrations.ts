@@ -682,6 +682,7 @@ function readLegacyState(path: string): ImportedLegacyState {
         })),
       };
     } catch (error) {
+      if (error instanceof StateMigrationError) throw error;
       throw new StateMigrationError(
         'MIGRATION_SOURCE_CORRUPT',
         `Legacy state cannot be read: ${errorMessage(error)}`,
@@ -902,8 +903,7 @@ function readLegacySubagents(database: NodeDatabaseSync): ImportedLegacyState['s
         ? {}
         : { childSessionId: requireLegacyText(row.child_session_id, 'Subagent child_session_id') }),
       task: requireLegacyText(row.task, 'Subagent task'),
-      contextStrategy: requireLegacyEnum(row.context_strategy, ['fresh', 'fork'], 'Subagent context_strategy') as
-        AgentSubagentRecord['contextStrategy'],
+      contextStrategy: normalizeLegacyContextStrategy(row.context_strategy),
       status: requireLegacyEnum(row.status, ['running', 'completed', 'failed', 'cancelled'], 'Subagent status') as
         AgentSubagentRecord['status'],
       depth: requireLegacyInteger(row.depth, 'Subagent depth'),
@@ -968,7 +968,11 @@ function validateLegacyToolCallLinks(sessions: ImportedLegacyState['sessions']):
     for (const message of session.messages) {
       if (message.role === 'assistant') {
         for (const call of message.toolCalls ?? []) {
-          if (seen.has(call.id)) throw new TypeError(`Legacy ToolCall id is duplicated: ${call.id}.`);
+          if (seen.has(call.id)) {
+            throw new StateMigrationError(
+              'MIGRATION_VALIDATION_FAILED', `Legacy ToolCall id is duplicated: ${call.id}.`,
+            );
+          }
           seen.add(call.id);
           pending.push({ id: call.id, name: call.name });
         }
@@ -976,13 +980,18 @@ function validateLegacyToolCallLinks(sessions: ImportedLegacyState['sessions']):
         const expected = pending.shift();
         if (expected === undefined || expected.id !== message.toolCallId ||
           expected.name !== message.toolName || resolved.has(message.toolCallId)) {
-          throw new TypeError(`Legacy Tool result ordering or identity is invalid: ${message.toolCallId}.`);
+          throw new StateMigrationError(
+            'MIGRATION_VALIDATION_FAILED',
+            `Legacy Tool result ordering or identity is invalid: ${message.toolCallId}.`,
+          );
         }
         resolved.add(message.toolCallId);
       }
     }
     if (pending.length > 0) {
-      throw new TypeError(`Legacy ToolCall has no exact result: ${pending[0]!.id}.`);
+      throw new StateMigrationError(
+        'MIGRATION_VALIDATION_FAILED', `Legacy ToolCall has no exact result: ${pending[0]!.id}.`,
+      );
     }
   }
 }
@@ -1103,8 +1112,8 @@ function validateLegacyState(
     sessionCount: state.sessions.length,
     messageCount: state.sessions.reduce((count, session) => count + session.messages.length, 0),
     runCount: state.runs.length,
-    completedRunCount: state.runs.filter(({ status }) => status === 'completed').length,
-    interruptedRunCount: state.runs.filter(({ status }) => status === 'interrupted_legacy').length,
+    completedRunCount: state.runs.filter(({ status }) => status === 'done').length,
+    interruptedRunCount: state.runs.filter(({ status }) => status === 'interrupted').length,
     preferenceCount: state.preferences.length,
     checkpointCount: state.checkpoints.length,
     subagentCount: state.subagents.length,
@@ -1340,19 +1349,22 @@ function normalizeLegacyContractState(state: ImportedLegacyState): void {
     };
   });
   for (const session of state.sessions) {
+    const mode = normalizeLegacyMode(session.mode);
+    session.mode = mode;
     const sourceRunId = latestLegacyRunId(state.runs, session.id) ?? `legacy-session:${session.id}`;
     for (const message of session.messages) message.sourceRunId = sourceRunId;
     const messages = session.messages.map(legacyMessageRecord);
-    session.record ??= {
+    const record = session.record ?? {
       id: session.id,
       title: session.title,
       ...(session.userId === null ? {} : { userId: session.userId }),
-      mode: normalizeLegacyMode(session.mode),
+      mode,
       messages,
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       aborted: false,
     };
-    session.record.messages = messages;
+    record.messages = messages;
+    session.record = record;
     session.archived ??= false;
     session.createdAt ??= messages[0]?.createdAt ?? epoch;
     session.updatedAt ??= messages.at(-1)?.createdAt ?? session.createdAt;
@@ -1400,6 +1412,13 @@ function normalizeLegacySubagentStatus(status: string): AgentSubagentRecord['sta
   return status === 'completed' || status === 'failed' || status === 'cancelled'
     ? status
     : 'running';
+}
+
+function normalizeLegacyContextStrategy(value: unknown): AgentSubagentRecord['contextStrategy'] {
+  const strategy = requireLegacyEnum(
+    value, ['fresh', 'fork', 'checkpoint-plus-recent'], 'Subagent context_strategy',
+  );
+  return strategy === 'fork' || strategy === 'checkpoint-plus-recent' ? 'fork' : 'fresh';
 }
 
 async function validateLegacyArchives(

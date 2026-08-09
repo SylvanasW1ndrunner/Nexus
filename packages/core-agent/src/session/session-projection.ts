@@ -122,7 +122,6 @@ type ActivityDescriptor = {
 
 export const EVENT_TO_ACTIVITY = Object.freeze(
   {
-    'run.created': { kind: 'status', phase: 'started' },
     'run.started': { kind: 'status', phase: 'started' },
     'run.resumed': { kind: 'status', phase: 'started' },
     'run.input_requested': { kind: 'status', phase: 'waiting' },
@@ -564,6 +563,7 @@ export class UserActivityProjectionAccumulator {
   readonly #options: ProjectionOptions;
   readonly #validator: ProjectionEventValidator;
   readonly #items: UserActivityEvent[] = [];
+  readonly #legacyCarrierRuns = new Set<string>();
   #cursor: number;
 
   constructor(options: ProjectionOptions, trustedJournal = false) {
@@ -587,7 +587,12 @@ export class UserActivityProjectionAccumulator {
       }
       return true;
     }
-    const descriptor = EVENT_TO_ACTIVITY[event.type as keyof typeof EVENT_TO_ACTIVITY];
+    if (event.type === 'legacy.imported') this.#legacyCarrierRuns.add(event.runId);
+    const descriptor = event.type === 'legacy.imported'
+      ? legacyActivityDescriptor(event.payload.entityType)
+      : this.#legacyCarrierRuns.has(event.runId)
+        ? undefined
+        : EVENT_TO_ACTIVITY[event.type as keyof typeof EVENT_TO_ACTIVITY];
     if (descriptor !== undefined) {
       if (this.#items.length >= this.#options.limit) return false;
       const finalText = event.type === 'run.completed'
@@ -667,6 +672,39 @@ function toUserActivity(
     createdAt: event.occurredAt,
   };
   switch (event.type) {
+    case 'legacy.imported':
+      switch (event.payload.entityType) {
+        case 'message':
+          return {
+            ...base,
+            runId: event.payload.sourceRunId,
+            summary: event.payload.record.content,
+            detail: {
+              entityType: 'message',
+              role: event.payload.record.role,
+              sourceRunId: event.payload.sourceRunId,
+            },
+          };
+        case 'run':
+          return {
+            ...base,
+            runId: event.payload.record.runId,
+            summary: event.payload.record.finalText || `Legacy run ${event.payload.record.status}.`,
+            detail: {
+              entityType: 'run',
+              record: portableProjectionPayload(event.payload.record),
+            },
+          };
+        case 'session':
+        case 'preference':
+        case 'checkpoint':
+        case 'subagent':
+        case 'diagnostic':
+        case 'archive':
+          throw new ProjectionError('SCHEMA_INVALID', 'Legacy entity is not a User Activity fact.');
+        default:
+          return projectionAssertNever(event.payload);
+      }
     case 'model_delta_batch':
       return {
         ...base,
@@ -725,8 +763,6 @@ function toUserActivity(
       return { ...base, summary: event.payload.code };
     case 'run.cancelled':
       return { ...base, summary: event.payload.reason ?? 'Run cancelled.' };
-    case 'run.created':
-      return { ...base, summary: 'Run created.' };
     case 'run.started':
       return { ...base, summary: 'Run started.' };
     case 'run.resumed':
@@ -734,6 +770,28 @@ function toUserActivity(
     default:
       return { ...base, summary: descriptor.kind };
   }
+}
+
+function legacyActivityDescriptor(
+  entityType: Extract<AgentEvent, { type: 'legacy.imported' }>['payload']['entityType'],
+): ActivityDescriptor | undefined {
+  switch (entityType) {
+    case 'message': return { kind: 'result', phase: 'succeeded' };
+    case 'run': return { kind: 'final', phase: 'succeeded' };
+    case 'session':
+    case 'preference':
+    case 'checkpoint':
+    case 'subagent':
+    case 'diagnostic':
+    case 'archive':
+      return undefined;
+    default:
+      return projectionAssertNever(entityType);
+  }
+}
+
+function projectionAssertNever(value: never): never {
+  throw new ProjectionError('SCHEMA_INVALID', `Unhandled projection discriminant: ${String(value)}.`);
 }
 
 function sameScope(scope: Scope | undefined, event: AgentEvent): scope is Scope {

@@ -80,8 +80,100 @@ describe('StateMigrationRunner', () => {
     await expect(publicStore.subagents(fixture.session.id)).resolves.toEqual([
       fixture.subagent,
     ]);
+    const activities = await publicStore.activities(fixture.session.id, { limit: 100 });
+    expect(activities.items).toEqual(expect.arrayContaining([
+      ...fixture.session.messages.map((message) => expect.objectContaining({
+        runId: fixture.run.runId,
+        kind: 'result',
+        phase: 'succeeded',
+        summary: message.content,
+        detail: {
+          entityType: 'message', role: message.role, sourceRunId: fixture.run.runId,
+        },
+      })),
+      expect.objectContaining({
+        runId: fixture.run.runId,
+        kind: 'final',
+        phase: 'succeeded',
+        summary: fixture.run.finalText,
+        detail: { entityType: 'run', record: fixture.run },
+      }),
+    ]));
     expect((await migrated.readImportedLegacyState()).runs).toEqual([fixture.run]);
     expect((await migrated.listLegacyArchives()).length).toBeGreaterThanOrEqual(4);
+  });
+
+  it.each([
+    ['duplicate ToolCall ids', [
+      { role: 'assistant', content: 'duplicate', toolCalls: [
+        { id: 'call-a', name: 'lookup', arguments: { id: 1 } },
+        { id: 'call-a', name: 'lookup', arguments: { id: 2 } },
+      ], createdAt: '2026-08-08T02:00:01.000Z' },
+    ]],
+    ['a mismatched Tool result name', [
+      { role: 'assistant', content: 'lookup', toolCalls: [
+        { id: 'call-a', name: 'lookup', arguments: { id: 1 } },
+      ], createdAt: '2026-08-08T02:00:01.000Z' },
+      {
+        role: 'tool', toolCallId: 'call-a', toolName: 'update', content: 'wrong name',
+        createdAt: '2026-08-08T02:00:02.000Z',
+      },
+    ]],
+    ['out-of-order Tool results', [
+      { role: 'assistant', content: 'two calls', toolCalls: [
+        { id: 'call-a', name: 'lookup', arguments: { id: 1 } },
+        { id: 'call-b', name: 'lookup', arguments: { id: 2 } },
+      ], createdAt: '2026-08-08T02:00:01.000Z' },
+      {
+        role: 'tool', toolCallId: 'call-b', toolName: 'lookup', content: 'second first',
+        createdAt: '2026-08-08T02:00:02.000Z',
+      },
+    ]],
+    ['a duplicate Tool result', [
+      { role: 'assistant', content: 'one call', toolCalls: [
+        { id: 'call-a', name: 'lookup', arguments: { id: 1 } },
+      ], createdAt: '2026-08-08T02:00:01.000Z' },
+      {
+        role: 'tool', toolCallId: 'call-a', toolName: 'lookup', content: 'first',
+        createdAt: '2026-08-08T02:00:02.000Z',
+      },
+      {
+        role: 'tool', toolCallId: 'call-a', toolName: 'lookup', content: 'duplicate',
+        createdAt: '2026-08-08T02:00:03.000Z',
+      },
+    ]],
+    ['a missing Tool result', [
+      { role: 'assistant', content: 'pending', toolCalls: [
+        { id: 'call-a', name: 'lookup', arguments: { id: 1 } },
+      ], createdAt: '2026-08-08T02:00:01.000Z' },
+    ]],
+  ] satisfies Array<[string, AgentSession['messages']]>)('rejects %s from a public Session producer', async (
+    _case,
+    toolMessages,
+  ) => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'dbagent-public-invalid-tool-causality-'));
+    temporaryDirectories.push(projectDir);
+    const sessionStore = new AgentSessionStore(join(projectDir, 'state.db'), {
+      rootPath: projectDir, configDirectory: '.dbagent',
+    });
+    await sessionStore.save({
+      now: '2026-08-08T02:00:04.000Z',
+      session: {
+        id: 'invalid-tool-session', title: 'Invalid Tool causality', mode: 'read',
+        project: { rootPath: projectDir, configDirectory: '.dbagent' },
+        messages: [
+          { role: 'user', content: 'Start', createdAt: '2026-08-08T02:00:00.000Z' },
+          ...toolMessages,
+        ],
+        tokenUsage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        aborted: false,
+      },
+    });
+
+    await expect(StateMigrationRunner.open(projectDir, {
+      targetSchemaVersion: 2,
+      migratorRevision: 'task-4-r3-tool-causality',
+    })).rejects.toMatchObject({ code: 'MIGRATION_VALIDATION_FAILED' });
   });
 
   it.each(crashPoints)('recovers a real on-disk cut at %s without duplicate import', async (cut) => {
@@ -116,8 +208,8 @@ describe('StateMigrationRunner', () => {
         { role: 'user', content: 'Продолжи анализ' },
       ]);
     expect(secondState.runs).toEqual([
-      expect.objectContaining({ runId: 'legacy-run-complete', status: 'completed' }),
-      expect.objectContaining({ runId: 'legacy-run-running', status: 'interrupted_legacy' }),
+      expect.objectContaining({ runId: 'legacy-run-complete', status: 'done' }),
+      expect.objectContaining({ runId: 'legacy-run-running', status: 'interrupted' }),
     ]);
     expect(secondState.plan).toEqual({
       steps: [

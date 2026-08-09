@@ -478,7 +478,8 @@ function validateLegacyImported(payload: unknown): void {
       exactKeys(record, ['entityType', 'legacyId', 'record', 'sourceStatus', 'legacyPlan']);
       requireString(record, 'sourceStatus');
       const run = requireRecord(record.record);
-      ['runId', 'sessionId', 'status', 'phase', 'finalText'].forEach((key) => requireString(run, key));
+      ['runId', 'sessionId', 'status', 'phase'].forEach((key) => requireString(run, key));
+      if (typeof run.finalText !== 'string') throw new TypeError('Legacy Run finalText must be a string.');
       if (run.runId !== record.legacyId) throw new TypeError('Legacy Run identity disagrees.');
       requireNonNegativeInteger(run, 'iteration');
       requireIsoTimestamp(run.createdAt, 'createdAt');
