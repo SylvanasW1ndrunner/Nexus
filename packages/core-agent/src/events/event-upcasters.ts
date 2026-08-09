@@ -40,5 +40,9 @@ export const AGENT_EVENT_UPCASTERS = Object.freeze(
 
 export function upcastAgentEvent<T extends AgentEventType>(event: StoredAgentEvent<T>): AgentEvent<T> {
   const payload = AGENT_EVENT_UPCASTERS[event.type](event.schemaVersion, event.payload);
-  return { ...structuredClone(event), payload } as AgentEvent<T>;
+  return {
+    ...structuredClone(event),
+    schemaVersion: AGENT_EVENT_SCHEMA_REGISTRY[event.type].schemaVersion,
+    payload,
+  } as AgentEvent<T>;
 }

@@ -1,4 +1,8 @@
-import type { ModelContentBlock, ModelFinishReason, ModelTokenUsage } from '@dbagent/core-llm';
+import type {
+  ModelContentBlock, ModelFinishReason, ModelProtocolEnvelope, ModelTokenUsage,
+  ValidatedModelAttempt,
+} from '@dbagent/core-llm';
+import type { AgentTurnProjection } from './event-projectors.js';
 import type { PortableValue } from '@dbagent/shared';
 
 export const AGENT_EVENT_TYPES = [
@@ -56,7 +60,6 @@ export const AGENT_EVENT_TYPES = [
 ] as const;
 
 export type AgentEventType = (typeof AGENT_EVENT_TYPES)[number];
-export type PortableObject = { [key: string]: PortableValue };
 
 export type AgentRunState =
   | 'created'
@@ -77,6 +80,12 @@ export type AgentRunState =
   | 'Cancelled';
 
 type EmptyPayload = Record<string, never>;
+type ToolTerminalPayload = {
+  invocationId: string;
+  summary: string;
+  resultRefs: string[];
+  errorCode?: string;
+};
 
 export interface AgentEventPayloadMap {
   'input.received': {
@@ -102,7 +111,7 @@ export interface AgentEventPayloadMap {
   'turn.started': { turnSnapshotId?: string };
   'turn.context_compiled': { contextRef?: string; tokenEstimate?: number };
   'turn.no_progress': { fingerprint: string };
-  model_attempt_started: { origin: PortableObject };
+  model_attempt_started: { origin: { connectionId: string; model: string; protocol: string } };
   model_delta_batch: { blocks: PortableValue[] };
   model_block_completed: { draftCallKey?: string; block: PortableValue };
   model_attempt_committed: {
@@ -111,6 +120,9 @@ export interface AgentEventPayloadMap {
     finishReason: ModelFinishReason;
     usage?: ModelTokenUsage;
     protocolEnvelopeRef: string;
+    validatedAttempt: ValidatedModelAttempt;
+    turn: AgentTurnProjection;
+    protocolEnvelope: ModelProtocolEnvelope;
   };
   model_attempt_discarded: { reason: string };
   model_failed: { code: string; retryable: boolean; detail?: PortableValue };
@@ -123,33 +135,33 @@ export interface AgentEventPayloadMap {
     arguments: PortableValue;
   };
   'tool.validated': { toolRevision: string; normalizedArgumentsDigest: string };
-  'tool.approval_requested': PortableObject;
-  'tool.authorized': PortableObject;
-  'tool.denied': PortableObject;
-  'tool.started': PortableObject;
-  'tool.progress': PortableObject;
-  'tool.succeeded': PortableObject;
-  'tool.failed': PortableObject;
-  'tool.cancelled': PortableObject;
-  'tool.outcome_unknown': PortableObject;
-  'tool.outcome_resolution_requested': PortableObject;
-  'tool.outcome_resolved': PortableObject;
-  'tool.retry_authorized': PortableObject;
-  'tool.observed': PortableObject;
-  'context.compaction_started': PortableObject;
-  'context.compacted': PortableObject;
-  'context.compaction_failed': PortableObject;
-  'artifact.created': PortableObject;
-  'artifact.expired': PortableObject;
-  'artifact.deleted': PortableObject;
-  'skill.activated': PortableObject;
-  'capability.snapshot_captured': PortableObject;
-  'subagent.started': PortableObject;
-  'subagent.steered': PortableObject;
-  'subagent.completed': PortableObject;
-  'subagent.failed': PortableObject;
-  'subagent.cancelled': PortableObject;
-  'usage.recorded': PortableObject;
+  'tool.approval_requested': { approvalId: string; invocationId: string; summary: string };
+  'tool.authorized': { approvalId: string; invocationId: string };
+  'tool.denied': { approvalId: string; invocationId: string; reason: string };
+  'tool.started': { invocationId: string };
+  'tool.progress': { invocationId: string; summary: string };
+  'tool.succeeded': ToolTerminalPayload;
+  'tool.failed': ToolTerminalPayload;
+  'tool.cancelled': ToolTerminalPayload;
+  'tool.outcome_unknown': ToolTerminalPayload;
+  'tool.outcome_resolution_requested': { invocationId: string; summary: string };
+  'tool.outcome_resolved': ToolTerminalPayload;
+  'tool.retry_authorized': { invocationId: string; reason: string };
+  'tool.observed': { observationId: string; invocationId: string; summary: string; evidenceRefs: string[] };
+  'context.compaction_started': { checkpointId: string };
+  'context.compacted': { checkpointId: string; summaryRef: string; coveredSequence: number };
+  'context.compaction_failed': { checkpointId: string; code: string };
+  'artifact.created': { artifactId: string; mediaType: string; summary: string };
+  'artifact.expired': { artifactId: string };
+  'artifact.deleted': { artifactId: string };
+  'skill.activated': { skillId: string; revision: string };
+  'capability.snapshot_captured': { snapshotId: string; revision: string };
+  'subagent.started': { subagentId: string; summary: string };
+  'subagent.steered': { subagentId: string; summary: string };
+  'subagent.completed': { subagentId: string; summary: string; refs: string[] };
+  'subagent.failed': { subagentId: string; code: string; summary: string };
+  'subagent.cancelled': { subagentId: string; reason: string };
+  'usage.recorded': { scope: string; inputTokens: number; outputTokens: number; totalTokens: number };
 }
 
 type AgentEventShape<T extends AgentEventType> = {

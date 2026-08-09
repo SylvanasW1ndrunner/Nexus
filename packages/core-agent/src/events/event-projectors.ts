@@ -1,4 +1,7 @@
-import type { ModelContentBlock, ModelFinishReason, ModelTokenUsage } from '@dbagent/core-llm';
+import type {
+  ModelContentBlock, ModelFinishReason, ModelProtocolEnvelope, ModelTokenUsage,
+  ValidatedModelAttempt,
+} from '@dbagent/core-llm';
 import type { PortableValue } from '@dbagent/shared';
 import type { AgentEvent, AgentRunState } from './agent-event.js';
 
@@ -57,6 +60,8 @@ export type AgentReplayProjection = {
   turns: AgentTurnProjection[];
   attempts: AgentAttemptProjection[];
   invocations: AgentInvocationProjection[];
+  envelopes: ModelProtocolEnvelope[];
+  validatedAttempts: ValidatedModelAttempt[];
   lastSequenceByProject: Record<string, number>;
 };
 
@@ -81,6 +86,8 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
   const turns = new Map<string, AgentTurnProjection>();
   const attempts = new Map<string, AgentAttemptProjection>();
   const invocations = new Map<string, AgentInvocationProjection>();
+  const envelopes = new Map<string, ModelProtocolEnvelope>();
+  const validatedAttempts = new Map<string, ValidatedModelAttempt>();
   const lastSequenceByProject: Record<string, number> = {};
 
   for (const event of ordered) {
@@ -114,18 +121,9 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
       }
     }
     if (event.type === 'model_attempt_committed' && event.turnId !== undefined) {
-      turns.set(event.turnId, {
-        projectId: event.projectId,
-        sessionId: event.sessionId,
-        runId: event.runId,
-        turnId: event.turnId,
-        attemptId: event.payload.attemptId,
-        blocks: structuredClone(event.payload.blocks),
-        finishReason: event.payload.finishReason,
-        ...(event.payload.usage === undefined ? {} : { usage: structuredClone(event.payload.usage) }),
-        protocolEnvelopeRef: event.payload.protocolEnvelopeRef,
-        committedAt: event.occurredAt,
-      });
+      turns.set(event.turnId, structuredClone(event.payload.turn));
+      envelopes.set(event.turnId, structuredClone(event.payload.protocolEnvelope));
+      validatedAttempts.set(event.payload.attemptId, structuredClone(event.payload.validatedAttempt));
       attempts.set(event.payload.attemptId, {
         projectId: event.projectId,
         runId: event.runId,
@@ -165,6 +163,8 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
     invocations: [...invocations.values()].sort(
       (a, b) => a.runId.localeCompare(b.runId) || a.actionOrdinal - b.actionOrdinal,
     ),
+    envelopes: [...envelopes.values()].sort((a, b) => a.attemptId.localeCompare(b.attemptId)),
+    validatedAttempts: [...validatedAttempts.values()].sort((a, b) => a.attemptId.localeCompare(b.attemptId)),
     lastSequenceByProject,
   };
 }

@@ -31,6 +31,7 @@ export * from './structured-output.js';
 export * from './stream-safety.js';
 export * from './telemetry.js';
 export * from './types.js';
+export { assertAuthenticValidatedModelAttempt } from './protocol/validated-attempt-authenticity.js';
 export * from './token-estimation.js';
 export * from './transport/http-json-transport.js';
 export * from './transport/sse-transport.js';

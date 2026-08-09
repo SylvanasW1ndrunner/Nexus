@@ -12,12 +12,17 @@ export type AgentJournalErrorCode =
   | 'COMMAND_CONFLICT'
   | 'RUN_NOT_FOUND'
   | 'RUN_IDENTITY_CONFLICT'
+  | 'TURN_NOT_FOUND'
+  | 'REVISION_CONFLICT'
   | 'LEASE_HELD'
   | 'STALE_LEASE'
   | 'FENCING_TOKEN_STALE'
   | 'PARENT_EVENT_INVALID'
   | 'ATTEMPT_NOT_VALIDATED'
-  | 'MODEL_COMMIT_CONFLICT';
+  | 'MODEL_COMMIT_CONFLICT'
+  | 'CORRUPT_EVENT'
+  | 'UNSUPPORTED_EVENT_SCHEMA'
+  | 'JOURNAL_BUSY';
 
 export class AgentJournalError extends Error {
   constructor(
@@ -51,8 +56,12 @@ export type JournalCommand = {
   runId: string;
   commandId: string;
   lease: RunLeaseReference;
+  expectedRunRevision: number;
   events: AgentEventDraft[];
 };
+
+export type StartRunCommand = Omit<JournalCommand, 'events'>;
+export type StartTurnCommand = StartRunCommand & { turnId: string };
 
 export type JournalCommitResult = { events: AgentEvent[] };
 
@@ -75,10 +84,13 @@ export type RunLease = {
 
 export interface AgentJournal {
   createRun(command: CreateRunCommand): Promise<CreateRunResult>;
+  startRun(command: StartRunCommand): Promise<JournalCommitResult>;
+  startTurn(command: StartTurnCommand): Promise<JournalCommitResult>;
   commit(command: JournalCommand): Promise<JournalCommitResult>;
   readProject(projectId: string, afterSequence: number, limit: number): Promise<AgentEvent[]>;
   acquireRunLease(input: AcquireRunLeaseInput): Promise<RunLease>;
   renewRunLease(input: RenewRunLeaseInput): Promise<RunLease>;
   getRunProjection(runId: string): Promise<AgentRunProjection | null>;
   countEvents(type?: AgentEventType, projectId?: string): Promise<number>;
+  rebuildProjectProjections(projectId: string): Promise<void>;
 }

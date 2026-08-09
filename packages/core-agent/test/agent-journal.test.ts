@@ -32,13 +32,13 @@ describe('SqliteAgentJournal', () => {
       ownerId: 'worker-a',
       ttlMs: 10_000,
     });
-    await journal.commit({
+    await journal.startRun({
       projectId: 'project-a',
       sessionId: 'session-a',
       runId: created.runId,
       commandId: 'start-a',
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
-      events: [{ type: 'run.started', payload: {} }],
+      expectedRunRevision: 1,
     });
 
     const firstRead = await journal.readProject('project-a', 0, 100);
@@ -116,6 +116,7 @@ describe('SqliteAgentJournal', () => {
       sessionId: 'session-a',
       runId: created.runId,
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 1,
     };
 
     await expect(
@@ -178,6 +179,7 @@ describe('SqliteAgentJournal', () => {
         runId: created.runId,
         commandId: 'raw-model-commit',
         lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+        expectedRunRevision: 1,
         events: [
           {
             type: 'model_attempt_committed',
@@ -189,11 +191,65 @@ describe('SqliteAgentJournal', () => {
               finishReason: 'stop',
               protocolEnvelopeRef: 'forged-envelope',
             },
-          },
+          } as never,
         ],
       }),
     ).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
     expect(await journal.countEvents('model_attempt_committed', 'project-a')).toBe(0);
+  });
+
+  it('rejects unknown command and draft keys before they can override journal-owned identity', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const first = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'request-a', input: 'a',
+    });
+    const second = await journal.createRun({
+      projectId: 'project-b', sessionId: 'session-b', clientRequestId: 'request-b', input: 'b',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: first.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+    const base = {
+      projectId: 'project-a', sessionId: 'session-a', runId: first.runId,
+      commandId: 'identity-attack',
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 1,
+      events: [{
+        type: 'run.started', payload: {}, projectId: 'project-b', sessionId: 'session-b',
+        runId: second.runId, lease: { ownerId: 'attacker', fencingToken: 999 },
+      }],
+    } as unknown as Parameters<SqliteAgentJournal['commit']>[0];
+
+    await expect(journal.commit(base)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(journal.commit({ ...base, events: [{ type: 'run.started', payload: {} }], extra: true } as never))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(journal.getRunProjection(first.runId)).resolves.toMatchObject({ revision: 1 });
+    await expect(journal.getRunProjection(second.runId)).resolves.toMatchObject({ revision: 1 });
+  });
+
+  it.each([
+    'run.completed', 'turn.started', 'model_attempt_started', 'model_failed',
+    'tool.started', 'tool.succeeded', 'tool.observed',
+  ] as const)('rejects generic writes of authority-bearing %s facts', async (type) => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'request-a', input: 'a',
+    });
+    const lease = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 10_000,
+    });
+    await expect(journal.commit({
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      commandId: `reserved-${type}`,
+      lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
+      expectedRunRevision: 1,
+      events: [{ type, payload: {} } as never],
+    })).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
+  });
+
+  it('does not expose the prepared model-attempt persistence primitive', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    expect('commitPreparedModelAttempt' in journal).toBe(false);
   });
 });
 

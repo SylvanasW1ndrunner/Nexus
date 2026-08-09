@@ -4,10 +4,14 @@ import type {
   ModelProtocolEnvelope,
   ValidatedModelAttempt,
 } from '@dbagent/core-llm';
+import { assertAuthenticValidatedModelAttempt } from '@dbagent/core-llm';
 import { assertNoSecretMaterial, assertPortableValue, type PortableValue } from '@dbagent/shared';
 import { AgentJournalError, type RunLeaseReference } from './agent-journal.js';
 import type { AgentInvocationProjection, AgentTurnProjection } from './event-projectors.js';
-import type { SqliteAgentJournal } from './sqlite-agent-journal.js';
+import {
+  commitPreparedModelAttemptCapability,
+  type SqliteAgentJournal,
+} from './sqlite-agent-journal.js';
 
 export type CommitValidatedAttemptCommand = {
   projectId: string;
@@ -16,6 +20,8 @@ export type CommitValidatedAttemptCommand = {
   turnId: string;
   commandId: string;
   lease: RunLeaseReference;
+  expectedRunRevision: number;
+  expectedTurnRevision: number;
   attempt: ValidatedModelAttempt;
 };
 
@@ -34,16 +40,18 @@ export class RunEventCommitter {
     command: CommitValidatedAttemptCommand,
   ): Promise<ModelTurnCommitResult> {
     const prepared = prepareValidatedAttempt(command);
-    return await this.journal.commitPreparedModelAttempt(command, prepared);
+    return await this.journal[commitPreparedModelAttemptCapability](command, prepared);
   }
 }
 
 function prepareValidatedAttempt(command: CommitValidatedAttemptCommand): PreparedModelTurnCommit {
   const { attempt } = command;
-  if (attempt?.terminal !== true || attempt.validation !== 'validated') {
+  try {
+    assertAuthenticValidatedModelAttempt(attempt);
+  } catch {
     throw new AgentJournalError(
       'ATTEMPT_NOT_VALIDATED',
-      'RunEventCommitter accepts only a terminal ValidatedModelAttempt.',
+      'RunEventCommitter accepts only an authentic terminal ValidatedModelAttempt.',
     );
   }
   try {

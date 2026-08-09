@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ModelClientError,
   ModelExecutionGateway,
+  assertAuthenticValidatedModelAttempt,
   OpenAICompatibleProvider,
   createModelSession,
   createModelSessionBundle,
@@ -17,6 +18,15 @@ import { openAIChatCodec } from '../../src/protocol/codecs/openai-chat.js';
 import { openAIResponsesCodec } from '../../src/protocol/codecs/openai-responses.js';
 
 describe('ModelExecutionGateway attempt boundary', () => {
+  it('mints validated attempts that cannot be counterfeited structurally', async () => {
+    const result = await gateway().executeAttempt(
+      session(new ScriptedModelClient([staticChat('authentic')])),
+      request(),
+    );
+    expect(() => assertAuthenticValidatedModelAttempt(result.attempt)).not.toThrow();
+    expect(() => assertAuthenticValidatedModelAttempt(structuredClone(result.attempt)))
+      .toThrow(/authentic/i);
+  });
   it('discards a partial attempt before retrying and commits only one validated attempt', async () => {
     const client = new ScriptedModelClient([
       streamResponse(async function* () {

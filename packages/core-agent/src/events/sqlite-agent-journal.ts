@@ -15,10 +15,17 @@ import {
   type RenewRunLeaseInput,
   type RunLease,
   type RunLeaseReference,
+  type StartRunCommand,
+  type StartTurnCommand,
 } from './agent-journal.js';
 import type { AgentEvent, AgentEventDraft, AgentEventType } from './agent-event.js';
 import { AGENT_EVENT_SCHEMA_REGISTRY, isAgentEventType, validateAndRedactEventPayload } from './event-schema-registry.js';
-import type { AgentInvocationProjection, AgentRunProjection, AgentTurnProjection } from './event-projectors.js';
+import {
+  replayAgentEvents,
+  type AgentInvocationProjection,
+  type AgentRunProjection,
+  type AgentTurnProjection,
+} from './event-projectors.js';
 import { upcastAgentEvent } from './event-upcasters.js';
 import type {
   CommitValidatedAttemptCommand,
@@ -63,6 +70,10 @@ type CommandRow = { request_digest: string; result_json: string };
 type IngressRow = { input_digest: string; result_json: string };
 type LeaseRow = { owner_id: string; expires_at_ms: number; fencing_token: number };
 
+export const commitPreparedModelAttemptCapability: unique symbol = Symbol(
+  'SqliteAgentJournal.commitPreparedModelAttempt',
+);
+
 export class SqliteAgentJournal implements AgentJournal {
   readonly filePath: string;
   readonly busyTimeoutMs: number;
@@ -86,6 +97,9 @@ export class SqliteAgentJournal implements AgentJournal {
 
   async createRun(command: CreateRunCommand): Promise<CreateRunResult> {
     await Promise.resolve();
+    assertExactKeys(command, [
+      'projectId', 'sessionId', 'clientRequestId', 'input',
+    ], 'Create Run command');
     const projectId = requireText(command.projectId, 'projectId');
     const sessionId = requireText(command.sessionId, 'sessionId');
     const clientRequestId = requireText(command.clientRequestId, 'clientRequestId');
@@ -174,6 +188,9 @@ export class SqliteAgentJournal implements AgentJournal {
         if (replay !== undefined) return replay;
         this.#assertRun(database, normalized.projectId, normalized.sessionId, normalized.runId);
         this.#assertLease(database, normalized.projectId, normalized.runId, normalized.lease);
+        this.#assertRunRevision(
+          database, normalized.projectId, normalized.runId, normalized.expectedRunRevision,
+        );
         const occurredAt = this.#now();
         const events = normalized.events.map((draft) =>
           this.#appendEvent(database, {
@@ -198,6 +215,63 @@ export class SqliteAgentJournal implements AgentJournal {
         return result;
       }),
     );
+  }
+
+  async startRun(command: StartRunCommand): Promise<JournalCommitResult> {
+    await Promise.resolve();
+    const normalized = validateStartRunCommand(command);
+    return this.#withDatabase((database) => transaction(database, () => {
+      const digest = digestValue(normalized);
+      const replay = readCommandResult<JournalCommitResult>(
+        database, normalized.projectId, normalized.commandId, digest,
+      );
+      if (replay !== undefined) return replay;
+      this.#assertRun(database, normalized.projectId, normalized.sessionId, normalized.runId);
+      this.#assertLease(database, normalized.projectId, normalized.runId, normalized.lease);
+      this.#assertRunRevision(
+        database, normalized.projectId, normalized.runId, normalized.expectedRunRevision,
+      );
+      const occurredAt = this.#now();
+      const event = this.#appendEvent(database, {
+        projectId: normalized.projectId, sessionId: normalized.sessionId,
+        runId: normalized.runId, type: 'run.started', payload: {}, occurredAt,
+      });
+      this.#applyRunProjection(database, event, normalized.expectedRunRevision);
+      const result = { events: [event] };
+      writeCommandResult(database, normalized.projectId, normalized.commandId, 'run.start', digest, result, occurredAt);
+      return result;
+    }));
+  }
+
+  async startTurn(command: StartTurnCommand): Promise<JournalCommitResult> {
+    await Promise.resolve();
+    const normalized = validateStartTurnCommand(command);
+    return this.#withDatabase((database) => transaction(database, () => {
+      const digest = digestValue(normalized);
+      const replay = readCommandResult<JournalCommitResult>(
+        database, normalized.projectId, normalized.commandId, digest,
+      );
+      if (replay !== undefined) return replay;
+      this.#assertRun(database, normalized.projectId, normalized.sessionId, normalized.runId);
+      this.#assertLease(database, normalized.projectId, normalized.runId, normalized.lease);
+      this.#assertRunRevision(
+        database, normalized.projectId, normalized.runId, normalized.expectedRunRevision,
+      );
+      const occurredAt = this.#now();
+      const event = this.#appendEvent(database, {
+        projectId: normalized.projectId, sessionId: normalized.sessionId,
+        runId: normalized.runId, turnId: normalized.turnId,
+        type: 'turn.started', payload: {}, occurredAt,
+      });
+      database.prepare(
+        `INSERT INTO agent_turn_lifecycles
+          (project_id, session_id, run_id, turn_id, revision, status, started_at)
+         VALUES (?, ?, ?, ?, 1, 'started', ?)`,
+      ).run(normalized.projectId, normalized.sessionId, normalized.runId, normalized.turnId, occurredAt);
+      const result = { events: [event] };
+      writeCommandResult(database, normalized.projectId, normalized.commandId, 'turn.start', digest, result, occurredAt);
+      return result;
+    }));
   }
 
   async readProject(projectId: string, afterSequence: number, limit: number): Promise<AgentEvent[]> {
@@ -242,6 +316,60 @@ export class SqliteAgentJournal implements AgentJournal {
       }
       return Number(row.count);
     });
+  }
+
+  async rebuildProjectProjections(projectIdInput: string): Promise<void> {
+    await Promise.resolve();
+    const projectId = requireText(projectIdInput, 'projectId');
+    this.#withDatabase((database) => transaction(database, () => {
+      const rows = database.prepare(
+        'SELECT * FROM agent_events WHERE project_id = ? ORDER BY sequence ASC',
+      ).all(projectId) as unknown as EventRow[];
+      const events = rows.map(eventFromRow);
+      const replay = replayAgentEvents(events);
+      database.prepare('DELETE FROM agent_invocations WHERE project_id = ?').run(projectId);
+      database.prepare('DELETE FROM agent_protocol_envelopes WHERE project_id = ?').run(projectId);
+      database.prepare('DELETE FROM agent_turns WHERE project_id = ?').run(projectId);
+      database.prepare('DELETE FROM agent_attempts WHERE project_id = ?').run(projectId);
+
+      for (const turn of replay.turns) {
+        const attempt = replay.validatedAttempts.find((item) => item.attemptId === turn.attemptId);
+        const envelope = replay.envelopes.find((item) => item.attemptId === turn.attemptId);
+        if (attempt === undefined || envelope === undefined) {
+          throw new AgentJournalError('INVALID_EVENT_PAYLOAD', 'Committed model event is incomplete.');
+        }
+        database.prepare(
+          `INSERT INTO agent_attempts
+            (attempt_id, project_id, run_id, turn_id, status, payload_json, committed_at)
+           VALUES (?, ?, ?, ?, 'committed', ?, ?)`,
+        ).run(attempt.attemptId, turn.projectId, turn.runId, turn.turnId, JSON.stringify(attempt), turn.committedAt);
+        database.prepare(
+          `INSERT INTO agent_turns
+            (turn_id, project_id, session_id, run_id, attempt_id, status,
+             protocol_envelope_ref, payload_json, committed_at)
+           VALUES (?, ?, ?, ?, ?, 'committed', ?, ?, ?)`,
+        ).run(turn.turnId, turn.projectId, turn.sessionId, turn.runId, turn.attemptId,
+          turn.protocolEnvelopeRef, JSON.stringify(turn), turn.committedAt);
+        database.prepare(
+          `INSERT INTO agent_protocol_envelopes
+            (envelope_ref, project_id, run_id, turn_id, attempt_id, envelope_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(turn.protocolEnvelopeRef, turn.projectId, turn.runId, turn.turnId, turn.attemptId,
+          JSON.stringify(envelope), turn.committedAt);
+      }
+      for (const invocation of replay.invocations) {
+        database.prepare(
+          `INSERT INTO agent_invocations
+            (invocation_id, project_id, session_id, run_id, turn_id, attempt_id,
+             call_id, action_ordinal, name, arguments_json, state, revision,
+             payload_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', 1, ?, ?, ?)`,
+        ).run(invocation.invocationId, invocation.projectId, invocation.sessionId,
+          invocation.runId, invocation.turnId, invocation.attemptId, invocation.callId,
+          invocation.actionOrdinal, invocation.name, JSON.stringify(invocation.arguments),
+          JSON.stringify(invocation), invocation.createdAt, invocation.createdAt);
+      }
+    }));
   }
 
   async acquireRunLease(input: AcquireRunLeaseInput): Promise<RunLease> {
@@ -413,7 +541,7 @@ export class SqliteAgentJournal implements AgentJournal {
     }));
   }
 
-  async commitPreparedModelAttempt(
+  async [commitPreparedModelAttemptCapability](
     command: CommitValidatedAttemptCommand,
     prepared: PreparedModelTurnCommit,
   ): Promise<ModelTurnCommitResult> {
@@ -423,12 +551,19 @@ export class SqliteAgentJournal implements AgentJournal {
     const runId = requireText(command.runId, 'runId');
     const turnId = requireText(command.turnId, 'turnId');
     const commandId = requireText(command.commandId, 'commandId');
+    assertExactKeys(command, [
+      'projectId', 'sessionId', 'runId', 'turnId', 'commandId', 'lease',
+      'expectedRunRevision', 'expectedTurnRevision', 'attempt',
+    ], 'Model commit command');
+    const expectedRunRevision = requireRevision(command.expectedRunRevision, 'expectedRunRevision');
+    const expectedTurnRevision = requireRevision(command.expectedTurnRevision, 'expectedTurnRevision');
     const requestDigest = digestValue({
       projectId,
       sessionId,
       runId,
       turnId,
       attempt: command.attempt,
+      prepared,
     });
     return this.#withDatabase((database) =>
       transaction(database, () => {
@@ -441,6 +576,25 @@ export class SqliteAgentJournal implements AgentJournal {
         if (replay !== undefined) return replay;
         this.#assertRun(database, projectId, sessionId, runId);
         this.#assertLease(database, projectId, runId, command.lease);
+        this.#assertRunRevision(database, projectId, runId, expectedRunRevision);
+        const lifecycle = database.prepare(
+          `SELECT project_id, session_id, run_id, revision, status
+           FROM agent_turn_lifecycles WHERE turn_id = ?`,
+        ).get(turnId) as {
+          project_id: string; session_id: string; run_id: string; revision: number; status: string;
+        } | undefined;
+        if (lifecycle === undefined) {
+          throw new AgentJournalError('TURN_NOT_FOUND', `Turn not found: ${turnId}`);
+        }
+        if (
+          lifecycle.project_id !== projectId || lifecycle.session_id !== sessionId ||
+          lifecycle.run_id !== runId
+        ) {
+          throw new AgentJournalError('RUN_IDENTITY_CONFLICT', 'Turn does not belong to this Run.');
+        }
+        if (Number(lifecycle.revision) !== expectedTurnRevision || lifecycle.status !== 'started') {
+          throw new AgentJournalError('REVISION_CONFLICT', 'Turn revision does not match.');
+        }
         if (
           database.prepare('SELECT 1 AS present FROM agent_turns WHERE turn_id = ?').get(turnId) !==
           undefined
@@ -473,6 +627,9 @@ export class SqliteAgentJournal implements AgentJournal {
             finishReason: turn.finishReason,
             ...(turn.usage === undefined ? {} : { usage: turn.usage }),
             protocolEnvelopeRef: turn.protocolEnvelopeRef,
+            validatedAttempt: command.attempt,
+            turn,
+            protocolEnvelope: prepared.envelope,
           },
           occurredAt,
         });
@@ -570,6 +727,13 @@ export class SqliteAgentJournal implements AgentJournal {
           });
           if (index === 0) this.#inject('after-first-invocation');
         });
+        const turnCas = database.prepare(
+          `UPDATE agent_turn_lifecycles SET revision = revision + 1, status = 'committed'
+           WHERE project_id = ? AND run_id = ? AND turn_id = ? AND revision = ? AND status = 'started'`,
+        ).run(projectId, runId, turnId, expectedTurnRevision);
+        if (Number(turnCas.changes) !== 1) {
+          throw new AgentJournalError('REVISION_CONFLICT', 'Concurrent Turn commit won the revision race.');
+        }
         const result = { turn, envelope: prepared.envelope, invocations };
         writeCommandResult(
           database,
@@ -627,6 +791,21 @@ export class SqliteAgentJournal implements AgentJournal {
         'FENCING_TOKEN_STALE',
         'The mutating command does not hold the current non-expired Run lease.',
       );
+    }
+  }
+
+  #assertRunRevision(
+    database: NodeDatabaseSync,
+    projectId: string,
+    runId: string,
+    expectedRevision: number,
+  ): void {
+    const row = database.prepare(
+      'SELECT revision FROM agent_runs WHERE project_id = ? AND run_id = ?',
+    ).get(projectId, runId) as { revision: number } | undefined;
+    if (row === undefined) throw new AgentJournalError('RUN_NOT_FOUND', `Run not found: ${runId}`);
+    if (Number(row.revision) !== expectedRevision) {
+      throw new AgentJournalError('REVISION_CONFLICT', 'Run revision does not match.');
     }
   }
 
@@ -702,7 +881,7 @@ export class SqliteAgentJournal implements AgentJournal {
     } as AgentEvent;
   }
 
-  #applyRunProjection(database: NodeDatabaseSync, event: AgentEvent): void {
+  #applyRunProjection(database: NodeDatabaseSync, event: AgentEvent, expectedRevision?: number): void {
     const states: Partial<Record<AgentEventType, AgentRunProjection['state']>> = {
       'run.started': 'Preparing',
       'run.resumed': 'Preparing',
@@ -718,11 +897,12 @@ export class SqliteAgentJournal implements AgentJournal {
     if (state === undefined) return;
     const result = database
       .prepare(
-        'UPDATE agent_runs SET state = ?, revision = revision + 1, updated_at = ? WHERE run_id = ?',
+        `UPDATE agent_runs SET state = ?, revision = revision + 1, updated_at = ?
+         WHERE project_id = ? AND run_id = ?${expectedRevision === undefined ? '' : ' AND revision = ?'}`,
       )
-      .run(state, event.occurredAt, event.runId);
+      .run(state, event.occurredAt, event.projectId, event.runId, ...(expectedRevision === undefined ? [] : [expectedRevision]));
     if (Number(result.changes) !== 1) {
-      throw new AgentJournalError('RUN_NOT_FOUND', `Run not found: ${event.runId}`);
+      throw new AgentJournalError('REVISION_CONFLICT', `Run revision changed: ${event.runId}`);
     }
   }
 
@@ -735,7 +915,17 @@ export class SqliteAgentJournal implements AgentJournal {
     const database = new DatabaseSync(this.filePath);
     try {
       initializeDatabase(database, this.busyTimeoutMs);
-      return operation(database);
+      try {
+        return operation(database);
+      } catch (error) {
+        if (error instanceof Error && /database is (?:locked|busy)/iu.test(error.message)) {
+          throw new AgentJournalError(
+            'JOURNAL_BUSY',
+            `Agent Journal remained busy for ${this.busyTimeoutMs}ms.`,
+          );
+        }
+        throw error;
+      }
     } finally {
       database.close();
     }
@@ -743,6 +933,9 @@ export class SqliteAgentJournal implements AgentJournal {
 }
 
 function validateJournalCommand(command: JournalCommand): JournalCommand {
+  assertExactKeys(command, [
+    'projectId', 'sessionId', 'runId', 'commandId', 'lease', 'expectedRunRevision', 'events',
+  ], 'Journal command');
   const projectId = requireText(command.projectId, 'projectId');
   const sessionId = requireText(command.sessionId, 'sessionId');
   const runId = requireText(command.runId, 'runId');
@@ -762,17 +955,39 @@ function validateJournalCommand(command: JournalCommand): JournalCommand {
         'Event producers cannot choose schemaVersion, audience, or persistence.',
       );
     }
+    assertExactKeys(value, [
+      'type', 'payload', 'turnId', 'parentEventId', 'invocationId', 'attemptId',
+    ], 'Event draft');
     if (typeof value.type !== 'string' || !isAgentEventType(value.type)) {
       throw new AgentJournalError('UNKNOWN_EVENT_TYPE', `Unknown Agent event type: ${String(value.type)}`);
     }
-    if (value.type === 'model_attempt_committed' || value.type === 'tool.proposed') {
+    validatePortable(value.payload, `${value.type} payload`);
+    if (
+      value.type.startsWith('run.') ||
+      value.type.startsWith('turn.') ||
+      value.type.startsWith('model_') ||
+      value.type.startsWith('tool.')
+    ) {
       throw new AgentJournalError(
         'COMMITTER_REQUIRED',
         `${value.type} can only be created by RunEventCommitter's atomic commit path.`,
       );
     }
     const payload = validateEventPayload(value.type, value.payload);
-    return { ...structuredClone(draft), payload } as AgentEventDraft;
+    return {
+      type: value.type,
+      payload,
+      ...(value.turnId === undefined ? {} : { turnId: requireText(value.turnId, 'turnId') }),
+      ...(value.parentEventId === undefined
+        ? {}
+        : { parentEventId: requireText(value.parentEventId, 'parentEventId') }),
+      ...(value.invocationId === undefined
+        ? {}
+        : { invocationId: requireText(value.invocationId, 'invocationId') }),
+      ...(value.attemptId === undefined
+        ? {}
+        : { attemptId: requireText(value.attemptId, 'attemptId') }),
+    } as AgentEventDraft;
   });
   return {
     projectId,
@@ -783,8 +998,65 @@ function validateJournalCommand(command: JournalCommand): JournalCommand {
       ownerId: requireText(command.lease.ownerId, 'lease.ownerId'),
       fencingToken: command.lease.fencingToken,
     },
+    expectedRunRevision: requireRevision(command.expectedRunRevision, 'expectedRunRevision'),
     events,
   };
+}
+
+function validateStartRunCommand(command: StartRunCommand): StartRunCommand {
+  assertExactKeys(command, [
+    'projectId', 'sessionId', 'runId', 'commandId', 'lease', 'expectedRunRevision',
+  ], 'Start Run command');
+  return {
+    projectId: requireText(command.projectId, 'projectId'),
+    sessionId: requireText(command.sessionId, 'sessionId'),
+    runId: requireText(command.runId, 'runId'),
+    commandId: requireText(command.commandId, 'commandId'),
+    lease: {
+      ownerId: requireText(command.lease.ownerId, 'lease.ownerId'),
+      fencingToken: requireRevision(command.lease.fencingToken, 'lease.fencingToken'),
+    },
+    expectedRunRevision: requireRevision(command.expectedRunRevision, 'expectedRunRevision'),
+  };
+}
+
+function validateStartTurnCommand(command: StartTurnCommand): StartTurnCommand {
+  assertExactKeys(command, [
+    'projectId', 'sessionId', 'runId', 'turnId', 'commandId', 'lease', 'expectedRunRevision',
+  ], 'Start Turn command');
+  return {
+    projectId: requireText(command.projectId, 'projectId'),
+    sessionId: requireText(command.sessionId, 'sessionId'),
+    runId: requireText(command.runId, 'runId'),
+    turnId: requireText(command.turnId, 'turnId'),
+    commandId: requireText(command.commandId, 'commandId'),
+    lease: {
+      ownerId: requireText(command.lease.ownerId, 'lease.ownerId'),
+      fencingToken: requireRevision(command.lease.fencingToken, 'lease.fencingToken'),
+    },
+    expectedRunRevision: requireRevision(command.expectedRunRevision, 'expectedRunRevision'),
+  };
+}
+
+function requireRevision(value: unknown, name: string): number {
+  if (!Number.isInteger(value) || Number(value) < 1) {
+    throw new AgentJournalError('INVALID_ARGUMENT', `${name} must be a positive integer.`);
+  }
+  return Number(value);
+}
+
+function assertExactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT',
+      `${label} contains unknown keys: ${unknown.sort().join(', ')}.`,
+    );
+  }
 }
 
 function validateEventPayload(type: AgentEventType, payload: unknown): PortableValue {
@@ -811,6 +1083,10 @@ function validatePortable(value: unknown, label: string): asserts value is Porta
 }
 
 function validateLeaseInput<T extends AcquireRunLeaseInput>(input: T): T {
+  assertExactKeys(input, [
+    'projectId', 'runId', 'ownerId', 'ttlMs',
+    ...(Object.hasOwn(input, 'fencingToken') ? ['fencingToken'] : []),
+  ], 'Lease command');
   requireText(input.projectId, 'projectId');
   requireText(input.runId, 'runId');
   requireText(input.ownerId, 'ownerId');
@@ -888,7 +1164,23 @@ function nextProjectSequence(database: NodeDatabaseSync, projectId: string): num
 }
 
 function eventFromRow(row: EventRow): AgentEvent {
-  return upcastAgentEvent({
+  if (!isAgentEventType(row.event_type)) {
+    throw new AgentJournalError('CORRUPT_EVENT', `Unknown stored Agent event type: ${row.event_type}`);
+  }
+  if (!Number.isInteger(Number(row.schema_version)) || Number(row.schema_version) < 1) {
+    throw new AgentJournalError('CORRUPT_EVENT', 'Stored Agent event schemaVersion is invalid.');
+  }
+  let payload: PortableValue;
+  try {
+    payload = parsePortableJson(row.payload_json);
+  } catch (error) {
+    throw new AgentJournalError(
+      'CORRUPT_EVENT',
+      `Stored Agent event payload is invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    return upcastAgentEvent({
     eventId: row.event_id,
     projectId: row.project_id,
     sequence: Number(row.sequence),
@@ -899,10 +1191,20 @@ function eventFromRow(row: EventRow): AgentEvent {
     ...(row.parent_event_id === null ? {} : { parentEventId: row.parent_event_id }),
     ...(row.invocation_id === null ? {} : { invocationId: row.invocation_id }),
     ...(row.attempt_id === null ? {} : { attemptId: row.attempt_id }),
-    type: row.event_type as AgentEventType,
+    type: row.event_type,
     occurredAt: row.occurred_at,
-    payload: JSON.parse(row.payload_json) as PortableValue,
-  });
+      payload,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('UNSUPPORTED_EVENT_SCHEMA:')) {
+      throw new AgentJournalError('UNSUPPORTED_EVENT_SCHEMA', error.message);
+    }
+    if (error instanceof AgentJournalError) throw error;
+    throw new AgentJournalError(
+      'CORRUPT_EVENT',
+      `Stored Agent event failed runtime validation: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function transaction<T>(database: NodeDatabaseSync, operation: () => T): T {
@@ -1010,6 +1312,17 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
       committed_at TEXT NOT NULL,
       FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
     );
+    CREATE TABLE IF NOT EXISTS agent_turn_lifecycles (
+      project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL PRIMARY KEY,
+      revision INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      UNIQUE (project_id, run_id, turn_id),
+      FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
+    );
     CREATE TABLE IF NOT EXISTS agent_attempts (
       attempt_id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -1111,7 +1424,7 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
   `);
 }
 
-function requireText(value: string, name: string): string {
+function requireText(value: unknown, name: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new AgentJournalError('INVALID_ARGUMENT', `${name} is required.`);
   }

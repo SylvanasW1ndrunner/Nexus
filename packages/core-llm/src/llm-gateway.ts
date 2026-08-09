@@ -45,6 +45,7 @@ import type {
 } from './protocol/envelope.js';
 import type { DecodedModelContentBlock } from './protocol/content.js';
 import type { DecodedModelStreamEvent } from './protocol/model-stream.js';
+import { mintAuthenticValidatedModelAttempt } from './protocol/validated-attempt-authenticity.js';
 import { retryAfterMilliseconds, retryDelayFromError } from './retry-policy.js';
 import {
   estimateModelCost,
@@ -1273,7 +1274,7 @@ function validateDecodedModelAttempt(attempt: DecodedModelAttempt): ValidatedMod
       'Model attempt did not contain protocol-recognized terminal framing.',
     );
   }
-  return Object.freeze({
+  const validated = Object.freeze({
     ...attempt,
     origin: Object.freeze({ ...attempt.origin }),
     blocks: Object.freeze(attempt.blocks.map(cloneDecodedBlock)),
@@ -1282,6 +1283,7 @@ function validateDecodedModelAttempt(attempt: DecodedModelAttempt): ValidatedMod
     terminal: true as const,
     validation: 'validated' as const,
   }) as unknown as ValidatedModelAttempt;
+  return mintAuthenticValidatedModelAttempt(validated);
 }
 
 async function* guardModelStream(

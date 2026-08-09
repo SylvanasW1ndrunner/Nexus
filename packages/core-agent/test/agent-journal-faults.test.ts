@@ -1,9 +1,11 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ValidatedModelAttempt } from '@dbagent/core-llm';
 import { RunEventCommitter, SqliteAgentJournal } from '../src/index.js';
+import { validatedAttemptFixture } from './validated-attempt-fixture.js';
 
 const tempDirs: string[] = [];
 
@@ -29,7 +31,9 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       turnId: 'turn-a',
       commandId: `commit-${cut}`,
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
-      attempt: modelAttempt(),
+      expectedRunRevision: 2,
+      expectedTurnRevision: 1,
+      attempt: await modelAttempt(),
     };
     journal.failAt(cut);
 
@@ -89,7 +93,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       }),
     ).rejects.toMatchObject({ code: 'LEASE_HELD' });
 
-    now += 1_001;
+    now += 1_000;
     const second = await journal.acquireRunLease({
       projectId: 'project-a',
       runId: created.runId,
@@ -107,26 +111,98 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       }),
     ).rejects.toMatchObject({ code: 'STALE_LEASE' });
     await expect(
-      journal.commit({
+      journal.startRun({
         projectId: 'project-a',
         sessionId: 'session-a',
         runId: created.runId,
         commandId: 'stale-start',
         lease: { ownerId: first.ownerId, fencingToken: first.fencingToken },
-        events: [{ type: 'run.started', payload: {} }],
+        expectedRunRevision: 1,
       }),
     ).rejects.toMatchObject({ code: 'FENCING_TOKEN_STALE' });
     await expect(
-      journal.commit({
+      journal.startRun({
         projectId: 'project-a',
         sessionId: 'session-a',
         runId: created.runId,
         commandId: 'fresh-start',
         lease: { ownerId: second.ownerId, fencingToken: second.fencingToken },
-        events: [{ type: 'run.started', payload: {} }],
+        expectedRunRevision: 1,
       }),
     ).resolves.toMatchObject({ events: [{ type: 'run.started' }] });
   });
+
+  it('surfaces a bounded typed busy failure under a real worker_threads SQLite write lock', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath, busyTimeoutMs: 75 });
+    await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'seed', input: 'seed',
+    });
+    const worker = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(workerData);
+      db.exec('BEGIN IMMEDIATE');
+      parentPort.postMessage('locked');
+      parentPort.once('message', () => { db.exec('ROLLBACK'); db.close(); });
+    `, { eval: true, workerData: filePath });
+    await new Promise<void>((resolve, reject) => {
+      worker.once('message', () => resolve());
+      worker.once('error', reject);
+    });
+
+    await expect(journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'blocked', input: 'blocked',
+    })).rejects.toMatchObject({ code: 'JOURNAL_BUSY' });
+
+    worker.postMessage('release');
+    await new Promise<void>((resolve, reject) => {
+      worker.once('exit', () => resolve());
+      worker.once('error', reject);
+    });
+    await expect(journal.countEvents(undefined, 'project-a')).resolves.toBe(2);
+  });
+
+  it.each(['before-commit', 'after-commit-before-return'] as const)(
+    'recovers deterministically when a SQLite writer process dies %s',
+    async (cut) => {
+      const filePath = await journalPath();
+      const journal = new SqliteAgentJournal({ filePath });
+      const created = await journal.createRun({
+        projectId: 'project-a', sessionId: 'session-a', clientRequestId: `crash-${cut}`, input: cut,
+      });
+      const worker = new Worker(`
+        const { parentPort, workerData } = require('node:worker_threads');
+        const { DatabaseSync } = require('node:sqlite');
+        const db = new DatabaseSync(workerData.filePath);
+        db.exec('PRAGMA foreign_keys=ON; BEGIN IMMEDIATE');
+        db.prepare('UPDATE agent_project_sequences SET current_sequence=current_sequence+1 WHERE project_id=?').run('project-a');
+        const sequence = db.prepare('SELECT current_sequence FROM agent_project_sequences WHERE project_id=?').get('project-a').current_sequence;
+        db.prepare(\`INSERT INTO agent_events
+          (project_id, sequence, event_id, schema_version, session_id, run_id, event_type,
+           occurred_at, payload_json, audience_json, persistence)
+          VALUES (?, ?, ?, 1, ?, ?, 'artifact.created', ?, ?, ?, 'durable')\`)
+          .run('project-a', sequence, 'event-crash-' + workerData.cut,
+            'session-a', workerData.runId, new Date(0).toISOString(),
+            JSON.stringify({ artifactId: 'artifact-crash', mediaType: 'text/plain', summary: 'bounded' }),
+            JSON.stringify(['internal', 'user', 'audit']));
+        if (workerData.cut === 'after-commit-before-return') db.exec('COMMIT');
+        parentPort.postMessage('cut');
+        setInterval(() => {}, 1000);
+      `, { eval: true, workerData: { filePath, cut, runId: created.runId } });
+      await new Promise<void>((resolve, reject) => {
+        worker.once('message', () => resolve());
+        worker.once('error', reject);
+      });
+      await worker.terminate();
+
+      const reopened = new SqliteAgentJournal({ filePath });
+      expect(await reopened.countEvents('artifact.created', 'project-a'))
+        .toBe(cut === 'before-commit' ? 0 : 1);
+      expect((await reopened.readProject('project-a', 0, 100)).map((event) => event.sequence))
+        .toEqual(cut === 'before-commit' ? [1, 2] : [1, 2, 3]);
+    },
+  );
 });
 
 async function createLeasedRun(journal: SqliteAgentJournal) {
@@ -142,35 +218,21 @@ async function createLeasedRun(journal: SqliteAgentJournal) {
     ownerId: 'worker-a',
     ttlMs: 60_000,
   });
+  await journal.startRun({
+    projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+    commandId: `start-${created.runId}`,
+    lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken }, expectedRunRevision: 1,
+  });
+  await journal.startTurn({
+    projectId: 'project-a', sessionId: 'session-a', runId: created.runId, turnId: 'turn-a',
+    commandId: `turn-${created.runId}`,
+    lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken }, expectedRunRevision: 2,
+  });
   return { runId: created.runId, lease };
 }
 
-function modelAttempt(): ValidatedModelAttempt {
-  return {
-    attemptId: 'attempt-a',
-    origin: { connectionId: 'connection-a', model: 'model-a', protocol: 'openai-responses' },
-    terminal: true,
-    validation: 'validated',
-    finishReason: 'tool-calls',
-    opaqueBlockRefs: [],
-    blocks: [
-      { type: 'text', text: 'Checking.' },
-      {
-        type: 'tool-call-draft',
-        draftCallKey: 'attempt-a:1',
-        wireIdentity: { callId: 'wire-a', providerItemId: 'item-a' },
-        name: 'query_database',
-        arguments: { sql: 'select 1' },
-      },
-      {
-        type: 'tool-call-draft',
-        draftCallKey: 'attempt-a:2',
-        wireIdentity: { callId: 'wire-b', providerItemId: 'item-b' },
-        name: 'read_result',
-        arguments: { handle: 'result-a' },
-      },
-    ],
-  };
+async function modelAttempt(): Promise<ValidatedModelAttempt> {
+  return await validatedAttemptFixture('attempt-a');
 }
 
 async function journalPath(): Promise<string> {
