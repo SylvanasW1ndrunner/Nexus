@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "protocol": "openai-chat",
+      "response": {
+        "id": "chat-v1",
+        "choices": [{
+          "message": {
+            "role": "assistant",
+            "content": "chat text",
+            "tool_calls": [{
+              "id": "chat-wire-1",
+              "type": "function",
+              "function": { "name": "inspect", "arguments": "{\"table\":\"chat\"}" }
+            }]
+          },
+          "finish_reason": "tool_calls"
+        }]
+      },
+      "expectedWireIdentity": { "callId": "chat-wire-1" }
+    },
+    {
+      "protocol": "openai-responses",
+      "response": {
+        "id": "response-v1",
+        "status": "completed",
+        "output": [
+          {
+            "id": "reasoning-v1",
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": "public summary" }],
+            "encrypted_content": "encrypted-v1"
+          },
+          {
+            "id": "item-v1",
+            "type": "function_call",
+            "call_id": "response-wire-1",
+            "name": "inspect",
+            "arguments": "{\"table\":\"responses\"}"
+          }
+        ]
+      },
+      "expectedWireIdentity": { "callId": "response-wire-1", "providerItemId": "item-v1" }
+    },
+    {
+      "protocol": "anthropic-messages",
+      "response": {
+        "id": "anthropic-v1",
+        "content": [
+          { "type": "thinking", "thinking": "private-v1", "signature": "signature-v1" },
+          { "type": "tool_use", "id": "anthropic-wire-1", "name": "inspect", "input": { "table": "anthropic" } }
+        ],
+        "stop_reason": "tool_use"
+      },
+      "expectedWireIdentity": { "callId": "anthropic-wire-1" }
+    },
+    {
+      "protocol": "ollama-chat",
+      "response": {
+        "created_at": "ollama-v1",
+        "message": {
+          "role": "assistant",
+          "thinking": "private-v1",
+          "content": "ollama text",
+          "tool_calls": [{
+            "id": "ollama-wire-1",
+            "function": { "name": "inspect", "arguments": { "table": "ollama" } }
+          }]
+        },
+        "done": true,
+        "done_reason": "stop"
+      },
+      "expectedWireIdentity": { "callId": "ollama-wire-1" }
+    }
+  ]
+}

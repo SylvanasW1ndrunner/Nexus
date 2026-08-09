@@ -1,17 +1,23 @@
-import type { ModelContentBlock, ModelMessage } from '../content.js';
+import type { ModelMessage } from '../content.js';
 import {
   asRecord,
   assertContextProtocol,
+  createProtocolEncodeSession,
   createDecodedAttempt,
   draftToolCall,
+  ModelProtocolError,
   normalizedUsage,
   normalizeFinishReason,
   providerOpaqueBlock,
   records,
+  requiredRecords,
+  requiredString,
   stringValue,
   type AttemptDecodeContext,
   type CanonicalModelRequest,
+  type ModelEncodeContext,
   type ModelProtocolCodec,
+  type ProtocolEncodeSession,
 } from '../codec.js';
 import type { DecodedModelContentBlock } from '../content.js';
 import type { DecodedModelStreamEvent } from '../model-stream.js';
@@ -22,7 +28,7 @@ type StreamBlockState =
       kind: 'tool';
       ordinal: number;
       index: number;
-      wireCallId?: string | undefined;
+      wireIdentity?: { callId?: string } | undefined;
       name: string;
       argumentsText: string;
     };
@@ -30,10 +36,11 @@ type StreamBlockState =
 export class OpenAIChatCodec implements ModelProtocolCodec {
   readonly protocol = 'openai-chat' as const;
 
-  encode(request: CanonicalModelRequest): unknown {
-    return {
+  encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
+    const session = createProtocolEncodeSession(context, this.protocol);
+    return session.finish({
       model: request.model,
-      messages: request.messages.flatMap(encodeMessage),
+      messages: request.messages.flatMap((message) => encodeMessage(message, session)),
       ...(request.tools === undefined
         ? {}
         : {
@@ -52,27 +59,30 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
         ? {}
         : { max_completion_tokens: request.maxOutputTokens }),
       ...(request.stop === undefined ? {} : { stop: request.stop }),
-    };
+    });
   }
 
   decode(response: unknown, context: AttemptDecodeContext) {
     assertContextProtocol(context, this.protocol);
     const root = asRecord(response, 'OpenAI Chat response');
-    const choice = records(root.choices)[0];
-    if (choice === undefined) throw new Error('OpenAI Chat response has no choice');
+    const choice = requiredRecords(root.choices, 'OpenAI Chat choices')[0];
+    if (choice === undefined) {
+      throw new ModelProtocolError('INVALID_WIRE_RESPONSE', 'OpenAI Chat response has no choice');
+    }
     const message = asRecord(choice.message, 'OpenAI Chat message');
     const blocks: DecodedModelContentBlock[] = [];
     appendOpenAIContent(blocks, message.content, context);
-    for (const callValue of records(message.tool_calls)) {
+    for (const callValue of records(message.tool_calls, 'OpenAI Chat tool_calls')) {
       const fn = asRecord(callValue.function, 'OpenAI function call');
       const ordinal = blocks.length;
+      const wireCallId = stringValue(callValue.id);
       blocks.push(
         draftToolCall(
           context,
           ordinal,
-          stringValue(fn.name) ?? '',
+          requiredString(fn.name, 'OpenAI function name'),
           fn.arguments,
-          stringValue(callValue.id),
+          wireCallId === undefined ? undefined : { callId: wireCallId },
         ),
       );
     }
@@ -129,7 +139,7 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
         );
         if (usage !== undefined) yield { type: 'usage', usage };
       }
-      for (const choice of records(event.choices)) {
+      for (const choice of records(event.choices, 'OpenAI stream choices')) {
         const delta = choice.delta === undefined ? {} : asRecord(choice.delta, 'OpenAI delta');
         const text = stringValue(delta.content);
         if (text !== undefined && text.length > 0) {
@@ -140,7 +150,7 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
           textState.text += text;
           yield { type: 'text-delta', blockOrdinal: textState.ordinal, text };
         }
-        for (const rawCall of records(delta.tool_calls)) {
+        for (const rawCall of records(delta.tool_calls, 'OpenAI delta tool_calls')) {
           const index = typeof rawCall.index === 'number' ? rawCall.index : toolStates.size;
           let state = toolStates.get(index);
           if (state === undefined) {
@@ -154,7 +164,10 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
             toolStates.set(index, state);
             states.push(state);
           }
-          state.wireCallId ??= stringValue(rawCall.id);
+          const rawCallId = stringValue(rawCall.id);
+          if (rawCallId !== undefined && state.wireIdentity === undefined) {
+            state.wireIdentity = { callId: rawCallId };
+          }
           const fn = rawCall.function === undefined ? {} : asRecord(rawCall.function);
           state.name += stringValue(fn.name) ?? '';
           const argumentsDelta = stringValue(fn.arguments);
@@ -163,7 +176,7 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
             type: 'tool-call-delta',
             blockOrdinal: state.ordinal,
             draftCallKey: `${context.attemptId}:${state.ordinal}`,
-            ...(state.wireCallId === undefined ? {} : { wireCallId: state.wireCallId }),
+            ...(state.wireIdentity === undefined ? {} : { wireIdentity: state.wireIdentity }),
             ...(stringValue(fn.name) === undefined ? {} : { name: stringValue(fn.name) }),
             ...(argumentsDelta === undefined ? {} : { argumentsDelta }),
           };
@@ -179,15 +192,24 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
         state.ordinal,
         state.name,
         state.argumentsText,
-        state.wireCallId,
+        state.wireIdentity,
       );
     });
+    if (finishReason === undefined) {
+      throw new ModelProtocolError(
+        'INCOMPLETE_MODEL_ATTEMPT',
+        'OpenAI Chat stream ended without a terminal finish reason',
+      );
+    }
     const attempt = createDecodedAttempt(context, blocks, {
-      terminal: finishReason !== undefined,
-      ...(finishReason === undefined ? {} : { finishReason }),
+      terminal: true,
+      finishReason,
       ...(usage === undefined ? {} : { usage }),
       ...(providerResponseId === undefined ? {} : { providerResponseId }),
     });
+    for (const [blockOrdinal, block] of blocks.entries()) {
+      yield { type: 'block-complete', blockOrdinal, block };
+    }
     yield { type: 'finish', attempt };
   }
 }
@@ -201,50 +223,80 @@ function appendOpenAIContent(
     if (content.length > 0) blocks.push({ type: 'text', text: content });
     return;
   }
-  for (const part of records(content)) {
+  if (content === null || content === undefined) return;
+  for (const part of records(content, 'OpenAI Chat content')) {
     const type = stringValue(part.type);
-    if ((type === 'text' || type === 'output_text') && typeof part.text === 'string') {
+    if (type === 'text' || type === 'output_text') {
+      if (typeof part.text !== 'string') {
+        throw new ModelProtocolError('INVALID_WIRE_RESPONSE', 'OpenAI text content is required');
+      }
       blocks.push({ type: 'text', text: part.text });
-    } else {
+    } else if (type !== undefined) {
       blocks.push(providerOpaqueBlock(context, part));
+    } else {
+      throw new ModelProtocolError('INVALID_WIRE_RESPONSE', 'OpenAI content part type is required');
     }
   }
 }
 
-function encodeMessage(message: ModelMessage): Record<string, unknown>[] {
-  const toolResults = message.content.filter(
-    (block): block is Extract<ModelContentBlock, { type: 'tool-result' }> =>
-      block.type === 'tool-result',
-  );
-  if (toolResults.length > 0) {
-    return toolResults.map((result) => ({
-      role: 'tool',
-      tool_call_id: result.callId,
-      content: JSON.stringify(result.output),
-    }));
+function encodeMessage(
+  message: ModelMessage,
+  session: ProtocolEncodeSession,
+): Record<string, unknown>[] {
+  const output: Record<string, unknown>[] = [];
+  let content: unknown[] = [];
+  let toolCalls: Record<string, unknown>[] = [];
+  const role = message.role === 'developer' ? 'developer' : message.role;
+  const flush = () => {
+    if (content.length === 0 && toolCalls.length === 0) return;
+    output.push({
+      role,
+      content,
+      ...(toolCalls.length === 0 ? {} : { tool_calls: toolCalls }),
+    });
+    content = [];
+    toolCalls = [];
+  };
+  for (const [ordinal, block] of message.content.entries()) {
+    if (block.type === 'text' || block.type === 'reasoning-summary') {
+      if (toolCalls.length > 0) flush();
+      content.push({ type: 'text', text: block.text });
+    } else if (block.type === 'tool-call') {
+      const identity = session.identityFor(block.callId, ordinal);
+      const wireCallId = requiredIdentityCallId(identity);
+      toolCalls.push({
+        id: wireCallId,
+        type: 'function',
+        function: { name: block.name, arguments: JSON.stringify(block.arguments) },
+      });
+    } else if (block.type === 'tool-result') {
+      flush();
+      const identity = session.identityFor(block.callId, ordinal);
+      output.push({
+        role: 'tool',
+        tool_call_id: requiredIdentityCallId(identity),
+        content: JSON.stringify(block.output),
+      });
+    } else if (block.type === 'provider-opaque') {
+      if (toolCalls.length > 0) flush();
+      content.push(asRecord(session.opaqueValue(block), 'OpenAI opaque content'));
+    } else {
+      session.rejectResource();
+    }
   }
-  const toolCalls = message.content.filter(
-    (block): block is Extract<ModelContentBlock, { type: 'tool-call' }> => block.type === 'tool-call',
-  );
-  const text = message.content
-    .filter((block) => block.type === 'text' || block.type === 'reasoning-summary')
-    .map((block) => block.text)
-    .join('');
-  return [
-    {
-      role: message.role === 'developer' ? 'developer' : message.role,
-      content: text,
-      ...(toolCalls.length === 0
-        ? {}
-        : {
-            tool_calls: toolCalls.map((call) => ({
-              id: call.callId,
-              type: 'function',
-              function: { name: call.name, arguments: JSON.stringify(call.arguments) },
-            })),
-          }),
-    },
-  ];
+  flush();
+  if (output.length === 0) output.push({ role, content: [] });
+  return output;
+}
+
+function requiredIdentityCallId(identity: { callId?: string }): string {
+  if (identity.callId === undefined) {
+    throw new ModelProtocolError(
+      'MISSING_PROTOCOL_CORRELATION',
+      'OpenAI Chat requires a wire call ID',
+    );
+  }
+  return identity.callId;
 }
 
 export const openAIChatCodec = new OpenAIChatCodec();

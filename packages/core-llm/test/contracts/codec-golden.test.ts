@@ -116,7 +116,7 @@ describe('provider codec golden contract', () => {
       {
         type: 'tool-call-draft',
         draftCallKey: 'attempt-golden:1',
-        wireCallId: 'call-a',
+        wireIdentity: { callId: 'call-a' },
         name: 'inspect',
         arguments: { table: 'a' },
       },
@@ -144,10 +144,22 @@ describe('provider codec golden contract', () => {
     };
 
     const encoded = [
-      { value: openAIChatCodec.encode(request), transcriptKey: 'messages' },
-      { value: openAIResponsesCodec.encode(request), transcriptKey: 'input' },
-      { value: anthropicMessagesCodec.encode(request), transcriptKey: 'messages' },
-      { value: ollamaChatCodec.encode(request), transcriptKey: 'messages' },
+      {
+        value: openAIChatCodec.encode(request, freshEncodeContext('openai-chat')).wireRequest,
+        transcriptKey: 'messages',
+      },
+      {
+        value: openAIResponsesCodec.encode(request, freshEncodeContext('openai-responses')).wireRequest,
+        transcriptKey: 'input',
+      },
+      {
+        value: anthropicMessagesCodec.encode(request, freshEncodeContext('anthropic-messages')).wireRequest,
+        transcriptKey: 'messages',
+      },
+      {
+        value: ollamaChatCodec.encode(request, freshEncodeContext('ollama-chat')).wireRequest,
+        transcriptKey: 'messages',
+      },
     ];
     for (const item of encoded) {
       const value = item.value as Record<string, unknown>;
@@ -163,5 +175,13 @@ function asAsyncIterable<T>(values: readonly T[]): AsyncIterable<T> {
     async *[Symbol.asyncIterator]() {
       for (const value of values) yield await Promise.resolve(value);
     },
+  };
+}
+
+function freshEncodeContext(protocol: AttemptDecodeContext['origin']['protocol']) {
+  return {
+    requestId: 'golden-request',
+    target: { connectionId: 'conn-golden', model: 'm1', protocol },
+    replay: { mode: 'new' as const },
   };
 }

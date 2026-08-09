@@ -44,13 +44,13 @@ describe('canonical model protocol identity', () => {
       'tool-call-draft',
     ]);
     expect(attempt.blocks.filter((block) => block.type === 'tool-call-draft')).toEqual([
-      expect.objectContaining({ draftCallKey: 'attempt-1:1', wireCallId: 'call-a' }),
-      expect.objectContaining({ draftCallKey: 'attempt-1:2', wireCallId: 'call-b' }),
+      expect.objectContaining({ draftCallKey: 'attempt-1:1', wireIdentity: { callId: 'call-a' } }),
+      expect.objectContaining({ draftCallKey: 'attempt-1:2', wireIdentity: { callId: 'call-b' } }),
     ]);
-    expect(JSON.stringify(attempt)).not.toContain('"callId"');
+    expect(attempt.blocks.some((block) => 'callId' in block)).toBe(false);
   });
 
-  it('keeps missing wire IDs distinct without inventing provider or internal IDs', () => {
+  it('keeps missing wire identities distinct without inventing provider or internal IDs', () => {
     const fixture = structuredClone(openAiParallelToolFixture);
     delete fixture.choices[0]?.message.tool_calls[0]?.id;
     delete fixture.choices[0]?.message.tool_calls[1]?.id;

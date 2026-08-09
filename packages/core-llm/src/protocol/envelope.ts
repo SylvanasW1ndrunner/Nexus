@@ -3,6 +3,7 @@ import type {
   ModelContentBlock,
   ModelOrigin,
   ModelReplayScope,
+  ModelWireIdentity,
 } from './content.js';
 
 export type ModelFinishReason =
@@ -36,16 +37,18 @@ export type ValidatedModelAttempt = DecodedModelAttempt & {
   validation: 'validated';
 };
 
+export type ProtocolCorrelation = {
+  callId: string;
+  draftCallKey: string;
+  wireIdentity?: ModelWireIdentity;
+  replay: ModelReplayScope;
+};
+
 export type ModelProtocolEnvelope = {
   schemaVersion: 1;
   attemptId: string;
   origin: { connectionId: string; model: string; protocol: string };
-  correlations: Array<{
-    callId: string;
-    draftCallKey: string;
-    wireCallId?: string;
-    replay: ModelReplayScope;
-  }>;
+  correlations: ProtocolCorrelation[];
   opaqueBlockRefs: string[];
 };
 

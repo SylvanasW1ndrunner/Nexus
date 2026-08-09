@@ -14,6 +14,11 @@ export type ModelOrigin = {
 
 export type ModelReplayScope = 'same-connection-only' | 'compatible-protocol';
 
+export type ModelWireIdentity = {
+  callId?: string;
+  providerItemId?: string;
+};
+
 export type CommonModelContentBlock =
   | { type: 'text'; text: string }
   | {
@@ -36,7 +41,7 @@ export type DecodedModelContentBlock =
   | {
       type: 'tool-call-draft';
       draftCallKey: string;
-      wireCallId?: string;
+      wireIdentity?: ModelWireIdentity;
       name: string;
       arguments: PortableValue;
     };

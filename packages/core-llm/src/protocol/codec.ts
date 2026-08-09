@@ -4,11 +4,14 @@ import type {
   ModelMessage,
   ModelOrigin,
   ModelProtocol,
+  ModelWireIdentity,
 } from './content.js';
 import type {
   DecodedModelAttempt,
   ModelFinishReason,
+  ModelProtocolEnvelope,
   ModelTokenUsage,
+  ProtocolCorrelation,
 } from './envelope.js';
 import type { DecodedModelStreamEvent } from './model-stream.js';
 
@@ -33,13 +36,31 @@ export type AttemptDecodeContext = {
   origin: ModelOrigin;
 };
 
+export type ModelEncodeContext = {
+  requestId: string;
+  target: ModelOrigin;
+  replay:
+    | { mode: 'new' }
+    | { mode: 'same-connection'; envelope: ModelProtocolEnvelope }
+    | { mode: 'compatible-protocol'; envelope: ModelProtocolEnvelope };
+};
+
+export type ModelProtocolEncodeResult<TWireRequest> = {
+  wireRequest: TWireRequest;
+  correlations: ProtocolCorrelation[];
+  opaqueBlockRefs: string[];
+};
+
 export interface ModelProtocolCodec<
   TWireRequest = unknown,
   TWireResponse = unknown,
   TWireEvent = unknown,
 > {
   readonly protocol: ModelProtocol;
-  encode(request: CanonicalModelRequest): TWireRequest;
+  encode(
+    request: CanonicalModelRequest,
+    context: ModelEncodeContext,
+  ): ModelProtocolEncodeResult<TWireRequest>;
   decode(response: TWireResponse, context: AttemptDecodeContext): DecodedModelAttempt;
   decodeStream(
     stream: AsyncIterable<TWireEvent>,
@@ -52,7 +73,10 @@ export type ModelProtocolErrorCode =
   | 'INVALID_TOOL_ARGUMENTS'
   | 'DUPLICATE_WIRE_CALL_ID'
   | 'INCOMPLETE_MODEL_ATTEMPT'
-  | 'PROTOCOL_MISMATCH';
+  | 'PROTOCOL_MISMATCH'
+  | 'MISSING_PROTOCOL_CORRELATION'
+  | 'UNREPRESENTABLE_CANONICAL_BLOCK'
+  | 'OPAQUE_REPLAY_FORBIDDEN';
 
 export class ModelProtocolError extends Error {
   constructor(
@@ -83,16 +107,31 @@ export function asRecord(value: unknown, label = 'value'): Record<string, unknow
   return value as Record<string, unknown>;
 }
 
-export function records(value: unknown): Record<string, unknown>[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter(
-    (item): item is Record<string, unknown> =>
-      typeof item === 'object' && item !== null && !Array.isArray(item),
-  );
+export function records(value: unknown, label = 'array'): Record<string, unknown>[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new ModelProtocolError('INVALID_WIRE_RESPONSE', `${label} must be an array`);
+  }
+  return value.map((item, index) => asRecord(item, `${label}[${index}]`));
+}
+
+export function requiredRecords(value: unknown, label: string): Record<string, unknown>[] {
+  if (value === undefined) {
+    throw new ModelProtocolError('INVALID_WIRE_RESPONSE', `${label} is required`);
+  }
+  return records(value, label);
 }
 
 export function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+export function requiredString(value: unknown, label: string): string {
+  const result = stringValue(value);
+  if (result === undefined || result.length === 0) {
+    throw new ModelProtocolError('INVALID_WIRE_RESPONSE', `${label} must be a non-empty string`);
+  }
+  return result;
 }
 
 export function numberValue(value: unknown): number | undefined {
@@ -135,7 +174,7 @@ export function draftToolCall(
   ordinal: number,
   name: string,
   argumentsValue: unknown,
-  wireCallId?: string,
+  wireIdentity?: ModelWireIdentity,
 ): DecodedModelContentBlock {
   if (name.length === 0) {
     throw new ModelProtocolError('INVALID_WIRE_RESPONSE', 'Tool call name is required');
@@ -143,7 +182,7 @@ export function draftToolCall(
   return {
     type: 'tool-call-draft',
     draftCallKey: `${context.attemptId}:${ordinal}`,
-    ...(wireCallId === undefined ? {} : { wireCallId }),
+    ...(wireIdentity === undefined ? {} : { wireIdentity }),
     name,
     arguments: parseToolArguments(argumentsValue),
   };
@@ -173,10 +212,9 @@ export function createDecodedAttempt(
     finishReason?: ModelFinishReason | undefined;
     usage?: ModelTokenUsage | undefined;
     providerResponseId?: string | undefined;
-    allowDuplicateWireCallIds?: boolean | undefined;
   },
 ): DecodedModelAttempt {
-  if (options.allowDuplicateWireCallIds !== true) rejectDuplicateWireCallIds(blocks);
+  rejectDuplicateWireIdentities(blocks);
   return {
     attemptId: context.attemptId,
     origin: context.origin,
@@ -193,18 +231,147 @@ export function createDecodedAttempt(
   };
 }
 
-export function rejectDuplicateWireCallIds(blocks: readonly DecodedModelContentBlock[]): void {
-  const seen = new Set<string>();
+export function rejectDuplicateWireIdentities(blocks: readonly DecodedModelContentBlock[]): void {
+  const calls = new Map<string, string | undefined>();
+  const items = new Set<string>();
   for (const block of blocks) {
-    if (block.type !== 'tool-call-draft' || block.wireCallId === undefined) continue;
-    if (seen.has(block.wireCallId)) {
+    if (block.type !== 'tool-call-draft' || block.wireIdentity === undefined) continue;
+    const { callId, providerItemId } = block.wireIdentity;
+    if (providerItemId !== undefined && items.has(providerItemId)) {
       throw new ModelProtocolError(
         'DUPLICATE_WIRE_CALL_ID',
-        `Duplicate completed wire call ID: ${block.wireCallId}`,
+        `Duplicate completed provider item ID: ${providerItemId}`,
       );
     }
-    seen.add(block.wireCallId);
+    if (callId !== undefined && calls.has(callId)) {
+      const previousItemId = calls.get(callId);
+      if (
+        previousItemId === undefined ||
+        providerItemId === undefined ||
+        previousItemId === providerItemId
+      ) {
+        throw new ModelProtocolError(
+          'DUPLICATE_WIRE_CALL_ID',
+          `Duplicate completed wire call ID: ${callId}`,
+        );
+      }
+    }
+    if (providerItemId !== undefined) items.add(providerItemId);
+    if (callId !== undefined) calls.set(callId, providerItemId);
   }
+}
+
+export type ProtocolEncodeSession = {
+  identityFor(callId: string, ordinal: number): ModelWireIdentity;
+  opaqueValue(block: Extract<DecodedModelContentBlock, { type: 'provider-opaque' }>): PortableValue;
+  rejectResource(): never;
+  finish<TWireRequest>(wireRequest: TWireRequest): ModelProtocolEncodeResult<TWireRequest>;
+};
+
+export function createProtocolEncodeSession(
+  context: ModelEncodeContext,
+  protocol: ModelProtocol,
+): ProtocolEncodeSession {
+  if (context.target.protocol !== protocol) {
+    throw new ModelProtocolError(
+      'PROTOCOL_MISMATCH',
+      `Expected ${protocol} encode target, received ${context.target.protocol}`,
+    );
+  }
+  const sourceEnvelope = context.replay.mode === 'new' ? undefined : context.replay.envelope;
+  if (
+    context.replay.mode === 'same-connection' &&
+    (sourceEnvelope?.origin.connectionId !== context.target.connectionId ||
+      sourceEnvelope.origin.protocol !== protocol)
+  ) {
+    throw new ModelProtocolError(
+      'PROTOCOL_MISMATCH',
+      'Same-connection replay target does not match the protocol envelope origin',
+    );
+  }
+  const correlations: ProtocolCorrelation[] = [];
+  const resolved = new Map<string, ModelWireIdentity>();
+  return {
+    identityFor(callId, ordinal) {
+      const cached = resolved.get(callId);
+      if (cached !== undefined) return cached;
+      const source = sourceEnvelope?.correlations.find(
+        (correlation) => correlation.callId === callId,
+      );
+      let wireIdentity: ModelWireIdentity;
+      if (context.replay.mode === 'same-connection') {
+        if (source?.wireIdentity === undefined) {
+          throw new ModelProtocolError(
+            'MISSING_PROTOCOL_CORRELATION',
+            `No replayable wire identity exists for canonical call ${callId}`,
+          );
+        }
+        wireIdentity = source.wireIdentity;
+      } else {
+        wireIdentity = generatedWireIdentity(protocol, context.requestId, correlations.length);
+      }
+      resolved.set(callId, wireIdentity);
+      correlations.push({
+        callId,
+        draftCallKey: source?.draftCallKey ?? `${context.requestId}:${ordinal}`,
+        wireIdentity,
+        replay:
+          context.replay.mode === 'same-connection'
+            ? (source?.replay ?? 'same-connection-only')
+            : 'compatible-protocol',
+      });
+      return wireIdentity;
+    },
+    opaqueValue(block) {
+      const exactOrigin =
+        block.protocol === protocol &&
+        block.origin.connectionId === context.target.connectionId &&
+        block.origin.model === context.target.model;
+      const compatible =
+        context.replay.mode === 'compatible-protocol' &&
+        block.replay === 'compatible-protocol' &&
+        block.protocol === protocol;
+      if (context.replay.mode !== 'same-connection' && !compatible) {
+        throw new ModelProtocolError(
+          'OPAQUE_REPLAY_FORBIDDEN',
+          'Provider-opaque content cannot be replayed outside its declared scope',
+        );
+      }
+      if (!exactOrigin && !compatible) {
+        throw new ModelProtocolError(
+          'OPAQUE_REPLAY_FORBIDDEN',
+          'Provider-opaque content origin does not match the encode target',
+        );
+      }
+      return block.value;
+    },
+    rejectResource() {
+      throw new ModelProtocolError(
+        'UNREPRESENTABLE_CANONICAL_BLOCK',
+        'resource-ref requires an explicit artifact-to-wire projection',
+      );
+    },
+    finish(wireRequest) {
+      return {
+        wireRequest,
+        correlations,
+        opaqueBlockRefs: sourceEnvelope?.opaqueBlockRefs ?? [],
+      };
+    },
+  };
+}
+
+function generatedWireIdentity(
+  protocol: ModelProtocol,
+  requestId: string,
+  ordinal: number,
+): ModelWireIdentity {
+  return protocol === 'openai-responses'
+    ? {
+        callId: `${requestId}:call:${ordinal}`,
+        providerItemId: `${requestId}:item:${ordinal}`,
+      }
+    : { callId: `${requestId}:call:${ordinal}` };
 }
 
 export function normalizeFinishReason(value: unknown): ModelFinishReason | undefined {

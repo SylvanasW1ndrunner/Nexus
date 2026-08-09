@@ -1,4 +1,4 @@
-import type { DecodedModelContentBlock } from './content.js';
+import type { DecodedModelContentBlock, ModelWireIdentity } from './content.js';
 import type { DecodedModelAttempt, ModelTokenUsage } from './envelope.js';
 
 export type DecodedModelStreamEvent =
@@ -8,7 +8,7 @@ export type DecodedModelStreamEvent =
       type: 'tool-call-delta';
       blockOrdinal: number;
       draftCallKey: string;
-      wireCallId?: string | undefined;
+      wireIdentity?: ModelWireIdentity | undefined;
       name?: string | undefined;
       argumentsDelta?: string | undefined;
     }

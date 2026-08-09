@@ -1,17 +1,22 @@
-import type { ModelContentBlock, ModelMessage } from '../content.js';
+import type { ModelMessage } from '../content.js';
 import {
   asRecord,
   assertContextProtocol,
   createDecodedAttempt,
+  createProtocolEncodeSession,
   draftToolCall,
+  ModelProtocolError,
   normalizedUsage,
   normalizeFinishReason,
   providerOpaqueBlock,
   records,
+  requiredString,
   stringValue,
   type AttemptDecodeContext,
   type CanonicalModelRequest,
+  type ModelEncodeContext,
   type ModelProtocolCodec,
+  type ProtocolEncodeSession,
 } from '../codec.js';
 import type { DecodedModelContentBlock } from '../content.js';
 import type { DecodedModelStreamEvent } from '../model-stream.js';
@@ -23,7 +28,7 @@ type OllamaStreamBlock =
       kind: 'tool';
       ordinal: number;
       index: number;
-      wireCallId?: string | undefined;
+      wireIdentity?: { callId?: string } | undefined;
       name: string;
       argumentsValue: unknown;
       argumentsText: string;
@@ -32,11 +37,12 @@ type OllamaStreamBlock =
 export class OllamaChatCodec implements ModelProtocolCodec {
   readonly protocol = 'ollama-chat' as const;
 
-  encode(request: CanonicalModelRequest): unknown {
-    return {
+  encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
+    const session = createProtocolEncodeSession(context, this.protocol);
+    return session.finish({
       model: request.model,
       stream: false,
-      messages: request.messages.flatMap(encodeMessage),
+      messages: request.messages.flatMap((message) => encodeMessage(message, session)),
       ...(request.tools === undefined
         ? {}
         : {
@@ -50,7 +56,7 @@ export class OllamaChatCodec implements ModelProtocolCodec {
             })),
           }),
       ...encodeOptions(request),
-    };
+    });
   }
 
   decode(response: unknown, context: AttemptDecodeContext) {
@@ -59,20 +65,27 @@ export class OllamaChatCodec implements ModelProtocolCodec {
     const message = asRecord(root.message, 'Ollama message');
     const blocks: DecodedModelContentBlock[] = [];
     const thinking = stringValue(message.thinking);
+    if (message.thinking !== undefined && thinking === undefined) {
+      invalid('Ollama thinking must be a string');
+    }
     if (thinking !== undefined && thinking.length > 0) {
       blocks.push(providerOpaqueBlock(context, { type: 'thinking', thinking }));
     }
     const text = stringValue(message.content);
+    if (message.content !== undefined && text === undefined) {
+      invalid('Ollama content must be a string');
+    }
     if (text !== undefined && text.length > 0) blocks.push({ type: 'text', text });
-    for (const rawCall of records(message.tool_calls)) {
+    for (const rawCall of records(message.tool_calls, 'Ollama tool_calls')) {
       const fn = asRecord(rawCall.function, 'Ollama function call');
+      const wireCallId = stringValue(rawCall.id);
       blocks.push(
         draftToolCall(
           context,
           blocks.length,
-          stringValue(fn.name) ?? '',
-          fn.arguments,
-          stringValue(rawCall.id),
+          requiredString(fn.name, 'Ollama function name'),
+          fn.arguments === undefined ? invalid('Ollama function arguments are required') : fn.arguments,
+          wireCallId === undefined ? undefined : { callId: wireCallId },
         ),
       );
     }
@@ -122,7 +135,7 @@ export class OllamaChatCodec implements ModelProtocolCodec {
         textState.text += text;
         yield { type: 'text-delta', blockOrdinal: textState.ordinal, text };
       }
-      for (const [fallbackIndex, rawCall] of records(message.tool_calls).entries()) {
+      for (const [fallbackIndex, rawCall] of records(message.tool_calls, 'Ollama stream tool_calls').entries()) {
         const index = typeof rawCall.index === 'number' ? rawCall.index : fallbackIndex;
         let state = toolStates.get(index);
         if (state === undefined) {
@@ -137,7 +150,10 @@ export class OllamaChatCodec implements ModelProtocolCodec {
           states.push(state);
           toolStates.set(index, state);
         }
-        state.wireCallId ??= stringValue(rawCall.id);
+        const rawCallId = stringValue(rawCall.id);
+        if (rawCallId !== undefined && state.wireIdentity === undefined) {
+          state.wireIdentity = { callId: rawCallId };
+        }
         const fn = rawCall.function === undefined ? {} : asRecord(rawCall.function);
         state.name = stringValue(fn.name) ?? state.name;
         if (typeof fn.arguments === 'string') state.argumentsText += fn.arguments;
@@ -146,7 +162,7 @@ export class OllamaChatCodec implements ModelProtocolCodec {
           type: 'tool-call-delta',
           blockOrdinal: state.ordinal,
           draftCallKey: `${context.attemptId}:${state.ordinal}`,
-          ...(state.wireCallId === undefined ? {} : { wireCallId: state.wireCallId }),
+          ...(state.wireIdentity === undefined ? {} : { wireIdentity: state.wireIdentity }),
           ...(stringValue(fn.name) === undefined ? {} : { name: stringValue(fn.name) }),
           ...(typeof fn.arguments === 'string' ? { argumentsDelta: fn.arguments } : {}),
         };
@@ -167,52 +183,99 @@ export class OllamaChatCodec implements ModelProtocolCodec {
         state.ordinal,
         state.name,
         state.argumentsText.length > 0 ? state.argumentsText : state.argumentsValue,
-        state.wireCallId,
+        state.wireIdentity,
       );
     });
+    if (!done) {
+      throw new ModelProtocolError(
+        'INCOMPLETE_MODEL_ATTEMPT',
+        'Ollama stream ended without done=true',
+      );
+    }
     const attempt = createDecodedAttempt(context, blocks, {
-      terminal: done,
+      terminal: true,
       ...(finishReason === undefined ? {} : { finishReason }),
       ...(usage === undefined ? {} : { usage }),
       ...(providerResponseId === undefined ? {} : { providerResponseId }),
     });
+    for (const [blockOrdinal, block] of blocks.entries()) {
+      yield { type: 'block-complete', blockOrdinal, block };
+    }
     if (usage !== undefined) yield { type: 'usage', usage };
     yield { type: 'finish', attempt };
   }
 }
 
-function encodeMessage(message: ModelMessage): Record<string, unknown>[] {
-  const results = message.content.filter(
-    (block): block is Extract<ModelContentBlock, { type: 'tool-result' }> =>
-      block.type === 'tool-result',
-  );
-  if (results.length > 0) {
-    return results.map((result) => ({
-      role: 'tool',
-      content: JSON.stringify(result.output),
-      tool_call_id: result.callId,
-    }));
+function encodeMessage(
+  message: ModelMessage,
+  session: ProtocolEncodeSession,
+): Record<string, unknown>[] {
+  const output: Record<string, unknown>[] = [];
+  const role = message.role === 'developer' ? 'system' : message.role;
+  let thinking: string | undefined;
+  let content = '';
+  let calls: Record<string, unknown>[] = [];
+  const flush = () => {
+    if (thinking === undefined && content.length === 0 && calls.length === 0) return;
+    output.push({
+      role,
+      content,
+      ...(thinking === undefined ? {} : { thinking }),
+      ...(calls.length === 0 ? {} : { tool_calls: calls }),
+    });
+    thinking = undefined;
+    content = '';
+    calls = [];
+  };
+  for (const [ordinal, block] of message.content.entries()) {
+    if (block.type === 'text' || block.type === 'reasoning-summary') {
+      if (calls.length > 0) flush();
+      content += block.text;
+    } else if (block.type === 'tool-call') {
+      const identity = session.identityFor(block.callId, ordinal);
+      calls.push({
+        id: requiredIdentityCallId(identity),
+        function: { name: block.name, arguments: block.arguments },
+      });
+    } else if (block.type === 'tool-result') {
+      flush();
+      const identity = session.identityFor(block.callId, ordinal);
+      output.push({
+        role: 'tool',
+        content: JSON.stringify(block.output),
+        tool_call_id: requiredIdentityCallId(identity),
+      });
+    } else if (block.type === 'provider-opaque') {
+      if (content.length > 0 || calls.length > 0 || thinking !== undefined) flush();
+      const opaque = asRecord(session.opaqueValue(block), 'Ollama opaque block');
+      if (opaque.type !== 'thinking' || typeof opaque.thinking !== 'string') {
+        throw new ModelProtocolError(
+          'UNREPRESENTABLE_CANONICAL_BLOCK',
+          'Ollama can only replay its native thinking opaque block',
+        );
+      }
+      thinking = opaque.thinking;
+    } else {
+      session.rejectResource();
+    }
   }
-  const calls = message.content.filter(
-    (block): block is Extract<ModelContentBlock, { type: 'tool-call' }> => block.type === 'tool-call',
-  );
-  const text = message.content
-    .filter((block) => block.type === 'text' || block.type === 'reasoning-summary')
-    .map((block) => block.text)
-    .join('');
-  return [
-    {
-      role: message.role === 'developer' ? 'system' : message.role,
-      content: text,
-      ...(calls.length === 0
-        ? {}
-        : {
-            tool_calls: calls.map((call) => ({
-              function: { name: call.name, arguments: call.arguments },
-            })),
-          }),
-    },
-  ];
+  flush();
+  if (output.length === 0) output.push({ role, content: '' });
+  return output;
+}
+
+function requiredIdentityCallId(identity: { callId?: string }): string {
+  if (identity.callId === undefined) {
+    throw new ModelProtocolError(
+      'MISSING_PROTOCOL_CORRELATION',
+      'Ollama Chat requires a wire call ID',
+    );
+  }
+  return identity.callId;
+}
+
+function invalid(message: string): never {
+  throw new ModelProtocolError('INVALID_WIRE_RESPONSE', message);
 }
 
 function encodeOptions(request: CanonicalModelRequest): Record<string, unknown> {
