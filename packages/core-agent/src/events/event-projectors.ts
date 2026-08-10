@@ -2,7 +2,16 @@ import type {
   ModelContentBlock, ModelFinishReason, ModelProtocolEnvelope, ModelTokenUsage,
 } from '@dbagent/core-llm';
 import type { PortableValue } from '@dbagent/shared';
-import type { AgentEvent, AgentRunState, PersistedValidatedAttempt } from './agent-event.js';
+import type {
+  AgentEvent,
+  AgentRunState,
+  CanonicalToolIdFact,
+  PersistedValidatedAttempt,
+  ToolApprovalFact,
+  ToolEffectFact,
+  ToolExecutionErrorFact,
+  ToolObservationFact,
+} from './agent-event.js';
 
 export type AgentRunProjection = {
   projectId: string;
@@ -50,9 +59,51 @@ export type AgentInvocationProjection = {
   actionOrdinal: number;
   name: string;
   arguments: PortableValue;
-  state: 'proposed';
+  state:
+    | 'proposed'
+    | 'validated'
+    | 'awaiting_approval'
+    | 'authorized'
+    | 'denied'
+    | 'started'
+    | 'succeeded'
+    | 'failed'
+    | 'cancelled'
+    | 'outcome_unknown'
+    | 'observed';
   revision: number;
+  canonicalToolId?: CanonicalToolIdFact;
+  toolRevision?: string;
+  effect?: ToolEffectFact;
+  normalizedArgumentsDigest?: string;
+  proposedRevision?: number;
+  approvalId?: string;
+  retryOf?: string;
+  retryPermitId?: string;
+  retryPermit?: {
+    permitId: string;
+    toolRevision: string;
+    effect: ToolEffectFact;
+    normalizedArgumentsDigest: string;
+    reason: string;
+  };
+  started?: {
+    idempotencyKey: string;
+    fencingToken: number;
+    attempt: number;
+    startedAt: string;
+  };
+  terminal?: {
+    kind: 'succeeded' | 'failed' | 'cancelled' | 'outcome_unknown' | 'denied';
+    summary: string;
+    resultRefs: string[];
+    durableSummary?: PortableValue;
+    error?: ToolExecutionErrorFact;
+    occurredAt: string;
+  };
+  observation?: ToolObservationFact & { occurredAt: string };
   createdAt: string;
+  updatedAt: string;
 };
 
 export type AgentReplayProjection = {
@@ -60,6 +111,10 @@ export type AgentReplayProjection = {
   turns: AgentTurnProjection[];
   attempts: AgentAttemptProjection[];
   invocations: AgentInvocationProjection[];
+  approvals: ToolApprovalFact[];
+  observations: Array<ToolObservationFact & {
+    projectId: string; runId: string; createdAt: string;
+  }>;
   envelopes: ModelProtocolEnvelope[];
   validatedAttempts: PersistedValidatedAttempt[];
   lastSequenceByProject: Record<string, number>;
@@ -86,6 +141,10 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
   const turns = new Map<string, AgentTurnProjection>();
   const attempts = new Map<string, AgentAttemptProjection>();
   const invocations = new Map<string, AgentInvocationProjection>();
+  const approvals = new Map<string, ToolApprovalFact>();
+  const observations = new Map<string, ToolObservationFact & {
+    projectId: string; runId: string; createdAt: string;
+  }>();
   const envelopes = new Map<string, ModelProtocolEnvelope>();
   const validatedAttempts = new Map<string, PersistedValidatedAttempt>();
   const lastSequenceByProject: Record<string, number> = {};
@@ -192,8 +251,96 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         state: 'proposed',
         revision: 1,
         createdAt: event.occurredAt,
+        updatedAt: event.occurredAt,
       });
+      continue;
     }
+    const invocationId = event.invocationId;
+    if (invocationId === undefined) continue;
+    const invocation = invocations.get(invocationId);
+    if (invocation === undefined) continue;
+    if (event.type === 'tool.validated') {
+      invocation.state = 'validated';
+      invocation.canonicalToolId = structuredClone(event.payload.canonicalToolId);
+      invocation.toolRevision = event.payload.toolRevision;
+      invocation.effect = event.payload.effect;
+      invocation.normalizedArgumentsDigest = event.payload.normalizedArgumentsDigest;
+      invocation.proposedRevision = event.payload.proposedRevision;
+      if (event.payload.retryOf !== undefined) invocation.retryOf = event.payload.retryOf;
+      if (event.payload.retryPermitId !== undefined) {
+        invocation.retryPermitId = event.payload.retryPermitId;
+      }
+    } else if (event.type === 'tool.approval_requested') {
+      invocation.state = 'awaiting_approval';
+      invocation.approvalId = event.payload.approval.approvalId;
+      approvals.set(event.payload.approval.approvalId, structuredClone(event.payload.approval));
+    } else if (event.type === 'tool.authorized') {
+      invocation.state = 'authorized';
+      invocation.approvalId = event.payload.approvalId;
+      const approval = approvals.get(event.payload.approvalId);
+      if (approval !== undefined) {
+        approval.status = 'approved';
+        approval.decidedAt = event.occurredAt;
+      }
+    } else if (event.type === 'tool.denied') {
+      invocation.state = 'denied';
+      invocation.approvalId = event.payload.approvalId;
+      invocation.terminal = {
+        kind: 'denied', summary: event.payload.reason, resultRefs: [], occurredAt: event.occurredAt,
+      };
+      const approval = approvals.get(event.payload.approvalId);
+      if (approval !== undefined) {
+        approval.status = 'denied';
+        approval.decidedAt = event.occurredAt;
+        approval.reason = event.payload.reason;
+      }
+    } else if (event.type === 'tool.started') {
+      invocation.state = 'started';
+      invocation.started = {
+        idempotencyKey: event.payload.idempotencyKey,
+        fencingToken: event.payload.fencingToken,
+        attempt: event.payload.attempt,
+        startedAt: event.occurredAt,
+      };
+    } else if (
+      event.type === 'tool.succeeded' || event.type === 'tool.failed' ||
+      event.type === 'tool.cancelled' || event.type === 'tool.outcome_unknown'
+    ) {
+      const kind = event.type.slice('tool.'.length) as
+        'succeeded' | 'failed' | 'cancelled' | 'outcome_unknown';
+      invocation.state = kind;
+      invocation.terminal = {
+        kind,
+        summary: event.payload.summary,
+        resultRefs: [...event.payload.resultRefs],
+        ...(event.payload.durableSummary === undefined
+          ? {}
+          : { durableSummary: structuredClone(event.payload.durableSummary) }),
+        ...(event.payload.error === undefined
+          ? {}
+          : { error: structuredClone(event.payload.error) }),
+        occurredAt: event.occurredAt,
+      };
+    } else if (event.type === 'tool.observed') {
+      invocation.state = 'observed';
+      invocation.observation = { ...structuredClone(event.payload), occurredAt: event.occurredAt };
+      observations.set(event.payload.observationId, {
+        ...structuredClone(event.payload), projectId: event.projectId,
+        runId: event.runId, createdAt: event.occurredAt,
+      });
+    } else if (event.type === 'tool.retry_authorized') {
+      invocation.retryPermit = {
+        permitId: event.payload.permitId,
+        toolRevision: event.payload.toolRevision,
+        effect: event.payload.effect,
+        normalizedArgumentsDigest: event.payload.normalizedArgumentsDigest,
+        reason: event.payload.reason,
+      };
+    } else {
+      continue;
+    }
+    invocation.revision += 1;
+    invocation.updatedAt = event.occurredAt;
   }
 
   return {
@@ -202,6 +349,10 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
     attempts: [...attempts.values()].sort((a, b) => a.attemptId.localeCompare(b.attemptId)),
     invocations: [...invocations.values()].sort(
       (a, b) => a.runId.localeCompare(b.runId) || a.actionOrdinal - b.actionOrdinal,
+    ),
+    approvals: [...approvals.values()].sort((a, b) => a.approvalId.localeCompare(b.approvalId)),
+    observations: [...observations.values()].sort(
+      (a, b) => a.createdAt.localeCompare(b.createdAt) || a.observationId.localeCompare(b.observationId),
     ),
     envelopes: [...envelopes.values()].sort((a, b) => a.attemptId.localeCompare(b.attemptId)),
     validatedAttempts: [...validatedAttempts.values()].sort((a, b) => a.attemptId.localeCompare(b.attemptId)),

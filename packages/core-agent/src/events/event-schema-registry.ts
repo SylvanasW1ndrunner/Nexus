@@ -55,6 +55,10 @@ function assertJournalPayloadSafety(payload: unknown, maxPayloadBytes: number): 
     }
     for (const [key, item] of Object.entries(value)) {
       const normalized = key.replaceAll(/[-_]/gu, '').toLowerCase();
+      if (normalized === 'fencingtoken') {
+        visit(item);
+        continue;
+      }
       if (
         normalized.endsWith('password') || normalized.endsWith('authorization') ||
         normalized.endsWith('credential') || normalized.endsWith('apikey') ||
@@ -427,12 +431,118 @@ function validateToolProposed(payload: unknown): void {
 }
 
 function validateToolTerminal(payload: unknown): void {
-  validateShape(
-    payload,
-    ['summary', 'resultRefs'],
-    ['summary'],
-    ['resultRefs'],
-  );
+  const record = requireRecord(payload);
+  validateShape(payload, ['summary', 'resultRefs', 'durableSummary', 'error'], ['summary'], ['resultRefs']);
+  if (record.error !== undefined) validateToolExecutionError(record.error);
+}
+
+function validateCanonicalToolId(value: unknown): void {
+  const record = requireRecord(value);
+  exactKeys(record, ['namespace', 'name']);
+  requireString(record, 'name');
+  optionalString(record, 'namespace');
+}
+
+function validateToolEffect(record: Record<string, unknown>, key = 'effect'): void {
+  requireEnum(record, key, ['read', 'idempotent', 'transactional', 'non_idempotent']);
+}
+
+function validateSha256(record: Record<string, unknown>, key: string): void {
+  if (typeof record[key] !== 'string' || !/^[a-f0-9]{64}$/u.test(record[key] as string)) {
+    throw new TypeError(`Event payload ${key} must be lowercase SHA-256.`);
+  }
+}
+
+function validateToolValidated(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, [
+    'invocationId', 'canonicalToolId', 'toolRevision', 'effect',
+    'normalizedArgumentsDigest', 'proposedRevision', 'retryOf', 'retryPermitId',
+  ]);
+  ['invocationId', 'toolRevision'].forEach((key) => requireString(record, key));
+  optionalString(record, 'retryOf');
+  optionalString(record, 'retryPermitId');
+  validateCanonicalToolId(record.canonicalToolId);
+  validateToolEffect(record);
+  validateSha256(record, 'normalizedArgumentsDigest');
+  requireNonNegativeInteger(record, 'proposedRevision');
+}
+
+function validateToolApprovalFact(value: unknown): void {
+  const record = requireRecord(value);
+  exactKeys(record, [
+    'approvalId', 'projectId', 'sessionId', 'runId', 'turnId', 'invocationId',
+    'canonicalToolId', 'toolRevision', 'effect', 'normalizedArgumentsDigest',
+    'proposedRevision', 'status', 'decidedAt', 'decidedBy', 'reason',
+  ]);
+  [
+    'approvalId', 'projectId', 'sessionId', 'runId', 'turnId', 'invocationId', 'toolRevision',
+  ].forEach((key) => requireString(record, key));
+  validateCanonicalToolId(record.canonicalToolId);
+  validateToolEffect(record);
+  validateSha256(record, 'normalizedArgumentsDigest');
+  requireNonNegativeInteger(record, 'proposedRevision');
+  requireEnum(record, 'status', ['pending', 'approved', 'denied']);
+  if (record.decidedAt !== undefined) requireIsoTimestamp(record.decidedAt, 'decidedAt');
+  optionalString(record, 'decidedBy');
+  optionalString(record, 'reason');
+}
+
+function validateToolApprovalRequested(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['approval', 'summary']);
+  validateToolApprovalFact(record.approval);
+  requireBoundedString(record, 'summary', 2_000);
+}
+
+function validateToolStarted(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['invocationId', 'idempotencyKey', 'fencingToken', 'attempt']);
+  ['invocationId', 'idempotencyKey'].forEach((key) => requireString(record, key));
+  requireNonNegativeInteger(record, 'fencingToken');
+  requireNonNegativeInteger(record, 'attempt');
+}
+
+function validateToolExecutionError(value: unknown): void {
+  const record = requireRecord(value);
+  exactKeys(record, ['code', 'category', 'retryable', 'outcome']);
+  requireEnum(record, 'code', [
+    'HANDLER_FAILED', 'TOOL_TIMEOUT', 'TOOL_CANCELLED', 'INVALID_TOOL_RESULT',
+  ]);
+  requireEnum(record, 'category', ['internal', 'timeout', 'cancelled', 'contract']);
+  requireEnum(record, 'outcome', ['not_applied', 'unknown']);
+  if (typeof record.retryable !== 'boolean') {
+    throw new TypeError('Event payload retryable must be boolean.');
+  }
+}
+
+function validateToolRetryAuthorized(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, [
+    'invocationId', 'permitId', 'toolRevision', 'effect',
+    'normalizedArgumentsDigest', 'reason',
+  ]);
+  ['invocationId', 'permitId', 'toolRevision', 'reason'].forEach((key) => requireString(record, key));
+  validateToolEffect(record);
+  validateSha256(record, 'normalizedArgumentsDigest');
+}
+
+function validateToolObserved(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, [
+    'observationId', 'invocationId', 'summary', 'evidenceRefs',
+    'outcome', 'modelProjection', 'errorCode',
+  ]);
+  ['observationId', 'invocationId', 'summary'].forEach((key) => requireString(record, key));
+  requireStringArray(record, 'evidenceRefs');
+  requireEnum(record, 'outcome', [
+    'succeeded', 'failed', 'cancelled', 'outcome_unknown', 'denied',
+  ]);
+  if (record.errorCode !== undefined) {
+    requireEnum(record, 'errorCode', [
+      'HANDLER_FAILED', 'TOOL_TIMEOUT', 'TOOL_CANCELLED', 'INVALID_TOOL_RESULT',
+    ]);
+  }
 }
 
 function validateLegacyImported(payload: unknown): void {
@@ -566,11 +676,11 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   model_failed: descriptor({ persistence: 'diagnostic', validate: validateModelFailure }),
   'turn.closed': descriptor({ validate: (p) => validateShape(p, ['reason'], ['reason']) }),
   'tool.proposed': descriptor({ audience: MODEL, validate: validateToolProposed }),
-  'tool.validated': descriptor({ validate: (p) => validateShape(p, ['toolRevision', 'normalizedArgumentsDigest'], ['toolRevision', 'normalizedArgumentsDigest']) }),
-  'tool.approval_requested': descriptor({ audience: USER, validate: (p) => validateShape(p, ['approvalId', 'invocationId', 'summary'], ['approvalId', 'invocationId', 'summary']) }),
+  'tool.validated': descriptor({ validate: validateToolValidated }),
+  'tool.approval_requested': descriptor({ audience: USER, validate: validateToolApprovalRequested }),
   'tool.authorized': descriptor({ validate: (p) => validateShape(p, ['approvalId', 'invocationId'], ['approvalId', 'invocationId']) }),
   'tool.denied': descriptor({ audience: MODEL, validate: (p) => validateShape(p, ['approvalId', 'invocationId', 'reason'], ['approvalId', 'invocationId', 'reason']) }),
-  'tool.started': descriptor({ validate: (p) => validateShape(p, ['invocationId'], ['invocationId']) }),
+  'tool.started': descriptor({ validate: validateToolStarted }),
   'tool.progress': descriptor({ audience: USER, persistence: 'diagnostic', validate: (p) => validateShape(p, ['invocationId', 'summary'], ['invocationId', 'summary']) }),
   'tool.succeeded': descriptor({ validate: validateToolTerminal }),
   'tool.failed': descriptor({ validate: validateToolTerminal }),
@@ -578,8 +688,8 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   'tool.outcome_unknown': descriptor({ audience: MODEL, validate: validateToolTerminal }),
   'tool.outcome_resolution_requested': descriptor({ audience: USER, validate: (p) => validateShape(p, ['invocationId', 'summary'], ['invocationId', 'summary']) }),
   'tool.outcome_resolved': descriptor({ audience: MODEL, validate: validateToolTerminal }),
-  'tool.retry_authorized': descriptor({ validate: (p) => validateShape(p, ['invocationId', 'reason'], ['invocationId', 'reason']) }),
-  'tool.observed': descriptor({ audience: MODEL, validate: (p) => validateShape(p, ['observationId', 'invocationId', 'summary', 'evidenceRefs'], ['observationId', 'invocationId', 'summary'], ['evidenceRefs']) }),
+  'tool.retry_authorized': descriptor({ validate: validateToolRetryAuthorized }),
+  'tool.observed': descriptor({ audience: MODEL, validate: validateToolObserved }),
   'context.compaction_started': descriptor({ validate: (p) => validateShape(p, ['checkpointId'], ['checkpointId']) }),
   'context.compacted': descriptor({ validate: (p) => validateShape(p, ['checkpointId', 'summaryRef', 'coveredSequence'], ['checkpointId', 'summaryRef'], [], ['coveredSequence']) }),
   'context.compaction_failed': descriptor({ validate: (p) => validateShape(p, ['checkpointId', 'code'], ['checkpointId', 'code']) }),

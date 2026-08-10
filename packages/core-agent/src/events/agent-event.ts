@@ -90,6 +90,47 @@ type EmptyPayload = Record<string, never>;
 type ToolTerminalPayload = {
   summary: string;
   resultRefs: string[];
+  durableSummary?: PortableValue;
+  error?: ToolExecutionErrorFact;
+};
+
+export type ToolEffectFact = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
+
+export type CanonicalToolIdFact = { namespace?: string; name: string };
+
+export type ToolExecutionErrorFact = {
+  code: 'HANDLER_FAILED' | 'TOOL_TIMEOUT' | 'TOOL_CANCELLED' | 'INVALID_TOOL_RESULT';
+  category: 'internal' | 'timeout' | 'cancelled' | 'contract';
+  retryable: boolean;
+  outcome: 'not_applied' | 'unknown';
+};
+
+export type ToolApprovalFact = {
+  approvalId: string;
+  projectId: string;
+  sessionId: string;
+  runId: string;
+  turnId: string;
+  invocationId: string;
+  canonicalToolId: CanonicalToolIdFact;
+  toolRevision: string;
+  effect: ToolEffectFact;
+  normalizedArgumentsDigest: string;
+  proposedRevision: number;
+  status: 'pending' | 'approved' | 'denied';
+  decidedAt?: string;
+  decidedBy?: string;
+  reason?: string;
+};
+
+export type ToolObservationFact = {
+  observationId: string;
+  invocationId: string;
+  summary: string;
+  evidenceRefs: string[];
+  outcome: 'succeeded' | 'failed' | 'cancelled' | 'outcome_unknown' | 'denied';
+  modelProjection?: PortableValue;
+  errorCode?: ToolExecutionErrorFact['code'];
 };
 
 export type LegacyImportedToolCall = {
@@ -171,11 +212,25 @@ export interface AgentEventPayloadMap {
     name: string;
     arguments: PortableValue;
   };
-  'tool.validated': { toolRevision: string; normalizedArgumentsDigest: string };
-  'tool.approval_requested': { approvalId: string; invocationId: string; summary: string };
+  'tool.validated': {
+    invocationId: string;
+    canonicalToolId: CanonicalToolIdFact;
+    toolRevision: string;
+    effect: ToolEffectFact;
+    normalizedArgumentsDigest: string;
+    proposedRevision: number;
+    retryOf?: string;
+    retryPermitId?: string;
+  };
+  'tool.approval_requested': { approval: ToolApprovalFact; summary: string };
   'tool.authorized': { approvalId: string; invocationId: string };
   'tool.denied': { approvalId: string; invocationId: string; reason: string };
-  'tool.started': { invocationId: string };
+  'tool.started': {
+    invocationId: string;
+    idempotencyKey: string;
+    fencingToken: number;
+    attempt: number;
+  };
   'tool.progress': { invocationId: string; summary: string };
   'tool.succeeded': ToolTerminalPayload;
   'tool.failed': ToolTerminalPayload;
@@ -183,8 +238,15 @@ export interface AgentEventPayloadMap {
   'tool.outcome_unknown': ToolTerminalPayload;
   'tool.outcome_resolution_requested': { invocationId: string; summary: string };
   'tool.outcome_resolved': ToolTerminalPayload;
-  'tool.retry_authorized': { invocationId: string; reason: string };
-  'tool.observed': { observationId: string; invocationId: string; summary: string; evidenceRefs: string[] };
+  'tool.retry_authorized': {
+    invocationId: string;
+    permitId: string;
+    toolRevision: string;
+    effect: ToolEffectFact;
+    normalizedArgumentsDigest: string;
+    reason: string;
+  };
+  'tool.observed': ToolObservationFact;
   'context.compaction_started': { checkpointId: string };
   'context.compacted': { checkpointId: string; summaryRef: string; coveredSequence: number };
   'context.compaction_failed': { checkpointId: string; code: string };
