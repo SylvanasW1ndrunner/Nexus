@@ -12,6 +12,11 @@ import type {
   ToolExecutionErrorFact,
   ToolObservationFact,
 } from './agent-event.js';
+import {
+  decideSchedule,
+  runStateForSchedule,
+  type ScheduledToolInvocation,
+} from '../tools/tool-scheduler.js';
 
 export type AgentRunProjection = {
   projectId: string;
@@ -87,6 +92,12 @@ export type AgentInvocationProjection = {
     normalizedArgumentsDigest: string;
     reason: string;
   };
+  outcomeResolution?: {
+    resolutionId: string;
+    decisionDigest: string;
+    outcome: 'succeeded' | 'failed';
+    resolvedAt: string;
+  };
   started?: {
     idempotencyKey: string;
     fencingToken: number;
@@ -98,6 +109,8 @@ export type AgentInvocationProjection = {
     summary: string;
     resultRefs: string[];
     durableSummary?: PortableValue;
+    modelProjection?: PortableValue;
+    userProjection?: PortableValue;
     error?: ToolExecutionErrorFact;
     occurredAt: string;
   };
@@ -253,6 +266,9 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         createdAt: event.occurredAt,
         updatedAt: event.occurredAt,
       });
+      projectScheduledRunState(
+        runs, invocations, event.runId, event.turnId, event.occurredAt,
+      );
       continue;
     }
     const invocationId = event.invocationId;
@@ -261,14 +277,16 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
     if (invocation === undefined) continue;
     if (event.type === 'tool.validated') {
       invocation.state = 'validated';
-      invocation.canonicalToolId = structuredClone(event.payload.canonicalToolId);
-      invocation.toolRevision = event.payload.toolRevision;
-      invocation.effect = event.payload.effect;
-      invocation.normalizedArgumentsDigest = event.payload.normalizedArgumentsDigest;
-      invocation.proposedRevision = event.payload.proposedRevision;
-      if (event.payload.retryOf !== undefined) invocation.retryOf = event.payload.retryOf;
-      if (event.payload.retryPermitId !== undefined) {
-        invocation.retryPermitId = event.payload.retryPermitId;
+      if (!('validationError' in event.payload)) {
+        invocation.canonicalToolId = structuredClone(event.payload.canonicalToolId);
+        invocation.toolRevision = event.payload.toolRevision;
+        invocation.effect = event.payload.effect;
+        invocation.normalizedArgumentsDigest = event.payload.normalizedArgumentsDigest;
+        invocation.proposedRevision = event.payload.proposedRevision;
+        if (event.payload.retryOf !== undefined) invocation.retryOf = event.payload.retryOf;
+        if (event.payload.retryPermitId !== undefined) {
+          invocation.retryPermitId = event.payload.retryPermitId;
+        }
       }
     } else if (event.type === 'tool.approval_requested') {
       invocation.state = 'awaiting_approval';
@@ -316,11 +334,65 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         ...(event.payload.durableSummary === undefined
           ? {}
           : { durableSummary: structuredClone(event.payload.durableSummary) }),
+        ...(event.payload.modelProjection === undefined
+          ? {}
+          : { modelProjection: structuredClone(event.payload.modelProjection) }),
+        ...(event.payload.userProjection === undefined
+          ? {}
+          : { userProjection: structuredClone(event.payload.userProjection) }),
         ...(event.payload.error === undefined
           ? {}
           : { error: structuredClone(event.payload.error) }),
         occurredAt: event.occurredAt,
       };
+    } else if (event.type === 'tool.outcome_resolved') {
+      const previousObservation = invocation.observation;
+      if (previousObservation === undefined) {
+        throw new TypeError('Outcome resolution requires an existing Tool Observation.');
+      }
+      invocation.state = 'observed';
+      invocation.terminal = {
+        kind: event.payload.outcome,
+        summary: event.payload.summary,
+        resultRefs: [...event.payload.resultRefs],
+        ...(event.payload.durableSummary === undefined
+          ? {}
+          : { durableSummary: structuredClone(event.payload.durableSummary) }),
+        ...(event.payload.modelProjection === undefined
+          ? {}
+          : { modelProjection: structuredClone(event.payload.modelProjection) }),
+        ...(event.payload.userProjection === undefined
+          ? {}
+          : { userProjection: structuredClone(event.payload.userProjection) }),
+        ...(event.payload.error === undefined
+          ? {}
+          : { error: structuredClone(event.payload.error) }),
+        occurredAt: event.occurredAt,
+      };
+      invocation.observation = {
+        observationId: previousObservation.observationId,
+        invocationId: previousObservation.invocationId,
+        summary: event.payload.summary,
+        evidenceRefs: [...event.payload.resultRefs],
+        outcome: event.payload.outcome,
+        ...(event.payload.modelProjection === undefined
+          ? {}
+          : { modelProjection: structuredClone(event.payload.modelProjection) }),
+        ...(event.payload.error === undefined ? {} : { errorCode: event.payload.error.code }),
+        occurredAt: event.occurredAt,
+      };
+      invocation.outcomeResolution = {
+        resolutionId: event.payload.resolutionId,
+        decisionDigest: event.payload.decisionDigest,
+        outcome: event.payload.outcome,
+        resolvedAt: event.occurredAt,
+      };
+      observations.set(invocation.observation.observationId, {
+        ...publicObservationProjection(invocation.observation),
+        projectId: event.projectId,
+        runId: event.runId,
+        createdAt: event.occurredAt,
+      });
     } else if (event.type === 'tool.observed') {
       invocation.state = 'observed';
       invocation.observation = { ...structuredClone(event.payload), occurredAt: event.occurredAt };
@@ -341,6 +413,11 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
     }
     invocation.revision += 1;
     invocation.updatedAt = event.occurredAt;
+    if (event.type !== 'tool.validated') {
+      projectScheduledRunState(
+        runs, invocations, event.runId, invocation.turnId, event.occurredAt,
+      );
+    }
   }
 
   return {
@@ -357,5 +434,54 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
     envelopes: [...envelopes.values()].sort((a, b) => a.attemptId.localeCompare(b.attemptId)),
     validatedAttempts: [...validatedAttempts.values()].sort((a, b) => a.attemptId.localeCompare(b.attemptId)),
     lastSequenceByProject,
+  };
+}
+
+function projectScheduledRunState(
+  runs: ReadonlyMap<string, AgentRunProjection>,
+  invocations: ReadonlyMap<string, AgentInvocationProjection>,
+  runId: string,
+  turnId: string,
+  occurredAt: string,
+): void {
+  const run = runs.get(runId);
+  if (run === undefined) return;
+  const facts = [...invocations.values()]
+    .filter((invocation) => invocation.runId === runId && invocation.turnId === turnId)
+    .map(scheduledInvocationFact);
+  run.state = runStateForSchedule(decideSchedule({
+    invocations: facts,
+    maxConcurrency: Number.MAX_SAFE_INTEGER,
+  }));
+  run.updatedAt = occurredAt;
+}
+
+function scheduledInvocationFact(
+  invocation: AgentInvocationProjection,
+): ScheduledToolInvocation {
+  if (invocation.state === 'validated') {
+    throw new TypeError('A transient validated Tool state cannot be projected independently.');
+  }
+  return {
+    invocationId: invocation.invocationId,
+    actionOrdinal: invocation.actionOrdinal,
+    effect: invocation.effect ?? 'unresolved',
+    state: invocation.state,
+  };
+}
+
+function publicObservationProjection(
+  observation: ToolObservationFact & { occurredAt: string },
+): ToolObservationFact {
+  return {
+    observationId: observation.observationId,
+    invocationId: observation.invocationId,
+    summary: observation.summary,
+    evidenceRefs: [...observation.evidenceRefs],
+    outcome: observation.outcome,
+    ...(observation.modelProjection === undefined
+      ? {}
+      : { modelProjection: structuredClone(observation.modelProjection) }),
+    ...(observation.errorCode === undefined ? {} : { errorCode: observation.errorCode }),
   };
 }

@@ -18,6 +18,10 @@ import {
   type CreateRunResult,
   type JournalCommand,
   type JournalCommitResult,
+  type GetToolApprovalInput,
+  type ListToolApprovalsInput,
+  type ToolApprovalPage,
+  type ListTurnInvocationsInput,
   type RenewRunLeaseInput,
   type RunLease,
   type RunLeaseReference,
@@ -33,6 +37,7 @@ import type {
   AgentEventType,
   ToolApprovalFact,
   ToolEffectFact,
+  ToolExecutionErrorFact,
 } from './agent-event.js';
 import {
   AGENT_EVENT_SCHEMA_REGISTRY,
@@ -52,6 +57,11 @@ import type {
   ModelTurnCommitResult,
 } from './run-event-committer.js';
 import { activeLegacyMigrationIdentity } from '../internal/legacy-migration-writer.js';
+import {
+  decideSchedule,
+  runStateForSchedule,
+  type ScheduledToolInvocation,
+} from '../tools/tool-scheduler.js';
 
 type NodeDatabaseSyncConstructor = new (location: string) => NodeDatabaseSync;
 
@@ -88,6 +98,56 @@ type EventRow = {
 type CommandRow = { request_digest: string; result_json: string };
 type IngressRow = { input_digest: string; result_json: string };
 type LeaseRow = { owner_id: string; expires_at_ms: number; fencing_token: number };
+
+const MAX_TOOL_SUMMARY_CHARS = 4_096;
+const MAX_APPROVAL_SUMMARY_CHARS = 2_000;
+const MAX_APPROVAL_REASON_CHARS = 2_000;
+const MAX_DECIDED_BY_CHARS = 256;
+const MAX_TOOL_RESULT_REFS = 32;
+const PROJECT_ARTIFACT_HANDLE = /^agent-artifact:[a-f0-9]{24}:[a-f0-9]{40}$/u;
+const TOOL_INVOCATION_COMMON_KEYS = [
+  'action', 'projectId', 'sessionId', 'runId', 'turnId', 'invocationId',
+  'commandId', 'lease', 'expectedRunRevision', 'expectedInvocationRevision',
+] as const;
+const TOOL_INVOCATION_ACTION_KEYS: Record<ToolInvocationJournalCommand['action'], readonly string[]> = {
+  validate: [
+    'canonicalToolId', 'toolRevision', 'effect', 'normalizedArgumentsDigest',
+    'authorization', 'approvalSummary',
+  ],
+  'reject-validation': ['summary', 'error'],
+  'decide-approval': [
+    'approvalId', 'canonicalToolId', 'toolRevision', 'effect',
+    'normalizedArgumentsDigest', 'proposedRevision', 'decision', 'decidedBy', 'reason',
+  ],
+  start: ['idempotencyKey', 'attempt'],
+  finish: [
+    'outcome', 'summary', 'resultRefs', 'durableSummary', 'modelProjection',
+    'userProjection', 'error', 'interruptedFencingToken',
+  ],
+  observe: ['observation'],
+  'authorize-retry': [
+    'permitId', 'toolRevision', 'effect', 'normalizedArgumentsDigest', 'reason',
+  ],
+  'resolve-outcome': [
+    'resolutionId', 'outcome', 'canonicalToolId', 'toolRevision', 'effect',
+    'normalizedArgumentsDigest', 'proposedRevision', 'summary',
+  ],
+};
+const TOOL_INVOCATION_OPTIONAL_ACTION_KEYS: Record<
+  ToolInvocationJournalCommand['action'], readonly string[]
+> = {
+  validate: [],
+  'reject-validation': [],
+  'decide-approval': ['decidedBy', 'reason'],
+  start: [],
+  finish: [
+    'durableSummary', 'modelProjection', 'userProjection', 'error',
+    'interruptedFencingToken',
+  ],
+  observe: [],
+  'authorize-retry': [],
+  'resolve-outcome': [],
+};
 
 export class SqliteAgentJournal implements AgentJournal {
   readonly filePath: string;
@@ -223,8 +283,9 @@ export class SqliteAgentJournal implements AgentJournal {
   async commitToolInvocation(
     command: ToolInvocationJournalCommand,
   ): Promise<ToolInvocationCommitResult> {
+    const snapshot = snapshotToolInvocationCommand(command);
     await Promise.resolve();
-    const normalized = normalizeToolInvocationCommand(command);
+    const normalized = normalizeToolInvocationCommand(snapshot);
     const requestDigest = digestValue(toolInvocationCommandIdentity(normalized));
     return this.#withDatabase((database) => transaction(database, () => {
       const replay = readCommandResult<ToolInvocationCommitResult>(
@@ -276,6 +337,148 @@ export class SqliteAgentJournal implements AgentJournal {
       };
 
       switch (normalized.action) {
+        case 'resolve-outcome': {
+          const decisionDigest = digestValue(outcomeResolutionIdentity(normalized));
+          if (invocation.outcomeResolution !== undefined) {
+            if (invocation.outcomeResolution.decisionDigest !== decisionDigest) {
+              throw new AgentJournalError(
+                'OUTCOME_RESOLUTION_CONFLICT',
+                'Unknown outcome already has a conflicting resolution.',
+              );
+            }
+            const result: ToolInvocationCommitResult = { events, invocation };
+            writeCommandResult(
+              database, normalized.projectId, normalized.commandId,
+              'tool.resolve-outcome', requestDigest, result, occurredAt,
+            );
+            return result;
+          }
+          requireInvocationState(invocation, ['observed']);
+          if (
+            invocation.terminal?.kind !== 'outcome_unknown' ||
+            invocation.observation === undefined ||
+            invocation.canonicalToolId === undefined ||
+            canonicalJson(invocation.canonicalToolId) !==
+              canonicalJson(normalized.canonicalToolId) ||
+            invocation.toolRevision !== normalized.toolRevision ||
+            invocation.effect !== normalized.effect ||
+            invocation.normalizedArgumentsDigest !== normalized.normalizedArgumentsDigest ||
+            invocation.proposedRevision !== normalized.proposedRevision
+          ) {
+            throw new AgentJournalError(
+              'INVOCATION_STATE_CONFLICT',
+              'Outcome resolution does not match the exact unknown Invocation.',
+            );
+          }
+          invocation.state = 'observed';
+          const priorTerminal = invocation.terminal;
+          const resolutionError: ToolExecutionErrorFact | undefined =
+            normalized.outcome === 'failed'
+              ? {
+                  code: 'OUTCOME_RESOLVED_FAILED', category: 'resolution',
+                  retryable: false, outcome: 'unknown',
+                }
+              : undefined;
+          invocation.terminal = {
+            kind: normalized.outcome,
+            summary: boundedText(normalized.summary, 4_096),
+            resultRefs: [...priorTerminal.resultRefs],
+            ...(priorTerminal.durableSummary === undefined
+              ? {}
+              : { durableSummary: structuredClone(priorTerminal.durableSummary) }),
+            ...(priorTerminal.modelProjection === undefined
+              ? {}
+              : { modelProjection: structuredClone(priorTerminal.modelProjection) }),
+            ...(priorTerminal.userProjection === undefined
+              ? {}
+              : { userProjection: structuredClone(priorTerminal.userProjection) }),
+            ...(resolutionError === undefined ? {} : { error: resolutionError }),
+            occurredAt,
+          };
+          invocation.observation = {
+            observationId: invocation.observation.observationId,
+            invocationId: invocation.observation.invocationId,
+            summary: invocation.terminal.summary,
+            evidenceRefs: [...invocation.terminal.resultRefs],
+            outcome: normalized.outcome,
+            ...(invocation.terminal.modelProjection === undefined
+              ? {}
+              : { modelProjection: structuredClone(invocation.terminal.modelProjection) }),
+            ...(resolutionError === undefined
+              ? {}
+              : { errorCode: resolutionError.code }),
+            occurredAt,
+          };
+          invocation.outcomeResolution = {
+            resolutionId: normalized.resolutionId,
+            decisionDigest,
+            outcome: normalized.outcome,
+            resolvedAt: occurredAt,
+          };
+          append('tool.outcome_resolved', {
+            resolutionId: normalized.resolutionId,
+            decisionDigest,
+            invocationId: invocation.invocationId,
+            outcome: normalized.outcome,
+            canonicalToolId: normalized.canonicalToolId,
+            toolRevision: normalized.toolRevision,
+            effect: normalized.effect,
+            normalizedArgumentsDigest: normalized.normalizedArgumentsDigest,
+            proposedRevision: normalized.proposedRevision,
+            summary: invocation.terminal.summary,
+            resultRefs: invocation.terminal.resultRefs,
+            ...(invocation.terminal.durableSummary === undefined
+              ? {}
+              : { durableSummary: invocation.terminal.durableSummary }),
+            ...(invocation.terminal.modelProjection === undefined
+              ? {}
+              : { modelProjection: invocation.terminal.modelProjection }),
+            ...(invocation.terminal.userProjection === undefined
+              ? {}
+              : { userProjection: invocation.terminal.userProjection }),
+            ...(invocation.terminal.error === undefined
+              ? {}
+              : { error: invocation.terminal.error }),
+          });
+          const observation = invocation.observation;
+          database.prepare(
+            `UPDATE agent_observations SET payload_json = ?
+             WHERE observation_id = ? AND invocation_id = ?`,
+          ).run(
+            JSON.stringify({
+              ...observation,
+              projectId: invocation.projectId,
+              runId: invocation.runId,
+              createdAt: observation.occurredAt,
+            }),
+            observation.observationId,
+            invocation.invocationId,
+          );
+          break;
+        }
+        case 'reject-validation': {
+          requireInvocationState(invocation, ['proposed', 'authorized']);
+          if (invocation.state === 'proposed') {
+            append('tool.validated', {
+              invocationId: invocation.invocationId,
+              validationError: normalized.error,
+            });
+          }
+          invocation.state = 'failed';
+          invocation.terminal = {
+            kind: 'failed',
+            summary: boundedText(normalized.summary, 4_096),
+            resultRefs: [],
+            error: structuredClone(normalized.error),
+            occurredAt,
+          };
+          append('tool.failed', {
+            summary: invocation.terminal.summary,
+            resultRefs: [],
+            error: invocation.terminal.error,
+          });
+          break;
+        }
         case 'validate': {
           requireInvocationState(invocation, ['proposed']);
           let authorization = normalized.authorization;
@@ -286,7 +489,7 @@ export class SqliteAgentJournal implements AgentJournal {
             ? undefined
             : findUnconsumedRetryPermit(database, riskyPredecessor);
           if (riskyPredecessor !== undefined && availablePermit === undefined) {
-            authorization = 'ask';
+            authorization = 'deny';
           }
           invocation.canonicalToolId = structuredClone(normalized.canonicalToolId);
           invocation.toolRevision = normalized.toolRevision;
@@ -317,7 +520,9 @@ export class SqliteAgentJournal implements AgentJournal {
             append('tool.authorized', { approvalId, invocationId: invocation.invocationId });
           } else if (authorization === 'deny') {
             const approvalId = `policy_${stableToolIdentity(invocation.invocationId)}`;
-            const reason = 'The tool invocation was denied.';
+            const reason = riskyPredecessor !== undefined && availablePermit === undefined
+              ? 'An exact single-use retry permit is required for this unknown outcome.'
+              : 'The tool invocation was denied.';
             invocation.approvalId = approvalId;
             invocation.state = 'denied';
             invocation.terminal = {
@@ -428,9 +633,15 @@ export class SqliteAgentJournal implements AgentJournal {
         case 'finish': {
           requireInvocationState(invocation, ['started']);
           if (invocation.started?.fencingToken !== normalized.lease.fencingToken) {
-            throw new AgentJournalError(
-              'FENCING_TOKEN_STALE', 'Invocation was started under another fencing token.',
-            );
+            const replaySafeRecovery = invocation.effect === 'read' || invocation.effect === 'idempotent';
+            if (!replaySafeRecovery && (
+              normalized.outcome !== 'outcome_unknown' ||
+              normalized.interruptedFencingToken !== invocation.started?.fencingToken
+            )) {
+              throw new AgentJournalError(
+                'FENCING_TOKEN_STALE', 'Invocation was started under another fencing token.',
+              );
+            }
           }
           invocation.state = normalized.outcome;
           invocation.terminal = {
@@ -440,15 +651,27 @@ export class SqliteAgentJournal implements AgentJournal {
             ...(normalized.durableSummary === undefined
               ? {}
               : { durableSummary: structuredClone(normalized.durableSummary) }),
+            ...(normalized.modelProjection === undefined
+              ? {}
+              : { modelProjection: structuredClone(normalized.modelProjection) }),
+            ...(normalized.userProjection === undefined
+              ? {}
+              : { userProjection: structuredClone(normalized.userProjection) }),
             ...(normalized.error === undefined ? {} : { error: structuredClone(normalized.error) }),
             occurredAt,
           };
-          append(`tool.${normalized.outcome}` as AgentEventType, {
+          append(`tool.${normalized.outcome}`, {
             summary: invocation.terminal.summary,
             resultRefs: invocation.terminal.resultRefs,
             ...(invocation.terminal.durableSummary === undefined
               ? {}
               : { durableSummary: invocation.terminal.durableSummary }),
+            ...(invocation.terminal.modelProjection === undefined
+              ? {}
+              : { modelProjection: invocation.terminal.modelProjection }),
+            ...(invocation.terminal.userProjection === undefined
+              ? {}
+              : { userProjection: invocation.terminal.userProjection }),
             ...(invocation.terminal.error === undefined
               ? {}
               : { error: invocation.terminal.error }),
@@ -534,6 +757,7 @@ export class SqliteAgentJournal implements AgentJournal {
           'REVISION_CONFLICT', 'Concurrent Invocation transition won the revision race.',
         );
       }
+      projectToolRunState(database, invocation.runId, invocation.turnId, occurredAt);
       const result: ToolInvocationCommitResult = {
         events,
         invocation: structuredClone(invocation),
@@ -924,6 +1148,20 @@ export class SqliteAgentJournal implements AgentJournal {
     );
   }
 
+  async getRunLease(projectIdInput: string, runIdInput: string): Promise<RunLease | null> {
+    await Promise.resolve();
+    const projectId = requireText(projectIdInput, 'projectId');
+    const runId = requireText(runIdInput, 'runId');
+    return this.#withDatabase((database) => {
+      this.#assertRun(database, projectId, undefined, runId);
+      const row = database.prepare(
+        `SELECT owner_id, expires_at_ms, fencing_token
+         FROM agent_run_leases WHERE project_id = ? AND run_id = ?`,
+      ).get(projectId, runId) as LeaseRow | undefined;
+      return row === undefined ? null : leaseResult(projectId, runId, row);
+    });
+  }
+
   async getRunProjection(runId: string): Promise<AgentRunProjection | null> {
     await Promise.resolve();
     return this.#withDatabase((database) => {
@@ -1062,12 +1300,55 @@ export class SqliteAgentJournal implements AgentJournal {
     });
   }
 
+  async listTurnInvocations(
+    input: ListTurnInvocationsInput,
+  ): Promise<AgentInvocationProjection[]> {
+    const snapshot = snapshotListTurnInvocationsInput(input);
+    await Promise.resolve();
+    const projectId = requireText(snapshot.projectId, 'projectId');
+    const sessionId = requireText(snapshot.sessionId, 'sessionId');
+    const runId = requireText(snapshot.runId, 'runId');
+    const turnId = requireText(snapshot.turnId, 'turnId');
+    const afterActionOrdinal = snapshot.afterActionOrdinal ?? -1;
+    if (!Number.isSafeInteger(afterActionOrdinal) || afterActionOrdinal < -1) {
+      throw new AgentJournalError(
+        'INVALID_ARGUMENT',
+        'afterActionOrdinal must be a safe integer greater than or equal to -1.',
+      );
+    }
+    if (!Number.isSafeInteger(snapshot.limit) || snapshot.limit < 1 || snapshot.limit > 1_000) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Invocation page limit must be 1..1000.');
+    }
+    return this.#withDatabase((database) => {
+      this.#assertRun(database, projectId, sessionId, runId);
+      const rows = database.prepare(
+        `SELECT invocation_id FROM agent_invocations
+         WHERE project_id = ? AND session_id = ? AND run_id = ? AND turn_id = ?
+           AND action_ordinal > ?
+         ORDER BY action_ordinal ASC LIMIT ?`,
+      ).all(
+        projectId, sessionId, runId, turnId, afterActionOrdinal, snapshot.limit,
+      ) as unknown as Array<{ invocation_id: string }>;
+      return rows.map(({ invocation_id }) => {
+        const invocation = readInvocationProjection(database, invocation_id);
+        if (invocation === null) {
+          throw new AgentJournalError(
+            'PROJECTION_CORRUPT',
+            `Invocation projection is missing: ${invocation_id}.`,
+          );
+        }
+        return invocation;
+      });
+    });
+  }
+
   async getInvocation(invocationIdInput: string): Promise<AgentInvocationProjection | null> {
     await Promise.resolve();
     const invocationId = requireText(invocationIdInput, 'invocationId');
     return this.#withDatabase((database) => readInvocationProjection(database, invocationId));
   }
 
+  /** @deprecated Legacy projection query; unified Runtime uses scoped getApproval(). */
   async getApprovalForInvocation(invocationIdInput: string): Promise<ToolApprovalFact | null> {
     await Promise.resolve();
     const invocationId = requireText(invocationIdInput, 'invocationId');
@@ -1077,6 +1358,87 @@ export class SqliteAgentJournal implements AgentJournal {
          WHERE invocation_id = ? ORDER BY created_at DESC LIMIT 1`,
       ).get(invocationId) as { approval_id: string } | undefined;
       return row === undefined ? null : readApprovalProjection(database, row.approval_id);
+    });
+  }
+
+  async getApproval(input: GetToolApprovalInput): Promise<ToolApprovalFact | null> {
+    const snapshot = snapshotGetToolApprovalInput(input);
+    await Promise.resolve();
+    const projectId = requireText(snapshot.projectId, 'projectId');
+    const sessionId = requireText(snapshot.sessionId, 'sessionId');
+    const runId = requireText(snapshot.runId, 'runId');
+    const invocationId = requireText(snapshot.invocationId, 'invocationId');
+    return this.#withDatabase((database) => {
+      this.#assertRun(database, projectId, sessionId, runId);
+      const row = database.prepare(
+        `SELECT approval_id FROM agent_approvals
+         WHERE project_id = ? AND run_id = ? AND invocation_id = ?
+         ORDER BY approval_id DESC LIMIT 1`,
+      ).get(projectId, runId, invocationId) as { approval_id: string } | undefined;
+      return row === undefined ? null : readApprovalProjection(database, row.approval_id);
+    });
+  }
+
+  async listApprovals(input: ListToolApprovalsInput): Promise<ToolApprovalPage> {
+    const snapshot = snapshotListToolApprovalsInput(input);
+    await Promise.resolve();
+    const projectId = requireText(snapshot.projectId, 'projectId');
+    const sessionId = requireText(snapshot.sessionId, 'sessionId');
+    const runId = requireText(snapshot.runId, 'runId');
+    const cursor = snapshot.cursor === undefined
+      ? { createdAt: '', approvalId: '' }
+      : decodeApprovalCursor(requireText(snapshot.cursor, 'cursor'));
+    if (!Number.isSafeInteger(snapshot.limit) || snapshot.limit < 1 || snapshot.limit > 1_000) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Approval page limit must be 1..1000.');
+    }
+    if (
+      snapshot.status !== undefined &&
+      !['pending', 'approved', 'denied'].includes(snapshot.status)
+    ) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Approval status filter is invalid.');
+    }
+    return this.#withDatabase((database) => {
+      this.#assertRun(database, projectId, sessionId, runId);
+      const rows = (snapshot.status === undefined
+        ? database.prepare(
+          `SELECT approval_id, created_at FROM agent_approvals
+           WHERE project_id = ? AND run_id = ?
+             AND (created_at > ? OR (created_at = ? AND approval_id > ?))
+           ORDER BY created_at ASC, approval_id ASC LIMIT ?`,
+        ).all(
+          projectId, runId, cursor.createdAt, cursor.createdAt,
+          cursor.approvalId, snapshot.limit + 1,
+        )
+        : database.prepare(
+          `SELECT approval_id, created_at FROM agent_approvals
+           WHERE project_id = ? AND run_id = ? AND status = ?
+             AND (created_at > ? OR (created_at = ? AND approval_id > ?))
+           ORDER BY created_at ASC, approval_id ASC LIMIT ?`,
+        ).all(
+          projectId, runId, snapshot.status, cursor.createdAt, cursor.createdAt,
+          cursor.approvalId, snapshot.limit + 1,
+        )) as unknown as Array<{ approval_id: string; created_at: string }>;
+      const hasMore = rows.length > snapshot.limit;
+      const pageRows = rows.slice(0, snapshot.limit);
+      const items = pageRows.map(({ approval_id }) => {
+        const approval = readApprovalProjection(database, approval_id);
+        if (approval === null) {
+          throw new AgentJournalError(
+            'PROJECTION_CORRUPT',
+            `Approval projection is missing: ${approval_id}.`,
+          );
+        }
+        return approval;
+      });
+      const last = pageRows.at(-1);
+      const nextCursor = hasMore && last !== undefined
+        ? encodeApprovalCursor(last.created_at, last.approval_id)
+        : undefined;
+      return {
+        items,
+        hasMore,
+        ...(nextCursor === undefined ? {} : { nextCursor }),
+      };
     });
   }
 
@@ -1328,6 +1690,7 @@ export class SqliteAgentJournal implements AgentJournal {
         if (Number(runCas.changes) !== 1) {
           throw new AgentJournalError('REVISION_CONFLICT', 'Concurrent Run commit won the revision race.');
         }
+        projectToolRunState(database, runId, turnId, occurredAt);
         const result = { turn, envelope: prepared.envelope, invocations };
         writeCommandResult(
           database,
@@ -1639,6 +2002,103 @@ function snapshotRenewRunLeaseCommand(input: RenewRunLeaseInput): RenewRunLeaseI
     ttlMs: record.ttlMs,
     fencingToken: record.fencingToken,
   }) as RenewRunLeaseInput;
+}
+
+function snapshotToolInvocationCommand(
+  command: ToolInvocationJournalCommand,
+): ToolInvocationJournalCommand {
+  const allActionKeys = [...new Set(Object.values(TOOL_INVOCATION_ACTION_KEYS).flat())];
+  const captured = snapshotDataRecord(
+    command,
+    TOOL_INVOCATION_COMMON_KEYS,
+    allActionKeys,
+    'Tool Invocation command',
+  );
+  const action = captured.action;
+  if (
+    typeof action !== 'string' ||
+    !Object.hasOwn(TOOL_INVOCATION_ACTION_KEYS, action)
+  ) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'Tool Invocation action is invalid.');
+  }
+  const typedAction = action as ToolInvocationJournalCommand['action'];
+  const optionalActionKeys = TOOL_INVOCATION_OPTIONAL_ACTION_KEYS[typedAction];
+  const requiredActionKeys = TOOL_INVOCATION_ACTION_KEYS[typedAction]
+    .filter((key) => !optionalActionKeys.includes(key));
+  const exact = snapshotDataRecord(
+    captured,
+    [...TOOL_INVOCATION_COMMON_KEYS, ...requiredActionKeys],
+    optionalActionKeys,
+    'Tool Invocation command',
+  );
+  const output = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(exact)) {
+    let snapshotted = value;
+    if (key === 'lease') {
+      snapshotted = snapshotRunLeaseReference(value, 'Tool Invocation command lease');
+    } else if (key === 'resultRefs') {
+      snapshotted = snapshotDataArray(value, 'Tool Invocation command resultRefs',
+        (item, label) => snapshotPortableData(item, label));
+    } else if (
+      key === 'canonicalToolId' || key === 'error' || key === 'observation' ||
+      key === 'durableSummary' || key === 'modelProjection' || key === 'userProjection'
+    ) {
+      snapshotted = snapshotPortableData(value, `Tool Invocation command ${key}`);
+    }
+    Object.defineProperty(output, key, {
+      value: snapshotted,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return Object.freeze(output) as ToolInvocationJournalCommand;
+}
+
+function snapshotGetToolApprovalInput(input: GetToolApprovalInput): GetToolApprovalInput {
+  const record = snapshotDataRecord(input, [
+    'projectId', 'sessionId', 'runId', 'invocationId',
+  ], [], 'Get Tool Approval input');
+  return Object.freeze({
+    projectId: record.projectId,
+    sessionId: record.sessionId,
+    runId: record.runId,
+    invocationId: record.invocationId,
+  }) as GetToolApprovalInput;
+}
+
+function snapshotListToolApprovalsInput(
+  input: ListToolApprovalsInput,
+): ListToolApprovalsInput {
+  const record = snapshotDataRecord(input, [
+    'projectId', 'sessionId', 'runId', 'limit',
+  ], ['cursor', 'status'], 'List Tool Approvals input');
+  return Object.freeze({
+    projectId: record.projectId,
+    sessionId: record.sessionId,
+    runId: record.runId,
+    limit: record.limit,
+    ...(Object.hasOwn(record, 'cursor') ? { cursor: record.cursor } : {}),
+    ...(Object.hasOwn(record, 'status') ? { status: record.status } : {}),
+  }) as ListToolApprovalsInput;
+}
+
+function snapshotListTurnInvocationsInput(
+  input: ListTurnInvocationsInput,
+): ListTurnInvocationsInput {
+  const record = snapshotDataRecord(input, [
+    'projectId', 'sessionId', 'runId', 'turnId', 'limit',
+  ], ['afterActionOrdinal'], 'List Turn Invocations input');
+  return Object.freeze({
+    projectId: record.projectId,
+    sessionId: record.sessionId,
+    runId: record.runId,
+    turnId: record.turnId,
+    limit: record.limit,
+    ...(Object.hasOwn(record, 'afterActionOrdinal')
+      ? { afterActionOrdinal: record.afterActionOrdinal }
+      : {}),
+  }) as ListTurnInvocationsInput;
 }
 
 function snapshotRunLeaseReference(value: unknown, label: string): RunLeaseReference {
@@ -2002,22 +2462,31 @@ function normalizeToolInvocationCommand(
       'canonicalToolId', 'toolRevision', 'effect', 'normalizedArgumentsDigest',
       'authorization', 'approvalSummary',
     ],
+    'reject-validation': ['summary', 'error'],
     'decide-approval': [
       'approvalId', 'canonicalToolId', 'toolRevision', 'effect',
       'normalizedArgumentsDigest', 'proposedRevision', 'decision', 'decidedBy', 'reason',
     ],
     start: ['idempotencyKey', 'attempt'],
-    finish: ['outcome', 'summary', 'resultRefs', 'durableSummary', 'error'],
+    finish: [
+      'outcome', 'summary', 'resultRefs', 'durableSummary', 'modelProjection',
+      'userProjection', 'error',
+      'interruptedFencingToken',
+    ],
     observe: ['observation'],
     'authorize-retry': [
       'permitId', 'toolRevision', 'effect', 'normalizedArgumentsDigest', 'reason',
+    ],
+    'resolve-outcome': [
+      'resolutionId', 'outcome', 'canonicalToolId', 'toolRevision', 'effect',
+      'normalizedArgumentsDigest', 'proposedRevision', 'summary',
     ],
   };
   if (!Object.hasOwn(actionKeys, command.action)) {
     throw new AgentJournalError('INVALID_ARGUMENT', 'Tool Invocation action is invalid.');
   }
   assertExactKeys(
-    command as unknown as Record<string, unknown>,
+    command,
     [...common, ...actionKeys[command.action]],
     'Tool Invocation command',
   );
@@ -2033,6 +2502,7 @@ function normalizeToolInvocationCommand(
   requireRevision(command.lease.fencingToken, 'lease.fencingToken');
   requireRevision(command.expectedRunRevision, 'expectedRunRevision');
   requireRevision(command.expectedInvocationRevision, 'expectedInvocationRevision');
+  assertToolInvocationIngressBounds(command);
   validatePortable(command, 'Tool Invocation command');
   if ('canonicalToolId' in command) {
     requireCanonicalToolId(command.canonicalToolId);
@@ -2047,6 +2517,9 @@ function normalizeToolInvocationCommand(
       throw new AgentJournalError('INVALID_ARGUMENT', 'authorization is invalid.');
     }
     requireText(command.approvalSummary, 'approvalSummary');
+  } else if (command.action === 'reject-validation') {
+    requireText(command.summary, 'summary');
+    requireToolExecutionErrorFact(command.error);
   } else if (command.action === 'decide-approval') {
     requireText(command.approvalId, 'approvalId');
     requireRevision(command.proposedRevision, 'proposedRevision');
@@ -2068,20 +2541,124 @@ function normalizeToolInvocationCommand(
     )) {
       throw new AgentJournalError('INVALID_ARGUMENT', 'resultRefs must contain strings.');
     }
+    if (command.interruptedFencingToken !== undefined) {
+      requireRevision(command.interruptedFencingToken, 'interruptedFencingToken');
+      if (command.outcome !== 'outcome_unknown') {
+        throw new AgentJournalError(
+          'INVALID_ARGUMENT', 'interruptedFencingToken requires outcome_unknown.',
+        );
+      }
+    }
   } else if (command.action === 'observe') {
     requireText(command.observation.observationId, 'observation.observationId');
     requireText(command.observation.invocationId, 'observation.invocationId');
-  } else {
+  } else if (command.action === 'authorize-retry') {
     requireText(command.permitId, 'permitId');
     requireText(command.reason, 'reason');
+  } else {
+    requireText(command.resolutionId, 'resolutionId');
+    if (!['succeeded', 'failed'].includes(command.outcome)) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Outcome resolution is invalid.');
+    }
+    requireRevision(command.proposedRevision, 'proposedRevision');
+    requireText(command.summary, 'summary');
   }
   return structuredClone(command);
 }
 
+function assertToolInvocationIngressBounds(command: ToolInvocationJournalCommand): void {
+  if (command.action === 'validate') {
+    requireBoundedText(
+      command.approvalSummary,
+      'approvalSummary',
+      MAX_APPROVAL_SUMMARY_CHARS,
+    );
+    return;
+  }
+  if (command.action === 'reject-validation' || command.action === 'resolve-outcome') {
+    requireBoundedText(command.summary, 'summary', MAX_TOOL_SUMMARY_CHARS);
+    return;
+  }
+  if (command.action === 'decide-approval') {
+    if (command.decidedBy !== undefined) {
+      requireBoundedText(command.decidedBy, 'decidedBy', MAX_DECIDED_BY_CHARS);
+    }
+    if (command.reason !== undefined) {
+      requireBoundedText(command.reason, 'reason', MAX_APPROVAL_REASON_CHARS);
+    }
+    return;
+  }
+  if (command.action === 'finish') {
+    requireBoundedText(command.summary, 'summary', MAX_TOOL_SUMMARY_CHARS);
+    requireArtifactHandles(command.resultRefs, 'resultRefs');
+    return;
+  }
+  if (command.action === 'observe') {
+    requireBoundedText(
+      command.observation.summary,
+      'observation.summary',
+      MAX_TOOL_SUMMARY_CHARS,
+    );
+    requireArtifactHandles(command.observation.evidenceRefs, 'observation.evidenceRefs');
+    return;
+  }
+  if (command.action === 'authorize-retry') {
+    requireBoundedText(command.reason, 'reason', MAX_APPROVAL_REASON_CHARS);
+  }
+}
+
+function requireBoundedText(value: unknown, name: string, maximum: number): string {
+  const text = requireText(value, name);
+  if (text.length > maximum) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT',
+      `${name} exceeds the ${maximum}-character limit.`,
+    );
+  }
+  return text;
+}
+
+function requireArtifactHandles(value: unknown, name: string): asserts value is string[] {
+  if (!Array.isArray(value) || value.length > MAX_TOOL_RESULT_REFS) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT',
+      `${name} must contain at most ${MAX_TOOL_RESULT_REFS} Artifact handles.`,
+    );
+  }
+  for (const handle of value) {
+    if (typeof handle !== 'string' || !PROJECT_ARTIFACT_HANDLE.test(handle)) {
+      throw new AgentJournalError(
+        'INVALID_ARGUMENT',
+        `${name} contains an unsupported Artifact handle.`,
+      );
+    }
+  }
+}
+
 function toolInvocationCommandIdentity(command: ToolInvocationJournalCommand): PortableValue {
-  const { lease: _lease, expectedRunRevision: _runRevision,
-    expectedInvocationRevision: _invocationRevision, commandId: _commandId, ...identity } = command;
-  return identity as PortableValue;
+  const {
+    lease, expectedRunRevision, expectedInvocationRevision, commandId, ...identity
+  } = command;
+  void lease;
+  void expectedRunRevision;
+  void expectedInvocationRevision;
+  void commandId;
+  return identity;
+}
+
+function outcomeResolutionIdentity(
+  command: Extract<ToolInvocationJournalCommand, { action: 'resolve-outcome' }>,
+): PortableValue {
+  return {
+    resolutionId: command.resolutionId,
+    outcome: command.outcome,
+    canonicalToolId: command.canonicalToolId,
+    toolRevision: command.toolRevision,
+    effect: command.effect,
+    normalizedArgumentsDigest: command.normalizedArgumentsDigest,
+    proposedRevision: command.proposedRevision,
+    summary: command.summary,
+  };
 }
 
 function requireCanonicalToolId(value: unknown): void {
@@ -2097,6 +2674,30 @@ function requireCanonicalToolId(value: unknown): void {
 function requireToolEffect(value: unknown): asserts value is ToolEffectFact {
   if (!['read', 'idempotent', 'transactional', 'non_idempotent'].includes(String(value))) {
     throw new AgentJournalError('INVALID_ARGUMENT', 'Tool effect is invalid.');
+  }
+}
+
+function requireToolExecutionErrorFact(value: unknown): asserts value is ToolExecutionErrorFact {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'Tool error fact must be an object.');
+  }
+  const record = value as Record<string, unknown>;
+  assertExactKeys(record, ['code', 'category', 'retryable', 'outcome'], 'Tool error fact');
+  if (![
+    'HANDLER_FAILED', 'TOOL_TIMEOUT', 'TOOL_CANCELLED', 'INVALID_TOOL_RESULT',
+    'TOOL_NOT_FOUND', 'TOOL_REVISION_MISMATCH', 'TOOL_INPUT_INVALID',
+    'OUTCOME_RESOLVED_FAILED',
+  ].includes(String(record.code))) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'Tool error code is invalid.');
+  }
+  if (![
+    'internal', 'timeout', 'cancelled', 'contract', 'unavailable', 'conflict', 'validation',
+    'resolution',
+  ].includes(String(record.category))) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'Tool error category is invalid.');
+  }
+  if (typeof record.retryable !== 'boolean' || !['not_applied', 'unknown'].includes(String(record.outcome))) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'Tool error retry/outcome fact is invalid.');
   }
 }
 
@@ -2147,6 +2748,52 @@ function readInvocationProjection(
       );
     },
   );
+}
+
+function projectToolRunState(
+  database: NodeDatabaseSync,
+  runId: string,
+  turnId: string,
+  occurredAt: string,
+): void {
+  const rows = database.prepare(
+    `SELECT invocation_id FROM agent_invocations
+     WHERE run_id = ? AND turn_id = ? ORDER BY action_ordinal ASC, invocation_id ASC`,
+  ).all(runId, turnId) as unknown as Array<{ invocation_id: string }>;
+  const invocations = rows.map(({ invocation_id }) => {
+    const invocation = readInvocationProjection(database, invocation_id);
+    if (invocation === null) {
+      throw new AgentJournalError(
+        'PROJECTION_CORRUPT',
+        `Run aggregate references a missing Invocation: ${invocation_id}.`,
+      );
+    }
+    return invocation;
+  });
+  const facts: ScheduledToolInvocation[] = invocations.map((invocation) => {
+    if (invocation.state === 'validated') {
+      throw new AgentJournalError(
+        'PROJECTION_CORRUPT',
+        'A transient validated Tool state cannot be projected independently.',
+      );
+    }
+    return {
+      invocationId: invocation.invocationId,
+      actionOrdinal: invocation.actionOrdinal,
+      effect: invocation.effect ?? 'unresolved',
+      state: invocation.state,
+    };
+  });
+  const state = runStateForSchedule(decideSchedule({
+    invocations: facts,
+    maxConcurrency: Number.MAX_SAFE_INTEGER,
+  }));
+  const result = database.prepare(
+    'UPDATE agent_runs SET state = ?, updated_at = ? WHERE run_id = ?',
+  ).run(state, occurredAt, runId);
+  if (Number(result.changes) !== 1) {
+    throw new AgentJournalError('RUN_NOT_FOUND', `Run not found: ${runId}`);
+  }
 }
 
 function readApprovalProjection(
@@ -2230,19 +2877,33 @@ function findEquivalentUnknownInvocation(
   current: AgentInvocationProjection,
   command: Extract<ToolInvocationJournalCommand, { action: 'validate' }>,
 ): AgentInvocationProjection | undefined {
-  const rows = database.prepare(
+  const row = database.prepare(
     `SELECT invocation_id FROM agent_invocations
-     WHERE project_id = ? AND run_id = ? AND invocation_id <> ? AND state = 'observed'
-     ORDER BY updated_at DESC`,
-  ).all(current.projectId, current.runId, current.invocationId) as unknown as
-    Array<{ invocation_id: string }>;
-  return rows
-    .map(({ invocation_id }) => readInvocationProjection(database, invocation_id))
-    .find((candidate): candidate is AgentInvocationProjection =>
-      candidate !== null && candidate.terminal?.kind === 'outcome_unknown' &&
-      candidate.name === current.name &&
-      candidate.toolRevision === command.toolRevision && candidate.effect === command.effect &&
-      candidate.normalizedArgumentsDigest === command.normalizedArgumentsDigest);
+     WHERE project_id = ? AND run_id = ? AND name = ? AND invocation_id <> ?
+       AND state = 'observed'
+       AND json_extract(payload_json, '$.toolRevision') = ?
+       AND json_extract(payload_json, '$.effect') = ?
+       AND json_extract(payload_json, '$.normalizedArgumentsDigest') = ?
+       AND json_extract(payload_json, '$.terminal.kind') = 'outcome_unknown'
+     ORDER BY updated_at DESC LIMIT 1`,
+  ).get(
+    current.projectId,
+    current.runId,
+    current.name,
+    current.invocationId,
+    command.toolRevision,
+    command.effect,
+    command.normalizedArgumentsDigest,
+  ) as { invocation_id: string } | undefined;
+  if (row === undefined) return undefined;
+  const predecessor = readInvocationProjection(database, row.invocation_id);
+  if (predecessor === null) {
+    throw new AgentJournalError(
+      'PROJECTION_CORRUPT',
+      `Unknown-outcome predecessor is missing: ${row.invocation_id}.`,
+    );
+  }
+  return predecessor;
 }
 
 function findUnconsumedRetryPermit(
@@ -2252,15 +2913,42 @@ function findUnconsumedRetryPermit(
   const permit = invocation.retryPermit;
   if (permit === undefined) return undefined;
   const used = database.prepare(
-    `SELECT 1 AS present FROM agent_events
-     WHERE event_type = 'tool.validated'
-       AND json_extract(payload_json, '$.retryPermitId') = ? LIMIT 1`,
-  ).get(permit.permitId);
+    `SELECT 1 AS present FROM agent_invocations
+     WHERE project_id = ? AND run_id = ?
+       AND json_extract(payload_json, '$.retryPermitId') = ?
+     LIMIT 1`,
+  ).get(invocation.projectId, invocation.runId, permit.permitId);
   return used === undefined ? permit : undefined;
 }
 
 function boundedText(value: string, maximum: number): string {
   return value.length <= maximum ? value : value.slice(0, maximum);
+}
+
+function encodeApprovalCursor(createdAt: string, approvalId: string): string {
+  return Buffer.from(JSON.stringify({ createdAt, approvalId }), 'utf8').toString('base64url');
+}
+
+function decodeApprovalCursor(cursor: string): { createdAt: string; approvalId: string } {
+  try {
+    const value: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new TypeError('Cursor payload must be an object.');
+    }
+    const record = value as Record<string, unknown>;
+    assertExactKeys(record, ['createdAt', 'approvalId'], 'Approval cursor');
+    if (!isIsoTimestamp(record.createdAt)) {
+      throw new TypeError('Approval cursor timestamp is invalid.');
+    }
+    const approvalId = requireBoundedText(record.approvalId, 'cursor.approvalId', 256);
+    return { createdAt: record.createdAt, approvalId };
+  } catch (error) {
+    if (error instanceof AgentJournalError) throw error;
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT',
+      `Approval cursor is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function stableToolIdentity(value: string): string {
@@ -2637,7 +3325,8 @@ function assertInvocationProjection(value: unknown): asserts value is AgentInvoc
     'projectId', 'sessionId', 'runId', 'turnId', 'attemptId', 'invocationId', 'callId',
     'actionOrdinal', 'name', 'arguments', 'state', 'revision', 'canonicalToolId',
     'toolRevision', 'effect', 'normalizedArgumentsDigest', 'proposedRevision',
-    'approvalId', 'retryOf', 'retryPermitId', 'retryPermit', 'started', 'terminal',
+    'approvalId', 'retryOf', 'retryPermitId', 'retryPermit', 'outcomeResolution',
+    'started', 'terminal',
     'observation', 'createdAt', 'updatedAt',
   ], 'Agent Invocation');
   ['projectId', 'sessionId', 'runId', 'turnId', 'attemptId', 'invocationId', 'callId', 'name']
@@ -2919,6 +3608,24 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
       FOREIGN KEY (project_id, session_id, run_id, turn_id, attempt_id)
         REFERENCES agent_attempts(project_id, session_id, run_id, turn_id, attempt_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_agent_invocations_unknown_equivalent
+      ON agent_invocations (
+        project_id,
+        run_id,
+        name,
+        state,
+        json_extract(payload_json, '$.toolRevision'),
+        json_extract(payload_json, '$.effect'),
+        json_extract(payload_json, '$.normalizedArgumentsDigest'),
+        json_extract(payload_json, '$.terminal.kind'),
+        updated_at DESC
+      );
+    CREATE INDEX IF NOT EXISTS idx_agent_invocations_retry_permit
+      ON agent_invocations (
+        project_id,
+        run_id,
+        json_extract(payload_json, '$.retryPermitId')
+      );
     CREATE TABLE IF NOT EXISTS agent_observations (
       observation_id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -2942,6 +3649,10 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
       UNIQUE (invocation_id, tool_revision, arguments_digest, effect),
       FOREIGN KEY (invocation_id) REFERENCES agent_invocations(invocation_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_agent_approvals_scope_status_id
+      ON agent_approvals(project_id, run_id, status, created_at, approval_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_approvals_scope_id
+      ON agent_approvals(project_id, run_id, created_at, approval_id);
     CREATE TABLE IF NOT EXISTS agent_context_checkpoints (
       checkpoint_id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,

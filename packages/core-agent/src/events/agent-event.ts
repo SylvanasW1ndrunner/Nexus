@@ -91,6 +91,10 @@ type ToolTerminalPayload = {
   summary: string;
   resultRefs: string[];
   durableSummary?: PortableValue;
+  /** Bounded semantic result used to recreate the exact Observation after restart. */
+  modelProjection?: PortableValue;
+  /** Bounded user-facing view; full content is referenced through resultRefs. */
+  userProjection?: PortableValue;
   error?: ToolExecutionErrorFact;
 };
 
@@ -99,8 +103,24 @@ export type ToolEffectFact = 'read' | 'idempotent' | 'transactional' | 'non_idem
 export type CanonicalToolIdFact = { namespace?: string; name: string };
 
 export type ToolExecutionErrorFact = {
-  code: 'HANDLER_FAILED' | 'TOOL_TIMEOUT' | 'TOOL_CANCELLED' | 'INVALID_TOOL_RESULT';
-  category: 'internal' | 'timeout' | 'cancelled' | 'contract';
+  code:
+    | 'HANDLER_FAILED'
+    | 'TOOL_TIMEOUT'
+    | 'TOOL_CANCELLED'
+    | 'INVALID_TOOL_RESULT'
+    | 'TOOL_NOT_FOUND'
+    | 'TOOL_REVISION_MISMATCH'
+    | 'TOOL_INPUT_INVALID'
+    | 'OUTCOME_RESOLVED_FAILED';
+  category:
+    | 'internal'
+    | 'timeout'
+    | 'cancelled'
+    | 'contract'
+    | 'unavailable'
+    | 'conflict'
+    | 'validation'
+    | 'resolution';
   retryable: boolean;
   outcome: 'not_applied' | 'unknown';
 };
@@ -212,16 +232,21 @@ export interface AgentEventPayloadMap {
     name: string;
     arguments: PortableValue;
   };
-  'tool.validated': {
-    invocationId: string;
-    canonicalToolId: CanonicalToolIdFact;
-    toolRevision: string;
-    effect: ToolEffectFact;
-    normalizedArgumentsDigest: string;
-    proposedRevision: number;
-    retryOf?: string;
-    retryPermitId?: string;
-  };
+  'tool.validated':
+    | {
+        invocationId: string;
+        canonicalToolId: CanonicalToolIdFact;
+        toolRevision: string;
+        effect: ToolEffectFact;
+        normalizedArgumentsDigest: string;
+        proposedRevision: number;
+        retryOf?: string;
+        retryPermitId?: string;
+      }
+    | {
+        invocationId: string;
+        validationError: ToolExecutionErrorFact;
+      };
   'tool.approval_requested': { approval: ToolApprovalFact; summary: string };
   'tool.authorized': { approvalId: string; invocationId: string };
   'tool.denied': { approvalId: string; invocationId: string; reason: string };
@@ -237,7 +262,17 @@ export interface AgentEventPayloadMap {
   'tool.cancelled': ToolTerminalPayload;
   'tool.outcome_unknown': ToolTerminalPayload;
   'tool.outcome_resolution_requested': { invocationId: string; summary: string };
-  'tool.outcome_resolved': ToolTerminalPayload;
+  'tool.outcome_resolved': ToolTerminalPayload & {
+    resolutionId: string;
+    decisionDigest: string;
+    invocationId: string;
+    outcome: 'succeeded' | 'failed';
+    canonicalToolId: CanonicalToolIdFact;
+    toolRevision: string;
+    effect: ToolEffectFact;
+    normalizedArgumentsDigest: string;
+    proposedRevision: number;
+  };
   'tool.retry_authorized': {
     invocationId: string;
     permitId: string;

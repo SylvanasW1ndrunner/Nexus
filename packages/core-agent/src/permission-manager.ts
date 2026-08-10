@@ -21,6 +21,14 @@ export type PermissionCheckResult = {
 export class PermissionManager {
   constructor(private readonly approvalProvider?: ApprovalProvider) {}
 
+  /** Pure policy resolution used by the Journal-backed Invocation runtime. */
+  decide(
+    mode: AgentMode,
+    tool: Parameters<typeof decideAutomaticPermission>[1],
+  ): ToolPermissionDecision {
+    return decideAutomaticPermission(mode, tool);
+  }
+
   async check(request: PermissionRequest): Promise<ToolPermissionDecision> {
     return (await this.checkDetailed(request)).decision;
   }

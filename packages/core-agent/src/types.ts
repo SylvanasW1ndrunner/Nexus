@@ -181,9 +181,30 @@ export type AgentToolId = {
 
 export type AgentToolConcurrency = 'read' | 'write' | 'exclusive';
 
+export type ToolEffect = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
+
 export type AgentToolExecutionMetadata = {
   concurrency: AgentToolConcurrency;
   timeoutMs?: number;
+};
+
+export type AgentToolFailurePolicy = {
+  /** Classification used only when generic runtime signals cannot classify an error. */
+  onUnknown?: {
+    failureKind: AgentToolFailureKind;
+    retryable: boolean;
+  };
+};
+
+/** Optional user-facing rendering hints owned by the Tool. */
+export type AgentToolPresentation = {
+  category?: string;
+  preparingMessage?: string;
+  inputPreview?: {
+    argument: string;
+    label: string;
+    language?: string;
+  };
 };
 
 export type AgentToolProtocolMetadata = {
@@ -213,8 +234,12 @@ export type AgentToolDescriptor = {
   sourceId?: string;
   exposure: ToolExposure;
   requiredPermission?: AgentAccessMode;
+  /** Recovery semantics. Legacy registrations remain explicitly undeclared until Task 7 adapts them. */
+  effect: ToolEffect | 'legacy-undeclared';
   execution: AgentToolExecutionMetadata;
+  failurePolicy?: AgentToolFailurePolicy;
   completion?: AgentToolCompletionPolicy;
+  presentation?: AgentToolPresentation;
   protocolMetadata?: AgentToolProtocolMetadata;
 };
 
@@ -236,10 +261,13 @@ export type AgentToolDefinition = LlmTool & {
   sourceId?: string;
   originalName?: string;
   requiredPermission?: AgentAccessMode;
+  effect?: ToolEffect;
   resolveRequiredPermission?: (args: Record<string, unknown>) => AgentAccessMode;
   exposure?: ToolExposure;
   execution?: Partial<AgentToolExecutionMetadata>;
+  failurePolicy?: AgentToolFailurePolicy;
   completion?: AgentToolCompletionPolicy;
+  presentation?: AgentToolPresentation;
   protocolMetadata?: AgentToolProtocolMetadata;
 };
 
@@ -319,18 +347,32 @@ export type RegisteredAgentTool = AgentToolDefinition & {
   handler: AgentToolHandler;
 };
 
+export type AgentToolContribution = {
+  definition: AgentToolDefinition;
+  handler: AgentToolHandler;
+};
+
 export type AgentToolRuntime = {
   id: AgentToolId;
   flatName: string;
   handler: AgentToolHandler;
 };
 
-export type AgentToolCatalogChange = {
-  revision: number;
-  kind: 'registered' | 'unregistered';
-  toolName: string;
-  descriptor?: AgentToolDescriptor;
-};
+export type AgentToolCatalogChange =
+  | {
+      revision: number;
+      kind: 'registered' | 'unregistered';
+      toolName: string;
+      descriptor?: AgentToolDescriptor;
+    }
+  | {
+      revision: number;
+      kind: 'owner-replaced';
+      ownerId: string;
+      added: string[];
+      updated: string[];
+      removed: string[];
+    };
 
 export type AgentToolActivation = {
   toolName: string;

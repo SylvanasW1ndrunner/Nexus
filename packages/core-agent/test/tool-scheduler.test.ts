@@ -125,6 +125,42 @@ describe('decideSchedule', () => {
     });
   });
 
+  it('resolves the entire eligible read window before dispatching any authorized peer', async () => {
+    const { decideSchedule } = await scheduler();
+    expect(decideSchedule({
+      invocations: [
+        invocation('read-authorized', 0, 'read', 'authorized'),
+        invocation('read-proposed', 1, 'read', 'proposed'),
+      ],
+      maxConcurrency: 2,
+    })).toEqual({ state: 'ResolvingActions', invocationIds: ['read-proposed'] });
+  });
+
+  it('does not let a later authorized read cross an earlier pending approval', async () => {
+    const { decideSchedule } = await scheduler();
+    expect(decideSchedule({
+      invocations: [
+        invocation('read-waiting', 0, 'read', 'awaiting_approval'),
+        invocation('read-after', 1, 'read', 'authorized'),
+      ],
+      maxConcurrency: 2,
+    })).toEqual({
+      state: 'AwaitingUser', reason: 'approval', invocationIds: ['read-waiting'],
+    });
+  });
+
+  it('runs only authorized reads before the first pending approval', async () => {
+    const { decideSchedule } = await scheduler();
+    expect(decideSchedule({
+      invocations: [
+        invocation('read-before', 0, 'read', 'authorized'),
+        invocation('read-waiting', 1, 'read', 'awaiting_approval'),
+        invocation('read-after', 2, 'read', 'authorized'),
+      ],
+      maxConcurrency: 3,
+    })).toEqual({ state: 'ExecutingTools', invocationIds: ['read-before'] });
+  });
+
   it('closes only after every invocation has its committed observation', async () => {
     const { decideSchedule } = await scheduler();
     expect(decideSchedule({

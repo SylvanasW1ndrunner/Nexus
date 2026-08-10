@@ -27,6 +27,7 @@ export type AgentJournalErrorCode =
   | 'APPROVAL_NOT_FOUND'
   | 'APPROVAL_BINDING_MISMATCH'
   | 'APPROVAL_DECISION_CONFLICT'
+  | 'OUTCOME_RESOLUTION_CONFLICT'
   | 'REVISION_CONFLICT'
   | 'LEASE_HELD'
   | 'STALE_LEASE'
@@ -102,6 +103,12 @@ export type ValidateToolInvocationCommand = ToolInvocationCommandBase & {
   approvalSummary: string;
 };
 
+export type RejectToolInvocationCommand = ToolInvocationCommandBase & {
+  action: 'reject-validation';
+  summary: string;
+  error: ToolExecutionErrorFact;
+};
+
 export type DecideToolApprovalCommand = ToolInvocationCommandBase & {
   action: 'decide-approval';
   approvalId: string;
@@ -127,7 +134,11 @@ export type FinishToolInvocationCommand = ToolInvocationCommandBase & {
   summary: string;
   resultRefs: string[];
   durableSummary?: PortableValue;
+  modelProjection?: PortableValue;
+  userProjection?: PortableValue;
   error?: ToolExecutionErrorFact;
+  /** Exact stale start fence that a current lease is resolving as unknown. */
+  interruptedFencingToken?: number;
 };
 
 export type ObserveToolInvocationCommand = ToolInvocationCommandBase & {
@@ -144,13 +155,27 @@ export type AuthorizeToolRetryCommand = ToolInvocationCommandBase & {
   reason: string;
 };
 
+export type ResolveUnknownToolOutcomeCommand = ToolInvocationCommandBase & {
+  action: 'resolve-outcome';
+  resolutionId: string;
+  outcome: 'succeeded' | 'failed';
+  canonicalToolId: CanonicalToolIdFact;
+  toolRevision: string;
+  effect: ToolEffectFact;
+  normalizedArgumentsDigest: string;
+  proposedRevision: number;
+  summary: string;
+};
+
 export type ToolInvocationJournalCommand =
   | ValidateToolInvocationCommand
+  | RejectToolInvocationCommand
   | DecideToolApprovalCommand
   | StartToolInvocationCommand
   | FinishToolInvocationCommand
   | ObserveToolInvocationCommand
-  | AuthorizeToolRetryCommand;
+  | AuthorizeToolRetryCommand
+  | ResolveUnknownToolOutcomeCommand;
 
 export type ToolInvocationCommitResult = {
   events: AgentEvent[];
@@ -171,6 +196,37 @@ export type AgentObservationProjection = ToolObservationFact & {
   runId: string;
   createdAt: string;
 };
+
+export type ListToolApprovalsInput = Readonly<{
+  projectId: string;
+  sessionId: string;
+  runId: string;
+  cursor?: string;
+  limit: number;
+  status?: ToolApprovalFact['status'];
+}>;
+
+export type ToolApprovalPage = Readonly<{
+  items: ToolApprovalFact[];
+  hasMore: boolean;
+  nextCursor?: string;
+}>;
+
+export type GetToolApprovalInput = Readonly<{
+  projectId: string;
+  sessionId: string;
+  runId: string;
+  invocationId: string;
+}>;
+
+export type ListTurnInvocationsInput = Readonly<{
+  projectId: string;
+  sessionId: string;
+  runId: string;
+  turnId: string;
+  afterActionOrdinal?: number;
+  limit: number;
+}>;
 
 export type AcquireRunLeaseInput = {
   projectId: string;
@@ -198,10 +254,15 @@ export interface AgentJournal {
   readProject(projectId: string, afterSequence: number, limit: number): Promise<AgentEvent[]>;
   acquireRunLease(input: AcquireRunLeaseInput): Promise<RunLease>;
   renewRunLease(input: RenewRunLeaseInput): Promise<RunLease>;
+  getRunLease(projectId: string, runId: string): Promise<RunLease | null>;
   getRunProjection(runId: string): Promise<AgentRunProjection | null>;
   getInvocation(invocationId: string): Promise<AgentInvocationProjection | null>;
   listInvocations(runId: string): Promise<AgentInvocationProjection[]>;
+  listTurnInvocations(input: ListTurnInvocationsInput): Promise<AgentInvocationProjection[]>;
+  /** @deprecated Legacy projection query; unified Runtime must use scoped getApproval(). */
   getApprovalForInvocation(invocationId: string): Promise<ToolApprovalFact | null>;
+  getApproval(input: GetToolApprovalInput): Promise<ToolApprovalFact | null>;
+  listApprovals(input: ListToolApprovalsInput): Promise<ToolApprovalPage>;
   listObservations(runId: string): Promise<AgentObservationProjection[]>;
   countEvents(type?: AgentEventType, projectId?: string): Promise<number>;
   rebuildProjectProjections(projectId: string): Promise<void>;

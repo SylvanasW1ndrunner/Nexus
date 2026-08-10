@@ -1,4 +1,6 @@
-export type ToolEffect = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
+import type { ToolEffect } from '../types.js';
+
+export type ScheduledToolEffect = ToolEffect | 'unresolved';
 
 export type ToolInvocationScheduleState =
   | 'proposed'
@@ -15,7 +17,7 @@ export type ToolInvocationScheduleState =
 export type ScheduledToolInvocation = Readonly<{
   invocationId: string;
   actionOrdinal: number;
-  effect: ToolEffect;
+  effect: ScheduledToolEffect;
   state: ToolInvocationScheduleState;
 }>;
 
@@ -30,6 +32,13 @@ export type ToolScheduleDecision =
   | { state: 'ExecutingTools'; invocationIds: string[] }
   | { state: 'ApplyingObservations'; invocationIds: string[] }
   | { state: 'TurnReadyToClose'; invocationIds: [] };
+
+export type ToolScheduleRunState =
+  | 'ResolvingActions'
+  | 'AwaitingUser'
+  | 'ExecutingTools'
+  | 'ApplyingObservations'
+  | 'Finalizing';
 
 export type ToolScheduleErrorCode =
   | 'INVALID_CONCURRENCY'
@@ -54,8 +63,8 @@ const VALID_STATES = new Set<ToolInvocationScheduleState>([
   'succeeded', 'failed', 'cancelled', 'outcome_unknown', 'observed',
 ]);
 
-const VALID_EFFECTS = new Set<ToolEffect>([
-  'read', 'idempotent', 'transactional', 'non_idempotent',
+const VALID_EFFECTS = new Set<ScheduledToolEffect>([
+  'read', 'idempotent', 'transactional', 'non_idempotent', 'unresolved',
 ]);
 
 /**
@@ -84,16 +93,16 @@ export function decideSchedule(snapshot: ToolScheduleSnapshot): ToolScheduleDeci
   if (terminal.length > 0) {
     return { state: 'ApplyingObservations', invocationIds: ids(terminal) };
   }
+  const proposed = window.filter(({ state }) => state === 'proposed');
+  if (proposed.length > 0) {
+    return { state: 'ResolvingActions', invocationIds: ids(proposed) };
+  }
   const authorized = window.filter(({ state }) => state === 'authorized');
   if (authorized.length > 0) {
     return {
       state: 'ExecutingTools',
       invocationIds: ids(authorized.slice(0, snapshot.maxConcurrency)),
     };
-  }
-  const proposed = window.filter(({ state }) => state === 'proposed');
-  if (proposed.length > 0) {
-    return { state: 'ResolvingActions', invocationIds: ids(proposed) };
   }
   const awaitingApproval = window.filter(({ state }) => state === 'awaiting_approval');
   if (awaitingApproval.length > 0) {
@@ -107,6 +116,15 @@ export function decideSchedule(snapshot: ToolScheduleSnapshot): ToolScheduleDeci
   );
 }
 
+/**
+ * Projects the scheduler decision into the durable Run aggregate. Keeping this
+ * mapping beside the pure scheduler prevents online and replay projections from
+ * growing independent lifecycle algorithms.
+ */
+export function runStateForSchedule(decision: ToolScheduleDecision): ToolScheduleRunState {
+  return decision.state === 'TurnReadyToClose' ? 'ApplyingObservations' : decision.state;
+}
+
 function contiguousReadWindow(
   ordered: readonly ScheduledToolInvocation[],
   start: number,
@@ -116,6 +134,9 @@ function contiguousReadWindow(
     const invocation = ordered[index];
     if (invocation === undefined || invocation.effect !== 'read') break;
     if (invocation.state !== 'observed') window.push(invocation);
+    // An unresolved approval is an ordering boundary inside a read window.
+    // Earlier authorized reads may still run, but no later Action can cross it.
+    if (invocation.state === 'awaiting_approval') break;
   }
   return window;
 }
@@ -125,6 +146,7 @@ function ids(invocations: readonly ScheduledToolInvocation[]): string[] {
 }
 
 function validateSnapshot(snapshot: ToolScheduleSnapshot): void {
+  const invocations = snapshot.invocations;
   if (!Number.isSafeInteger(snapshot.maxConcurrency) || snapshot.maxConcurrency < 1) {
     throw new ToolScheduleError(
       'INVALID_CONCURRENCY', 'Tool maxConcurrency must be a positive safe integer.',
@@ -135,7 +157,7 @@ function validateSnapshot(snapshot: ToolScheduleSnapshot): void {
   }
   const invocationIds = new Set<string>();
   const ordinals = new Set<number>();
-  for (const invocation of snapshot.invocations) {
+  for (const invocation of invocations) {
     if (
       invocation === null || typeof invocation !== 'object' ||
       typeof invocation.invocationId !== 'string' || invocation.invocationId.trim() === '' ||

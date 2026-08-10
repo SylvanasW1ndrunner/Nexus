@@ -65,6 +65,9 @@ importers:
       '@dbagent/shared':
         specifier: workspace:*
         version: link:../shared
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
     devDependencies:
       vitest:
         specifier: ^2.1.8
