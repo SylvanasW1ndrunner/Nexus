@@ -8,6 +8,7 @@ import {
   deleteInvocationHandler,
   replaceInvocationHandlers,
   setInvocationHandler,
+  unbindInvocationHandlerSnapshot,
 } from './internal/tool-invocation-authority.js';
 import type {
   AgentToolCatalogChange,
@@ -260,16 +261,19 @@ export class ToolRegistry {
   }
 
   captureSnapshot(): ToolCatalogSnapshot {
-    const snapshot = new ToolCatalogSnapshot(
-      this.revision,
-      new Map(this.tools),
-      new Map(this.runtimes),
-      new Map(this.invocationRevisions),
-      new Map(this.activeToolRevisions),
-      new Map(this.snapshotLifecycles),
-    );
-    bindInvocationHandlerSnapshot(this, snapshot);
-    return snapshot;
+    // Capture every generation-bearing map before invoking any external
+    // lifecycle callback. A re-entrant retain() may mutate the live Registry,
+    // but it cannot splice a new Handler into this immutable generation.
+    const captured: ToolCatalogSnapshotCapture = {
+      catalogRevision: this.revision,
+      tools: new Map(this.tools),
+      runtimes: new Map(this.runtimes),
+      invocationHandlers: cloneInvocationHandlers(this),
+      invocationRevisions: new Map(this.invocationRevisions),
+      revisions: new Map(this.activeToolRevisions),
+      lifecycles: new Map(this.snapshotLifecycles),
+    };
+    return createToolCatalogSnapshot(captured);
   }
 
   get(name: string): RegisteredAgentTool | undefined {
@@ -328,43 +332,40 @@ export class ToolRegistry {
 }
 
 export class ToolCatalogSnapshot {
-  private readonly releases: Array<() => void>;
-  private released = false;
+  private constructor() {
+    throw new TypeError(
+      'ToolCatalogSnapshot can only be created by ToolRegistry.captureSnapshot().',
+    );
+  }
 
-  constructor(
-    readonly catalogRevision: number,
-    private readonly tools: ReadonlyMap<string, RegisteredAgentTool>,
-    private readonly runtimes: ReadonlyMap<string, AgentToolRuntime>,
-    private readonly invocationRevisions: ReadonlyMap<string, string>,
-    private readonly revisions: ReadonlyMap<string, number>,
-    lifecycles: ReadonlyMap<string, AgentToolSnapshotLifecycle>,
-  ) {
-    const releases: Array<() => void> = [];
-    try {
-      for (const lifecycle of new Set(lifecycles.values())) releases.push(lifecycle.retain());
-    } catch (error) {
-      for (const release of releases.reverse()) release();
-      throw error;
-    }
-    this.releases = releases;
+  get catalogRevision(): number {
+    return requireToolCatalogSnapshotState(this).catalogRevision;
   }
 
   release(): void {
-    if (this.released) return;
-    this.released = true;
-    for (const release of this.releases.reverse()) release();
+    const state = requireToolCatalogSnapshotState(this);
+    if (state.released) return;
+    state.released = true;
+    const failures = releaseSnapshotLifecycles(state.releases);
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        'Tool snapshot lifecycle release failed.',
+        { cause: failures[0] },
+      );
+    }
   }
 
   get(name: string): RegisteredAgentTool | undefined {
-    return this.tools.get(name);
+    return requireToolCatalogSnapshotState(this).tools.get(name);
   }
 
   has(name: string): boolean {
-    return this.tools.has(name);
+    return requireToolCatalogSnapshotState(this).tools.has(name);
   }
 
   list(): RegisteredAgentTool[] {
-    return [...this.tools.values()];
+    return [...requireToolCatalogSnapshotState(this).tools.values()];
   }
 
   listDescriptors(): AgentToolDescriptor[] {
@@ -372,19 +373,20 @@ export class ToolCatalogSnapshot {
   }
 
   getRuntime(id: AgentToolId | string): AgentToolRuntime | undefined {
+    const state = requireToolCatalogSnapshotState(this);
     if (typeof id === 'string') {
-      const registered = this.tools.get(id);
-      return registered ? this.runtimes.get(toolIdKey(registered.descriptor.id)) : undefined;
+      const registered = state.tools.get(id);
+      return registered ? state.runtimes.get(toolIdKey(registered.descriptor.id)) : undefined;
     }
-    return this.runtimes.get(toolIdKey(id));
+    return state.runtimes.get(toolIdKey(id));
   }
 
   invocationRevision(name: string): string | undefined {
-    return this.invocationRevisions.get(name);
+    return requireToolCatalogSnapshotState(this).invocationRevisions.get(name);
   }
 
   toolRevision(name: string): number | undefined {
-    return this.revisions.get(name);
+    return requireToolCatalogSnapshotState(this).revisions.get(name);
   }
 
   llmTools(allowedTools?: string[]): LlmTool[] {
@@ -393,6 +395,84 @@ export class ToolCatalogSnapshot {
       .filter((tool) => allowed === undefined || allowed.has(tool.name))
       .map(toLlmTool);
   }
+}
+
+type ToolCatalogSnapshotCapture = Readonly<{
+  catalogRevision: number;
+  tools: ReadonlyMap<string, RegisteredAgentTool>;
+  runtimes: ReadonlyMap<string, AgentToolRuntime>;
+  invocationHandlers: ReadonlyMap<string, ToolInvocationHandlerRuntime>;
+  invocationRevisions: ReadonlyMap<string, string>;
+  revisions: ReadonlyMap<string, number>;
+  lifecycles: ReadonlyMap<string, AgentToolSnapshotLifecycle>;
+}>;
+
+type ToolCatalogSnapshotState = Readonly<{
+  catalogRevision: number;
+  tools: ReadonlyMap<string, RegisteredAgentTool>;
+  runtimes: ReadonlyMap<string, AgentToolRuntime>;
+  invocationRevisions: ReadonlyMap<string, string>;
+  revisions: ReadonlyMap<string, number>;
+  releases: Array<() => void>;
+}> & { released: boolean };
+
+const toolCatalogSnapshotStates = new WeakMap<ToolCatalogSnapshot, ToolCatalogSnapshotState>();
+
+function createToolCatalogSnapshot(captured: ToolCatalogSnapshotCapture): ToolCatalogSnapshot {
+  const snapshot = Object.create(ToolCatalogSnapshot.prototype) as ToolCatalogSnapshot;
+  const state: ToolCatalogSnapshotState = {
+    catalogRevision: captured.catalogRevision,
+    tools: captured.tools,
+    runtimes: captured.runtimes,
+    invocationRevisions: captured.invocationRevisions,
+    revisions: captured.revisions,
+    releases: [],
+    released: false,
+  };
+  toolCatalogSnapshotStates.set(snapshot, state);
+  bindInvocationHandlerSnapshot(snapshot, captured.invocationHandlers);
+  try {
+    for (const lifecycle of new Set(captured.lifecycles.values())) {
+      const release = lifecycle.retain();
+      if (typeof release !== 'function') {
+        throw new TypeError('Tool snapshot lifecycle retain() must return a release function.');
+      }
+      state.releases.push(release);
+    }
+  } catch (retainFailure) {
+    unbindInvocationHandlerSnapshot(snapshot);
+    toolCatalogSnapshotStates.delete(snapshot);
+    const cleanupFailures = releaseSnapshotLifecycles(state.releases);
+    if (cleanupFailures.length === 0) throw retainFailure;
+    throw new AggregateError(
+      [retainFailure, ...cleanupFailures],
+      'Tool snapshot lifecycle retain failed and cleanup also failed.',
+      { cause: retainFailure },
+    );
+  }
+  return Object.freeze(snapshot);
+}
+
+function requireToolCatalogSnapshotState(snapshot: ToolCatalogSnapshot): ToolCatalogSnapshotState {
+  const state = toolCatalogSnapshotStates.get(snapshot);
+  if (state === undefined) {
+    throw new TypeError('ToolCatalogSnapshot is not bound to an internal snapshot generation.');
+  }
+  return state;
+}
+
+function releaseSnapshotLifecycles(releases: Array<() => void>): unknown[] {
+  const failures: unknown[] = [];
+  while (releases.length > 0) {
+    const release = releases.pop();
+    if (release === undefined) continue;
+    try {
+      release();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  return failures;
 }
 
 export type AgentToolSnapshotLifecycle = {

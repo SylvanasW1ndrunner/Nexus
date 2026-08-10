@@ -26,6 +26,13 @@ describe('built-package Tool authority boundaries', () => {
           inputSchema: { type: 'object' },
         }, { execute: rawHandler });
         const snapshot = registry.captureSnapshot();
+        let constructorError;
+        try {
+          new api.ToolCatalogSnapshot();
+          constructorError = 'CONSTRUCTED';
+        } catch (error) {
+          constructorError = { name: error.name, message: error.message };
+        }
 
         function containsReference(root, target, seen = new Set()) {
           if (root === target) return true;
@@ -57,6 +64,7 @@ describe('built-package Tool authority boundaries', () => {
           registryLeak: containsReference(registry, rawHandler),
           snapshotLeak: containsReference(snapshot, rawHandler),
           getter: typeof snapshot.getInvocationRuntime,
+          constructorError,
           calls,
         }));
       `);
@@ -65,6 +73,10 @@ describe('built-package Tool authority boundaries', () => {
         registryLeak: false,
         snapshotLeak: false,
         getter: 'undefined',
+        constructorError: {
+          name: 'TypeError',
+          message: 'ToolCatalogSnapshot can only be created by ToolRegistry.captureSnapshot().',
+        },
         calls: 0,
       });
 
@@ -124,9 +136,10 @@ describe('built-package Tool authority boundaries', () => {
       });
 
       await writeFile(join(consumer.root, 'consumer.mts'), `
-        import { SqliteAgentJournal } from '@dbagent/core-agent';
+        import { SqliteAgentJournal, ToolCatalogSnapshot } from '@dbagent/core-agent';
         const journal = new SqliteAgentJournal({ filePath: 'authority.db' });
         void journal.commitToolInvocation({} as never);
+        new ToolCatalogSnapshot();
       `);
       await writeFile(join(consumer.root, 'tsconfig.json'), JSON.stringify({
         compilerOptions: {
@@ -135,9 +148,9 @@ describe('built-package Tool authority boundaries', () => {
         },
         files: ['./consumer.mts'],
       }));
-      await expect(runConsumerCompile(consumer.root)).resolves.toMatch(
-        /Property 'commitToolInvocation' does not exist/u,
-      );
+      const compileFailure = await runConsumerCompile(consumer.root);
+      expect(compileFailure).toMatch(/Property 'commitToolInvocation' does not exist/u);
+      expect(compileFailure).toMatch(/Constructor of class 'ToolCatalogSnapshot' is private/u);
     } finally {
       await rm(consumer.root, { recursive: true, force: true });
     }

@@ -8,7 +8,8 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 - `23fddbe` - pure deterministic scheduler and ordering/barrier tests.
 - `8a8fefe` - durable Invocation lifecycle facts, schemas, projections, and Journal commands.
 - `332ca7b` - unified Tool scheduling, execution, approval, bounded results, and recovery.
-- The formal-review repair and this updated evidence report are committed together. No checkpoint was pushed.
+- `52e0529` - sealed Tool execution authority, Artifact-first projection, fenced recovery, and protected Run projections.
+- The second formal-review repair and this updated evidence report are committed together. No checkpoint was pushed.
 
 ## RED evidence
 
@@ -24,6 +25,7 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 - Invocation fingerprint ingress initially risked traversing accessors, cycles, `undefined`, or a sparse array's declared length. RED tests proved every such descriptor is rejected atomically before registration and without evaluating a getter.
 - The first Task 4 regression run passed 183 of 184 tests; the built-package import test correctly failed because `dist` had not been built. After the documented package build prerequisite, the complete controller passed 184 of 184.
 - Formal review found that raw Handler references and a lifecycle committer were still reflectively reachable from public objects, large projections could be replaced by a non-durable placeholder, recovery did not atomically claim a new fencing generation, and late Tool facts could overwrite protected Run states. Each finding first received a failing boundary, fault, race, or replay test.
+- Second-round review found a re-entrant snapshot cut: semantic maps were cloned before lifecycle `retain()`, but Invocation Handlers were rebound from the live Registry afterward. The RED test observed a v1 descriptor/revision paired with the v2 Handler. Lifecycle RED tests also proved that one throwing cleanup masked the original retain failure, stopped later cleanup, and that a non-function retain result was accepted.
 
 ## Implemented guarantees
 
@@ -33,6 +35,9 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 - `ToolInvocationRuntime` is the sole new Handler invocation authority. Public direct execution may only select the first Invocation in the current committed scheduler decision; it cannot jump barriers, later reads, or concurrency bounds.
 - Handlers may complete concurrently and their terminal facts are committed in real completion order; exactly one Observation per Invocation is then published strictly in model action order. Cancellation stops undispatched work and reaches started Handlers without discarding already committed terminal evidence.
 - Raw Handler references live only in a package-private WeakMap authority. Registry and snapshot reflection, recursive graph traversal, package-root imports, and blocked deep imports cannot obtain or invoke a Handler.
+- Snapshot capture now cuts descriptor, runtime, Invocation Handler, semantic revision, numeric generation, and lifecycle maps before the first external callback. The Handler authority is bound from that exact cut before lifecycle acquisition, so re-entrant unregister/register or owner replacement can only affect the next snapshot.
+- `ToolCatalogSnapshot` has a package-internal factory and a private, runtime-rejecting constructor. Built-package JavaScript and TypeScript consumers cannot construct a partial or unbound snapshot.
+- Lifecycle acquisition validates every retain result. Failed acquisition explicitly removes Handler authority, releases every earlier lease in reverse order, and preserves the original retain failure as the aggregate primary cause. Normal release also invokes every callback exactly once and reports failures in deterministic reverse-acquisition order; repeated release is inert.
 
 ### Strict immutable ingress and durable lifecycle
 
@@ -70,9 +75,9 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 
 ## Final verification
 
-- Task 5 exact controller: **11 files / 171 tests**, passed after the formal-review repair. This covers scheduler windows/barriers, approval, registry and lifecycle authority isolation, Journal lifecycle, restart-stable Tool identity, online/rebuild projection equivalence, two-Runtime and real two-process recovery races, cancellation, real child-process crash cuts, lease expiry/takeover, unknown outcome, retry permits, indexed scale lookup, exact projection boundaries, Artifact-first materialization, and result redaction.
+- Task 5 exact controller: **11 files / 177 tests**, passed after the second formal-review repair. This additionally covers re-entrant unregister/register and owner replacement, same-generation descriptor/revision/Handler/lifecycle capture, invalid retain results, multi-error rollback/release, repeat release, and built-package constructor rejection.
 - Task 3 exact regression: **6 files / 110 tests**, passed after the final production edit.
-- Task 4 exact persistence regression after a clean core-agent build: **9 files / 184 tests**, passed after the final production edit.
+- Task 4 exact persistence regression after a clean core-agent build: **9 files / 184 tests**, passed in one bounded single-worker run without changing test timeout policy.
 - TypeScript `--noEmit`: core-agent source, core-agent tests, core-llm source, and core-llm tests all passed.
 - The recovery suite uses real temporary SQLite state, a real external counter, and real child-process crash cuts at `after-started-before-handler`, `after-external-effect-before-terminal`, and `after-terminal-before-observation`.
 - No live model, network endpoint, or credential was needed; all Tool adapters are deterministic Task 5 fixtures and all credential-like values are synthetic.

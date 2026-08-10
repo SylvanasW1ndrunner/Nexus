@@ -38,10 +38,14 @@ export function replaceInvocationHandlers(
 }
 
 export function bindInvocationHandlerSnapshot(
-  registry: object,
   snapshot: ToolCatalogSnapshot,
+  handlers: ReadonlyMap<string, ToolInvocationHandlerRuntime>,
 ): void {
-  handlersByOwner.set(snapshot, cloneInvocationHandlers(registry));
+  handlersByOwner.set(snapshot, new Map(handlers));
+}
+
+export function unbindInvocationHandlerSnapshot(snapshot: ToolCatalogSnapshot): void {
+  handlersByOwner.delete(snapshot);
 }
 
 export function resolveInvocationHandler(
