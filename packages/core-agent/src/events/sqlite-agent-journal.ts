@@ -35,6 +35,7 @@ import type {
   AgentEvent,
   AgentEventDraft,
   AgentEventType,
+  AgentRunState,
   ToolApprovalFact,
   ToolEffectFact,
   ToolExecutionErrorFact,
@@ -57,6 +58,7 @@ import type {
   ModelTurnCommitResult,
 } from './run-event-committer.js';
 import { activeLegacyMigrationIdentity } from '../internal/legacy-migration-writer.js';
+import { bindToolLifecycleCommitter } from '../internal/tool-lifecycle-authority.js';
 import {
   decideSchedule,
   runStateForSchedule,
@@ -119,7 +121,7 @@ const TOOL_INVOCATION_ACTION_KEYS: Record<ToolInvocationJournalCommand['action']
     'approvalId', 'canonicalToolId', 'toolRevision', 'effect',
     'normalizedArgumentsDigest', 'proposedRevision', 'decision', 'decidedBy', 'reason',
   ],
-  start: ['idempotencyKey', 'attempt'],
+  start: ['idempotencyKey', 'attempt', 'recoveryOfFencingToken'],
   finish: [
     'outcome', 'summary', 'resultRefs', 'durableSummary', 'modelProjection',
     'userProjection', 'error', 'interruptedFencingToken',
@@ -139,7 +141,7 @@ const TOOL_INVOCATION_OPTIONAL_ACTION_KEYS: Record<
   validate: [],
   'reject-validation': [],
   'decide-approval': ['decidedBy', 'reason'],
-  start: [],
+  start: ['recoveryOfFencingToken'],
   finish: [
     'durableSummary', 'modelProjection', 'userProjection', 'error',
     'interruptedFencingToken',
@@ -164,6 +166,7 @@ export class SqliteAgentJournal implements AgentJournal {
     }
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#createId = options.createId ?? randomUUID;
+    bindToolLifecycleCommitter(this, (command) => this.#commitToolInvocation(command));
   }
 
   failAt(point: ModelCommitFaultPoint): void {
@@ -280,7 +283,7 @@ export class SqliteAgentJournal implements AgentJournal {
     return this.#commitNormalized(normalized);
   }
 
-  async commitToolInvocation(
+  async #commitToolInvocation(
     command: ToolInvocationJournalCommand,
   ): Promise<ToolInvocationCommitResult> {
     const snapshot = snapshotToolInvocationCommand(command);
@@ -614,7 +617,24 @@ export class SqliteAgentJournal implements AgentJournal {
           break;
         }
         case 'start': {
-          requireInvocationState(invocation, ['authorized']);
+          if (normalized.recoveryOfFencingToken === undefined) {
+            requireInvocationState(invocation, ['authorized']);
+          } else {
+            requireInvocationState(invocation, ['started']);
+            const priorStart = invocation.started;
+            if (
+              priorStart === undefined ||
+              priorStart.fencingToken !== normalized.recoveryOfFencingToken ||
+              normalized.lease.fencingToken <= priorStart.fencingToken ||
+              normalized.idempotencyKey !== priorStart.idempotencyKey ||
+              normalized.attempt !== priorStart.attempt + 1
+            ) {
+              throw new AgentJournalError(
+                'INVOCATION_STATE_CONFLICT',
+                'Recovery start must atomically supersede the exact stale start fact.',
+              );
+            }
+          }
           invocation.state = 'started';
           invocation.started = {
             idempotencyKey: normalized.idempotencyKey,
@@ -633,11 +653,10 @@ export class SqliteAgentJournal implements AgentJournal {
         case 'finish': {
           requireInvocationState(invocation, ['started']);
           if (invocation.started?.fencingToken !== normalized.lease.fencingToken) {
-            const replaySafeRecovery = invocation.effect === 'read' || invocation.effect === 'idempotent';
-            if (!replaySafeRecovery && (
+            if (
               normalized.outcome !== 'outcome_unknown' ||
               normalized.interruptedFencingToken !== invocation.started?.fencingToken
-            )) {
+            ) {
               throw new AgentJournalError(
                 'FENCING_TOKEN_STALE', 'Invocation was started under another fencing token.',
               );
@@ -757,7 +776,9 @@ export class SqliteAgentJournal implements AgentJournal {
           'REVISION_CONFLICT', 'Concurrent Invocation transition won the revision race.',
         );
       }
-      projectToolRunState(database, invocation.runId, invocation.turnId, occurredAt);
+      projectToolRunState(
+        database, invocation.runId, invocation.turnId, occurredAt, normalized.action,
+      );
       const result: ToolInvocationCommitResult = {
         events,
         invocation: structuredClone(invocation),
@@ -1690,7 +1711,7 @@ export class SqliteAgentJournal implements AgentJournal {
         if (Number(runCas.changes) !== 1) {
           throw new AgentJournalError('REVISION_CONFLICT', 'Concurrent Run commit won the revision race.');
         }
-        projectToolRunState(database, runId, turnId, occurredAt);
+        projectToolRunState(database, runId, turnId, occurredAt, 'model-commit');
         const result = { turn, envelope: prepared.envelope, invocations };
         writeCommandResult(
           database,
@@ -2467,7 +2488,7 @@ function normalizeToolInvocationCommand(
       'approvalId', 'canonicalToolId', 'toolRevision', 'effect',
       'normalizedArgumentsDigest', 'proposedRevision', 'decision', 'decidedBy', 'reason',
     ],
-    start: ['idempotencyKey', 'attempt'],
+    start: ['idempotencyKey', 'attempt', 'recoveryOfFencingToken'],
     finish: [
       'outcome', 'summary', 'resultRefs', 'durableSummary', 'modelProjection',
       'userProjection', 'error',
@@ -2531,6 +2552,9 @@ function normalizeToolInvocationCommand(
   } else if (command.action === 'start') {
     requireText(command.idempotencyKey, 'idempotencyKey');
     requireRevision(command.attempt, 'attempt');
+    if (command.recoveryOfFencingToken !== undefined) {
+      requireRevision(command.recoveryOfFencingToken, 'recoveryOfFencingToken');
+    }
   } else if (command.action === 'finish') {
     if (!['succeeded', 'failed', 'cancelled', 'outcome_unknown'].includes(command.outcome)) {
       throw new AgentJournalError('INVALID_ARGUMENT', 'Tool outcome is invalid.');
@@ -2755,7 +2779,15 @@ function projectToolRunState(
   runId: string,
   turnId: string,
   occurredAt: string,
+  transition: ToolInvocationJournalCommand['action'] | 'model-commit',
 ): void {
+  const current = database.prepare(
+    'SELECT state FROM agent_runs WHERE run_id = ?',
+  ).get(runId) as { state: AgentRunState } | undefined;
+  if (current === undefined) {
+    throw new AgentJournalError('RUN_NOT_FOUND', `Run not found: ${runId}`);
+  }
+  if (isProtectedToolProjectionState(current.state, transition)) return;
   const rows = database.prepare(
     `SELECT invocation_id FROM agent_invocations
      WHERE run_id = ? AND turn_id = ? ORDER BY action_ordinal ASC, invocation_id ASC`,
@@ -2794,6 +2826,18 @@ function projectToolRunState(
   if (Number(result.changes) !== 1) {
     throw new AgentJournalError('RUN_NOT_FOUND', `Run not found: ${runId}`);
   }
+}
+
+function isProtectedToolProjectionState(
+  state: AgentRunState,
+  transition: ToolInvocationJournalCommand['action'] | 'model-commit',
+): boolean {
+  if (state === 'AwaitingUser') {
+    return transition !== 'decide-approval' && transition !== 'resolve-outcome';
+  }
+  return state === 'Finalizing' || state === 'Cancelling' || state === 'LimitReached' ||
+    state === 'Interrupted' || state === 'Completed' || state === 'Failed' ||
+    state === 'Cancelled';
 }
 
 function readApprovalProjection(

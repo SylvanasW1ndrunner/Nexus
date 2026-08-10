@@ -22,7 +22,15 @@ import type {
   ToolInvocationExecutionContext,
   ToolInvocationHandlerRuntime,
 } from '../tool-registry.js';
-import { normalizeAgentToolResult } from '../tool-result.js';
+import { resolveInvocationHandler } from '../internal/tool-invocation-authority.js';
+import {
+  openToolLifecycleCommitter,
+  type ToolLifecycleCommitter,
+} from '../internal/tool-lifecycle-authority.js';
+import {
+  materializeNormalizedToolResult,
+  normalizeAgentToolResult,
+} from '../tool-result.js';
 import type { AgentMode, AgentToolDescriptor } from '../types.js';
 import {
   adaptToolHandlerFailure,
@@ -130,6 +138,7 @@ export type UnknownOutcomeResolution = Readonly<{
  */
 export class ToolInvocationRuntime {
   readonly #journal: AgentJournal;
+  readonly #toolLifecycle: ToolLifecycleCommitter;
   readonly #registry: ToolCatalogSnapshot;
   readonly #permissionManager: PermissionManager;
   readonly #artifactStore: ProjectArtifactStore | undefined;
@@ -143,6 +152,7 @@ export class ToolInvocationRuntime {
 
   constructor(options: ToolInvocationRuntimeOptions) {
     this.#journal = options.journal;
+    this.#toolLifecycle = openToolLifecycleCommitter(options.journal);
     this.#registry = options.registry;
     this.#permissionManager = options.permissionManager;
     this.#artifactStore = options.artifactStore;
@@ -232,7 +242,7 @@ export class ToolInvocationRuntime {
     const invocation = await this.#requireBoundInvocation(decision.invocationId);
     const runRevision = await this.#runRevision();
     try {
-      await this.#journal.commitToolInvocation({
+      await this.#toolLifecycle.commit({
         action: 'decide-approval',
         projectId: decision.projectId,
         sessionId: decision.sessionId,
@@ -270,7 +280,7 @@ export class ToolInvocationRuntime {
     const invocation = await this.#requireBoundInvocation(input.invocationId, false);
     const permitId = `retry_${sha256(`${input.invocationId}\0${input.commandId}`)}`;
     try {
-      const result = await this.#journal.commitToolInvocation({
+      const result = await this.#toolLifecycle.commit({
         action: 'authorize-retry',
         projectId: invocation.projectId,
         sessionId: invocation.sessionId,
@@ -321,7 +331,7 @@ export class ToolInvocationRuntime {
     };
     const resolutionId = `resolution_${sha256(canonicalJson(resolutionIdentity))}`;
     try {
-      const result = await this.#journal.commitToolInvocation({
+      const result = await this.#toolLifecycle.commit({
         action: 'resolve-outcome',
         projectId: invocation.projectId,
         sessionId: invocation.sessionId,
@@ -351,7 +361,7 @@ export class ToolInvocationRuntime {
   }
 
   async recover(invocationId: string): Promise<ToolObservationFact> {
-    const invocation = await this.#requireBoundInvocation(invocationId);
+    let invocation = await this.#requireBoundInvocation(invocationId);
     if (invocation.observation !== undefined) return publicObservation(invocation.observation);
     if (invocation.terminal !== undefined) return await this.#convergeRecoveredObservation(invocation);
     if (invocation.state === 'authorized') return await this.execute(invocationId);
@@ -359,17 +369,65 @@ export class ToolInvocationRuntime {
       throw new ToolInvocationError('INVOCATION_CONFLICT', 'Invocation cannot be recovered.');
     }
     if (invocation.effect === 'read' || invocation.effect === 'idempotent') {
+      invocation = await this.#claimReplayRecovery(invocation);
+      if (invocation.terminal !== undefined || invocation.observation !== undefined) {
+        return await this.#convergeRecoveredObservation(invocation);
+      }
       return await this.#convergeRecoveredObservation(await this.#resumeStarted(invocation));
     }
     if (invocation.effect === 'transactional') {
-      const runtime = this.#registry.getInvocationRuntime(invocation.name);
+      const runtime = resolveInvocationHandler(this.#registry, invocation.name);
       if (runtime?.recover !== undefined) {
+        invocation = await this.#claimReplayRecovery(invocation);
+        if (invocation.terminal !== undefined || invocation.observation !== undefined) {
+          return await this.#convergeRecoveredObservation(invocation);
+        }
         return await this.#convergeRecoveredObservation(
           await this.#resumeStarted(invocation, true),
         );
       }
     }
+    if (this.#binding.lease.fencingToken <= invocation.started.fencingToken) {
+      invocation = await this.#waitForCompetingTerminal(invocationId, undefined);
+      return await this.#convergeRecoveredObservation(invocation);
+    }
     return await this.#convergeRecoveredObservation(await this.#finishUnknown(invocation));
+  }
+
+  async #claimReplayRecovery(
+    invocation: AgentInvocationProjection,
+  ): Promise<AgentInvocationProjection> {
+    const priorStart = invocation.started;
+    if (invocation.state !== 'started' || priorStart === undefined) {
+      throw new ToolInvocationError('INVOCATION_CONFLICT', 'Invocation start fact is missing.');
+    }
+    if (this.#binding.lease.fencingToken <= priorStart.fencingToken) {
+      return await this.#waitForCompetingTerminal(invocation.invocationId, undefined);
+    }
+    try {
+      const claimed = await this.#toolLifecycle.commit({
+        action: 'start',
+        projectId: invocation.projectId,
+        sessionId: invocation.sessionId,
+        runId: invocation.runId,
+        turnId: invocation.turnId,
+        invocationId: invocation.invocationId,
+        commandId: `tool-recovery-claim:${invocation.invocationId}:${this.#runtimeId}`,
+        lease: leaseReference(this.#binding.lease),
+        expectedRunRevision: await this.#runRevision(),
+        expectedInvocationRevision: invocation.revision,
+        idempotencyKey: priorStart.idempotencyKey,
+        attempt: priorStart.attempt + 1,
+        recoveryOfFencingToken: priorStart.fencingToken,
+      });
+      return claimed.invocation;
+    } catch (error) {
+      const mapped = mapJournalError(error);
+      if (mapped.code === 'INVOCATION_CONFLICT') {
+        return await this.#waitForCompetingTerminal(invocation.invocationId, undefined);
+      }
+      throw mapped;
+    }
   }
 
   async #terminalForQualifiedInvocation(
@@ -405,7 +463,7 @@ export class ToolInvocationRuntime {
     let runtime: ToolInvocationHandlerRuntime;
     try {
       descriptor = this.#requireDescriptor(invocation);
-      runtime = this.#requireHandlerRuntime(invocation, descriptor);
+      runtime = this.#requireHandlerRuntime(invocation);
     } catch (error) {
       if (error instanceof ToolInvocationError && isPreStartResolutionError(error)) {
         return await this.#rejectBeforeStart(invocation, error);
@@ -415,7 +473,7 @@ export class ToolInvocationRuntime {
     const attempt = (invocation.started?.attempt ?? 0) + 1;
     const idempotencyKey = stableIdempotencyKey(invocation);
     try {
-      const started = await this.#journal.commitToolInvocation({
+      const started = await this.#toolLifecycle.commit({
         action: 'start',
         projectId: invocation.projectId,
         sessionId: invocation.sessionId,
@@ -446,7 +504,7 @@ export class ToolInvocationRuntime {
     recoverHandler = false,
   ): Promise<AgentInvocationProjection> {
     const descriptor = this.#requireDescriptor(invocation);
-    const runtime = this.#requireHandlerRuntime(invocation, descriptor);
+    const runtime = this.#requireHandlerRuntime(invocation);
     return await this.#invokeStarted(invocation, runtime, descriptor, undefined, recoverHandler);
   }
 
@@ -481,6 +539,7 @@ export class ToolInvocationRuntime {
     const argumentsRecord = frozenArguments(invocation.arguments);
     const handler = useRecoveryHandler ? runtime.recover : runtime.execute;
     if (handler === undefined) return await this.#finishUnknown(invocation);
+    let handlerCompleted = false;
     let terminal:
       | { outcome: 'succeeded'; summary: string; resultRefs: string[]; durableSummary: PortableValue;
           modelProjection: PortableValue; userProjection?: PortableValue }
@@ -488,6 +547,7 @@ export class ToolInvocationRuntime {
           resultRefs: []; error: ToolExecutionErrorFact };
     try {
       const value = await invokeHandlerUntilAbort(handler, argumentsRecord, context);
+      handlerCompleted = true;
       await this.#crashPoint('after-external-effect-before-terminal');
       const normalized = normalizeAgentToolResult(value);
       const resultRefs: string[] = [];
@@ -511,15 +571,16 @@ export class ToolInvocationRuntime {
         });
         resultRefs.push(ref.handle);
       }
+      const projected = materializeNormalizedToolResult(normalized, resultRefs[0]);
       terminal = {
         outcome: 'succeeded',
         summary: 'The tool completed.',
         resultRefs,
-        durableSummary: normalized.durableSummary,
-        modelProjection: normalized.modelProjection,
-        ...(normalized.userProjection === undefined
+        durableSummary: projected.durableSummary,
+        modelProjection: projected.modelProjection,
+        ...(projected.userProjection === undefined
           ? {}
-          : { userProjection: normalized.userProjection }),
+          : { userProjection: projected.userProjection }),
       };
     } catch (error) {
       if (linked.leaseLost()) {
@@ -534,7 +595,7 @@ export class ToolInvocationRuntime {
         descriptor.effect === 'transactional';
       const unacknowledgedRiskyAbort = error instanceof ToolHandlerAbort && riskyEffect;
       const outcomeUnknown = riskyEffect &&
-        (unacknowledgedRiskyAbort || mapped.fact.outcome === 'unknown');
+        (handlerCompleted || unacknowledgedRiskyAbort || mapped.fact.outcome === 'unknown');
       const executionError: ToolExecutionErrorFact = outcomeUnknown
         ? { ...mapped.fact, outcome: 'unknown' }
         : descriptor.effect === 'read' && mapped.fact.outcome === 'unknown'
@@ -554,7 +615,7 @@ export class ToolInvocationRuntime {
     }
     let committed: AgentInvocationProjection;
     try {
-      const result = await this.#journal.commitToolInvocation({
+      const result = await this.#toolLifecycle.commit({
         action: 'finish',
         projectId: invocation.projectId,
         sessionId: invocation.sessionId,
@@ -588,7 +649,7 @@ export class ToolInvocationRuntime {
       throw new ToolInvocationError('INVOCATION_CONFLICT', 'Invocation start fact is missing.');
     }
     try {
-      const result = await this.#journal.commitToolInvocation({
+      const result = await this.#toolLifecycle.commit({
         action: 'finish',
         projectId: invocation.projectId,
         sessionId: invocation.sessionId,
@@ -637,7 +698,7 @@ export class ToolInvocationRuntime {
       ...(terminal.error === undefined ? {} : { errorCode: terminal.error.code }),
     };
     try {
-      const result = await this.#journal.commitToolInvocation({
+      const result = await this.#toolLifecycle.commit({
         action: 'observe',
         projectId: invocation.projectId,
         sessionId: invocation.sessionId,
@@ -715,7 +776,7 @@ export class ToolInvocationRuntime {
           'TOOL_REVISION_MISMATCH', 'Tool effect metadata is unavailable for this snapshot.',
         );
       }
-      this.#requireHandlerRuntime(invocation, descriptor);
+      this.#requireHandlerRuntime(invocation);
       argumentsRecord = portableArguments(invocation.arguments);
       const revision = this.#registry.invocationRevision(invocation.name);
       if (revision === undefined) {
@@ -739,7 +800,7 @@ export class ToolInvocationRuntime {
       throw error;
     }
     try {
-      await this.#journal.commitToolInvocation({
+      await this.#toolLifecycle.commit({
         action: 'validate',
         projectId: invocation.projectId,
         sessionId: invocation.sessionId,
@@ -768,7 +829,7 @@ export class ToolInvocationRuntime {
   ): Promise<AgentInvocationProjection> {
     const fact = resolutionErrorFact(error);
     try {
-      const result = await this.#journal.commitToolInvocation({
+      const result = await this.#toolLifecycle.commit({
         action: 'reject-validation',
         projectId: invocation.projectId,
         sessionId: invocation.sessionId,
@@ -806,11 +867,8 @@ export class ToolInvocationRuntime {
     return tool.descriptor;
   }
 
-  #requireHandlerRuntime(
-    invocation: AgentInvocationProjection,
-    descriptor: AgentToolDescriptor,
-  ): ToolInvocationHandlerRuntime {
-    const runtime = this.#registry.getInvocationRuntime(descriptor.id);
+  #requireHandlerRuntime(invocation: AgentInvocationProjection): ToolInvocationHandlerRuntime {
+    const runtime = resolveInvocationHandler(this.#registry, invocation.name);
     if (runtime === undefined) {
       throw new ToolInvocationError(
         'TOOL_NOT_FOUND', `Tool ${invocation.name} has no Invocation Handler.`,

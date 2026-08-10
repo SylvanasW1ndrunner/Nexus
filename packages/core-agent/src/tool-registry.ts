@@ -2,6 +2,13 @@ import type { LlmTool } from '@dbagent/core-llm';
 import { assertPortableValue, type PortableValue } from '@dbagent/shared';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  bindInvocationHandlerSnapshot,
+  cloneInvocationHandlers,
+  deleteInvocationHandler,
+  replaceInvocationHandlers,
+  setInvocationHandler,
+} from './internal/tool-invocation-authority.js';
 import type {
   AgentToolCatalogChange,
   AgentToolContribution,
@@ -22,7 +29,6 @@ const MAX_DESCRIPTOR_CONTAINER_ENTRIES = 10_000;
 export class ToolRegistry {
   private readonly tools = new Map<string, RegisteredAgentTool>();
   private readonly runtimes = new Map<string, AgentToolRuntime>();
-  private readonly invocationRuntimes = new Map<string, ToolInvocationHandlerRuntime>();
   private readonly invocationRevisions = new Map<string, string>();
   private readonly ownerByTool = new Map<string, string>();
   private readonly toolsByOwner = new Map<string, Set<string>>();
@@ -92,7 +98,7 @@ export class ToolRegistry {
     this.runtimes.set(key, {
       id: descriptor.id, flatName: descriptor.flatName, handler: guardedLegacyHandler,
     });
-    this.invocationRuntimes.set(key, invocationRuntime);
+    setInvocationHandler(this, definition.name, invocationRuntime);
     this.invocationRevisions.set(definition.name, invocationRevision);
     this.ownerByTool.set(definition.name, ownerId);
     this.toolsByOwner.set(ownerId, new Set([definition.name]));
@@ -111,7 +117,7 @@ export class ToolRegistry {
     if (!tool) return false;
     this.tools.delete(name);
     this.runtimes.delete(toolIdKey(tool.descriptor.id));
-    this.invocationRuntimes.delete(toolIdKey(tool.descriptor.id));
+    deleteInvocationHandler(this, name);
     this.invocationRevisions.delete(name);
     const ownerId = this.ownerByTool.get(name);
     this.ownerByTool.delete(name);
@@ -169,7 +175,7 @@ export class ToolRegistry {
 
     const nextTools = new Map(this.tools);
     const nextRuntimes = new Map(this.runtimes);
-    const nextInvocationRuntimes = new Map(this.invocationRuntimes);
+    const nextInvocationRuntimes = cloneInvocationHandlers(this);
     const nextInvocationRevisions = new Map(this.invocationRevisions);
     const nextOwnerByTool = new Map(this.ownerByTool);
     const nextActiveToolRevisions = new Map(this.activeToolRevisions);
@@ -182,7 +188,7 @@ export class ToolRegistry {
       if (previous) {
         const key = toolIdKey(previous.descriptor.id);
         nextRuntimes.delete(key);
-        nextInvocationRuntimes.delete(key);
+        nextInvocationRuntimes.delete(name);
         nextInvocationRevisions.delete(name);
       }
       nextOwnerByTool.delete(name);
@@ -190,7 +196,7 @@ export class ToolRegistry {
       nextSnapshotLifecycles.delete(name);
     }
     for (const tool of prepared) {
-      nextInvocationRuntimes.delete(toolIdKey(tool.descriptor.id));
+      nextInvocationRuntimes.delete(tool.name);
       nextInvocationRevisions.delete(tool.name);
       if (unchangedNames.has(tool.name)) {
         nextTools.set(tool.name, tool);
@@ -224,7 +230,7 @@ export class ToolRegistry {
 
     replaceMap(this.tools, nextTools);
     replaceMap(this.runtimes, nextRuntimes);
-    replaceMap(this.invocationRuntimes, nextInvocationRuntimes);
+    replaceInvocationHandlers(this, nextInvocationRuntimes);
     replaceMap(this.invocationRevisions, nextInvocationRevisions);
     replaceMap(this.ownerByTool, nextOwnerByTool);
     replaceMap(this.activeToolRevisions, nextActiveToolRevisions);
@@ -254,15 +260,16 @@ export class ToolRegistry {
   }
 
   captureSnapshot(): ToolCatalogSnapshot {
-    return new ToolCatalogSnapshot(
+    const snapshot = new ToolCatalogSnapshot(
       this.revision,
       new Map(this.tools),
       new Map(this.runtimes),
-      new Map(this.invocationRuntimes),
       new Map(this.invocationRevisions),
       new Map(this.activeToolRevisions),
       new Map(this.snapshotLifecycles),
     );
+    bindInvocationHandlerSnapshot(this, snapshot);
+    return snapshot;
   }
 
   get(name: string): RegisteredAgentTool | undefined {
@@ -328,7 +335,6 @@ export class ToolCatalogSnapshot {
     readonly catalogRevision: number,
     private readonly tools: ReadonlyMap<string, RegisteredAgentTool>,
     private readonly runtimes: ReadonlyMap<string, AgentToolRuntime>,
-    private readonly invocationRuntimes: ReadonlyMap<string, ToolInvocationHandlerRuntime>,
     private readonly invocationRevisions: ReadonlyMap<string, string>,
     private readonly revisions: ReadonlyMap<string, number>,
     lifecycles: ReadonlyMap<string, AgentToolSnapshotLifecycle>,
@@ -371,16 +377,6 @@ export class ToolCatalogSnapshot {
       return registered ? this.runtimes.get(toolIdKey(registered.descriptor.id)) : undefined;
     }
     return this.runtimes.get(toolIdKey(id));
-  }
-
-  getInvocationRuntime(id: AgentToolId | string): ToolInvocationHandlerRuntime | undefined {
-    if (typeof id === 'string') {
-      const registered = this.tools.get(id);
-      return registered
-        ? this.invocationRuntimes.get(toolIdKey(registered.descriptor.id))
-        : undefined;
-    }
-    return this.invocationRuntimes.get(toolIdKey(id));
   }
 
   invocationRevision(name: string): string | undefined {

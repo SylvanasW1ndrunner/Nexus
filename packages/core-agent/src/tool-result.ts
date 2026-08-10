@@ -57,7 +57,18 @@ export type NormalizedToolResult = {
   durableSummary: PortableValue;
   artifactBytes?: Uint8Array;
   artifactByteSize: number;
+  modelProjectionByteSize: number;
+  userProjectionByteSize?: number;
+  durableSummaryByteSize: number;
+  maxModelProjectionBytes: number;
+  maxUserProjectionBytes: number;
+  maxDurableSummaryBytes: number;
 };
+
+export type MaterializedToolResult = Pick<
+  NormalizedToolResult,
+  'modelProjection' | 'userProjection' | 'durableSummary'
+>;
 
 export function normalizeAgentToolResult(
   value: unknown,
@@ -80,25 +91,71 @@ export function normalizeAgentToolResult(
   const maxUser = options.maxUserProjectionBytes ?? 16 * 1024;
   const maxDurable = options.maxDurableSummaryBytes ?? 4 * 1024;
   const artifactThreshold = options.artifactThresholdBytes ?? 32 * 1024;
-  const modelProjection = boundedPortableProjection(
-    envelope.modelProjection as PortableValue, maxModel, 'model projection',
-  );
-  const durableSummary = boundedPortableProjection(
-    envelope.durableSummary as PortableValue, maxDurable, 'durable summary',
-  );
+  const modelProjection = envelope.modelProjection as PortableValue;
+  const userProjection = envelope.userProjection as PortableValue | undefined;
+  const durableSummary = envelope.durableSummary as PortableValue;
+  const modelProjectionByteSize = portableByteSize(modelProjection);
+  const userProjectionByteSize = userProjection === undefined
+    ? undefined
+    : portableByteSize(userProjection);
+  const durableSummaryByteSize = portableByteSize(durableSummary);
+  const projectionReplacementRequired =
+    modelProjectionByteSize > maxModel ||
+    (userProjectionByteSize !== undefined && userProjectionByteSize > maxUser) ||
+    durableSummaryByteSize > maxDurable;
   return {
     envelope,
-    modelProjection,
-    ...(envelope.userProjection === undefined
+    modelProjection: structuredClone(modelProjection),
+    ...(userProjection === undefined ? {} : { userProjection: structuredClone(userProjection) }),
+    durableSummary: structuredClone(durableSummary),
+    ...(encoded.byteLength <= artifactThreshold && !projectionReplacementRequired
+      ? {}
+      : { artifactBytes: encoded }),
+    artifactByteSize: encoded.byteLength,
+    modelProjectionByteSize,
+    ...(userProjectionByteSize === undefined ? {} : { userProjectionByteSize }),
+    durableSummaryByteSize,
+    maxModelProjectionBytes: maxModel,
+    maxUserProjectionBytes: maxUser,
+    maxDurableSummaryBytes: maxDurable,
+  };
+}
+
+/**
+ * Produces the bounded values that may be journaled only after the Artifact
+ * handle is durable. Until this function succeeds, normalizeAgentToolResult()
+ * contains the complete sanitized values and no synthetic reference.
+ */
+export function materializeNormalizedToolResult(
+  normalized: NormalizedToolResult,
+  artifactRef?: string,
+): MaterializedToolResult {
+  return {
+    modelProjection: boundedPortableProjection(
+      normalized.modelProjection,
+      normalized.modelProjectionByteSize,
+      normalized.maxModelProjectionBytes,
+      'model projection',
+      artifactRef,
+    ),
+    ...(normalized.userProjection === undefined || normalized.userProjectionByteSize === undefined
       ? {}
       : {
           userProjection: boundedPortableProjection(
-            envelope.userProjection as PortableValue, maxUser, 'user projection',
+            normalized.userProjection,
+            normalized.userProjectionByteSize,
+            normalized.maxUserProjectionBytes,
+            'user projection',
+            artifactRef,
           ),
         }),
-    durableSummary,
-    ...(encoded.byteLength <= artifactThreshold ? {} : { artifactBytes: encoded }),
-    artifactByteSize: encoded.byteLength,
+    durableSummary: boundedPortableProjection(
+      normalized.durableSummary,
+      normalized.durableSummaryByteSize,
+      normalized.maxDurableSummaryBytes,
+      'durable summary',
+      artifactRef,
+    ),
   };
 }
 
@@ -138,14 +195,21 @@ function isLocalAbsolutePath(value: string): boolean {
 
 function boundedPortableProjection(
   value: PortableValue,
+  byteSize: number,
   maximumBytes: number,
   label: string,
+  artifactRef: string | undefined,
 ): PortableValue {
-  const byteSize = new TextEncoder().encode(JSON.stringify(value)).byteLength;
   if (byteSize <= maximumBytes) return structuredClone(value);
+  if (artifactRef === undefined || artifactRef.length === 0) throw invalidToolResultError();
   return {
     type: 'schemanaut.bounded-projection.v1',
     summary: `${label} is available in the referenced artifact.`,
     byteSize,
+    artifactRef,
   };
+}
+
+function portableByteSize(value: PortableValue): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }

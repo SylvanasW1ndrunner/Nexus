@@ -126,6 +126,8 @@ export type StartToolInvocationCommand = ToolInvocationCommandBase & {
   action: 'start';
   idempotencyKey: string;
   attempt: number;
+  /** Prior start fence atomically superseded by this recovery claim. */
+  recoveryOfFencingToken?: number;
 };
 
 export type FinishToolInvocationCommand = ToolInvocationCommandBase & {
@@ -250,7 +252,6 @@ export interface AgentJournal {
   startRun(command: StartRunCommand): Promise<JournalCommitResult>;
   startTurn(command: StartTurnCommand): Promise<JournalCommitResult>;
   commit(command: JournalCommand): Promise<JournalCommitResult>;
-  commitToolInvocation(command: ToolInvocationJournalCommand): Promise<ToolInvocationCommitResult>;
   readProject(projectId: string, afterSequence: number, limit: number): Promise<AgentEvent[]>;
   acquireRunLease(input: AcquireRunLeaseInput): Promise<RunLease>;
   renewRunLease(input: RenewRunLeaseInput): Promise<RunLease>;

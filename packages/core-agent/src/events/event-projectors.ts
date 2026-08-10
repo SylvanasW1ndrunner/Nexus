@@ -268,6 +268,7 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
       });
       projectScheduledRunState(
         runs, invocations, event.runId, event.turnId, event.occurredAt,
+        event.type,
       );
       continue;
     }
@@ -275,6 +276,7 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
     if (invocationId === undefined) continue;
     const invocation = invocations.get(invocationId);
     if (invocation === undefined) continue;
+    const priorInvocationState = invocation.state;
     if (event.type === 'tool.validated') {
       invocation.state = 'validated';
       if (!('validationError' in event.payload)) {
@@ -416,6 +418,7 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
     if (event.type !== 'tool.validated') {
       projectScheduledRunState(
         runs, invocations, event.runId, invocation.turnId, event.occurredAt,
+        event.type, priorInvocationState,
       );
     }
   }
@@ -443,9 +446,12 @@ function projectScheduledRunState(
   runId: string,
   turnId: string,
   occurredAt: string,
+  trigger: AgentEvent['type'],
+  priorInvocationState?: AgentInvocationProjection['state'],
 ): void {
   const run = runs.get(runId);
   if (run === undefined) return;
+  if (isProtectedReplayToolState(run.state, trigger, priorInvocationState)) return;
   const facts = [...invocations.values()]
     .filter((invocation) => invocation.runId === runId && invocation.turnId === turnId)
     .map(scheduledInvocationFact);
@@ -454,6 +460,22 @@ function projectScheduledRunState(
     maxConcurrency: Number.MAX_SAFE_INTEGER,
   }));
   run.updatedAt = occurredAt;
+}
+
+function isProtectedReplayToolState(
+  state: AgentRunState,
+  trigger: AgentEvent['type'],
+  priorInvocationState: AgentInvocationProjection['state'] | undefined,
+): boolean {
+  if (state === 'AwaitingUser') {
+    const exactApprovalDecision =
+      (trigger === 'tool.authorized' || trigger === 'tool.denied') &&
+      priorInvocationState === 'awaiting_approval';
+    return !exactApprovalDecision && trigger !== 'tool.outcome_resolved';
+  }
+  return state === 'Finalizing' || state === 'Cancelling' || state === 'LimitReached' ||
+    state === 'Interrupted' || state === 'Completed' || state === 'Failed' ||
+    state === 'Cancelled';
 }
 
 function scheduledInvocationFact(

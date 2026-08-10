@@ -7,7 +7,8 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 
 - `23fddbe` - pure deterministic scheduler and ordering/barrier tests.
 - `8a8fefe` - durable Invocation lifecycle facts, schemas, projections, and Journal commands.
-- The final Task 5 implementation commit is created after this report. No checkpoint was pushed.
+- `332ca7b` - unified Tool scheduling, execution, approval, bounded results, and recovery.
+- The formal-review repair and this updated evidence report are committed together. No checkpoint was pushed.
 
 ## RED evidence
 
@@ -22,6 +23,7 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 - Restart recovery initially compared process-local numeric Registry revisions. A new Registry could therefore reuse revision `1` for changed Tool semantics, or reject unchanged semantics after unrelated registrations. RED tests covered identical restart semantics plus independent Schema, effect, and Handler revision changes.
 - Invocation fingerprint ingress initially risked traversing accessors, cycles, `undefined`, or a sparse array's declared length. RED tests proved every such descriptor is rejected atomically before registration and without evaluating a getter.
 - The first Task 4 regression run passed 183 of 184 tests; the built-package import test correctly failed because `dist` had not been built. After the documented package build prerequisite, the complete controller passed 184 of 184.
+- Formal review found that raw Handler references and a lifecycle committer were still reflectively reachable from public objects, large projections could be replaced by a non-durable placeholder, recovery did not atomically claim a new fencing generation, and late Tool facts could overwrite protected Run states. Each finding first received a failing boundary, fault, race, or replay test.
 
 ## Implemented guarantees
 
@@ -30,6 +32,7 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 - `decideSchedule(snapshot)` is pure and deterministic. It preserves model order, resolves eligible proposals before dispatch, stops read windows at unresolved write/external barriers, and enforces bounded read concurrency.
 - `ToolInvocationRuntime` is the sole new Handler invocation authority. Public direct execution may only select the first Invocation in the current committed scheduler decision; it cannot jump barriers, later reads, or concurrency bounds.
 - Handlers may complete concurrently and their terminal facts are committed in real completion order; exactly one Observation per Invocation is then published strictly in model action order. Cancellation stops undispatched work and reaches started Handlers without discarding already committed terminal evidence.
+- Raw Handler references live only in a package-private WeakMap authority. Registry and snapshot reflection, recursive graph traversal, package-root imports, and blocked deep imports cannot obtain or invoke a Handler.
 
 ### Strict immutable ingress and durable lifecycle
 
@@ -39,6 +42,8 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 - The lifecycle is Journal-authoritative: `proposed -> validated -> awaiting_approval | authorized | denied -> started -> succeeded | failed | outcome_unknown -> observed`.
 - Every transition uses expected revision/CAS and current Run lease fencing. Two Runtime instances racing validation or execution cannot call a Handler prematurely or create duplicate terminal/Observation facts.
 - Run aggregate projections rebuild mixed Invocation state from Journal facts; no in-memory Map is durable authority.
+- Lifecycle commits are available only through a package-private capability bound to the Journal instance. `AgentJournal`, `SqliteAgentJournal`, their prototypes, and the built package expose no lifecycle committer; generic public commits reject forged reserved Tool facts.
+- Late Tool facts cannot move `Finalizing`, `Cancelling`, `LimitReached`, `Interrupted`, `Completed`, `Failed`, or `Cancelled` Runs back into execution. `AwaitingUser` exits only through the exact approval or outcome-resolution event. Online projection and full Journal rebuild produce the same protected state.
 
 ### Approval, lease, and recovery
 
@@ -46,12 +51,14 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 - Approval listing is scoped and keyset-paged by opaque `(createdAt, approvalId)` cursor with a hard limit. Waits survive Runtime restart and honor cancellation.
 - Lease monitoring reads the authoritative Journal lease, observes owner/fence changes and natural expiry, and respects renewed expiry. Stale completions cannot publish a terminal result or Observation.
 - Read/idempotent recovery reuses the persisted idempotency key under a current fence. Transactional/non-idempotent interruption records `outcome_unknown`; equivalent risky retry requires one exact, single-use, Invocation-bound permit.
+- Recovery under a replacement lease first performs one atomic Journal compare-and-set claim from the interrupted fencing token to the current token. Same-process and real two-process races produce exactly one recovery start, one Handler call, one terminal fact, and one Observation; losing contenders wait for the committed outcome.
 - Unknown-equivalent and retry-permit lookup use indexed exact queries over `agent_invocations`, including scope, revision, effect, and digest. Resolution removes an Invocation from unknown-equivalent matching.
 
 ### Results and errors
 
 - Ajv 2020 validates Tool arguments through a bounded 128-entry compiled-schema cache. Validator diagnostics and Handler failures map to the closed typed error contract; exception text is not execution policy.
 - Handler output is sanitized before any durable write. Journal outcome/Observation facts keep bounded portable projections and references; full bounded-independent envelopes are staged in the managed Artifact Store.
+- Crossing any model, user, or durable projection limit first persists the complete sanitized envelope as an Artifact, then publishes a bounded projection containing the real Artifact reference. Exact 16 KiB and 32 KiB boundaries are covered. If Artifact persistence fails, no fake reference or lossy success is committed; a completed risky effect becomes `outcome_unknown`.
 - Secret-bearing keys, stack traces, and local filesystem diagnostics are removed from model, durable, user, Journal, and Artifact views. Ordinary business paths remain usable.
 - User-safe summaries, approval text, actor identity, reference counts, and artifact handles have explicit bounds and formats. Raw or large outputs are not copied into Session messages or preferences.
 
@@ -63,7 +70,7 @@ Scope: deterministic Tool scheduling, authoritative Invocation lifecycle, approv
 
 ## Final verification
 
-- Task 5 exact controller: **8 files / 93 tests**, passed after the stable semantic revision change. This covers scheduler windows/barriers, approval, registry atomicity, Journal lifecycle, restart-stable Tool identity, two-Runtime races, cancellation, real child-process crashes, lease expiry/takeover, unknown outcome, retry permits, indexed scale lookup, bounded projections, and result redaction.
+- Task 5 exact controller: **11 files / 171 tests**, passed after the formal-review repair. This covers scheduler windows/barriers, approval, registry and lifecycle authority isolation, Journal lifecycle, restart-stable Tool identity, online/rebuild projection equivalence, two-Runtime and real two-process recovery races, cancellation, real child-process crash cuts, lease expiry/takeover, unknown outcome, retry permits, indexed scale lookup, exact projection boundaries, Artifact-first materialization, and result redaction.
 - Task 3 exact regression: **6 files / 110 tests**, passed after the final production edit.
 - Task 4 exact persistence regression after a clean core-agent build: **9 files / 184 tests**, passed after the final production edit.
 - TypeScript `--noEmit`: core-agent source, core-agent tests, core-llm source, and core-llm tests all passed.

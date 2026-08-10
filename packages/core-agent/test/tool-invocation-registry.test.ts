@@ -40,7 +40,7 @@ describe('invocation-only Tool registry boundary', () => {
     expect(getterCalls).toBe(0);
   });
 
-  it('captures an immutable Handler revision that legacy runtime lookup cannot execute', () => {
+  it('captures an immutable Handler revision without retaining the raw Handler publicly', () => {
     const registry = new ToolRegistry();
     const execute = () => createAgentToolResultEnvelope({
       modelProjection: { ok: true }, durableSummary: { ok: true },
@@ -53,14 +53,15 @@ describe('invocation-only Tool registry boundary', () => {
     }, { execute });
     const snapshot = registry.captureSnapshot();
 
-    expect(snapshot.getInvocationRuntime('runtime_only')).toMatchObject({ execute });
+    expect(containsReference(registry, execute)).toBe(false);
+    expect(containsReference(snapshot, execute)).toBe(false);
+    expect('getInvocationRuntime' in snapshot).toBe(false);
     expect(snapshot.get('runtime_only')?.descriptor).toMatchObject({
       flatName: 'runtime_only', effect: 'read',
     });
     expect(() => registry.getRuntime('runtime_only')?.handler({}, {} as never))
       .toThrow(/ToolInvocationRuntime/u);
     registry.unregister('runtime_only');
-    expect(snapshot.getInvocationRuntime('runtime_only')).toMatchObject({ execute });
     snapshot.release();
   });
 
@@ -80,7 +81,34 @@ describe('invocation-only Tool registry boundary', () => {
     }, { execute });
 
     expect(snapshots).toHaveLength(1);
-    expect(snapshots[0]?.getInvocationRuntime('atomic_runtime')).toMatchObject({ execute });
+    expect(snapshots[0]?.get('atomic_runtime')?.descriptor).toMatchObject({
+      flatName: 'atomic_runtime', effect: 'read',
+    });
+    expect(containsReference(snapshots[0], execute)).toBe(false);
     snapshots.forEach((snapshot) => snapshot.release());
   });
 });
+
+function containsReference(root: unknown, target: unknown, seen = new Set<unknown>()): boolean {
+  if (root === target) return true;
+  if ((typeof root !== 'object' && typeof root !== 'function') || root === null) return false;
+  if (seen.has(root)) return false;
+  seen.add(root);
+  if (root instanceof Map) {
+    for (const [key, value] of root) {
+      if (containsReference(key, target, seen) || containsReference(value, target, seen)) return true;
+    }
+  }
+  if (root instanceof Set) {
+    for (const value of root) if (containsReference(value, target, seen)) return true;
+  }
+  for (const key of Reflect.ownKeys(root)) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(root, key);
+    if (
+      descriptor !== undefined && 'value' in descriptor &&
+      containsReference(descriptor.value, target, seen)
+    ) return true;
+  }
+  const prototype = Reflect.getPrototypeOf(root) as unknown;
+  return prototype !== null && containsReference(prototype, target, seen);
+}

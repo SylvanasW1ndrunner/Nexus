@@ -23,6 +23,10 @@ import {
   createAgentToolResultEnvelope,
 } from '../src/index.js';
 import { validatedAttemptFixture } from './validated-attempt-fixture.js';
+import {
+  bindToolLifecycleCommitter,
+  openToolLifecycleCommitter,
+} from '../src/internal/tool-lifecycle-authority.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -391,13 +395,19 @@ describe('ToolInvocationRuntime', () => {
         { name: 'query_database', arguments: { sql: 'select 2' } },
       ]),
     });
-    const realCommit = fixture.journal.commitToolInvocation.bind(fixture.journal);
+    const realCommit = openToolLifecycleCommitter(fixture.journal).commit;
     let signalFirstValidated = (): void => undefined;
     let releaseFirstValidation = (): void => undefined;
     const firstValidated = new Promise<void>((resolve) => { signalFirstValidated = resolve; });
     const validationRelease = new Promise<void>((resolve) => { releaseFirstValidation = resolve; });
     let held = false;
-    vi.spyOn(fixture.journal, 'commitToolInvocation').mockImplementation(async (command) => {
+    const journalFacade = new Proxy(fixture.journal, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) as unknown : value;
+      },
+    });
+    bindToolLifecycleCommitter(journalFacade, async (command) => {
       const result = await realCommit(command);
       if (
         !held && command.action === 'validate' &&
@@ -409,11 +419,14 @@ describe('ToolInvocationRuntime', () => {
       }
       return result;
     });
-    const resolving = fixture.runtime.resolve();
+    const { ToolInvocationRuntime } = await runtimeModule();
+    const resolvingRuntime = new ToolInvocationRuntime({
+      ...fixture.runtimeOptions(), journal: journalFacade,
+    });
+    const resolving = resolvingRuntime.resolve();
     await firstValidated;
     expect(fixture.readCalls()).toBe(0);
 
-    const { ToolInvocationRuntime } = await runtimeModule();
     const competitor = new ToolInvocationRuntime(fixture.runtimeOptions());
     const executing = competitor.execute(fixture.invocationIds[0] ?? '');
     await fixture.waitUntilReadStarted();
@@ -441,7 +454,7 @@ describe('ToolInvocationRuntime', () => {
   });
 
   it('maps unknown Handler errors to a closed safe error without scanning or leaking their text', async () => {
-    const secret = 'sk-never-persist-this';
+    const secret = 'synthetic-api-key-never-persist';
     const fixture = await createFixture({
       mode: 'full',
       readHandler: () => {
@@ -489,6 +502,124 @@ describe('ToolInvocationRuntime', () => {
     expect(artifactEvent?.type).toBe('artifact.created');
     if (artifactEvent?.type !== 'artifact.created') throw new Error('Artifact fact is missing.');
     expect(artifactEvent.payload.byteSize).toBeGreaterThan(256 * 1024);
+  });
+
+  it.each([
+    ['16 KiB', 16 * 1024, false],
+    ['just above 16 KiB', 16 * 1024 + 1, true],
+    ['just below 32 KiB', 32 * 1024 - 1, true],
+    ['32 KiB', 32 * 1024, true],
+    ['just above 32 KiB', 32 * 1024 + 1, true],
+  ] as const)(
+    'keeps a %s model projection lossless and Artifact-bound when it is replaced',
+    async (_label, projectionBytes, expectsArtifact) => {
+      const completeProjection = jsonStringWithByteSize(projectionBytes);
+      const fixture = await createFixture({
+        mode: 'full', artifactStore: true,
+        readHandler: () => createAgentToolResultEnvelope({
+          modelProjection: completeProjection,
+          userProjection: { visible: true },
+          durableSummary: { rowCount: 1 },
+        }),
+      });
+      await fixture.runtime.resolve();
+      const observation = await fixture.runtime.execute(fixture.readInvocationId);
+      const invocation = await fixture.journal.getInvocation(fixture.readInvocationId);
+      const handle = invocation?.terminal?.resultRefs[0];
+
+      if (!expectsArtifact) {
+        expect(invocation?.terminal?.resultRefs).toEqual([]);
+        expect(observation.modelProjection).toBe(completeProjection);
+        return;
+      }
+      expect(handle).toMatch(/^agent-artifact:/u);
+      expect(observation.modelProjection).toEqual({
+        type: 'schemanaut.bounded-projection.v1',
+        summary: 'model projection is available in the referenced artifact.',
+        byteSize: projectionBytes,
+        artifactRef: handle,
+      });
+      const artifact = await readResultArtifact(fixture.artifactStore, fixture.journal, handle);
+      expect(artifact).toMatchObject({ modelProjection: completeProjection });
+    },
+  );
+
+  it.each([
+    ['model', 16 * 1024 + 1],
+    ['user', 16 * 1024 + 1],
+    ['durable', 4 * 1024 + 1],
+  ] as const)(
+    'requires a committed full-envelope Artifact before replacing the %s projection',
+    async (projection, projectionBytes) => {
+      const completeProjection = jsonStringWithByteSize(projectionBytes);
+      const fixture = await createFixture({
+        mode: 'full', artifactStore: true,
+        readHandler: () => createAgentToolResultEnvelope({
+          modelProjection: projection === 'model' ? completeProjection : { ok: true },
+          userProjection: projection === 'user' ? completeProjection : { visible: true },
+          durableSummary: projection === 'durable' ? completeProjection : { rowCount: 1 },
+        }),
+      });
+      await fixture.runtime.resolve();
+      const observation = await fixture.runtime.execute(fixture.readInvocationId);
+      const invocation = await fixture.journal.getInvocation(fixture.readInvocationId);
+      const handle = invocation?.terminal?.resultRefs[0];
+      expect(handle).toMatch(/^agent-artifact:/u);
+      const projected = projection === 'model'
+        ? observation.modelProjection
+        : projection === 'user'
+          ? invocation?.terminal?.userProjection
+          : invocation?.terminal?.durableSummary;
+      expect(projected).toMatchObject({
+        type: 'schemanaut.bounded-projection.v1',
+        byteSize: projectionBytes,
+        artifactRef: handle,
+      });
+      const artifact = await readResultArtifact(fixture.artifactStore, fixture.journal, handle);
+      expect(artifact).toMatchObject({
+        [projection === 'model'
+          ? 'modelProjection'
+          : projection === 'user' ? 'userProjection' : 'durableSummary']: completeProjection,
+      });
+    },
+  );
+
+  it('never commits a referenced placeholder when the required Artifact cannot be created', async () => {
+    const completeProjection = jsonStringWithByteSize(16 * 1024 + 1);
+    const fixture = await createFixture({
+      mode: 'full', artifactStore: false,
+      readHandler: () => createAgentToolResultEnvelope({
+        modelProjection: completeProjection,
+        durableSummary: { rowCount: 1 },
+      }),
+    });
+    await fixture.runtime.resolve();
+    const observation = await fixture.runtime.execute(fixture.readInvocationId);
+    const invocation = await fixture.journal.getInvocation(fixture.readInvocationId);
+
+    expect(observation.outcome).toBe('failed');
+    expect(invocation?.terminal?.kind).toBe('failed');
+    expect(invocation?.terminal?.resultRefs).toEqual([]);
+    expect(JSON.stringify(invocation?.terminal)).not.toContain('bounded-projection');
+  });
+
+  it('records an unknown outcome when a risky Handler completed but its required Artifact failed', async () => {
+    const fixture = await createFixture({
+      mode: 'full', artifactStore: false, readEffect: 'non_idempotent',
+      readHandler: () => createAgentToolResultEnvelope({
+        modelProjection: jsonStringWithByteSize(16 * 1024 + 1),
+        durableSummary: { changed: true },
+      }),
+    });
+    await fixture.runtime.resolve();
+    const observation = await fixture.runtime.execute(fixture.readInvocationId);
+    const invocation = await fixture.journal.getInvocation(fixture.readInvocationId);
+
+    expect(observation.outcome).toBe('outcome_unknown');
+    expect(invocation?.terminal).toMatchObject({
+      kind: 'outcome_unknown', resultRefs: [], error: { outcome: 'unknown' },
+    });
+    expect(JSON.stringify(invocation?.terminal)).not.toContain('bounded-projection');
   });
 
   it('redacts secret-like diagnostics before terminal commit and preserves the full bounded result artifact', async () => {
@@ -955,6 +1086,40 @@ async function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
     if (signal.aborted) abort();
     else signal.addEventListener('abort', abort, { once: true });
   });
+}
+
+function jsonStringWithByteSize(byteSize: number): string {
+  if (!Number.isSafeInteger(byteSize) || byteSize < 2) throw new Error('Invalid JSON byte size.');
+  return 'x'.repeat(byteSize - 2);
+}
+
+async function readResultArtifact(
+  store: ProjectArtifactStore | undefined,
+  journal: SqliteAgentJournal,
+  handle: string | undefined,
+): Promise<Record<string, unknown>> {
+  if (store === undefined || handle === undefined) throw new Error('Result Artifact is missing.');
+  const artifactEvent = (await journal.readProject('project-a', 0, 100)).find(
+    (event) => event.type === 'artifact.created' && event.payload.handle === handle,
+  );
+  if (artifactEvent?.type !== 'artifact.created' || artifactEvent.payload.availability !== 'available') {
+    throw new Error('Result Artifact fact is missing.');
+  }
+  const stream = await store.open({
+    schemaVersion: 1,
+    artifactId: artifactEvent.payload.artifactId,
+    handle: artifactEvent.payload.handle,
+    projectId: 'project-a',
+    checksum: artifactEvent.payload.checksum,
+    byteSize: artifactEvent.payload.byteSize,
+    mediaType: artifactEvent.payload.mediaType,
+    availability: 'available',
+    createdAt: artifactEvent.occurredAt,
+    ...(artifactEvent.payload.expiresAt === undefined
+      ? {}
+      : { expiresAt: artifactEvent.payload.expiresAt }),
+  });
+  return JSON.parse(await readTextStream(stream)) as Record<string, unknown>;
 }
 
 async function readTextStream(stream: ReadableStream<Uint8Array>): Promise<string> {

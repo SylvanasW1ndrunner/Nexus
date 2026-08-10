@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -13,8 +14,11 @@ import {
   createAgentToolResultEnvelope,
 } from '../src/index.js';
 import { validatedAttemptFixture } from './validated-attempt-fixture.js';
+import { openToolLifecycleCommitter } from '../src/internal/tool-lifecycle-authority.js';
 
 const temporaryDirectories: string[] = [];
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const repositoryRoot = join(packageRoot, '..', '..');
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
   DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => NodeDatabaseSync;
 };
@@ -45,7 +49,7 @@ describe('Tool outcome recovery', () => {
     expect(await waitForExit(child)).not.toBe(0);
 
     const reopenedJournal = new SqliteAgentJournal({ filePath: fixture.journalPath });
-    const recovered = await fixture.newRuntime({ journal: reopenedJournal });
+    const recovered = await fixture.takeoverRuntime({ journal: reopenedJournal });
     const observation = await recovered.recover(fixture.invocationId);
 
     expect(await readCounter(fixture.counterPath)).toBe(expectedCounter);
@@ -53,7 +57,9 @@ describe('Tool outcome recovery', () => {
     if (expectedOutcome === 'succeeded') {
       expect(observation.modelProjection).toEqual({ counter: expectedCounter });
     }
-    expect(await reopenedJournal.countEvents('tool.started', 'project-a')).toBe(1);
+    expect(await reopenedJournal.countEvents('tool.started', 'project-a')).toBe(
+      cut === 'after-started-before-handler' ? 2 : 1,
+    );
     expect(await reopenedJournal.countEvents('tool.observed', 'project-a')).toBe(1);
     expect(
       await reopenedJournal.countEvents(
@@ -70,7 +76,7 @@ describe('Tool outcome recovery', () => {
     expect(await waitForExit(child)).not.toBe(0);
 
     const started = await fixture.journal.getInvocation(fixture.invocationId);
-    const recovered = await fixture.newRuntime();
+    const recovered = await fixture.takeoverRuntime();
     await recovered.recover(fixture.invocationId);
     const finished = await fixture.journal.getInvocation(fixture.invocationId);
 
@@ -215,34 +221,114 @@ describe('Tool outcome recovery', () => {
     expect(await readCounter(fixture.counterPath)).toBe(1);
   });
 
+  it.each(['read', 'idempotent', 'transactional'] as const)(
+    'commits one Journal recovery claim before two Runtime instances replay a %s Handler',
+    async (effect) => {
+      let clock = Date.now();
+      const fixture = await createRecoveryFixture({
+        effect,
+        now: () => new Date(clock).toISOString(),
+        leaseTtlMs: 100,
+        handlerDelayMs: 50,
+      });
+      await fixture.runtime.resolve();
+      await commitStartedForRecovery(fixture);
+      clock += 101;
+      const takeover = await fixture.journal.acquireRunLease({
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        ownerId: 'recovery-owner',
+        ttlMs: 60_000,
+      });
+      const first = await fixture.newRuntime({ lease: takeover });
+      const second = await fixture.newRuntime({ lease: takeover });
+
+      const observations = await Promise.all([
+        first.recover(fixture.invocationId),
+        second.recover(fixture.invocationId),
+      ]);
+
+      expect(observations).toHaveLength(2);
+      expect(observations.every(({ outcome }) => outcome === 'succeeded')).toBe(true);
+      expect(fixture.handlerCalls()).toBe(1);
+      expect(await fixture.journal.countEvents('tool.started', fixture.projectId)).toBe(2);
+      expect(await fixture.journal.countEvents('tool.succeeded', fixture.projectId)).toBe(1);
+      expect(await fixture.journal.countEvents('tool.observed', fixture.projectId)).toBe(1);
+    },
+    20_000,
+  );
+
+  it.each(['read', 'idempotent', 'transactional'] as const)(
+    'lets one of two real recovery processes claim and replay a %s Handler',
+    async (effect) => {
+      let clock = Date.now();
+      const fixture = await createRecoveryFixture({
+        effect,
+        now: () => new Date(clock).toISOString(),
+        leaseTtlMs: 100,
+      });
+      await fixture.runtime.resolve();
+      await commitStartedForRecovery(fixture);
+      clock += 101;
+      const takeover = await fixture.journal.acquireRunLease({
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        ownerId: 'process-recovery-owner',
+        ttlMs: 60_000,
+      });
+      const releasePath = join(fixture.directory, `release-${effect}`);
+      const readyPaths = [
+        join(fixture.directory, `ready-${effect}-a`),
+        join(fixture.directory, `ready-${effect}-b`),
+      ];
+      const children = readyPaths.map((readyPath) => spawnRecoveryRaceWorker(
+        fixture,
+        takeover,
+        readyPath,
+        releasePath,
+      ));
+      await Promise.all(readyPaths.map(waitForPath));
+      await writeFile(releasePath, 'go', 'utf8');
+
+      expect(await Promise.all(children.map(waitForExit))).toEqual([0, 0]);
+      expect(await readHandlerCalls(fixture.counterPath)).toBe(1);
+      expect(await readCounter(fixture.counterPath)).toBe(1);
+      expect(await fixture.journal.countEvents('tool.started', fixture.projectId)).toBe(2);
+      expect(await fixture.journal.countEvents('tool.succeeded', fixture.projectId)).toBe(1);
+      expect(await fixture.journal.countEvents('tool.observed', fixture.projectId)).toBe(1);
+    },
+    20_000,
+  );
+
   it('requires an exact single-use retry permit for a risky equivalent action', async () => {
     const fixture = await createRecoveryFixture({ effect: 'non_idempotent' });
     await fixture.runtime.resolve();
     const child = spawnCrashWorker(fixture, 'after-external-effect-before-terminal');
     expect(await waitForExit(child)).not.toBe(0);
-    await (await fixture.newRuntime()).recover(fixture.invocationId);
+    const activeRuntime = await fixture.takeoverRuntime();
+    await activeRuntime.recover(fixture.invocationId);
     const unknown = await fixture.journal.getInvocation(fixture.invocationId);
 
-    await expect(fixture.runtime.authorizeRiskyRetry({
+    await expect(activeRuntime.authorizeRiskyRetry({
       commandId: 'risk-permit-wrong-revision', invocationId: fixture.invocationId,
       toolRevision: `${unknown?.toolRevision ?? ''}-changed`, effect: 'non_idempotent',
       normalizedArgumentsDigest: unknown?.normalizedArgumentsDigest ?? '',
       reason: 'must not bind another revision',
     })).rejects.toMatchObject({ code: 'INVOCATION_CONFLICT' });
-    await expect(fixture.runtime.authorizeRiskyRetry({
+    await expect(activeRuntime.authorizeRiskyRetry({
       commandId: 'risk-permit-wrong-digest', invocationId: fixture.invocationId,
       toolRevision: unknown?.toolRevision ?? '', effect: 'non_idempotent',
       normalizedArgumentsDigest: 'f'.repeat(64),
       reason: 'must not bind another digest',
     })).rejects.toMatchObject({ code: 'INVOCATION_CONFLICT' });
 
-    const permitted = await fixture.runtime.authorizeRiskyRetry({
+    const permitted = await activeRuntime.authorizeRiskyRetry({
       commandId: 'risk-permit', invocationId: fixture.invocationId,
       toolRevision: unknown?.toolRevision ?? '', effect: 'non_idempotent',
       normalizedArgumentsDigest: unknown?.normalizedArgumentsDigest ?? '',
       reason: 'user accepted duplicate-effect risk',
     });
-    const replay = await fixture.runtime.authorizeRiskyRetry({
+    const replay = await activeRuntime.authorizeRiskyRetry({
       commandId: 'risk-permit', invocationId: fixture.invocationId,
       toolRevision: unknown?.toolRevision ?? '', effect: 'non_idempotent',
       normalizedArgumentsDigest: unknown?.normalizedArgumentsDigest ?? '',
@@ -281,13 +367,14 @@ describe('Tool outcome recovery', () => {
     await fixture.runtime.resolve();
     const child = spawnCrashWorker(fixture, 'after-external-effect-before-terminal');
     expect(await waitForExit(child)).not.toBe(0);
-    await (await fixture.newRuntime()).recover(fixture.invocationId);
+    const activeRuntime = await fixture.takeoverRuntime();
+    await activeRuntime.recover(fixture.invocationId);
     const unknown = await fixture.journal.getInvocation(fixture.invocationId);
     if (
       unknown?.toolRevision === undefined || unknown.effect !== 'non_idempotent' ||
       unknown.normalizedArgumentsDigest === undefined
     ) throw new Error('Missing unknown outcome binding.');
-    const permit = await fixture.runtime.authorizeRiskyRetry({
+    const permit = await activeRuntime.authorizeRiskyRetry({
       commandId: 'scale-retry-permit', invocationId: unknown.invocationId,
       toolRevision: unknown.toolRevision, effect: unknown.effect,
       normalizedArgumentsDigest: unknown.normalizedArgumentsDigest,
@@ -374,7 +461,7 @@ describe('Tool outcome recovery', () => {
     await fixture.runtime.resolve();
     const child = spawnCrashWorker(fixture, 'after-external-effect-before-terminal');
     expect(await waitForExit(child)).not.toBe(0);
-    const recovered = await fixture.newRuntime();
+    const recovered = await fixture.takeoverRuntime();
     await recovered.recover(fixture.invocationId);
     const unknown = await fixture.journal.getInvocation(fixture.invocationId);
     if (
@@ -424,6 +511,7 @@ type RecoveryFixtureOptions = {
   leaseTtlMs?: number;
   now?: () => string;
   afterCounter?: (signal: AbortSignal) => Promise<void>;
+  handlerDelayMs?: number;
   leasePollIntervalMs?: number;
 };
 
@@ -462,6 +550,21 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
 
   const createRegistry = () => {
     const registry = new ToolRegistry();
+    const counterHandler = async (
+      _arguments: Readonly<Record<string, unknown>>,
+      context: { idempotencyKey: string; signal: AbortSignal },
+    ) => {
+      handlerCalls += 1;
+      incrementCounter(counterPath, context.idempotencyKey, options.effect === 'idempotent');
+      if (options.handlerDelayMs !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, options.handlerDelayMs));
+      }
+      await options.afterCounter?.(context.signal);
+      return createAgentToolResultEnvelope({
+        modelProjection: { counter: await readCounter(counterPath) },
+        durableSummary: { counter: await readCounter(counterPath) },
+      });
+    };
     registry.registerInvocation({
       name: 'query_database', description: 'persistent counter fixture', dangerLevel: 'safe',
       readonly: options.effect === 'read', effect: options.effect,
@@ -473,14 +576,8 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
         type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'],
       },
     }, {
-      execute: async (_arguments, context) => {
-        incrementCounter(counterPath, context.idempotencyKey, options.effect === 'idempotent');
-        await options.afterCounter?.(context.signal);
-        return createAgentToolResultEnvelope({
-          modelProjection: { counter: await readCounter(counterPath) },
-          durableSummary: { counter: await readCounter(counterPath) },
-        });
-      },
+      execute: counterHandler,
+      ...(options.effect === 'transactional' ? { recover: counterHandler } : {}),
     });
     registry.registerInvocation({
       name: 'read_result', description: 'unused fixture Tool', dangerLevel: 'safe', readonly: true,
@@ -495,6 +592,9 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
     }) });
     return registry;
   };
+  let handlerCalls = 0;
+  let activeLease = lease;
+  let takeoverOrdinal = 0;
   const snapshot = createRegistry().captureSnapshot();
   const { ToolInvocationRuntime } = await runtimeModule();
   const runtimeOptions = (overrides: {
@@ -504,7 +604,8 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
     permissionManager: new PermissionManager(),
     binding: {
       projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
-      turnId: overrides.turnId ?? 'turn-a', lease: overrides.lease ?? lease, mode: 'full' as const,
+      turnId: overrides.turnId ?? 'turn-a', lease: overrides.lease ?? activeLease,
+      mode: 'full' as const,
     },
     ...(options.leasePollIntervalMs === undefined
       ? {}
@@ -517,18 +618,37 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
     journal?: SqliteAgentJournal; lease?: typeof lease; turnId?: string;
   } = {}) => Promise.resolve(new ToolInvocationRuntime(runtimeOptions(overrides)));
 
+  const takeoverRuntime = async (overrides: {
+    journal?: SqliteAgentJournal; turnId?: string;
+  } = {}) => {
+    expireRunLeaseForCrash(journalPath, created.runId);
+    const leaseJournal = overrides.journal ?? journal;
+    takeoverOrdinal += 1;
+    activeLease = await leaseJournal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: `recovery-owner-${takeoverOrdinal}`, ttlMs: 60_000,
+    });
+    return new ToolInvocationRuntime(runtimeOptions({
+      journal: leaseJournal,
+      lease: activeLease,
+      ...(overrides.turnId === undefined ? {} : { turnId: overrides.turnId }),
+    }));
+  };
+
   const commitEquivalentNextTurn = async (turnId: string, attemptId: string) => {
     const run = await journal.getRunProjection(created.runId);
     if (run === null) throw new Error('Missing Run projection');
     await journal.startTurn({
       projectId: 'project-a', sessionId: 'session-a', runId: created.runId, turnId,
-      commandId: `start-${turnId}`, lease: leaseRef, expectedRunRevision: run.revision,
+      commandId: `start-${turnId}`, lease: leaseReference(activeLease),
+      expectedRunRevision: run.revision,
     });
     const started = await journal.getRunProjection(created.runId);
     if (started === null) throw new Error('Missing started Run projection');
     const result = await new RunEventCommitter(journal).commitValidatedAttempt({
       projectId: 'project-a', sessionId: 'session-a', runId: created.runId, turnId,
-      commandId: `commit-${turnId}`, lease: leaseRef, expectedRunRevision: started.revision,
+      commandId: `commit-${turnId}`, lease: leaseReference(activeLease),
+      expectedRunRevision: started.revision,
       expectedTurnRevision: 1, attempt: await validatedAttemptFixture(attemptId),
     });
     return result.invocations[0] ?? (() => { throw new Error('Missing retry Invocation'); })();
@@ -537,8 +657,47 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
   return {
     directory, journalPath, counterPath, journal, runId: created.runId, turnId: 'turn-a',
     sessionId: 'session-a', projectId: 'project-a', lease, runtime, invocationId,
-    effect: options.effect, newRuntime, commitEquivalentNextTurn,
+    effect: options.effect, newRuntime, takeoverRuntime, commitEquivalentNextTurn,
+    handlerCalls: () => handlerCalls,
   };
+}
+
+function expireRunLeaseForCrash(journalPath: string, runId: string): void {
+  const database = new DatabaseSync(journalPath);
+  try {
+    const result = database.prepare(
+      'UPDATE agent_run_leases SET expires_at_ms = 0 WHERE run_id = ?',
+    ).run(runId);
+    if (Number(result.changes) !== 1) throw new Error('Crash fixture lease is missing.');
+  } finally {
+    database.close();
+  }
+}
+
+function leaseReference(lease: { ownerId: string; fencingToken: number }) {
+  return { ownerId: lease.ownerId, fencingToken: lease.fencingToken };
+}
+
+async function commitStartedForRecovery(
+  fixture: Awaited<ReturnType<typeof createRecoveryFixture>>,
+): Promise<void> {
+  const invocation = await fixture.journal.getInvocation(fixture.invocationId);
+  const run = await fixture.journal.getRunProjection(fixture.runId);
+  if (invocation === null || run === null) throw new Error('Recovery fixture is incomplete.');
+  await openToolLifecycleCommitter(fixture.journal).commit({
+    action: 'start',
+    projectId: fixture.projectId,
+    sessionId: fixture.sessionId,
+    runId: fixture.runId,
+    turnId: fixture.turnId,
+    invocationId: fixture.invocationId,
+    commandId: `test-start:${fixture.invocationId}`,
+    lease: { ownerId: fixture.lease.ownerId, fencingToken: fixture.lease.fencingToken },
+    expectedRunRevision: run.revision,
+    expectedInvocationRevision: invocation.revision,
+    idempotencyKey: `test-idempotency:${fixture.invocationId}`,
+    attempt: 1,
+  });
 }
 
 function spawnCrashWorker(
@@ -546,14 +705,14 @@ function spawnCrashWorker(
   cut: 'after-started-before-handler' | 'after-external-effect-before-terminal' | 'after-terminal-before-observation',
 ) {
   const viteNode = join(
-    process.cwd(), 'node_modules', '.pnpm', 'vite-node@2.1.9_@types+node@22.19.20',
+    repositoryRoot, 'node_modules', '.pnpm', 'vite-node@2.1.9_@types+node@22.19.20',
     'node_modules', 'vite-node', 'vite-node.mjs',
   );
   const worker = join(
-    process.cwd(), 'packages', 'core-agent', 'test', 'fixtures', 'tool-runtime-crash-worker.ts',
+    packageRoot, 'test', 'fixtures', 'tool-runtime-crash-worker.ts',
   );
   return spawn(process.execPath, [viteNode, worker], {
-    cwd: process.cwd(), stdio: 'ignore',
+    cwd: repositoryRoot, stdio: 'ignore',
     env: {
       ...process.env,
       DBAGENT_TOOL_CRASH_INPUT: JSON.stringify({
@@ -561,6 +720,41 @@ function spawnCrashWorker(
         projectId: fixture.projectId, sessionId: fixture.sessionId, runId: fixture.runId,
         turnId: fixture.turnId, invocationId: fixture.invocationId, lease: fixture.lease,
         effect: fixture.effect, cut,
+      }),
+    },
+  });
+}
+
+function spawnRecoveryRaceWorker(
+  fixture: Awaited<ReturnType<typeof createRecoveryFixture>>,
+  lease: Awaited<ReturnType<SqliteAgentJournal['acquireRunLease']>>,
+  readyPath: string,
+  releasePath: string,
+) {
+  const viteNode = join(
+    repositoryRoot, 'node_modules', '.pnpm', 'vite-node@2.1.9_@types+node@22.19.20',
+    'node_modules', 'vite-node', 'vite-node.mjs',
+  );
+  const worker = join(
+    packageRoot, 'test', 'fixtures',
+    'tool-recovery-race-worker.ts',
+  );
+  return spawn(process.execPath, [viteNode, worker], {
+    cwd: repositoryRoot, stdio: 'ignore',
+    env: {
+      ...process.env,
+      DBAGENT_TOOL_RECOVERY_RACE_INPUT: JSON.stringify({
+        journalPath: fixture.journalPath,
+        counterPath: fixture.counterPath,
+        readyPath,
+        releasePath,
+        projectId: fixture.projectId,
+        sessionId: fixture.sessionId,
+        runId: fixture.runId,
+        turnId: fixture.turnId,
+        invocationId: fixture.invocationId,
+        lease,
+        effect: fixture.effect,
       }),
     },
   });
@@ -574,6 +768,9 @@ function initializeCounter(path: string): void {
         effect_id INTEGER PRIMARY KEY AUTOINCREMENT,
         idempotency_key TEXT NOT NULL,
         UNIQUE (idempotency_key)
+      );
+      CREATE TABLE IF NOT EXISTS handler_calls (
+        call_id TEXT PRIMARY KEY
       );`);
   } finally {
     database.close();
@@ -605,6 +802,19 @@ async function readCounter(path: string): Promise<number> {
   }
 }
 
+async function readHandlerCalls(path: string): Promise<number> {
+  await Promise.resolve();
+  const database = new DatabaseSync(path, { readOnly: true });
+  try {
+    return Number(
+      (database.prepare('SELECT COUNT(*) AS count FROM handler_calls').get() as { count: number })
+        .count,
+    );
+  } finally {
+    database.close();
+  }
+}
+
 async function readIdempotencyKeys(path: string): Promise<Array<string | undefined>> {
   await Promise.resolve();
   const database = new DatabaseSync(path, { readOnly: true });
@@ -619,4 +829,17 @@ async function readIdempotencyKeys(path: string): Promise<Array<string | undefin
 async function waitForExit(child: ReturnType<typeof spawn>): Promise<number | null> {
   if (child.exitCode !== null) return child.exitCode;
   return await new Promise((resolve) => child.once('exit', resolve));
+}
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  throw new Error(`Timed out waiting for recovery worker: ${path}`);
 }

@@ -1,13 +1,19 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RunEventCommitter, SqliteAgentJournal } from '../src/index.js';
 import type { ToolInvocationJournalCommand } from '../src/events/agent-journal.js';
+import { openToolLifecycleCommitter } from '../src/internal/tool-lifecycle-authority.js';
 import { validatedAttemptFixture } from './validated-attempt-fixture.js';
 
 const temporaryDirectories: string[] = [];
+const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
+  DatabaseSync: new (path: string) => NodeDatabaseSync;
+};
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -18,7 +24,7 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
   it('persists exact approval, terminal and Observation facts and rebuilds every projection', async () => {
     const fixture = await createFixture();
     const digest = sha256({ sql: 'select 1' });
-    const validated = await fixture.journal.commitToolInvocation({
+    const validated = await commitTool(fixture.journal, {
       ...fixture.base('validate', 1), action: 'validate',
       canonicalToolId: { name: 'query_database' }, toolRevision: '1', effect: 'read',
       normalizedArgumentsDigest: digest, authorization: 'ask', approvalSummary: 'Run query',
@@ -31,22 +37,22 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       effect: 'read', normalizedArgumentsDigest: digest, proposedRevision: 1,
       status: 'pending',
     });
-    const approved = await fixture.journal.commitToolInvocation({
+    const approved = await commitTool(fixture.journal, {
       ...fixture.base('approve', validated.invocation.revision), action: 'decide-approval',
       approvalId: validated.approval?.approvalId ?? '', canonicalToolId: { name: 'query_database' },
       toolRevision: '1', effect: 'read', normalizedArgumentsDigest: digest,
       proposedRevision: 1, decision: 'approve', decidedBy: 'tester',
     });
-    const started = await fixture.journal.commitToolInvocation({
+    const started = await commitTool(fixture.journal, {
       ...fixture.base('start', approved.invocation.revision), action: 'start',
       idempotencyKey: 'idem-fixture-a', attempt: 1,
     });
-    const finished = await fixture.journal.commitToolInvocation({
+    const finished = await commitTool(fixture.journal, {
       ...fixture.base('finish', started.invocation.revision), action: 'finish',
       outcome: 'succeeded', summary: 'Query completed.', resultRefs: [],
       durableSummary: { rowCount: 1 },
     });
-    await fixture.journal.commitToolInvocation({
+    await commitTool(fixture.journal, {
       ...fixture.base('observe', finished.invocation.revision), action: 'observe',
       observation: {
         observationId: 'observation-a', invocationId: fixture.invocationId,
@@ -67,6 +73,84 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
     expect(await fixture.journal.listObservations(fixture.runId)).toHaveLength(1);
   });
 
+  it.each([
+    'AwaitingUser', 'Finalizing', 'Cancelling', 'LimitReached', 'Interrupted',
+    'Completed', 'Failed', 'Cancelled',
+  ] as const)('never rewrites a protected %s Run state from a late Tool terminal', async (state) => {
+    const fixture = await createFixture();
+    const digest = sha256({ sql: 'select 1' });
+    const validated = await commitTool(fixture.journal, {
+      ...fixture.base(`validate-${state}`, 1), action: 'validate',
+      canonicalToolId: { name: 'query_database' }, toolRevision: '1', effect: 'read',
+      normalizedArgumentsDigest: digest, authorization: 'allow', approvalSummary: 'Run query',
+    });
+    const started = await commitTool(fixture.journal, {
+      ...fixture.base(`start-${state}`, validated.invocation.revision), action: 'start',
+      idempotencyKey: `idem-${state}`, attempt: 1,
+    });
+    const database = new DatabaseSync(fixture.filePath);
+    try {
+      database.prepare(
+        'UPDATE agent_runs SET state = ?, revision = revision + 1 WHERE run_id = ?',
+      ).run(state, fixture.runId);
+    } finally {
+      database.close();
+    }
+
+    await commitTool(fixture.journal, {
+      ...fixture.base(`finish-${state}`, started.invocation.revision),
+      expectedRunRevision: 5,
+      action: 'finish', outcome: 'succeeded', summary: 'Query completed.', resultRefs: [],
+      durableSummary: { rowCount: 1 }, modelProjection: { rowCount: 1 },
+    });
+
+    expect((await fixture.journal.getRunProjection(fixture.runId))?.state).toBe(state);
+  });
+
+  it.each([
+    {
+      label: 'awaiting-input', type: 'run.input_requested', state: 'AwaitingUser',
+      payload: { reason: 'Operator input is required.' },
+    },
+    {
+      label: 'cancelling', type: 'run.cancel_requested', state: 'Cancelling',
+      payload: { reason: 'Operator requested cancellation.' },
+    },
+    {
+      label: 'completed', type: 'run.completed', state: 'Completed',
+      payload: {
+        finalContentRef: 'final-content-a', deliveryStatus: 'delivered', evidenceRefs: [],
+      },
+    },
+  ] as const)(
+    'keeps online and rebuilt Run state equivalent after a late Tool terminal in $label',
+    async ({ type, state, payload }) => {
+      const fixture = await createFixture();
+      const digest = sha256({ sql: 'select 1' });
+      const validated = await commitTool(fixture.journal, {
+        ...fixture.base(`validate-${type}`, 1), action: 'validate',
+        canonicalToolId: { name: 'query_database' }, toolRevision: '1', effect: 'read',
+        normalizedArgumentsDigest: digest, authorization: 'allow', approvalSummary: 'Run query',
+      });
+      const started = await commitTool(fixture.journal, {
+        ...fixture.base(`start-${type}`, validated.invocation.revision), action: 'start',
+        idempotencyKey: `idem-${type}`, attempt: 1,
+      });
+      appendProtectedRunEvent(fixture.filePath, fixture.runId, type, payload, state);
+
+      await commitTool(fixture.journal, {
+        ...fixture.base(`late-finish-${type}`, started.invocation.revision),
+        expectedRunRevision: 5,
+        action: 'finish', outcome: 'succeeded', summary: 'Late completion.', resultRefs: [],
+        durableSummary: { rowCount: 1 }, modelProjection: { rowCount: 1 },
+      });
+      expect((await fixture.journal.getRunProjection(fixture.runId))?.state).toBe(state);
+
+      await fixture.journal.rebuildProjectProjections('project-a');
+      expect((await fixture.journal.getRunProjection(fixture.runId))?.state).toBe(state);
+    },
+  );
+
   it('uses Invocation CAS so two independent decisions cannot both commit', async () => {
     const fixture = await createFixture();
     const command = (commandId: string) => ({
@@ -76,8 +160,8 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       authorization: 'allow' as const, approvalSummary: 'Run query',
     });
     const settled = await Promise.allSettled([
-      fixture.journal.commitToolInvocation(command('validate-a')),
-      fixture.journal.commitToolInvocation(command('validate-b')),
+      commitTool(fixture.journal, command('validate-a')),
+      commitTool(fixture.journal, command('validate-b')),
     ]);
     expect(settled.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
     expect(settled.filter(({ status }) => status === 'rejected')).toHaveLength(1);
@@ -94,7 +178,7 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       authorization: 'ask' as const, approvalSummary: 'x'.repeat(2_001),
     };
 
-    await expect(fixture.journal.commitToolInvocation(command))
+    await expect(commitTool(fixture.journal, command))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect((await fixture.journal.getInvocation(fixture.invocationId))?.state).toBe('proposed');
     expect(await fixture.journal.countEvents('tool.validated', 'project-a')).toBe(0);
@@ -103,7 +187,7 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
   it('hard-bounds approval decision provenance at Journal ingress', async () => {
     const fixture = await createFixture();
     const digest = sha256({ sql: 'select 1' });
-    const validated = await fixture.journal.commitToolInvocation({
+    const validated = await commitTool(fixture.journal, {
       ...fixture.base('validate-for-bounds', 1), action: 'validate',
       canonicalToolId: { name: 'query_database' }, toolRevision: '1', effect: 'read',
       normalizedArgumentsDigest: digest, authorization: 'ask', approvalSummary: 'Run query',
@@ -117,10 +201,10 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       decision: 'approve' as const,
     };
 
-    await expect(fixture.journal.commitToolInvocation({
+    await expect(commitTool(fixture.journal, {
       ...base, decidedBy: 'x'.repeat(257),
     })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-    await expect(fixture.journal.commitToolInvocation({
+    await expect(commitTool(fixture.journal, {
       ...base, commandId: 'reason-too-large', reason: 'x'.repeat(2_001),
     })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect(await fixture.journal.getApprovalForInvocation(fixture.invocationId))
@@ -130,12 +214,12 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
   it('rejects oversized or unsupported result references before terminal commit', async () => {
     const fixture = await createFixture();
     const digest = sha256({ sql: 'select 1' });
-    const validated = await fixture.journal.commitToolInvocation({
+    const validated = await commitTool(fixture.journal, {
       ...fixture.base('validate-for-results', 1), action: 'validate',
       canonicalToolId: { name: 'query_database' }, toolRevision: '1', effect: 'read',
       normalizedArgumentsDigest: digest, authorization: 'allow', approvalSummary: 'Run query',
     });
-    const started = await fixture.journal.commitToolInvocation({
+    const started = await commitTool(fixture.journal, {
       ...fixture.base('start-for-results', validated.invocation.revision), action: 'start',
       idempotencyKey: 'idem-result-bounds', attempt: 1,
     });
@@ -145,16 +229,16 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       summary: 'Completed.', resultRefs: [] as string[],
     };
 
-    await expect(fixture.journal.commitToolInvocation({
+    await expect(commitTool(fixture.journal, {
       ...finishBase, summary: 'x'.repeat(4_097),
     })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-    await expect(fixture.journal.commitToolInvocation({
+    await expect(commitTool(fixture.journal, {
       ...finishBase,
       commandId: 'too-many-result-refs',
       resultRefs: Array.from({ length: 33 }, (_, index) =>
         `agent-artifact:${'a'.repeat(24)}:${index.toString(16).padStart(40, '0')}`),
     })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-    await expect(fixture.journal.commitToolInvocation({
+    await expect(commitTool(fixture.journal, {
       ...finishBase, commandId: 'invalid-result-ref', resultRefs: ['https://example.test/result'],
     })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect((await fixture.journal.getInvocation(fixture.invocationId))?.state).toBe('started');
@@ -177,7 +261,7 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       },
     });
 
-    await expect(journal.commitToolInvocation(command as ToolInvocationJournalCommand))
+    await expect(commitTool(journal, command as ToolInvocationJournalCommand))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect(getterCalls).toBe(0);
   });
@@ -185,7 +269,7 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
   it('rejects Proxy, cycle, sparse array, symbol and action-extraneous keys at ingress', async () => {
     const journal = await emptyJournal();
     const proxied = new Proxy(commandForSnapshot('start'), {});
-    await expect(journal.commitToolInvocation(proxied))
+    await expect(commitTool(journal, proxied))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
 
     const cyclicObservation: Record<string, unknown> = {
@@ -193,12 +277,12 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       summary: 'done', evidenceRefs: [], outcome: 'succeeded',
     };
     cyclicObservation.self = cyclicObservation;
-    await expect(journal.commitToolInvocation({
+    await expect(commitTool(journal, {
       ...commandForSnapshot('observe'), observation: cyclicObservation,
     } as ToolInvocationJournalCommand)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
 
     const sparseRefs = new Array<string>(1);
-    await expect(journal.commitToolInvocation({
+    await expect(commitTool(journal, {
       ...commandForSnapshot('finish'), resultRefs: sparseRefs,
     } as ToolInvocationJournalCommand)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
 
@@ -206,10 +290,10 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       [key: symbol]: string;
     } = commandForSnapshot('start');
     withSymbol[Symbol('unexpected')] = 'value';
-    await expect(journal.commitToolInvocation(withSymbol))
+    await expect(commitTool(journal, withSymbol))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
 
-    await expect(journal.commitToolInvocation({
+    await expect(commitTool(journal, {
       ...commandForSnapshot('start'), reason: 'belongs to another action',
     } as ToolInvocationJournalCommand)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
@@ -230,7 +314,7 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
       approvalSummary: 'Run query',
     };
 
-    const pending = fixture.journal.commitToolInvocation(command);
+    const pending = commitTool(fixture.journal, command);
     canonicalToolId.name = 'mutated_tool';
     lease.ownerId = 'mutated-owner';
     command.approvalSummary = 'mutated summary';
@@ -333,7 +417,8 @@ function commandForSnapshot(
 async function createFixture() {
   const directory = await mkdtemp(join(tmpdir(), 'dbagent-tool-journal-'));
   temporaryDirectories.push(directory);
-  const journal = new SqliteAgentJournal({ filePath: join(directory, 'state.db') });
+  const filePath = join(directory, 'state.db');
+  const journal = new SqliteAgentJournal({ filePath });
   const created = await journal.createRun({
     projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'request-a', input: 'go',
   });
@@ -356,7 +441,7 @@ async function createFixture() {
   });
   const invocationId = committed.invocations[0]?.invocationId ?? '';
   return {
-    journal, runId: created.runId, invocationId,
+    journal, filePath, runId: created.runId, invocationId,
     base: (commandId: string, expectedInvocationRevision: number) => ({
       projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
       turnId: 'turn-a', invocationId, commandId, lease: leaseRef,
@@ -367,4 +452,49 @@ async function createFixture() {
 
 function sha256(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function appendProtectedRunEvent(
+  filePath: string,
+  runId: string,
+  type: 'run.input_requested' | 'run.cancel_requested' | 'run.completed',
+  payload: unknown,
+  state: 'AwaitingUser' | 'Cancelling' | 'Completed',
+): void {
+  const database = new DatabaseSync(filePath);
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    database.prepare(
+      'UPDATE agent_project_sequences SET current_sequence = current_sequence + 1 WHERE project_id = ?',
+    ).run('project-a');
+    const sequence = Number((database.prepare(
+      'SELECT current_sequence FROM agent_project_sequences WHERE project_id = ?',
+    ).get('project-a') as { current_sequence: number }).current_sequence);
+    database.prepare(
+      `INSERT INTO agent_events (
+        project_id, sequence, event_id, schema_version, session_id, run_id,
+        turn_id, parent_event_id, invocation_id, attempt_id, event_type,
+        occurred_at, payload_json, audience_json, persistence
+      ) VALUES (?, ?, ?, 1, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, '[]', 'durable')`,
+    ).run(
+      'project-a', sequence, `event-protected-${type}-${sequence}`, 'session-a', runId,
+      type, '2026-08-10T00:00:10.000Z', JSON.stringify(payload),
+    );
+    database.prepare(
+      'UPDATE agent_runs SET state = ?, revision = revision + 1 WHERE run_id = ?',
+    ).run(state, runId);
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+function commitTool(
+  journal: SqliteAgentJournal,
+  command: ToolInvocationJournalCommand,
+) {
+  return openToolLifecycleCommitter(journal).commit(command);
 }
