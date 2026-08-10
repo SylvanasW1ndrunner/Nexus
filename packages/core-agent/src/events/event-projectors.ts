@@ -9,6 +9,7 @@ export type AgentRunProjection = {
   sessionId: string;
   runId: string;
   clientRequestId: string;
+  visibility?: 'legacy-import-carrier';
   state: AgentRunState;
   revision: number;
   input?: PortableValue;
@@ -102,6 +103,7 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         sessionId: event.sessionId,
         runId: event.runId,
         clientRequestId: event.payload.clientRequestId,
+        ...(event.payload.visibility === undefined ? {} : { visibility: event.payload.visibility }),
         state: 'created',
         revision: 1,
         ...(input === undefined ? {} : { input: structuredClone(input) }),

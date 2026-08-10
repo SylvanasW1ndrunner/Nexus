@@ -405,11 +405,12 @@ export class SqliteAgentJournal implements AgentJournal {
         database.prepare(
           `INSERT INTO agent_runs (
             run_id, project_id, session_id, client_request_id, state, revision,
-            input_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            input_json, created_at, updated_at, hidden
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           run.runId, run.projectId, run.sessionId, run.clientRequestId, run.state, run.revision,
           JSON.stringify(run.input ?? null), run.createdAt, run.updatedAt,
+          run.visibility === 'legacy-import-carrier' ? 1 : 0,
         );
       }
       for (const started of events.filter((event) => event.type === 'turn.started')) {

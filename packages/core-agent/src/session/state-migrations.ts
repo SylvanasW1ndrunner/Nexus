@@ -651,6 +651,7 @@ async function buildValidatedShadow(
     migrationWriter.seal();
   }
   const eventCount = await journal.countEvents();
+  const importedPrefixes = await captureImportedEventPrefixes(journal, projectIds);
   const shadow = new DatabaseSync(shadowPath);
   try {
     shadow.exec(`
@@ -685,6 +686,14 @@ async function buildValidatedShadow(
         max_active_projection_accumulators INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE legacy_import_prefixes (
+        migration_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        max_sequence INTEGER NOT NULL CHECK (max_sequence > 0),
+        event_count INTEGER NOT NULL CHECK (event_count > 0),
+        prefix_digest TEXT NOT NULL,
+        PRIMARY KEY (migration_id, project_id)
+      );
       CREATE TABLE legacy_archives (
         migration_id TEXT NOT NULL,
         relative_path TEXT NOT NULL,
@@ -710,6 +719,16 @@ async function buildValidatedShadow(
         importDiagnostics.maxImportBatchSize,
         new Date(0).toISOString(),
       );
+      const insertPrefix = shadow.prepare(`
+        INSERT INTO legacy_import_prefixes (
+          migration_id, project_id, max_sequence, event_count, prefix_digest
+        ) VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const prefix of importedPrefixes) {
+        insertPrefix.run(
+          migrationId, prefix.projectId, prefix.maxSequence, prefix.eventCount, prefix.digest,
+        );
+      }
       const insertArchive = shadow.prepare(`
         INSERT INTO legacy_archives (
           migration_id, relative_path, object_relative_path, archive_handle, checksum, byte_size
@@ -797,6 +816,7 @@ async function activate(
         await assertLiveLegacyStillMatches(projectDir, intent);
         await sealMigrationBuildContext(intent.shadowPath, intent);
         await validateShadow(intent, true);
+        writerGate.persistMigrationSealed(intent.migrationId, intent.sourceDigest);
         await rename(intent.sourcePath, intent.sourceBackupPath);
         await fsyncDirectory(projectDir);
         crashIf(crashAt, 'after-source-renamed', inspectionFromIntent(intent, intent.status));
@@ -828,6 +848,7 @@ async function activate(
     await migrationBarrier(projectDir, 'after-promote-before-active');
     await validateShadow(intent, true);
     await setMigrationActive(intent.finalPath, intent.migrationId);
+    writerGate.persistActive(intent.migrationId, intent.sourceDigest);
     const completed = { ...intent, status: 'completed' as const };
     await writeIntent(projectDir, completed);
     await rm(intent.shadowPath, { force: true });
@@ -836,6 +857,7 @@ async function activate(
   } catch (error) {
     if (!(error instanceof StateMigrationError && error.code === 'INJECTED_CRASH')) {
       await rollbackFailedActivation(projectDir, intent, ownsPromotedSource);
+      writerGate.persistLegacyWritable(intent.migrationId, intent.sourceDigest);
     }
     throw error;
   } finally {
@@ -1445,10 +1467,20 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
         SELECT event_count FROM legacy_imports WHERE migration_id = ?
       `).get(intent.migrationId) as { event_count: number } | undefined;
       if (imported === undefined) throw new Error('Legacy import count is missing.');
-      const eventCount = Number((database.prepare(
-        'SELECT COUNT(*) AS count FROM agent_events',
-      ).get() as { count: number }).count);
-      if (eventCount !== Number(imported.event_count)) throw new Error('Legacy import event count changed.');
+      const prefixes = database.prepare(`
+        SELECT project_id, max_sequence, event_count, prefix_digest
+        FROM legacy_import_prefixes WHERE migration_id = ? ORDER BY project_id
+      `).all(intent.migrationId) as unknown as Array<{
+        project_id: string;
+        max_sequence: number;
+        event_count: number;
+        prefix_digest: string;
+      }>;
+      if (prefixes.length !== intent.projectIds.length ||
+        prefixes.reduce((count, prefix) => count + Number(prefix.event_count), 0) !==
+          Number(imported.event_count)) {
+        throw new Error('Legacy import prefixes are incomplete.');
+      }
       const context = database.prepare(`
         SELECT migration_id, source_digest, sealed
         FROM legacy_migration_build_context WHERE id = 1
@@ -1459,13 +1491,17 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
         throw new Error('Legacy migration build context is invalid.');
       }
       const carriers = database.prepare(`
-        SELECT state, hidden FROM agent_runs WHERE client_request_id LIKE 'legacy-import:%'
+        SELECT DISTINCT runs.state, runs.hidden FROM agent_runs AS runs
+        JOIN agent_events AS events
+          ON events.project_id = runs.project_id AND events.run_id = runs.run_id
+        WHERE events.event_type = 'run.created'
+          AND json_extract(events.payload_json, '$.visibility') = 'legacy-import-carrier'
       `).all() as unknown as Array<{ state: string; hidden: number }>;
       if (carriers.length === 0 || carriers.some(({ state, hidden }) =>
         !['Completed', 'Failed', 'Cancelled'].includes(state) || Number(hidden) !== 1)) {
         throw new Error('Synthetic legacy carrier Runs are not terminal and hidden.');
       }
-      return { eventCount };
+      return { prefixes };
     });
 
     const journal = new SqliteAgentJournal({ filePath: path });
@@ -1475,6 +1511,12 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
     let maxActiveProjectionSessions = 0;
     let maxActiveProjectionAccumulators = 0;
     for (const projectId of intent.projectIds) {
+      const expectedPrefix = databaseValidation.prefixes.find(
+        (prefix) => prefix.project_id === projectId,
+      );
+      if (expectedPrefix === undefined) throw new Error('Legacy import Project prefix is missing.');
+      const prefixHash = createHash('sha256');
+      let prefixEventCount = 0;
       projectPasses += 1;
       const causalValidator = new ProjectionEventValidator(projectId);
       const projections = new Map<string, {
@@ -1490,6 +1532,10 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
         if (page.length === 0) break;
         maxPageSize = Math.max(maxPageSize, page.length);
         for (const event of page) {
+          if (event.sequence > Number(expectedPrefix.max_sequence)) break;
+          prefixHash.update(canonicalJson(event));
+          prefixHash.update('\n');
+          prefixEventCount += 1;
           cursor = event.sequence;
           causalValidator.accept(event);
           const terminal = causalValidator.releaseTerminal(event, true);
@@ -1533,6 +1579,12 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
             projections.delete(event.sessionId);
           }
         }
+        if (cursor >= Number(expectedPrefix.max_sequence)) break;
+      }
+      if (cursor !== Number(expectedPrefix.max_sequence) ||
+        prefixEventCount !== Number(expectedPrefix.event_count) ||
+        prefixHash.digest('hex') !== expectedPrefix.prefix_digest) {
+        throw new Error('Legacy imported Journal prefix changed.');
       }
       for (const projection of projections.values()) {
         projection.accumulators.forEach((accumulator) => accumulator.finish());
@@ -1562,9 +1614,6 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
       throw new Error('Migration validation report digest changed.');
     }
     await validateLegacyArchives(dirname(intent.finalPath), path, intent);
-    if (databaseValidation.eventCount !== await journal.countEvents()) {
-      throw new Error('Journal event count is not stable after projection validation.');
-    }
   } catch (error) {
     if (error instanceof StateMigrationError) throw error;
     throw new StateMigrationError(
@@ -1573,6 +1622,38 @@ async function validateShadow(intent: MigrationIntent, requireSealed = false): P
       inspectionFromIntent(intent, intent.status),
     );
   }
+}
+
+type ImportedEventPrefix = {
+  projectId: string;
+  maxSequence: number;
+  eventCount: number;
+  digest: string;
+};
+
+async function captureImportedEventPrefixes(
+  journal: SqliteAgentJournal,
+  projectIds: readonly string[],
+): Promise<ImportedEventPrefix[]> {
+  const prefixes: ImportedEventPrefix[] = [];
+  for (const projectId of projectIds) {
+    const hash = createHash('sha256');
+    let cursor = 0;
+    let eventCount = 0;
+    while (true) {
+      const page = await journal.readProject(projectId, cursor, 1_000);
+      if (page.length === 0) break;
+      for (const event of page) {
+        hash.update(canonicalJson(event));
+        hash.update('\n');
+        cursor = event.sequence;
+        eventCount += 1;
+      }
+    }
+    if (eventCount === 0) throw new Error(`Imported Project ${projectId} has no Journal prefix.`);
+    prefixes.push({ projectId, maxSequence: cursor, eventCount, digest: hash.digest('hex') });
+  }
+  return prefixes;
 }
 
 function normalizeImportedLegacyState(state: ImportedLegacyState): void {
@@ -2162,7 +2243,7 @@ async function importLegacyFacts(
       );
     }
     const projectId = legacyProjectId(session.projectKey, session.projectRoot);
-    const clientRequestId = `legacy-import:${input.migrationId}:${sha256(session.id).slice(0, 24)}`;
+    const clientRequestId = sha256(`legacy carrier\0${input.migrationId}\0${session.id}`);
     const created = await journal.createRun({
       projectId, sessionId: session.id, clientRequestId,
       input: { legacyMigrationId: input.migrationId },

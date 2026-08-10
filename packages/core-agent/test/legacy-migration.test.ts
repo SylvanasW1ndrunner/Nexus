@@ -761,6 +761,75 @@ describe('project state migration authority', () => {
     expect((await recovered.inspect()).intentStatus).toBe('completed');
   });
 
+  it.each([
+    ['after-shadow-validated', true],
+    ['after-intent-fsync', true],
+    ['after-source-renamed', false],
+    ['after-shadow-promoted', false],
+  ] as const)('enforces the durable writer fence after a crash at %s', async (cut, writable) => {
+    const projectDir = await createLegacyProject();
+    await expect(openProjectStateMigration(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-final-fence', crashAt: cut,
+    })).rejects.toMatchObject({ code: 'INJECTED_CRASH', crashPoint: cut });
+
+    const lateAudit = new AgentAuditLogStore(join(projectDir, 'legacy-audit.jsonl'));
+    const append = lateAudit.append({
+      type: 'run_finished', timestamp: '2026-08-09T00:00:00.000Z', sessionId: 'late-session',
+      status: 'done', iterations: 1, durationMs: 1,
+    });
+    if (writable) await expect(append).resolves.toBeUndefined();
+    else await expect(append).rejects.toMatchObject({ code: 'STATE_MIGRATION_ACTIVE' });
+  });
+
+  it('validates only the immutable imported prefix after normal active events', async () => {
+    const projectDir = await createLegacyProject();
+    const migrated = await openProjectStateMigration(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-final-prefix',
+    });
+    const inspection = await migrated.inspect();
+    const journal = new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') });
+    await journal.createRun({
+      projectId: inspection.projectId, sessionId: 'normal-session',
+      clientRequestId: 'normal-after-migration', input: { text: 'normal' },
+    });
+
+    await expect(openProjectStateMigration(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-final-prefix',
+    })).resolves.toMatchObject({ activeSchemaVersion: expect.any(Function) });
+  });
+
+  it('rebuilds typed carrier visibility without client request prefix semantics', async () => {
+    const projectDir = await createLegacyProject();
+    const migrated = await openProjectStateMigration(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-final-rebuild-visibility',
+    });
+    const inspection = await migrated.inspect();
+    const journal = new SqliteAgentJournal({ filePath: join(projectDir, 'state.db') });
+    const normal = await journal.createRun({
+      projectId: inspection.projectId, sessionId: 'normal-prefix-session',
+      clientRequestId: 'legacy-import:user-chosen', input: { text: 'ordinary' },
+    });
+    await journal.rebuildProjectProjections(inspection.projectId);
+
+    const visibility = withTestDatabase(join(projectDir, 'state.db'), (database) => ({
+      normal: database.prepare('SELECT hidden FROM agent_runs WHERE run_id = ?')
+        .get(normal.runId) as { hidden: number },
+      carriers: database.prepare(`
+        SELECT runs.hidden FROM agent_runs AS runs
+        JOIN agent_events AS events
+          ON events.project_id = runs.project_id AND events.run_id = runs.run_id
+        WHERE events.event_type = 'run.created'
+          AND json_extract(events.payload_json, '$.visibility') = 'legacy-import-carrier'
+      `).all() as unknown as Array<{ hidden: number }>,
+    }));
+    expect(visibility.normal.hidden).toBe(0);
+    expect(visibility.carriers.length).toBeGreaterThan(0);
+    expect(visibility.carriers.every(({ hidden }) => Number(hidden) === 1)).toBe(true);
+    await expect(openProjectStateMigration(projectDir, {
+      targetSchemaVersion: 2, migratorRevision: 'task-4-final-rebuild-visibility',
+    })).resolves.toMatchObject({ activeSchemaVersion: expect.any(Function) });
+  });
+
   it('rejects generic producer forgery of a reserved legacy fact', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dbagent-forged-legacy-fact-'));
     temporaryDirectories.push(directory);
@@ -878,7 +947,11 @@ describe('project state migration authority', () => {
 
     const carriers = withTestDatabase(join(projectDir, 'state.db'), (database) =>
       database.prepare(`
-        SELECT state, hidden FROM agent_runs WHERE client_request_id LIKE 'legacy-import:%'
+        SELECT DISTINCT runs.state, runs.hidden FROM agent_runs AS runs
+        JOIN agent_events AS events
+          ON events.project_id = runs.project_id AND events.run_id = runs.run_id
+        WHERE events.event_type = 'run.created'
+          AND json_extract(events.payload_json, '$.visibility') = 'legacy-import-carrier'
       `).all() as unknown as Array<{ state: string; hidden: number }>,
     );
     expect(carriers.length).toBeGreaterThan(0);
