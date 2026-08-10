@@ -299,6 +299,10 @@ describe('project state migration authority', () => {
       maxImportBatchSize: 500,
       maxActiveProjectionSessions: 1,
       maxActiveProjectionAccumulators: 3,
+      maxRetainedValidationScopes: 1,
+      maxImportHashProjects: 1,
+      maxValidationFactProjects: 1,
+      maxSourceEntityBufferSize: 1,
     });
   });
 
@@ -329,6 +333,10 @@ describe('project state migration authority', () => {
       maxImportBatchSize: 2,
       maxActiveProjectionSessions: 1,
       maxActiveProjectionAccumulators: 3,
+      maxRetainedValidationScopes: 1,
+      maxImportHashProjects: 1,
+      maxValidationFactProjects: 1,
+      maxSourceEntityBufferSize: 1,
     });
   }, 30_000);
 

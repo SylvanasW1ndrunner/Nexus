@@ -188,11 +188,12 @@ export class AuditProjector {
 }
 
 type Scope = { projectId: string; sessionId: string; runId: string; sequence: number };
-type RunScope = Scope & { clientRequestId?: string; createdAt?: string };
+type RunScope = Scope & { clientRequestId?: string; createdAt?: string; createdSequence?: number };
 type TurnScope = Scope & { turnId: string };
 type AttemptScope = TurnScope & { attemptId: string };
 type InvocationScope = AttemptScope & { invocationId: string };
 export type ProjectionRetainedScopes = {
+  events: number;
   runs: number;
   turns: number;
   attempts: number;
@@ -235,7 +236,8 @@ export class ProjectionEventValidator {
       throw new ProjectionError('SEQUENCE_INVALID', 'Source sequence must be strictly monotonic.');
     }
     this.#previousSequence = event.sequence;
-    if (this.#trustedJournal && event.sessionId !== this.#targetSessionId) return;
+    if (this.#trustedJournal && this.#targetSessionId !== undefined &&
+      event.sessionId !== this.#targetSessionId) return;
     const descriptor = AGENT_EVENT_SCHEMA_REGISTRY[event.type];
     if (event.schemaVersion !== descriptor.schemaVersion) {
       throw new ProjectionError('SCHEMA_INVALID', 'Projection input was not upcast to current schema.');
@@ -278,6 +280,7 @@ export class ProjectionEventValidator {
           );
         }
         run.createdAt = event.occurredAt;
+        run.createdSequence = event.sequence;
       }
     }
     this.#validateTurnAttemptInvocation(event);
@@ -289,6 +292,7 @@ export class ProjectionEventValidator {
 
   retainedScopes(): ProjectionRetainedScopes {
     return {
+      events: this.#events.size,
       runs: this.#runs.size,
       turns: this.#turns.size,
       attempts: this.#attempts.size,
@@ -317,6 +321,9 @@ export class ProjectionEventValidator {
       finalText: event.type === 'run.completed' ? this.resolveFinalText(event) : undefined,
     };
     this.#runs.delete(event.runId);
+    for (const [key, scope] of this.#events) {
+      if (scope.runId === event.runId) this.#events.delete(key);
+    }
     for (const [key, scope] of this.#turns) {
       if (scope.runId === event.runId) this.#turns.delete(key);
     }
@@ -454,6 +461,7 @@ export class SessionProjectionAccumulator {
       this.#runs,
       terminal?.run ?? this.#validator.run(event.runId),
       this.#options.limit,
+      this.#options.afterSequence,
     )) {
       return false;
     }
@@ -561,7 +569,9 @@ export class SessionProjectionAccumulator {
         if (existing !== undefined) {
           existing.state = state;
           existing.updatedAt = event.occurredAt;
-        } else if (run?.clientRequestId !== undefined && run.createdAt !== undefined) {
+        } else if (run?.clientRequestId !== undefined && run.createdAt !== undefined &&
+          run.createdSequence !== undefined &&
+          run.createdSequence > this.#options.afterSequence) {
           this.#runs.set(event.runId, {
             runId: event.runId, clientRequestId: run.clientRequestId, state,
             createdAt: run.createdAt, updatedAt: event.occurredAt,
@@ -924,22 +934,28 @@ function wouldOverflowSessionPage(
   runs: ReadonlyMap<string, SessionProjectionRun>,
   run: RunScope | undefined,
   limit: number,
+  afterSequence: number,
 ): boolean {
+  const visibleCount = messages.length + artifacts.size + runs.size;
   if (event.type === 'input.received' && publicInputText(event.payload.content) !== undefined) {
-    return messages.length >= limit;
+    return visibleCount >= limit;
   }
   if (event.type === 'model_attempt_committed' && committedText(event).length > 0) {
-    return messages.length >= limit;
+    return visibleCount >= limit;
   }
   if (event.type === 'legacy.imported' && event.payload.entityType === 'message') {
-    return messages.length >= limit;
+    return visibleCount >= limit;
   }
   if (event.type === 'artifact.created' && !artifacts.has(event.payload.artifactId)) {
-    return artifacts.size >= limit;
+    return visibleCount >= limit;
   }
+  if (event.type === 'run.created' && !runs.has(event.runId)) return visibleCount >= limit;
+  if (event.type === 'legacy.imported' && event.payload.entityType === 'run' &&
+    !runs.has(event.payload.record.runId)) return visibleCount >= limit;
   const state = projectedRunState(event.type);
   return state !== undefined && !runs.has(event.runId) &&
-    run?.clientRequestId !== undefined && runs.size >= limit;
+    run?.clientRequestId !== undefined && run.createdSequence !== undefined &&
+    run.createdSequence > afterSequence && visibleCount >= limit;
 }
 
 function isTerminalRunEvent(type: AgentEventType): boolean {

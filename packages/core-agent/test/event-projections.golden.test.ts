@@ -132,7 +132,7 @@ describe('Journal event projections', () => {
     });
     const events = await readAll(fixture.journal, 'project-a', 100);
     const sessionA = projectSession(events, {
-      projectId: 'project-a', sessionId: 'session-a', afterSequence: 0, limit: 2,
+      projectId: 'project-a', sessionId: 'session-a', afterSequence: 0, limit: 10,
     });
     const sessionB = projectSession(events, {
       projectId: 'project-a', sessionId: 'session-b', afterSequence: 0, limit: 100,
@@ -202,13 +202,40 @@ describe('Journal event projections', () => {
       expect(user.accept(event)).toBe(true);
     }
     expect(session.retainedScopes()).toEqual({
-      runs: 0, turns: 0, attempts: 0, invocations: 0, finalText: 0,
+      events: 0, runs: 0, turns: 0, attempts: 0, invocations: 0, finalText: 0,
     });
     expect(user.retainedScopes()).toEqual({
-      runs: 0, turns: 0, attempts: 0, invocations: 0, finalText: 0,
+      events: 0, runs: 0, turns: 0, attempts: 0, invocations: 0, finalText: 0,
     });
     expect(session.finish().runs).toEqual([]);
     expect(user.finish().items).toEqual([]);
+  });
+
+  it('pages thousands of Runs and messages under one exact visible-item limit', () => {
+    const events = terminalRunEvents(2_000);
+    const seenMessages = new Set<number>();
+    const seenRuns = new Set<string>();
+    let cursor = 0;
+    while (cursor < events.at(-1)!.sequence) {
+      const page = projectSession(events, {
+        projectId: 'project-retention', sessionId: 'session-retention',
+        afterSequence: cursor, limit: 37,
+      });
+      expect(page.messages.length + page.artifacts.length + page.runs.length)
+        .toBeLessThanOrEqual(37);
+      expect(page.nextSourceSequence).toBeGreaterThan(cursor);
+      for (const message of page.messages) {
+        expect(seenMessages.has(message.sourceSequence)).toBe(false);
+        seenMessages.add(message.sourceSequence);
+      }
+      for (const run of page.runs) {
+        expect(seenRuns.has(run.runId)).toBe(false);
+        seenRuns.add(run.runId);
+      }
+      cursor = page.nextSourceSequence;
+    }
+    expect(seenMessages.size).toBe(2_000);
+    expect(seenRuns.size).toBe(2_000);
   });
 
   it('validates current payloads and Turn/Attempt ownership during pure projection', async () => {
