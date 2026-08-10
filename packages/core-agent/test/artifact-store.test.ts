@@ -815,6 +815,90 @@ describe('ProjectArtifactStore', () => {
     })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(await readStream(await fixture.store.open(retained))).toEqual(Buffer.from('retained'));
   });
+
+  it('recovers non-expiring staged orphans after the default retention and preserves fresh stages', async () => {
+    const fixture = await createFixture();
+    const old = await fixture.store.stage({
+      mediaType: 'text/plain', source: chunks(Buffer.from('old-no-expiry')),
+    });
+    const futureStore = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      now: () => '2026-08-10T11:59:59.999Z',
+    });
+    const fresh = await futureStore.stage({
+      mediaType: 'text/plain', source: chunks(Buffer.from('fresh-no-expiry')),
+    });
+
+    await expect(futureStore.collectGarbage(new Date('2026-08-10T12:00:00.000Z')))
+      .resolves.toMatchObject({ stagedObjectsDeleted: 1, bytesDeleted: old.byteSize });
+    await expect(stat(join(fixture.artifactRoot, 'metadata', `${old.artifactId}.staged.json`)))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(fixture.artifactRoot, 'metadata', `${fresh.artifactId}.staged.json`)))
+      .resolves.toBeDefined();
+  });
+
+  it('uses the configured staged-orphan retention boundary exactly', async () => {
+    const fixture = await createFixture();
+    const store = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      now: () => '2026-08-09T12:00:00.000Z', stagedOrphanRetentionMs: 1_000,
+    });
+    const staged = await store.stage({
+      mediaType: 'text/plain', source: chunks(Buffer.from('configured-orphan')),
+    });
+
+    await expect(store.collectGarbage(new Date('2026-08-09T12:00:00.999Z')))
+      .resolves.toMatchObject({ stagedObjectsDeleted: 0 });
+    await expect(store.collectGarbage(new Date('2026-08-09T12:00:01.000Z')))
+      .resolves.toMatchObject({ stagedObjectsDeleted: 1, bytesDeleted: staged.byteSize });
+  });
+
+  it('releases lifecycle gates before prehash and closes the pinned descriptor on cancel or error', async () => {
+    const fixture = await createFixture();
+    const staged = await fixture.store.stage({
+      mediaType: 'application/octet-stream',
+      source: chunks(Buffer.alloc(4 * 1024 * 1024, 0x5a), 64 * 1024),
+    });
+    const committed = await fixture.store.commit({
+      staged, journal: fixture.context('prehash-gate-seed'), summary: 'large prehash fixture',
+    });
+    let signalPinned = (): void => undefined;
+    const pinned = new Promise<void>((resolve) => { signalPinned = resolve; });
+    let releasePrehash = (): void => undefined;
+    const prehashRelease = new Promise<void>((resolve) => { releasePrehash = resolve; });
+    const openingStore = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      beforeOpenPrehash: async () => {
+        signalPinned();
+        await prehashRelease;
+      },
+    });
+    const opening = openingStore.open(committed);
+    await pinned;
+
+    const holder = spawnArtifactWorker(fixture.directory, 'hold-state');
+    await waitForPath(join(fixture.directory, 'artifact-state-holder-ready'));
+    await writeFile(join(fixture.directory, 'artifact-state-holder-release'), 'release');
+    expect(await waitForExit(holder)).toBe(0);
+    await expect(fixture.store.collectGarbage(new Date('2026-08-09T12:00:00.000Z')))
+      .resolves.toMatchObject({ committedObjectsDeleted: 0 });
+
+    releasePrehash();
+    const stream = await opening;
+    await stream.cancel();
+    const objectPath = await findFileContaining(fixture.artifactRoot, 'ZZZZZZZZZZZZZZZZ');
+    const movedPath = `${objectPath}.cancelled`;
+    await rename(objectPath, movedPath);
+    await rename(movedPath, objectPath);
+
+    const failingStore = new ProjectArtifactStore({
+      projectId: 'project-a', rootDir: fixture.artifactRoot, journal: fixture.journal,
+      beforeOpenPrehash: async () => { await Promise.reject(new Error('prehash hook failure')); },
+    });
+    await expect(failingStore.open(committed)).rejects.toMatchObject({ code: 'CORRUPT' });
+    await rename(objectPath, movedPath);
+    await rename(movedPath, objectPath);
+  }, 20_000);
 });
 
 async function createFixture() {

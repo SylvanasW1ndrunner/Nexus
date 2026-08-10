@@ -92,6 +92,18 @@ function activeMigrationFromState(projectDir: string): {
       WHERE type = 'table' AND name = 'schema_migrations'
     `).get() as { present: number } | undefined;
     if (schema === undefined) return undefined;
+    const columns = new Set(
+      (database.prepare('PRAGMA table_info(schema_migrations)').all() as unknown as
+        Array<{ name: string }>).map(({ name }) => name),
+    );
+    if (!columns.has('migration_id') || !columns.has('source_digest')) {
+      const active = database.prepare(`
+        SELECT 1 AS present FROM schema_migrations WHERE status = 'active' LIMIT 1
+      `).get() as { present: number } | undefined;
+      return active === undefined
+        ? undefined
+        : { migrationId: 'legacy-active-state', sourceDigest: 'legacy-active-state' };
+    }
     return database.prepare(`
       SELECT migration_id AS migrationId, source_digest AS sourceDigest FROM schema_migrations
       WHERE status = 'active' LIMIT 1
@@ -204,21 +216,25 @@ function beginGate(
 }
 
 function ensureWriterFenceSchema(database: NodeDatabaseSync, projectDir: string): void {
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS state_writer_fence (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      phase TEXT NOT NULL CHECK (phase IN ('legacy-writable', 'migration-sealed', 'active')),
-      migration_id TEXT,
-      source_digest TEXT,
-      CHECK (
-        (phase = 'legacy-writable') OR
-        (migration_id IS NOT NULL AND source_digest IS NOT NULL)
-      )
-    )
-  `);
-  database.prepare(`
-    INSERT OR IGNORE INTO state_writer_fence (id, phase) VALUES (1, 'legacy-writable')
-  `).run();
+  const schema = database.prepare(`
+    SELECT 1 AS present FROM sqlite_schema
+    WHERE type = 'table' AND name = 'state_writer_fence'
+  `).get() as { present: number } | undefined;
+  if (schema === undefined) {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS state_writer_fence (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        phase TEXT NOT NULL CHECK (phase IN ('legacy-writable', 'migration-sealed', 'active')),
+        migration_id TEXT,
+        source_digest TEXT,
+        CHECK (
+          (phase = 'legacy-writable') OR
+          (migration_id IS NOT NULL AND source_digest IS NOT NULL)
+        )
+      );
+      INSERT OR IGNORE INTO state_writer_fence (id, phase) VALUES (1, 'legacy-writable');
+    `);
+  }
   const active = activeMigrationFromState(projectDir);
   if (active !== undefined && readFence(database).phase === 'legacy-writable') {
     database.prepare(`

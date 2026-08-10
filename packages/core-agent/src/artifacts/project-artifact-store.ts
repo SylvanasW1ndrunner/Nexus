@@ -45,8 +45,10 @@ export type ProjectArtifactStoreOptions = {
   createId?: () => string;
   writeChunk?: (file: FileHandle, chunk: Uint8Array, offset: number) => Promise<number>;
   afterOpenVerified?: (objectPath: string) => Promise<void>;
+  beforeOpenPrehash?: () => Promise<void>;
   afterCommitBytesVerified?: () => Promise<void>;
   mutationGateTimeoutMs?: number;
+  stagedOrphanRetentionMs?: number;
   crashAt?: ArtifactCrashPoint;
 };
 
@@ -68,6 +70,7 @@ type ArtifactFactState = {
 };
 
 const ORPHAN_STAGE_TEMP_MAX_AGE_MS = 60_000;
+const DEFAULT_STAGED_ORPHAN_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
 export class ProjectArtifactStore implements AgentArtifactStore {
   readonly #projectId: string;
@@ -77,8 +80,10 @@ export class ProjectArtifactStore implements AgentArtifactStore {
   readonly #createId: () => string;
   readonly #writeChunk: (file: FileHandle, chunk: Uint8Array, offset: number) => Promise<number>;
   readonly #afterOpenVerified: ((objectPath: string) => Promise<void>) | undefined;
+  readonly #beforeOpenPrehash: (() => Promise<void>) | undefined;
   readonly #afterCommitBytesVerified: (() => Promise<void>) | undefined;
   readonly #mutationGateTimeoutMs: number;
+  readonly #stagedOrphanRetentionMs: number;
   #crashAt: ArtifactCrashPoint | undefined;
 
   constructor(options: ProjectArtifactStoreOptions) {
@@ -91,6 +96,7 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     this.#writeChunk = options.writeChunk ?? (async (file, chunk, offset) =>
       (await file.write(chunk, offset, chunk.byteLength - offset, null)).bytesWritten);
     this.#afterOpenVerified = options.afterOpenVerified;
+    this.#beforeOpenPrehash = options.beforeOpenPrehash;
     this.#afterCommitBytesVerified = options.afterCommitBytesVerified;
     this.#mutationGateTimeoutMs = options.mutationGateTimeoutMs ?? 10_000;
     if (!Number.isSafeInteger(this.#mutationGateTimeoutMs) ||
@@ -98,6 +104,14 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       throw new ArtifactStoreError(
         'INVALID_ARGUMENT',
         'mutationGateTimeoutMs must be between 100 and 60000.',
+      );
+    }
+    this.#stagedOrphanRetentionMs = options.stagedOrphanRetentionMs ??
+      DEFAULT_STAGED_ORPHAN_RETENTION_MS;
+    if (!Number.isSafeInteger(this.#stagedOrphanRetentionMs) ||
+      this.#stagedOrphanRetentionMs < 0) {
+      throw new ArtifactStoreError(
+        'INVALID_ARGUMENT', 'stagedOrphanRetentionMs must be a non-negative safe integer.',
       );
     }
     this.#crashAt = options.crashAt;
@@ -324,9 +338,10 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       assertArtifactInput(metadata, ref);
       const objectPath = this.#objectPath(ref.checksum);
       file = await open(objectPath, 'r');
-      await verifyOpenFile(file, ref.checksum, ref.byteSize);
       baseline = await file.stat();
-      await this.#afterOpenVerified?.(objectPath);
+      if (!baseline.isFile()) {
+        throw new ArtifactStoreError('CORRUPT', 'Artifact object is not a file.');
+      }
     } catch (error) {
       await file?.close().catch(() => undefined);
       throw normalizeArtifactReadError(error);
@@ -338,6 +353,16 @@ export class ProjectArtifactStore implements AgentArtifactStore {
     }
     const verifiedFile = file;
     const verifiedBaseline = baseline;
+    try {
+      await this.#beforeOpenPrehash?.();
+      await verifyPinnedOpenFile(
+        verifiedFile, ref.checksum, ref.byteSize, verifiedBaseline,
+      );
+      await this.#afterOpenVerified?.(this.#objectPath(ref.checksum));
+    } catch (error) {
+      await verifiedFile.close().catch(() => undefined);
+      throw normalizeArtifactReadError(error);
+    }
     let position = 0;
     let closed = false;
     const hash = createHash('sha256');
@@ -442,10 +467,13 @@ export class ProjectArtifactStore implements AgentArtifactStore {
       const artifactId = entry.name.slice(0, -'.staged.json'.length);
       requireArtifactId(artifactId);
       const metadata = await this.#readStagedMetadata(artifactId);
-      if (metadata === undefined || metadata.expiresAt === undefined) continue;
+      if (metadata === undefined) continue;
       assertPersistedArtifact(metadata, this.#projectId);
-      if (Date.parse(metadata.expiresAt) > now.getTime()) continue;
       if (factStates.has(artifactId)) continue;
+      const eligible = metadata.expiresAt === undefined
+        ? now.getTime() - Date.parse(metadata.stagedAt) >= this.#stagedOrphanRetentionMs
+        : Date.parse(metadata.expiresAt) <= now.getTime();
+      if (!eligible) continue;
       await rm(containedPath(this.#stagedDir(), metadata.blobName), { force: true });
       await rm(this.#stagedMetadataPath(artifactId), { force: true });
       stagedObjectsDeleted += 1;
@@ -918,6 +946,15 @@ async function verifyOpenFile(
   byteSize: number,
 ): Promise<void> {
   const before = await file.stat();
+  await verifyPinnedOpenFile(file, checksum, byteSize, before);
+}
+
+async function verifyPinnedOpenFile(
+  file: FileHandle,
+  checksum: string,
+  byteSize: number,
+  before: Awaited<ReturnType<FileHandle['stat']>>,
+): Promise<void> {
   if (!before.isFile()) throw new ArtifactStoreError('CORRUPT', 'Artifact object is not a file.');
   const hash = createHash('sha256');
   let actualSize = 0;
