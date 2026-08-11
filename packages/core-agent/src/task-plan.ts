@@ -24,6 +24,41 @@ export type UpdateAgentTaskInput = {
   now?: string;
 };
 
+export type AgentTaskPlanProjection = Readonly<{
+  planId: string;
+  revision: number;
+  plan: AgentTaskPlan;
+}>;
+
+export type AgentTaskPlanFact =
+  | Readonly<{ type: 'plan.created'; planId: string; revision: 1; plan: AgentTaskPlan }>
+  | Readonly<{ type: 'plan.updated'; planId: string; revision: number; plan: AgentTaskPlan }>;
+
+/**
+ * Pure plan projector. A plan is optional model-visible working state; it is
+ * never accepted as delivery evidence or as the Run completion predicate.
+ */
+export function applyAgentTaskPlanFact(
+  current: AgentTaskPlanProjection | undefined,
+  fact: AgentTaskPlanFact,
+): AgentTaskPlanProjection {
+  if (fact.type === 'plan.created') {
+    if (current !== undefined || fact.revision !== 1) {
+      throw new Error('Task plan creation conflicts with the persisted projection.');
+    }
+  } else {
+    if (
+      current === undefined || current.planId !== fact.planId ||
+      fact.revision !== current.revision + 1
+    ) {
+      throw new Error('Task plan update revision conflicts with the persisted projection.');
+    }
+  }
+  return deepFreezePlan({
+    planId: fact.planId, revision: fact.revision, plan: structuredClone(fact.plan),
+  });
+}
+
 export function createAgentTaskPlan(input: CreateAgentTaskPlanInput): AgentTaskPlan {
   const goal = requireText(input.goal, 'goal');
   if (input.tasks.length === 0) {
@@ -216,4 +251,11 @@ function requireText(value: string, name: string): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`${name} is required.`);
   return normalized;
+}
+
+function deepFreezePlan<T>(value: T, seen = new WeakSet<object>()): T {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  Object.values(value).forEach((item) => deepFreezePlan(item, seen));
+  return Object.freeze(value);
 }

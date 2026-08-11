@@ -59,9 +59,29 @@ import type {
 } from './run-event-committer.js';
 import { activeLegacyMigrationIdentity } from '../internal/legacy-migration-writer.js';
 import { bindToolLifecycleCommitter } from '../internal/tool-lifecycle-authority.js';
+import { bindKernelJournalCommitter } from '../internal/kernel-journal-authority.js';
+import { bindSessionBindingCommitter } from '../internal/session-binding-authority.js';
+import type {
+  BindSessionModelCommand,
+  SessionModelBinding,
+} from '../kernel/session-model-binding.js';
+import type {
+  EnvironmentBindingInput,
+  FinalizeRunKernelCommand,
+  KernelJournalCommand,
+  KernelJournalCommitResult,
+  KernelRunProjection,
+  PersistedEnvironmentBinding,
+  PersistedTurnSnapshot,
+  TurnSnapshotInput,
+} from '../kernel/run-controller.js';
+import {
+  createKernelRunProjection,
+  projectKernelRunEvent,
+  projectKernelSchedule,
+} from '../kernel/kernel-run-projector.js';
 import {
   decideSchedule,
-  runStateForSchedule,
   type ScheduledToolInvocation,
 } from '../tools/tool-scheduler.js';
 
@@ -73,6 +93,8 @@ export type ModelCommitFaultPoint =
   | 'after-turn-before-envelope'
   | 'after-envelope-before-invocations'
   | 'after-first-invocation';
+
+export type KernelCommitFaultPoint = 'after-events-before-projection';
 
 export type SqliteAgentJournalOptions = {
   filePath: string;
@@ -100,12 +122,24 @@ type EventRow = {
 type CommandRow = { request_digest: string; result_json: string };
 type IngressRow = { input_digest: string; result_json: string };
 type LeaseRow = { owner_id: string; expires_at_ms: number; fencing_token: number };
+type KernelEnvironmentRow = {
+  environment_binding_id: string; project_id: string; session_id: string; run_id: string;
+  schema_version: number; digest: string; payload_json: string; created_at: string;
+};
+type KernelSnapshotRow = {
+  snapshot_id: string; project_id: string; session_id: string; run_id: string; turn_id: string;
+  environment_binding_id: string; schema_version: number; digest: string;
+  payload_json: string; created_at: string;
+};
 
 const MAX_TOOL_SUMMARY_CHARS = 4_096;
 const MAX_APPROVAL_SUMMARY_CHARS = 2_000;
 const MAX_APPROVAL_REASON_CHARS = 2_000;
 const MAX_DECIDED_BY_CHARS = 256;
 const MAX_TOOL_RESULT_REFS = 32;
+const KERNEL_RESERVED_EVENT_TYPES = new Set<AgentEventType>([
+  'run.environment_bound', 'delivery.decided', 'plan.created', 'plan.updated',
+]);
 const PROJECT_ARTIFACT_HANDLE = /^agent-artifact:[a-f0-9]{24}:[a-f0-9]{40}$/u;
 const TOOL_INVOCATION_COMMON_KEYS = [
   'action', 'projectId', 'sessionId', 'runId', 'turnId', 'invocationId',
@@ -157,6 +191,7 @@ export class SqliteAgentJournal implements AgentJournal {
   readonly #now: () => string;
   readonly #createId: () => string;
   #faultPoint: ModelCommitFaultPoint | undefined;
+  #kernelFaultPoint: KernelCommitFaultPoint | undefined;
 
   constructor(options: SqliteAgentJournalOptions) {
     this.filePath = requireText(options.filePath, 'filePath');
@@ -167,10 +202,16 @@ export class SqliteAgentJournal implements AgentJournal {
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#createId = options.createId ?? randomUUID;
     bindToolLifecycleCommitter(this, (command) => this.#commitToolInvocation(command));
+    bindKernelJournalCommitter(this, (command) => this.#commitKernelCommand(command));
+    bindSessionBindingCommitter(this, (command) => this.#commitSessionModelBinding(command));
   }
 
   failAt(point: ModelCommitFaultPoint): void {
     this.#faultPoint = point;
+  }
+
+  failKernelAt(point: KernelCommitFaultPoint): void {
+    this.#kernelFaultPoint = point;
   }
 
   async createRun(command: CreateRunCommand): Promise<CreateRunResult> {
@@ -253,10 +294,78 @@ export class SqliteAgentJournal implements AgentJournal {
     );
   }
 
+  async #commitSessionModelBinding(
+    command: BindSessionModelCommand,
+  ): Promise<SessionModelBinding> {
+    const snapshot = snapshotSessionBindingCommand(command);
+    await Promise.resolve();
+    const requestDigest = digestValue(snapshot);
+    return this.#withDatabase((database) => transaction(database, () => {
+      const replay = readCommandResult<SessionModelBinding>(
+        database, snapshot.projectId, snapshot.commandId, requestDigest,
+      );
+      if (replay !== undefined) return deepFreezeKernelValue(replay);
+      const current = database.prepare(
+        `SELECT revision FROM agent_session_model_bindings
+         WHERE project_id = ? AND session_id = ?`,
+      ).get(snapshot.projectId, snapshot.sessionId) as { revision: number } | undefined;
+      const currentRevision = current?.revision ?? 0;
+      if (currentRevision !== snapshot.expectedRevision) {
+        throw new AgentJournalError('REVISION_CONFLICT', 'Session model binding revision changed.');
+      }
+      const sequenceRow = database.prepare(
+        `SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
+         FROM agent_session_events WHERE project_id = ?`,
+      ).get(snapshot.projectId) as { next_sequence: number };
+      const nextRevision = currentRevision + 1;
+      const occurredAt = this.#now();
+      const binding: SessionModelBinding = deepFreezeKernelValue({
+        schemaVersion: 1, projectId: snapshot.projectId, sessionId: snapshot.sessionId,
+        revision: nextRevision, connectionId: snapshot.connectionId,
+        modelId: snapshot.modelId, updatedAt: occurredAt,
+      });
+      database.prepare(
+        `INSERT INTO agent_session_events (
+          project_id, sequence, event_id, schema_version, session_id,
+          event_type, payload_json, occurred_at
+        ) VALUES (?, ?, ?, 1, ?, 'session.model_bound', ?, ?)`,
+      ).run(
+        snapshot.projectId, sequenceRow.next_sequence, `session_event_${this.#createId()}`,
+        snapshot.sessionId, JSON.stringify(binding), occurredAt,
+      );
+      database.prepare(
+        `INSERT INTO agent_session_model_bindings (
+          project_id, session_id, revision, connection_id, model_id, payload_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, session_id) DO UPDATE SET
+          revision = excluded.revision, connection_id = excluded.connection_id,
+          model_id = excluded.model_id, payload_json = excluded.payload_json,
+          updated_at = excluded.updated_at`,
+      ).run(
+        snapshot.projectId, snapshot.sessionId, nextRevision, snapshot.connectionId,
+        snapshot.modelId, JSON.stringify(binding), occurredAt,
+      );
+      writeCommandResult(
+        database, snapshot.projectId, snapshot.commandId, 'session.model-bind',
+        requestDigest, binding, occurredAt,
+      );
+      return binding;
+    }));
+  }
+
   async commit(command: JournalCommand): Promise<JournalCommitResult> {
     await Promise.resolve();
     const identity = activeLegacyMigrationIdentity(this);
     const normalized = validateJournalCommand(snapshotJournalCommand(command), identity !== undefined);
+    if (
+      identity === undefined &&
+      normalized.events.some(({ type }) => KERNEL_RESERVED_EVENT_TYPES.has(type))
+    ) {
+      throw new AgentJournalError(
+        'COMMITTER_REQUIRED',
+        'Kernel lifecycle facts require the sealed RunController committer.',
+      );
+    }
     if (identity !== undefined && (
       normalized.events.some(({ type }) => type !== 'legacy.imported' && type !== 'run.cancelled') ||
       !normalized.commandId.includes(identity.migrationId)
@@ -776,6 +885,13 @@ export class SqliteAgentJournal implements AgentJournal {
           'REVISION_CONFLICT', 'Concurrent Invocation transition won the revision race.',
         );
       }
+      if (normalized.action === 'observe' || normalized.action === 'resolve-outcome') {
+        const evidenceEvent = events.find((event) =>
+          event.type === 'tool.observed' || event.type === 'tool.outcome_resolved');
+        if (evidenceEvent !== undefined) {
+          advanceOnlineKernelEvidence(database, invocation.runId, evidenceEvent);
+        }
+      }
       projectToolRunState(
         database, invocation.runId, invocation.turnId, occurredAt, normalized.action,
       );
@@ -870,6 +986,511 @@ export class SqliteAgentJournal implements AgentJournal {
     }));
   }
 
+  async #commitKernelCommand(command: KernelJournalCommand): Promise<KernelJournalCommitResult> {
+    const snapshot = snapshotKernelJournalCommand(command);
+    await Promise.resolve();
+    const normalized = validateKernelJournalCommand(snapshot);
+    const requestDigest = digestValue(normalized);
+    return this.#withDatabase((database) => transaction(database, () => {
+      const replay = readCommandResult<KernelJournalCommitResult>(
+        database, normalized.projectId, normalized.commandId, requestDigest,
+      );
+      if (replay !== undefined) return replay;
+      this.#assertRun(
+        database, normalized.projectId, normalized.sessionId, normalized.runId,
+      );
+      this.#assertLease(database, normalized.projectId, normalized.runId, normalized.lease);
+      this.#assertRunRevision(
+        database, normalized.projectId, normalized.runId, normalized.expectedRunRevision,
+      );
+      switch (normalized.action) {
+        case 'prepare-turn':
+          return this.#commitPrepareTurn(database, normalized, requestDigest);
+        case 'start-model-attempt':
+          return this.#commitStartModelAttempt(database, normalized, requestDigest);
+        case 'discard-model-attempt':
+          return this.#commitDiscardModelAttempt(database, normalized, requestDigest);
+        case 'request-cancel':
+          return this.#commitRequestCancel(database, normalized, requestDigest);
+        case 'settle-cancellation':
+          return this.#commitSettleCancellation(database, normalized, requestDigest);
+        case 'record-no-progress':
+          return this.#commitRecordNoProgress(database, normalized, requestDigest);
+        case 'finalize-run':
+          return this.#commitFinalizeRun(database, normalized, requestDigest);
+        default:
+          return assertNeverKernelCommand(normalized);
+      }
+    }));
+  }
+
+  #commitStartModelAttempt(
+    database: NodeDatabaseSync,
+    command: Extract<KernelJournalCommand, { action: 'start-model-attempt' }>,
+    requestDigest: string,
+  ): KernelJournalCommitResult {
+    const current = readKernelRunProjection(database, command.runId);
+    if (
+      current.state !== 'CallingModel' || current.currentTurnId !== command.turnId ||
+      current.currentAttemptId !== null
+    ) {
+      throw new AgentJournalError('COMMAND_CONFLICT', 'Run is not ready to start this model Attempt.');
+    }
+    const lifecycle = database.prepare(
+      `SELECT revision, status FROM agent_turn_lifecycles WHERE turn_id = ?`,
+    ).get(command.turnId) as { revision: number; status: string } | undefined;
+    if (
+      lifecycle === undefined || lifecycle.revision !== command.expectedTurnRevision ||
+      lifecycle.status !== 'started'
+    ) {
+      throw new AgentJournalError('REVISION_CONFLICT', 'Turn revision does not match.');
+    }
+    const environmentRow = readEnvironmentBindingRow(database, command.runId);
+    if (environmentRow === null) {
+      throw new AgentJournalError('PROJECTION_CORRUPT', 'Run has no Environment Binding.');
+    }
+    const environment = environmentBindingFromRow(environmentRow);
+    const routes = [environment.payload.modelRoute.primary, ...environment.payload.modelRoute.fallbacks];
+    if (!routes.some((route) =>
+      route.connectionId === command.origin.connectionId &&
+      route.modelId === command.origin.model && route.protocol === command.origin.protocol)) {
+      throw new AgentJournalError('COMMAND_CONFLICT', 'Attempt origin is outside the persisted Model Route.');
+    }
+    const occurredAt = this.#now();
+    const event = this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      turnId: command.turnId, attemptId: command.attemptId,
+      type: 'model_attempt_started', payload: { origin: command.origin }, occurredAt,
+    });
+    this.#injectKernel('after-events-before-projection');
+    persistKernelRunProjectionCas(
+      database, current, projectKernelRunEvent(current, event),
+      command.expectedRunRevision, 'Concurrent model Attempt start won the race.',
+    );
+    const result: KernelJournalCommitResult = {
+      events: [event], run: readKernelRunProjection(database, command.runId),
+    };
+    writeCommandResult(
+      database, command.projectId, command.commandId, 'kernel.start-model-attempt',
+      requestDigest, result, occurredAt,
+    );
+    return result;
+  }
+
+  #commitDiscardModelAttempt(
+    database: NodeDatabaseSync,
+    command: Extract<KernelJournalCommand, { action: 'discard-model-attempt' }>,
+    requestDigest: string,
+  ): KernelJournalCommitResult {
+    const current = readKernelRunProjection(database, command.runId);
+    if (
+      !['ReceivingModel', 'Cancelling'].includes(current.state) ||
+      current.currentTurnId !== command.turnId ||
+      current.currentAttemptId !== command.attemptId
+    ) {
+      throw new AgentJournalError('MODEL_COMMIT_CONFLICT', 'Discard does not match active Attempt.');
+    }
+    const lifecycle = database.prepare(
+      'SELECT revision, status FROM agent_turn_lifecycles WHERE turn_id = ?',
+    ).get(command.turnId) as { revision: number; status: string } | undefined;
+    if (lifecycle?.revision !== command.expectedTurnRevision || lifecycle.status !== 'started') {
+      throw new AgentJournalError('REVISION_CONFLICT', 'Turn revision does not match discard.');
+    }
+    const occurredAt = this.#now();
+    const events: AgentEvent[] = [];
+    if (command.failure !== undefined) {
+      events.push(this.#appendEvent(database, {
+        projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+        turnId: command.turnId, attemptId: command.attemptId,
+        type: 'model_failed', payload: command.failure, occurredAt,
+      }));
+    }
+    events.push(this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      turnId: command.turnId, attemptId: command.attemptId,
+      type: 'model_attempt_discarded', payload: { reason: command.reason }, occurredAt,
+    }));
+    this.#injectKernel('after-events-before-projection');
+    persistKernelRunProjectionCas(
+      database, current, projectKernelRunEvents(current, events),
+      command.expectedRunRevision, 'Concurrent model Attempt discard won the race.',
+    );
+    const result: KernelJournalCommitResult = {
+      events, run: readKernelRunProjection(database, command.runId),
+    };
+    writeCommandResult(
+      database, command.projectId, command.commandId, 'kernel.discard-model-attempt',
+      requestDigest, result, occurredAt,
+    );
+    return result;
+  }
+
+  #commitRequestCancel(
+    database: NodeDatabaseSync,
+    command: Extract<KernelJournalCommand, { action: 'request-cancel' }>,
+    requestDigest: string,
+  ): KernelJournalCommitResult {
+    const current = readKernelRunProjection(database, command.runId);
+    if (['Completed', 'Failed', 'Cancelled', 'Cancelling'].includes(current.state)) {
+      throw new AgentJournalError(
+        'COMMAND_CONFLICT', `Run cannot request cancellation from ${current.state}.`,
+      );
+    }
+    const occurredAt = this.#now();
+    const event = this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      type: 'run.cancel_requested',
+      payload: command.reason === undefined ? {} : { reason: command.reason }, occurredAt,
+    });
+    this.#injectKernel('after-events-before-projection');
+    persistKernelRunProjectionCas(
+      database, current, projectKernelRunEvent(current, event),
+      command.expectedRunRevision, 'Concurrent cancellation request won the race.',
+    );
+    const result: KernelJournalCommitResult = {
+      events: [event], run: readKernelRunProjection(database, command.runId),
+    };
+    writeCommandResult(
+      database, command.projectId, command.commandId, 'kernel.request-cancel',
+      requestDigest, result, occurredAt,
+    );
+    return result;
+  }
+
+  #commitSettleCancellation(
+    database: NodeDatabaseSync,
+    command: Extract<KernelJournalCommand, { action: 'settle-cancellation' }>,
+    requestDigest: string,
+  ): KernelJournalCommitResult {
+    const current = readKernelRunProjection(database, command.runId);
+    if (current.state !== 'Cancelling') {
+      throw new AgentJournalError('COMMAND_CONFLICT', 'Only a Cancelling Run can settle cancellation.');
+    }
+    if (current.currentAttemptId !== null) {
+      throw new AgentJournalError(
+        'COMMAND_CONFLICT', 'Cancellation cannot settle while a model Attempt is active.',
+      );
+    }
+    const unresolvedInvocations = database.prepare(
+      `SELECT COUNT(*) AS count FROM agent_invocations
+       WHERE project_id = ? AND run_id = ? AND state <> 'observed'`,
+    ).get(command.projectId, command.runId) as { count: number };
+    const pendingApprovals = database.prepare(
+      `SELECT COUNT(*) AS count FROM agent_approvals
+       WHERE project_id = ? AND run_id = ? AND status = 'pending'`,
+    ).get(command.projectId, command.runId) as { count: number };
+    if (Number(unresolvedInvocations.count) > 0 || Number(pendingApprovals.count) > 0) {
+      throw new AgentJournalError(
+        'COMMAND_CONFLICT', 'Cancellation cannot settle before all Tool protocol facts are observed.',
+      );
+    }
+    const occurredAt = this.#now();
+    const reason = readLatestCancellationReason(database, command.runId);
+    const events: AgentEvent[] = [];
+    let parentEventId: string | undefined;
+    if (current.currentTurnId !== null) {
+      const lifecycle = database.prepare(
+        'SELECT revision, status FROM agent_turn_lifecycles WHERE turn_id = ?',
+      ).get(current.currentTurnId) as { revision: number; status: string } | undefined;
+      if (lifecycle === undefined || !['started', 'committed'].includes(lifecycle.status)) {
+        throw new AgentJournalError(
+          'PROJECTION_CORRUPT', 'Cancellation has an invalid open Turn lifecycle.',
+        );
+      }
+      const close = this.#appendEvent(database, {
+        projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+        turnId: current.currentTurnId, type: 'turn.closed', payload: { reason: 'cancelled' }, occurredAt,
+      });
+      events.push(close);
+      parentEventId = close.eventId;
+      const closed = database.prepare(
+        `UPDATE agent_turn_lifecycles SET revision = revision + 1, status = 'closed'
+         WHERE turn_id = ? AND revision = ? AND status = ?`,
+      ).run(current.currentTurnId, lifecycle.revision, lifecycle.status);
+      if (Number(closed.changes) !== 1) {
+        throw new AgentJournalError('REVISION_CONFLICT', 'Open Turn changed while cancelling.');
+      }
+    }
+    const cancelled = this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      ...(current.currentTurnId === null ? {} : { turnId: current.currentTurnId }),
+      ...(parentEventId === undefined ? {} : { parentEventId }),
+      type: 'run.cancelled', payload: reason === undefined ? {} : { reason }, occurredAt,
+    });
+    events.push(cancelled);
+    this.#injectKernel('after-events-before-projection');
+    persistKernelRunProjectionCas(
+      database, current, projectKernelRunEvents(current, events),
+      command.expectedRunRevision, 'Concurrent cancellation settlement won the race.',
+    );
+    const result: KernelJournalCommitResult = {
+      events, run: readKernelRunProjection(database, command.runId),
+    };
+    writeCommandResult(
+      database, command.projectId, command.commandId, 'kernel.settle-cancellation',
+      requestDigest, result, occurredAt,
+    );
+    return result;
+  }
+
+  #commitRecordNoProgress(
+    database: NodeDatabaseSync,
+    command: Extract<KernelJournalCommand, { action: 'record-no-progress' }>,
+    requestDigest: string,
+  ): KernelJournalCommitResult {
+    const current = readKernelRunProjection(database, command.runId);
+    if (current.state !== 'Preparing') {
+      throw new AgentJournalError(
+        'COMMAND_CONFLICT', 'No-progress evidence may be committed only at a Preparing boundary.',
+      );
+    }
+    const occurredAt = this.#now();
+    const event = this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      ...(current.currentTurnId === null ? {} : { turnId: current.currentTurnId }),
+      type: 'turn.no_progress', payload: { fingerprint: command.fingerprint }, occurredAt,
+    });
+    this.#injectKernel('after-events-before-projection');
+    persistKernelRunProjectionCas(
+      database, current, projectKernelRunEvent(current, event),
+      command.expectedRunRevision, 'Concurrent no-progress commit won the race.',
+    );
+    const result: KernelJournalCommitResult = {
+      events: [event], run: readKernelRunProjection(database, command.runId),
+    };
+    writeCommandResult(
+      database, command.projectId, command.commandId, 'kernel.record-no-progress',
+      requestDigest, result, occurredAt,
+    );
+    return result;
+  }
+
+  #commitPrepareTurn(
+    database: NodeDatabaseSync,
+    command: Extract<KernelJournalCommand, { action: 'prepare-turn' }>,
+    requestDigest: string,
+  ): KernelJournalCommitResult {
+    const current = readKernelRunProjection(database, command.runId);
+    const runRow = database.prepare(
+      `SELECT state FROM agent_runs
+       WHERE project_id = ? AND session_id = ? AND run_id = ?`,
+    ).get(command.projectId, command.sessionId, command.runId) as { state: string };
+    const allowed = command.resume
+      ? ['AwaitingUser', 'Interrupted', 'LimitReached', 'Preparing']
+      : ['created', 'Preparing'];
+    if (!allowed.includes(runRow.state)) {
+      throw new AgentJournalError(
+        'COMMAND_CONFLICT', `Run cannot prepare a Turn from ${runRow.state}.`,
+      );
+    }
+    const occurredAt = this.#now();
+    const environmentDigest = digestValue(command.environment);
+    const existingEnvironment = readEnvironmentBindingRow(database, command.runId);
+    let environment: PersistedEnvironmentBinding;
+    const events: AgentEvent[] = [];
+    if (existingEnvironment === null) {
+      environment = freezeEnvironmentBinding({
+        schemaVersion: 1,
+        environmentBindingId: command.environment.environmentBindingId,
+        projectId: command.projectId,
+        sessionId: command.sessionId,
+        runId: command.runId,
+        digest: environmentDigest,
+        payload: command.environment,
+        createdAt: occurredAt,
+      });
+      database.prepare(
+        `INSERT INTO agent_environment_bindings (
+          environment_binding_id, project_id, session_id, run_id, schema_version,
+          digest, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+      ).run(
+        environment.environmentBindingId, command.projectId, command.sessionId,
+        command.runId, environment.digest, JSON.stringify(environment.payload), occurredAt,
+      );
+      events.push(this.#appendEvent(database, {
+        projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+        type: 'run.environment_bound',
+        payload: {
+          environmentBindingId: environment.environmentBindingId,
+          digest: environment.digest,
+          binding: command.environment,
+        },
+        occurredAt,
+      }));
+    } else {
+      environment = environmentBindingFromRow(existingEnvironment);
+      if (
+        environment.environmentBindingId !== command.environment.environmentBindingId ||
+        environment.digest !== environmentDigest
+      ) {
+        throw new AgentJournalError(
+          'COMMAND_CONFLICT', 'A Run Environment Binding is immutable after its first Turn.',
+        );
+      }
+    }
+    const snapshotDigest = digestValue({
+      payload: command.snapshot,
+      turnId: command.turnId,
+      environmentBindingId: environment.environmentBindingId,
+    });
+    if (database.prepare('SELECT 1 AS present FROM agent_snapshots WHERE snapshot_id = ?')
+      .get(command.snapshot.turnSnapshotId) !== undefined) {
+      throw new AgentJournalError('COMMAND_CONFLICT', 'Turn Snapshot identity already exists.');
+    }
+    const persistedSnapshot = freezeTurnSnapshot({
+      schemaVersion: 1,
+      turnSnapshotId: command.snapshot.turnSnapshotId,
+      projectId: command.projectId,
+      sessionId: command.sessionId,
+      runId: command.runId,
+      turnId: command.turnId,
+      environmentBindingId: environment.environmentBindingId,
+      digest: snapshotDigest,
+      payload: command.snapshot,
+      createdAt: occurredAt,
+    });
+    database.prepare(
+      `INSERT INTO agent_snapshots (
+        snapshot_id, project_id, session_id, run_id, turn_id, environment_binding_id,
+        schema_version, snapshot_type, revision, digest, payload_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 1, 'turn', ?, ?, ?, ?)`,
+    ).run(
+      persistedSnapshot.turnSnapshotId, command.projectId, command.sessionId, command.runId,
+      command.turnId, environment.environmentBindingId, command.snapshot.capability.revision,
+      snapshotDigest, JSON.stringify(command.snapshot), occurredAt,
+    );
+    const runEvent = this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      type: command.resume ? 'run.resumed' : 'run.started',
+      payload: command.resume ? { reason: 'turn-prepare' } : {}, occurredAt,
+    });
+    events.push(runEvent);
+    events.push(this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      turnId: command.turnId,
+      type: 'capability.snapshot_captured',
+      payload: {
+        snapshotId: command.snapshot.capability.snapshotId,
+        revision: command.snapshot.capability.revision,
+      }, occurredAt,
+    }));
+    events.push(this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      turnId: command.turnId,
+      type: 'turn.started',
+      payload: {
+        turnSnapshotId: persistedSnapshot.turnSnapshotId,
+        environmentBindingId: environment.environmentBindingId,
+        digest: persistedSnapshot.digest,
+        snapshot: command.snapshot,
+      },
+      occurredAt,
+    }));
+    this.#injectKernel('after-events-before-projection');
+    database.prepare(
+      `INSERT INTO agent_turn_lifecycles (
+        project_id, session_id, run_id, turn_id, revision, status, started_at
+      ) VALUES (?, ?, ?, ?, 1, 'started', ?)`,
+    ).run(command.projectId, command.sessionId, command.runId, command.turnId, occurredAt);
+    persistKernelRunProjectionCas(
+      database, current, projectKernelRunEvents(current, events),
+      command.expectedRunRevision, 'Concurrent Run preparation won the race.',
+    );
+    const run = readKernelRunProjection(database, command.runId);
+    const result: KernelJournalCommitResult = {
+      events, run, environment, snapshot: persistedSnapshot,
+    };
+    writeCommandResult(
+      database, command.projectId, command.commandId, 'kernel.prepare-turn',
+      requestDigest, result, occurredAt,
+    );
+    return result;
+  }
+
+  #commitFinalizeRun(
+    database: NodeDatabaseSync,
+    command: Extract<KernelJournalCommand, { action: 'finalize-run' }>,
+    requestDigest: string,
+  ): KernelJournalCommitResult {
+    const lifecycle = database.prepare(
+      `SELECT revision, status FROM agent_turn_lifecycles
+       WHERE project_id = ? AND session_id = ? AND run_id = ? AND turn_id = ?`,
+    ).get(command.projectId, command.sessionId, command.runId, command.turnId) as
+      { revision: number; status: string } | undefined;
+    if (lifecycle === undefined) throw new AgentJournalError('TURN_NOT_FOUND', 'Turn not found.');
+    if (lifecycle.revision !== command.expectedTurnRevision || lifecycle.status !== 'committed') {
+      throw new AgentJournalError('REVISION_CONFLICT', 'Final Turn revision does not match.');
+    }
+    const current = readKernelRunProjection(database, command.runId);
+    if (current.state !== 'Finalizing' || current.currentTurnId !== command.turnId) {
+      throw new AgentJournalError('COMMAND_CONFLICT', 'Run is not ready for final delivery.');
+    }
+    if (current.currentAttemptId !== null) {
+      throw new AgentJournalError(
+        'COMMAND_CONFLICT', 'Run cannot finalize while a model Attempt remains active.',
+      );
+    }
+    const unresolvedInvocations = database.prepare(
+      `SELECT COUNT(*) AS count FROM agent_invocations
+       WHERE project_id = ? AND run_id = ? AND state <> 'observed'`,
+    ).get(command.projectId, command.runId) as { count: number };
+    const pendingApprovals = database.prepare(
+      `SELECT COUNT(*) AS count FROM agent_approvals
+       WHERE project_id = ? AND run_id = ? AND status = 'pending'`,
+    ).get(command.projectId, command.runId) as { count: number };
+    if (Number(unresolvedInvocations.count) > 0 || Number(pendingApprovals.count) > 0) {
+      throw new AgentJournalError(
+        'COMMAND_CONFLICT', 'Run cannot finalize with unresolved Tool or approval protocol facts.',
+      );
+    }
+    if (command.decision.evidenceRevision !== current.evidenceRevision) {
+      throw new AgentJournalError(
+        'COMMAND_CONFLICT', 'Delivery decision does not match the current Evidence Revision.',
+      );
+    }
+    const occurredAt = this.#now();
+    const delivery = this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      turnId: command.turnId, type: 'delivery.decided',
+      payload: { ...command.decision, evidenceRefs: [...command.decision.evidenceRefs] }, occurredAt,
+    });
+    const close = this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      turnId: command.turnId, parentEventId: delivery.eventId,
+      type: 'turn.closed', payload: { reason: command.decision.outcome }, occurredAt,
+    });
+    const terminalType = command.decision.outcome === 'accepted' ? 'run.completed' : 'run.failed';
+    const terminal = this.#appendEvent(database, {
+      projectId: command.projectId, sessionId: command.sessionId, runId: command.runId,
+      turnId: command.turnId, parentEventId: close.eventId,
+      type: terminalType,
+      payload: terminalType === 'run.completed' ? {
+        finalContentRef: command.finalContentRef,
+        deliveryStatus: command.decision.status,
+        evidenceRefs: [...command.decision.evidenceRefs],
+      } : { code: 'DELIVERY_UNVERIFIED', detail: command.decision.reason ?? null },
+      occurredAt,
+    });
+    this.#injectKernel('after-events-before-projection');
+    database.prepare(
+      `UPDATE agent_turn_lifecycles SET revision = revision + 1, status = 'closed'
+       WHERE turn_id = ? AND revision = ? AND status = 'committed'`,
+    ).run(command.turnId, command.expectedTurnRevision);
+    persistKernelRunProjectionCas(
+      database, current, projectKernelRunEvents(current, [delivery, close, terminal]),
+      command.expectedRunRevision, 'Concurrent Run finalization won the race.',
+    );
+    const result: KernelJournalCommitResult = {
+      events: [delivery, close, terminal], run: readKernelRunProjection(database, command.runId),
+    };
+    writeCommandResult(
+      database, command.projectId, command.commandId, 'kernel.finalize-run',
+      requestDigest, result, occurredAt,
+    );
+    return result;
+  }
+
   async startTurn(command: StartTurnCommand): Promise<JournalCommitResult> {
     await Promise.resolve();
     const normalized = validateStartTurnCommand(snapshotStartTurnCommand(command));
@@ -940,6 +1561,140 @@ export class SqliteAgentJournal implements AgentJournal {
     });
   }
 
+  async readRunEvents(input: Readonly<{
+    projectId: string; sessionId: string; runId: string; afterSequence: number; limit: number;
+  }>): Promise<Readonly<{ events: readonly AgentEvent[]; nextSequence: number | null }>> {
+    await Promise.resolve();
+    const projectId = requireText(input.projectId, 'projectId');
+    const sessionId = requireText(input.sessionId, 'sessionId');
+    const runId = requireText(input.runId, 'runId');
+    if (!Number.isSafeInteger(input.afterSequence) || input.afterSequence < 0) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'afterSequence must be non-negative.');
+    }
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1_000) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Run event limit must be between 1 and 1000.');
+    }
+    return this.#withDatabase((database) => {
+      this.#assertRun(database, projectId, sessionId, runId);
+      const rows = database.prepare(
+        `SELECT * FROM agent_events
+         WHERE project_id = ? AND session_id = ? AND run_id = ? AND sequence > ?
+         ORDER BY sequence ASC LIMIT ?`,
+      ).all(projectId, sessionId, runId, input.afterSequence, input.limit) as unknown as EventRow[];
+      const events = rows.map((row) => {
+        assertStoredParentCausality(database, row);
+        return eventFromRow(row);
+      });
+      return Object.freeze({
+        events: Object.freeze(events),
+        nextSequence: events.at(-1)?.sequence ?? null,
+      });
+    });
+  }
+
+  async getKernelRunProjection(input: Readonly<{
+    projectId: string; sessionId: string; runId: string;
+  }>): Promise<KernelRunProjection | null> {
+    await Promise.resolve();
+    const projectId = requireText(input.projectId, 'projectId');
+    const sessionId = requireText(input.sessionId, 'sessionId');
+    const runId = requireText(input.runId, 'runId');
+    return this.#withDatabase((database) => {
+      this.#assertRun(database, projectId, sessionId, runId);
+      return readKernelRunProjection(database, runId);
+    });
+  }
+
+  async getEnvironmentBinding(input: Readonly<{
+    projectId: string; sessionId: string; runId: string;
+  }>): Promise<PersistedEnvironmentBinding | null> {
+    await Promise.resolve();
+    const projectId = requireText(input.projectId, 'projectId');
+    const sessionId = requireText(input.sessionId, 'sessionId');
+    const runId = requireText(input.runId, 'runId');
+    return this.#withDatabase((database) => {
+      this.#assertRun(database, projectId, sessionId, runId);
+      const row = readEnvironmentBindingRow(database, runId);
+      return row === null ? null : environmentBindingFromRow(row);
+    });
+  }
+
+  async getTurnSnapshot(input: Readonly<{
+    projectId: string; sessionId: string; runId: string; turnId: string;
+  }>): Promise<PersistedTurnSnapshot | null> {
+    await Promise.resolve();
+    const projectId = requireText(input.projectId, 'projectId');
+    const sessionId = requireText(input.sessionId, 'sessionId');
+    const runId = requireText(input.runId, 'runId');
+    const turnId = requireText(input.turnId, 'turnId');
+    return this.#withDatabase((database) => {
+      this.#assertRun(database, projectId, sessionId, runId);
+      const row = database.prepare(
+        `SELECT snapshot_id, project_id, session_id, run_id, turn_id,
+          environment_binding_id, schema_version, digest, payload_json, created_at
+         FROM agent_snapshots
+         WHERE project_id = ? AND session_id = ? AND run_id = ? AND turn_id = ?`,
+      ).get(projectId, sessionId, runId, turnId) as KernelSnapshotRow | undefined;
+      if (row === undefined) return null;
+      return turnSnapshotFromRow(row);
+    });
+  }
+
+  async getSessionModelBinding(
+    projectId: string,
+    sessionId: string,
+  ): Promise<SessionModelBinding | null> {
+    await Promise.resolve();
+    requireText(projectId, 'projectId');
+    requireText(sessionId, 'sessionId');
+    return this.#withDatabase((database) => {
+      const row = database.prepare(
+        `SELECT payload_json FROM agent_session_model_bindings
+         WHERE project_id = ? AND session_id = ?`,
+      ).get(projectId, sessionId) as { payload_json: string } | undefined;
+      if (row === undefined) return null;
+      const binding = parsePortableJson(row.payload_json) as unknown as SessionModelBinding;
+      return deepFreezeKernelValue(binding);
+    });
+  }
+
+  async readSessionEvents(input: Readonly<{
+    projectId: string; sessionId: string; afterSequence: number; limit: number;
+  }>): Promise<Readonly<{
+    events: readonly Readonly<{
+      sequence: number; eventId: string; type: 'session.model_bound';
+      binding: SessionModelBinding; occurredAt: string;
+    }>[];
+    nextSequence: number | null;
+  }>> {
+    await Promise.resolve();
+    requireText(input.projectId, 'projectId');
+    requireText(input.sessionId, 'sessionId');
+    if (!Number.isSafeInteger(input.afterSequence) || input.afterSequence < 0 ||
+      !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1_000) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Session event cursor or limit is invalid.');
+    }
+    return this.#withDatabase((database) => {
+      const rows = database.prepare(
+        `SELECT sequence, event_id, event_type, payload_json, occurred_at
+         FROM agent_session_events
+         WHERE project_id = ? AND session_id = ? AND sequence > ?
+         ORDER BY sequence ASC LIMIT ?`,
+      ).all(input.projectId, input.sessionId, input.afterSequence, input.limit) as unknown as Array<{
+        sequence: number; event_id: string; event_type: string;
+        payload_json: string; occurred_at: string;
+      }>;
+      const events = rows.map((row) => deepFreezeKernelValue({
+        sequence: row.sequence, eventId: row.event_id, type: 'session.model_bound' as const,
+        binding: parsePortableJson(row.payload_json) as unknown as SessionModelBinding,
+        occurredAt: row.occurred_at,
+      }));
+      return deepFreezeKernelValue({
+        events, nextSequence: events.at(-1)?.sequence ?? null,
+      });
+    });
+  }
+
   async countEvents(type?: AgentEventType, projectId?: string): Promise<number> {
     await Promise.resolve();
     return this.#withDatabase((database) => {
@@ -975,6 +1730,7 @@ export class SqliteAgentJournal implements AgentJournal {
         return eventFromRow(row);
       });
       const replay = replayAgentEvents(events);
+      const kernelReplay = replayKernelJournalFacts(events, replay.invocations);
       database.prepare('DELETE FROM agent_observations WHERE project_id = ?').run(projectId);
       database.prepare('DELETE FROM agent_approvals WHERE project_id = ?').run(projectId);
       database.prepare('DELETE FROM agent_invocations WHERE project_id = ?').run(projectId);
@@ -982,19 +1738,48 @@ export class SqliteAgentJournal implements AgentJournal {
       database.prepare('DELETE FROM agent_turns WHERE project_id = ?').run(projectId);
       database.prepare('DELETE FROM agent_attempts WHERE project_id = ?').run(projectId);
       database.prepare('DELETE FROM agent_turn_lifecycles WHERE project_id = ?').run(projectId);
+      database.prepare('DELETE FROM agent_kernel_runs WHERE project_id = ?').run(projectId);
+      database.prepare('DELETE FROM agent_snapshots WHERE project_id = ?').run(projectId);
+      database.prepare('DELETE FROM agent_environment_bindings WHERE project_id = ?').run(projectId);
       database.prepare('DELETE FROM agent_run_leases WHERE project_id = ?').run(projectId);
       database.prepare('DELETE FROM agent_runs WHERE project_id = ?').run(projectId);
 
       for (const run of replay.runs) {
+        const kernel = kernelReplay.runs.get(run.runId);
         database.prepare(
           `INSERT INTO agent_runs (
             run_id, project_id, session_id, client_request_id, state, revision,
             input_json, created_at, updated_at, hidden
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
-          run.runId, run.projectId, run.sessionId, run.clientRequestId, run.state, run.revision,
-          JSON.stringify(run.input ?? null), run.createdAt, run.updatedAt,
+          run.runId, run.projectId, run.sessionId, run.clientRequestId,
+          kernel?.state ?? run.state, kernel?.revision ?? run.revision,
+          JSON.stringify(run.input ?? null), run.createdAt, kernel?.updatedAt ?? run.updatedAt,
           run.visibility === 'legacy-import-carrier' ? 1 : 0,
+        );
+      }
+      for (const environment of kernelReplay.environments.values()) {
+        database.prepare(
+          `INSERT INTO agent_environment_bindings (
+            environment_binding_id, project_id, session_id, run_id, schema_version,
+            digest, payload_json, created_at
+          ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+        ).run(
+          environment.environmentBindingId, environment.projectId, environment.sessionId,
+          environment.runId, environment.digest, JSON.stringify(environment.payload),
+          environment.createdAt,
+        );
+      }
+      for (const snapshot of kernelReplay.snapshots.values()) {
+        database.prepare(
+          `INSERT INTO agent_snapshots (
+            snapshot_id, project_id, session_id, run_id, turn_id, environment_binding_id,
+            schema_version, snapshot_type, revision, digest, payload_json, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 1, 'turn', ?, ?, ?, ?)`,
+        ).run(
+          snapshot.turnSnapshotId, snapshot.projectId, snapshot.sessionId, snapshot.runId,
+          snapshot.turnId, snapshot.environmentBindingId, snapshot.payload.capability.revision,
+          snapshot.digest, JSON.stringify(snapshot.payload), snapshot.createdAt,
         );
       }
       for (const started of events.filter((event) => event.type === 'turn.started')) {
@@ -1075,6 +1860,20 @@ export class SqliteAgentJournal implements AgentJournal {
         ).run(
           observation.observationId, observation.projectId, observation.runId,
           observation.invocationId, JSON.stringify(observation), observation.createdAt,
+        );
+      }
+      for (const run of kernelReplay.runs.values()) {
+        database.prepare(
+          `INSERT INTO agent_kernel_runs (
+            run_id, project_id, session_id, environment_binding_id, current_turn_id,
+            turn_snapshot_id, current_attempt_id, wait_reason, evidence_revision,
+            evidence_digest, no_progress_count, final_content_ref, delivery_status, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          run.runId, run.projectId, run.sessionId, run.environmentBindingId,
+          run.currentTurnId, run.turnSnapshotId, run.currentAttemptId, run.waitReason,
+          run.evidenceRevision, run.evidenceDigest, run.noProgressCount,
+          run.finalContentRef, run.deliveryStatus, run.updatedAt,
         );
       }
     }));
@@ -1502,8 +2301,8 @@ export class SqliteAgentJournal implements AgentJournal {
   async commitValidatedAttempt(
     command: CommitValidatedAttemptCommand,
   ): Promise<ModelTurnCommitResult> {
-    await Promise.resolve();
     const normalized = snapshotValidatedAttemptCommand(command);
+    await Promise.resolve();
     const {
       projectId, sessionId, runId, turnId, commandId, attempt,
       expectedRunRevision, expectedTurnRevision,
@@ -1546,6 +2345,54 @@ export class SqliteAgentJournal implements AgentJournal {
         this.#assertRun(database, projectId, sessionId, runId);
         this.#assertLease(database, projectId, runId, normalized.lease);
         this.#assertRunRevision(database, projectId, runId, expectedRunRevision);
+        const kernelRun = database.prepare(
+          'SELECT current_turn_id, current_attempt_id, turn_snapshot_id FROM agent_kernel_runs WHERE run_id = ?',
+        ).get(runId) as {
+          current_turn_id: string | null; current_attempt_id: string | null;
+          turn_snapshot_id: string | null;
+        } | undefined;
+        let kernelCurrent: KernelRunProjection | null = null;
+        if (kernelRun !== undefined) {
+          const current = readKernelRunProjection(database, runId);
+          kernelCurrent = current;
+          if (
+            current.state !== 'ReceivingModel' || current.currentTurnId !== turnId ||
+            current.currentAttemptId !== attempt.attemptId
+          ) {
+            throw new AgentJournalError(
+              'MODEL_COMMIT_CONFLICT', 'Validated Attempt is not the exact active Run Attempt.',
+            );
+          }
+          const snapshotRow = database.prepare(
+            `SELECT snapshot_id, project_id, session_id, run_id, turn_id,
+              environment_binding_id, schema_version, digest, payload_json, created_at
+             FROM agent_snapshots WHERE snapshot_id = ? AND turn_id = ?`,
+          ).get(kernelRun.turn_snapshot_id, turnId) as KernelSnapshotRow | undefined;
+          if (snapshotRow === undefined) {
+            throw new AgentJournalError('PROJECTION_CORRUPT', 'Active Turn Snapshot is missing.');
+          }
+          const turnSnapshot = turnSnapshotFromRow(snapshotRow);
+          const environmentRow = readEnvironmentBindingRow(database, runId);
+          if (
+            environmentRow === null ||
+            turnSnapshot.environmentBindingId !== environmentRow.environment_binding_id
+          ) {
+            throw new AgentJournalError(
+              'PROJECTION_CORRUPT', 'Turn Snapshot and Environment Binding disagree.',
+            );
+          }
+          const environment = environmentBindingFromRow(environmentRow);
+          const routes = [
+            environment.payload.modelRoute.primary, ...environment.payload.modelRoute.fallbacks,
+          ];
+          if (!routes.some((route) =>
+            route.connectionId === attempt.origin.connectionId &&
+            route.modelId === attempt.origin.model && route.protocol === attempt.origin.protocol)) {
+            throw new AgentJournalError(
+              'MODEL_COMMIT_CONFLICT', 'Attempt origin disagrees with the immutable Model Route.',
+            );
+          }
+        }
         const lifecycle = database.prepare(
           `SELECT project_id, session_id, run_id, revision, status
            FROM agent_turn_lifecycles WHERE turn_id = ?`,
@@ -1704,14 +2551,23 @@ export class SqliteAgentJournal implements AgentJournal {
         if (Number(turnCas.changes) !== 1) {
           throw new AgentJournalError('REVISION_CONFLICT', 'Concurrent Turn commit won the revision race.');
         }
-        const runCas = database.prepare(
-          `UPDATE agent_runs SET revision = revision + 1, updated_at = ?
-           WHERE project_id = ? AND session_id = ? AND run_id = ? AND revision = ?`,
-        ).run(occurredAt, projectId, sessionId, runId, expectedRunRevision);
-        if (Number(runCas.changes) !== 1) {
-          throw new AgentJournalError('REVISION_CONFLICT', 'Concurrent Run commit won the revision race.');
+        if (kernelCurrent === null) {
+          const runCas = database.prepare(
+            `UPDATE agent_runs SET revision = revision + 1, updated_at = ?
+             WHERE project_id = ? AND session_id = ? AND run_id = ? AND revision = ?`,
+          ).run(occurredAt, projectId, sessionId, runId, expectedRunRevision);
+          if (Number(runCas.changes) !== 1) {
+            throw new AgentJournalError(
+              'REVISION_CONFLICT', 'Concurrent Run commit won the revision race.',
+            );
+          }
+          projectToolRunState(database, runId, turnId, occurredAt, 'model-commit');
+        } else {
+          persistKernelRunProjectionCas(
+            database, kernelCurrent, projectKernelRunEvent(kernelCurrent, modelEvent),
+            expectedRunRevision, 'Concurrent Run commit won the revision race.',
+          );
         }
-        projectToolRunState(database, runId, turnId, occurredAt, 'model-commit');
         const result = { turn, envelope: prepared.envelope, invocations };
         writeCommandResult(
           database,
@@ -1731,6 +2587,12 @@ export class SqliteAgentJournal implements AgentJournal {
     if (this.#faultPoint !== point) return;
     this.#faultPoint = undefined;
     throw new Error(`INJECTED_FAILURE:${point}`);
+  }
+
+  #injectKernel(point: KernelCommitFaultPoint): void {
+    if (this.#kernelFaultPoint !== point) return;
+    this.#kernelFaultPoint = undefined;
+    throw new Error(`INJECTED_KERNEL_FAILURE:${point}`);
   }
 
   #assertRun(
@@ -2816,16 +3678,36 @@ function projectToolRunState(
       state: invocation.state,
     };
   });
-  const state = runStateForSchedule(decideSchedule({
+  const decision = decideSchedule({
     invocations: facts,
     maxConcurrency: Number.MAX_SAFE_INTEGER,
-  }));
+  });
+  const kernelProjectionExists = database.prepare(
+    'SELECT 1 AS present FROM agent_kernel_runs WHERE run_id = ?',
+  ).get(runId) !== undefined;
+  const kernel = readKernelRunProjection(database, runId);
+  const projected = projectKernelSchedule(kernel, decision, occurredAt);
   const result = database.prepare(
     'UPDATE agent_runs SET state = ?, updated_at = ? WHERE run_id = ?',
-  ).run(state, occurredAt, runId);
+  ).run(projected.state, occurredAt, runId);
   if (Number(result.changes) !== 1) {
     throw new AgentJournalError('RUN_NOT_FOUND', `Run not found: ${runId}`);
   }
+  if (kernelProjectionExists) persistKernelRunProjection(database, projected);
+}
+
+function advanceOnlineKernelEvidence(
+  database: NodeDatabaseSync,
+  runId: string,
+  event: AgentEvent,
+): void {
+  const present = database.prepare(
+    'SELECT 1 AS present FROM agent_kernel_runs WHERE run_id = ?',
+  ).get(runId);
+  if (present === undefined) return;
+  const current = readKernelRunProjection(database, runId);
+  const next = projectKernelRunEvent(current, event);
+  persistKernelRunProjection(database, next);
 }
 
 function isProtectedToolProjectionState(
@@ -3538,6 +4420,29 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
       created_at TEXT NOT NULL,
       PRIMARY KEY (project_id, session_id, client_request_id)
     );
+    CREATE TABLE IF NOT EXISTS agent_session_events (
+      project_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      event_id TEXT NOT NULL UNIQUE,
+      schema_version INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      PRIMARY KEY (project_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_session_events_scope_sequence
+      ON agent_session_events(project_id, session_id, sequence);
+    CREATE TABLE IF NOT EXISTS agent_session_model_bindings (
+      project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      connection_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (project_id, session_id)
+    );
     CREATE TABLE IF NOT EXISTS agent_runs (
       run_id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -3556,7 +4461,10 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
     CREATE TABLE IF NOT EXISTS agent_environment_bindings (
       environment_binding_id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
       run_id TEXT NOT NULL UNIQUE,
+      schema_version INTEGER NOT NULL,
+      digest TEXT NOT NULL,
       payload_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
@@ -3564,11 +4472,33 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
     CREATE TABLE IF NOT EXISTS agent_snapshots (
       snapshot_id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
       run_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL UNIQUE,
+      environment_binding_id TEXT NOT NULL,
+      schema_version INTEGER NOT NULL,
       snapshot_type TEXT NOT NULL,
       revision TEXT NOT NULL,
+      digest TEXT NOT NULL,
       payload_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
+    );
+    CREATE TABLE IF NOT EXISTS agent_kernel_runs (
+      run_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      environment_binding_id TEXT,
+      current_turn_id TEXT,
+      turn_snapshot_id TEXT,
+      current_attempt_id TEXT,
+      wait_reason TEXT,
+      evidence_revision INTEGER NOT NULL DEFAULT 0,
+      evidence_digest TEXT,
+      no_progress_count INTEGER NOT NULL DEFAULT 0,
+      final_content_ref TEXT,
+      delivery_status TEXT,
+      updated_at TEXT NOT NULL,
       FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
     );
     CREATE TABLE IF NOT EXISTS agent_turns (
@@ -3732,6 +4662,37 @@ function initializeDatabase(database: NodeDatabaseSync, busyTimeoutMs: number): 
   migrateHiddenRuns(database);
   migrateArtifactReferenceUniqueness(database);
   migrateLegacyRunLeaseForeignKey(database);
+  migrateKernelJournalTables(database);
+}
+
+function migrateKernelJournalTables(database: NodeDatabaseSync): void {
+  const addMissing = (table: string, columns: Readonly<Record<string, string>>): void => {
+    const present = new Set((database.prepare(`PRAGMA table_info(${table})`).all() as unknown as
+      Array<{ name: string }>).map(({ name }) => name));
+    for (const [name, definition] of Object.entries(columns)) {
+      if (!present.has(name)) database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    }
+  };
+  addMissing('agent_environment_bindings', {
+    session_id: "TEXT NOT NULL DEFAULT ''",
+    schema_version: 'INTEGER NOT NULL DEFAULT 1',
+    digest: "TEXT NOT NULL DEFAULT ''",
+  });
+  addMissing('agent_snapshots', {
+    session_id: "TEXT NOT NULL DEFAULT ''",
+    turn_id: "TEXT NOT NULL DEFAULT ''",
+    environment_binding_id: "TEXT NOT NULL DEFAULT ''",
+    schema_version: 'INTEGER NOT NULL DEFAULT 1',
+    digest: "TEXT NOT NULL DEFAULT ''",
+  });
+  addMissing('agent_kernel_runs', {
+    evidence_digest: 'TEXT',
+    no_progress_count: 'INTEGER NOT NULL DEFAULT 0',
+  });
+  database.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_snapshots_turn_id
+     ON agent_snapshots(turn_id) WHERE turn_id <> ''`,
+  );
 }
 
 function migrateHiddenRuns(database: NodeDatabaseSync): void {
@@ -3990,6 +4951,572 @@ function stableIdentity(
     .digest('hex')
     .slice(0, 32);
   return `${prefix}_${digest}`;
+}
+
+function snapshotKernelJournalCommand(command: KernelJournalCommand): KernelJournalCommand {
+  try {
+    return structuredClone(command);
+  } catch {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', 'Kernel Journal command must be structured-cloneable.',
+    );
+  }
+}
+
+function snapshotSessionBindingCommand(
+  command: BindSessionModelCommand,
+): BindSessionModelCommand {
+  let snapshot: BindSessionModelCommand;
+  try {
+    snapshot = structuredClone(command);
+    const candidate: unknown = snapshot;
+    assertPortableValue(candidate);
+    assertNoSecretMaterial(candidate);
+  } catch (error) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', `Session binding command is not portable: ${errorMessage(error)}`,
+    );
+  }
+  assertExactObjectKeys(snapshot, [
+    'projectId', 'sessionId', 'commandId', 'expectedRevision', 'connectionId', 'modelId',
+  ]);
+  requireText(snapshot.projectId, 'projectId');
+  requireText(snapshot.sessionId, 'sessionId');
+  requireText(snapshot.commandId, 'commandId');
+  requireText(snapshot.connectionId, 'connectionId');
+  requireText(snapshot.modelId, 'modelId');
+  if (!Number.isSafeInteger(snapshot.expectedRevision) || snapshot.expectedRevision < 0) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'expectedRevision is invalid.');
+  }
+  return deepFreezeKernelValue(snapshot);
+}
+
+function validateKernelJournalCommand(command: KernelJournalCommand): KernelJournalCommand {
+  try {
+    const portableCandidate: unknown = command;
+    assertPortableValue(portableCandidate);
+    assertNoSecretMaterial(portableCandidate);
+  } catch (error) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', `Kernel Journal command is not portable: ${errorMessage(error)}`,
+    );
+  }
+  requireText(command.projectId, 'projectId');
+  requireText(command.sessionId, 'sessionId');
+  requireText(command.runId, 'runId');
+  requireText(command.commandId, 'commandId');
+  requireText(command.lease.ownerId, 'lease.ownerId');
+  if (!Number.isSafeInteger(command.lease.fencingToken) || command.lease.fencingToken < 1) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'lease.fencingToken is invalid.');
+  }
+  if (!Number.isSafeInteger(command.expectedRunRevision) || command.expectedRunRevision < 1) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'expectedRunRevision is invalid.');
+  }
+  switch (command.action) {
+    case 'prepare-turn':
+      assertExactObjectKeys(command, [
+        'action', 'projectId', 'sessionId', 'runId', 'commandId', 'lease',
+        'expectedRunRevision', 'turnId', 'resume', 'environment', 'snapshot',
+      ]);
+      requireText(command.turnId, 'turnId');
+      validateEnvironmentBindingInput(command.environment);
+      validateTurnSnapshotInput(command.snapshot);
+      return command;
+    case 'start-model-attempt':
+      assertExactObjectKeys(command, [
+        'action', 'projectId', 'sessionId', 'runId', 'commandId', 'lease',
+        'expectedRunRevision', 'turnId', 'expectedTurnRevision', 'attemptId', 'origin',
+      ]);
+      requireText(command.turnId, 'turnId');
+      requireText(command.attemptId, 'attemptId');
+      if (!Number.isSafeInteger(command.expectedTurnRevision) || command.expectedTurnRevision < 1) {
+        throw new AgentJournalError('INVALID_ARGUMENT', 'expectedTurnRevision is invalid.');
+      }
+      assertExactObjectKeys(command.origin, ['connectionId', 'model', 'protocol']);
+      requireText(command.origin.connectionId, 'origin.connectionId');
+      requireText(command.origin.model, 'origin.model');
+      requireText(command.origin.protocol, 'origin.protocol');
+      return command;
+    case 'discard-model-attempt':
+      assertExactObjectKeys(command, [
+        'action', 'projectId', 'sessionId', 'runId', 'commandId', 'lease',
+        'expectedRunRevision', 'turnId', 'expectedTurnRevision', 'attemptId',
+        'reason',
+      ], ['failure']);
+      requireText(command.turnId, 'turnId');
+      requireText(command.attemptId, 'attemptId');
+      requireText(command.reason, 'reason');
+      if (!Number.isSafeInteger(command.expectedTurnRevision) || command.expectedTurnRevision < 1) {
+        throw new AgentJournalError('INVALID_ARGUMENT', 'expectedTurnRevision is invalid.');
+      }
+      if (command.failure !== undefined) {
+        assertExactObjectKeys(command.failure, ['code', 'retryable']);
+        requireText(command.failure.code, 'failure.code');
+        if (typeof command.failure.retryable !== 'boolean') {
+          throw new AgentJournalError('INVALID_ARGUMENT', 'failure.retryable is invalid.');
+        }
+      }
+      return command;
+    case 'request-cancel':
+      assertExactObjectKeys(command, [
+        'action', 'projectId', 'sessionId', 'runId', 'commandId', 'lease',
+        'expectedRunRevision',
+      ], ['reason']);
+      if (command.reason !== undefined) requireText(command.reason, 'reason');
+      return command;
+    case 'settle-cancellation':
+      assertExactObjectKeys(command, [
+        'action', 'projectId', 'sessionId', 'runId', 'commandId', 'lease',
+        'expectedRunRevision',
+      ]);
+      return command;
+    case 'record-no-progress':
+      assertExactObjectKeys(command, [
+        'action', 'projectId', 'sessionId', 'runId', 'commandId', 'lease',
+        'expectedRunRevision', 'fingerprint',
+      ]);
+      if (!/^[a-f0-9]{64}$/u.test(command.fingerprint)) {
+        throw new AgentJournalError('INVALID_ARGUMENT', 'fingerprint must be a SHA-256 digest.');
+      }
+      return command;
+    case 'finalize-run':
+      assertExactObjectKeys(command, [
+        'action', 'projectId', 'sessionId', 'runId', 'commandId', 'lease',
+        'expectedRunRevision', 'turnId', 'expectedTurnRevision', 'finalContentRef', 'decision',
+      ]);
+      requireText(command.turnId, 'turnId');
+      requireText(command.finalContentRef, 'finalContentRef');
+      if (!Number.isSafeInteger(command.expectedTurnRevision) || command.expectedTurnRevision < 1) {
+        throw new AgentJournalError('INVALID_ARGUMENT', 'expectedTurnRevision is invalid.');
+      }
+      validateFinalizeDecision(command.decision);
+      return command;
+    default:
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Unknown Kernel Journal command action.');
+  }
+}
+
+function validateFinalizeDecision(value: FinalizeRunKernelCommand['decision']): void {
+  assertExactObjectKeys(value, [
+    'evidenceRevision', 'status', 'outcome', 'evidenceRefs',
+  ], ['verifierId', 'verifierRevision', 'reason']);
+  if (!Number.isSafeInteger(value.evidenceRevision) || value.evidenceRevision < 0) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'decision.evidenceRevision is invalid.');
+  }
+  if (!['not-required', 'verified', 'unverified'].includes(value.status)) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'decision.status is invalid.');
+  }
+  if (!['accepted', 'failed'].includes(value.outcome)) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'decision.outcome is invalid.');
+  }
+  if (!Array.isArray(value.evidenceRefs) || value.evidenceRefs.length > 1_024) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'decision.evidenceRefs is invalid.');
+  }
+  for (const ref of value.evidenceRefs) requireText(ref, 'decision.evidenceRefs[]');
+  if (new Set(value.evidenceRefs).size !== value.evidenceRefs.length) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'decision.evidenceRefs must be unique.');
+  }
+  if ((value.verifierId === undefined) !== (value.verifierRevision === undefined)) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', 'Verifier identity and revision must be supplied together.',
+    );
+  }
+  if (value.verifierId !== undefined) requireText(value.verifierId, 'decision.verifierId');
+  if (value.verifierRevision !== undefined) {
+    requireText(value.verifierRevision, 'decision.verifierRevision');
+  }
+  if (value.reason !== undefined) requireText(value.reason, 'decision.reason');
+  if (value.status === 'not-required' && value.verifierId !== undefined) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', 'A not-required delivery cannot claim a verifier decision.',
+    );
+  }
+  if (value.status === 'verified' && value.verifierId === undefined) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', 'A verified delivery requires a versioned verifier identity.',
+    );
+  }
+  if (value.outcome === 'failed' && value.status !== 'unverified') {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', 'A failed delivery must be explicitly unverified.',
+    );
+  }
+}
+
+function validateEnvironmentBindingInput(value: EnvironmentBindingInput): void {
+  assertExactObjectKeys(value, [
+    'environmentBindingId', 'settingsRevision', 'permissionPolicyRevision', 'modelRoute',
+  ]);
+  requireText(value.environmentBindingId, 'environmentBindingId');
+  requireText(value.settingsRevision, 'settingsRevision');
+  requireText(value.permissionPolicyRevision, 'permissionPolicyRevision');
+  assertExactObjectKeys(value.modelRoute, ['routeRevision', 'primary', 'fallbacks']);
+  requireText(value.modelRoute.routeRevision, 'routeRevision');
+  validateModelRouteCandidate(value.modelRoute.primary);
+  if (!Array.isArray(value.modelRoute.fallbacks) || value.modelRoute.fallbacks.length > 16) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'Model fallback snapshot is invalid.');
+  }
+  value.modelRoute.fallbacks.forEach(validateModelRouteCandidate);
+}
+
+function validateModelRouteCandidate(
+  value: EnvironmentBindingInput['modelRoute']['primary'],
+): void {
+  assertExactObjectKeys(value, [
+    'connectionId', 'modelId', 'protocol', 'codecRevision', 'maxInputTokens',
+    'maxOutputTokens', 'generation',
+  ]);
+  ['connectionId', 'modelId', 'protocol', 'codecRevision'].forEach((key) =>
+    requireText(value[key as keyof typeof value], key));
+  for (const item of [value.maxInputTokens, value.maxOutputTokens]) {
+    if (item !== null && (!Number.isSafeInteger(item) || item < 1)) {
+      throw new AgentJournalError('INVALID_ARGUMENT', 'Model context limits are invalid.');
+    }
+  }
+  if (value.generation === null || typeof value.generation !== 'object' ||
+    Array.isArray(value.generation)) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'Generation snapshot is invalid.');
+  }
+}
+
+function validateTurnSnapshotInput(value: TurnSnapshotInput): void {
+  assertExactObjectKeys(value, [
+    'turnSnapshotId', 'capability', 'promptRevision', 'tools', 'skills', 'verifiers',
+  ]);
+  requireText(value.turnSnapshotId, 'turnSnapshotId');
+  requireText(value.promptRevision, 'promptRevision');
+  assertExactObjectKeys(value.capability, ['snapshotId', 'revision']);
+  requireText(value.capability.snapshotId, 'capability.snapshotId');
+  requireText(value.capability.revision, 'capability.revision');
+  if (value.tools.length > 1_024 || value.skills.length > 256 || value.verifiers.length > 64) {
+    throw new AgentJournalError('INVALID_ARGUMENT', 'Turn Snapshot contribution list is unbounded.');
+  }
+}
+
+function assertExactObjectKeys(
+  value: object,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): void {
+  const actual = Object.keys(value).sort();
+  const allowed = [...required, ...optional];
+  if (
+    required.some((key) => !Object.hasOwn(value, key)) ||
+    actual.some((key) => !allowed.includes(key))
+  ) {
+    throw new AgentJournalError(
+      'INVALID_ARGUMENT', `Kernel command keys are not closed: ${actual.join(',')}.`,
+    );
+  }
+}
+
+function readEnvironmentBindingRow(
+  database: NodeDatabaseSync,
+  runId: string,
+): KernelEnvironmentRow | null {
+  return (database.prepare(
+    `SELECT environment_binding_id, project_id, session_id, run_id, schema_version,
+      digest, payload_json, created_at
+     FROM agent_environment_bindings WHERE run_id = ?`,
+  ).get(runId) as KernelEnvironmentRow | undefined) ?? null;
+}
+
+function environmentBindingFromRow(row: KernelEnvironmentRow): PersistedEnvironmentBinding {
+  const payload = parsePortableJson(row.payload_json) as unknown as EnvironmentBindingInput;
+  const actualDigest = digestValue(payload);
+  if (actualDigest !== row.digest || row.schema_version !== 1) {
+    throw new AgentJournalError('PROJECTION_CORRUPT', 'Environment Binding digest disagrees.');
+  }
+  return freezeEnvironmentBinding({
+    schemaVersion: 1,
+    environmentBindingId: row.environment_binding_id,
+    projectId: row.project_id,
+    sessionId: row.session_id,
+    runId: row.run_id,
+    digest: row.digest,
+    payload,
+    createdAt: row.created_at,
+  });
+}
+
+function turnSnapshotFromRow(row: KernelSnapshotRow): PersistedTurnSnapshot {
+  const payload = parsePortableJson(row.payload_json) as unknown as TurnSnapshotInput;
+  const actualDigest = digestValue({
+    payload, turnId: row.turn_id, environmentBindingId: row.environment_binding_id,
+  });
+  if (actualDigest !== row.digest || row.schema_version !== 1) {
+    throw new AgentJournalError('PROJECTION_CORRUPT', 'Turn Snapshot digest disagrees.');
+  }
+  return freezeTurnSnapshot({
+    schemaVersion: 1,
+    turnSnapshotId: row.snapshot_id,
+    projectId: row.project_id,
+    sessionId: row.session_id,
+    runId: row.run_id,
+    turnId: row.turn_id,
+    environmentBindingId: row.environment_binding_id,
+    digest: row.digest,
+    payload,
+    createdAt: row.created_at,
+  });
+}
+
+function readKernelRunProjection(
+  database: NodeDatabaseSync,
+  runId: string,
+): KernelRunProjection {
+  const row = database.prepare(
+    `SELECT r.project_id, r.session_id, r.run_id, r.state, r.revision, r.updated_at,
+      k.environment_binding_id, k.current_turn_id, k.turn_snapshot_id,
+      k.current_attempt_id, k.wait_reason, k.evidence_revision,
+      k.evidence_digest, k.no_progress_count, k.final_content_ref, k.delivery_status
+     FROM agent_runs r LEFT JOIN agent_kernel_runs k ON k.run_id = r.run_id
+     WHERE r.run_id = ?`,
+  ).get(runId) as Record<string, unknown> | undefined;
+  if (row === undefined) throw new AgentJournalError('RUN_NOT_FOUND', `Run not found: ${runId}`);
+  return deepFreezeKernelValue({
+    schemaVersion: 1,
+    projectId: String(row.project_id),
+    sessionId: String(row.session_id),
+    runId: String(row.run_id),
+    state: String(row.state) as AgentRunState,
+    revision: Number(row.revision),
+    environmentBindingId: nullableText(row.environment_binding_id),
+    currentTurnId: nullableText(row.current_turn_id),
+    turnSnapshotId: nullableText(row.turn_snapshot_id),
+    currentAttemptId: nullableText(row.current_attempt_id),
+    waitReason: nullableText(row.wait_reason),
+    evidenceRevision: row.evidence_revision === null || row.evidence_revision === undefined
+      ? 0 : Number(row.evidence_revision),
+    evidenceDigest: nullableText(row.evidence_digest),
+    noProgressCount: row.no_progress_count === null || row.no_progress_count === undefined
+      ? 0 : Number(row.no_progress_count),
+    finalContentRef: nullableText(row.final_content_ref),
+    deliveryStatus: nullableText(row.delivery_status) as KernelRunProjection['deliveryStatus'],
+    updatedAt: String(row.updated_at),
+  });
+}
+
+function projectKernelRunEvents(
+  current: KernelRunProjection,
+  events: readonly AgentEvent[],
+): KernelRunProjection {
+  return events.reduce(projectKernelRunEvent, current);
+}
+
+/** Persists the shared pure Kernel projection with the Run revision as its fencing CAS. */
+function persistKernelRunProjectionCas(
+  database: NodeDatabaseSync,
+  current: KernelRunProjection,
+  next: KernelRunProjection,
+  expectedRevision: number,
+  conflictMessage: string,
+): void {
+  if (
+    current.projectId !== next.projectId || current.sessionId !== next.sessionId ||
+    current.runId !== next.runId || current.revision !== expectedRevision ||
+    next.revision !== expectedRevision + 1
+  ) {
+    throw new AgentJournalError(
+      'PROJECTION_CORRUPT', 'Kernel event reduction produced an invalid identity or revision.',
+    );
+  }
+  const changed = database.prepare(
+    `UPDATE agent_runs SET state = ?, revision = ?, updated_at = ?
+     WHERE project_id = ? AND session_id = ? AND run_id = ? AND revision = ?`,
+  ).run(
+    next.state, next.revision, next.updatedAt,
+    next.projectId, next.sessionId, next.runId, expectedRevision,
+  );
+  if (Number(changed.changes) !== 1) {
+    throw new AgentJournalError('REVISION_CONFLICT', conflictMessage);
+  }
+  persistKernelRunProjection(database, next);
+}
+
+function persistKernelRunProjection(
+  database: NodeDatabaseSync,
+  projection: KernelRunProjection,
+): void {
+  database.prepare(
+    `INSERT INTO agent_kernel_runs (
+      run_id, project_id, session_id, environment_binding_id, current_turn_id,
+      turn_snapshot_id, current_attempt_id, wait_reason, evidence_revision,
+      evidence_digest, no_progress_count, final_content_ref, delivery_status, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(run_id) DO UPDATE SET
+      project_id = excluded.project_id,
+      session_id = excluded.session_id,
+      environment_binding_id = excluded.environment_binding_id,
+      current_turn_id = excluded.current_turn_id,
+      turn_snapshot_id = excluded.turn_snapshot_id,
+      current_attempt_id = excluded.current_attempt_id,
+      wait_reason = excluded.wait_reason,
+      evidence_revision = excluded.evidence_revision,
+      evidence_digest = excluded.evidence_digest,
+      no_progress_count = excluded.no_progress_count,
+      final_content_ref = excluded.final_content_ref,
+      delivery_status = excluded.delivery_status,
+      updated_at = excluded.updated_at`,
+  ).run(
+    projection.runId, projection.projectId, projection.sessionId,
+    projection.environmentBindingId, projection.currentTurnId, projection.turnSnapshotId,
+    projection.currentAttemptId, projection.waitReason, projection.evidenceRevision,
+    projection.evidenceDigest, projection.noProgressCount, projection.finalContentRef,
+    projection.deliveryStatus, projection.updatedAt,
+  );
+}
+
+function readLatestCancellationReason(
+  database: NodeDatabaseSync,
+  runId: string,
+): string | undefined {
+  const row = database.prepare(
+    `SELECT payload_json FROM agent_events
+     WHERE run_id = ? AND event_type = 'run.cancel_requested'
+     ORDER BY sequence DESC LIMIT 1`,
+  ).get(runId) as { payload_json: string } | undefined;
+  if (row === undefined) return undefined;
+  const payload = parsePortableJson(row.payload_json) as { reason?: unknown };
+  return typeof payload.reason === 'string' ? payload.reason : undefined;
+}
+
+type KernelReplayProjection = Readonly<{
+  runs: Map<string, KernelRunProjection>;
+  environments: Map<string, PersistedEnvironmentBinding>;
+  snapshots: Map<string, PersistedTurnSnapshot>;
+}>;
+
+/** Rebuilds all Kernel-only tables from immutable Journal facts; no projection table is read. */
+function replayKernelJournalFacts(
+  events: readonly AgentEvent[],
+  invocations: readonly AgentInvocationProjection[],
+): KernelReplayProjection {
+  const ordered = [...events].sort((left, right) => left.sequence - right.sequence);
+  const created = new Map(ordered.filter((event) => event.type === 'run.created')
+    .map((event) => [event.runId, event] as const));
+  const runs = new Map<string, KernelRunProjection>();
+  const environments = new Map<string, PersistedEnvironmentBinding>();
+  const snapshots = new Map<string, PersistedTurnSnapshot>();
+
+  for (const event of ordered) {
+    if (event.type !== 'run.environment_bound') continue;
+    const createdEvent = created.get(event.runId);
+    if (createdEvent === undefined || event.payload.binding === undefined) {
+      throw new AgentJournalError(
+        'PROJECTION_CORRUPT', 'Kernel Environment Binding is not reconstructible from Journal facts.',
+      );
+    }
+    const payload = structuredClone(event.payload.binding) as unknown as EnvironmentBindingInput;
+    validateEnvironmentBindingInput(payload);
+    if (digestValue(payload) !== event.payload.digest) {
+      throw new AgentJournalError(
+        'PROJECTION_CORRUPT', 'Kernel Environment Binding fact digest disagrees.',
+      );
+    }
+    const existing = environments.get(event.runId);
+    if (existing !== undefined && (
+      existing.environmentBindingId !== event.payload.environmentBindingId ||
+      existing.digest !== event.payload.digest
+    )) {
+      throw new AgentJournalError(
+        'PROJECTION_CORRUPT', 'A Run has conflicting Environment Binding facts.',
+      );
+    }
+    environments.set(event.runId, freezeEnvironmentBinding({
+      schemaVersion: 1, environmentBindingId: event.payload.environmentBindingId,
+      projectId: event.projectId, sessionId: event.sessionId, runId: event.runId,
+      digest: event.payload.digest, payload, createdAt: event.occurredAt,
+    }));
+    if (!runs.has(event.runId)) {
+      runs.set(event.runId, createKernelRunProjection({
+        projectId: event.projectId, sessionId: event.sessionId, runId: event.runId,
+        environmentBindingId: event.payload.environmentBindingId,
+        createdAt: createdEvent.occurredAt,
+      }));
+    }
+  }
+
+  for (const event of ordered) {
+    const current = runs.get(event.runId);
+    if (current === undefined) continue;
+    if (event.type === 'turn.started') {
+      if (
+        event.turnId === undefined || event.payload.turnSnapshotId === undefined ||
+        event.payload.environmentBindingId === undefined || event.payload.digest === undefined ||
+        event.payload.snapshot === undefined
+      ) {
+        throw new AgentJournalError(
+          'PROJECTION_CORRUPT', 'Kernel Turn Snapshot is not reconstructible from Journal facts.',
+        );
+      }
+      const payload = structuredClone(event.payload.snapshot) as unknown as TurnSnapshotInput;
+      validateTurnSnapshotInput(payload);
+      const digest = digestValue({
+        payload, turnId: event.turnId,
+        environmentBindingId: event.payload.environmentBindingId,
+      });
+      if (digest !== event.payload.digest) {
+        throw new AgentJournalError('PROJECTION_CORRUPT', 'Kernel Turn Snapshot fact digest disagrees.');
+      }
+      snapshots.set(event.turnId, freezeTurnSnapshot({
+        schemaVersion: 1, turnSnapshotId: event.payload.turnSnapshotId,
+        projectId: event.projectId, sessionId: event.sessionId, runId: event.runId,
+        turnId: event.turnId, environmentBindingId: event.payload.environmentBindingId,
+        digest, payload, createdAt: event.occurredAt,
+      }));
+    }
+    runs.set(event.runId, projectKernelRunEvent(current, event));
+  }
+
+  for (const [runId, current] of runs) {
+    if (
+      current.currentTurnId === null ||
+      !['ResolvingActions', 'ExecutingTools', 'ApplyingObservations', 'AwaitingUser'].includes(
+        current.state,
+      ) || (current.state === 'AwaitingUser' && current.waitReason !== 'approval')
+    ) continue;
+    const scheduled: ScheduledToolInvocation[] = invocations.filter(
+      (invocation) => invocation.runId === runId && invocation.turnId === current.currentTurnId,
+    ).map((invocation) => {
+      if (invocation.state === 'validated') {
+        throw new AgentJournalError(
+          'PROJECTION_CORRUPT', 'Replay contains a transient validated Invocation projection.',
+        );
+      }
+      return {
+        invocationId: invocation.invocationId, actionOrdinal: invocation.actionOrdinal,
+        effect: invocation.effect ?? 'unresolved', state: invocation.state,
+      };
+    });
+    if (scheduled.length === 0) continue;
+    const decision = decideSchedule({ invocations: scheduled, maxConcurrency: Number.MAX_SAFE_INTEGER });
+    runs.set(runId, projectKernelSchedule(current, decision, current.updatedAt));
+  }
+  return { runs, environments, snapshots };
+}
+
+function nullableText(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function freezeEnvironmentBinding(value: PersistedEnvironmentBinding): PersistedEnvironmentBinding {
+  return deepFreezeKernelValue(structuredClone(value));
+}
+
+function freezeTurnSnapshot(value: PersistedTurnSnapshot): PersistedTurnSnapshot {
+  return deepFreezeKernelValue(structuredClone(value));
+}
+
+function deepFreezeKernelValue<T>(value: T, seen = new WeakSet<object>()): T {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  Object.values(value).forEach((item) => deepFreezeKernelValue(item, seen));
+  return Object.freeze(value);
+}
+
+function assertNeverKernelCommand(value: never): never {
+  throw new AgentJournalError('INVALID_ARGUMENT', `Unknown Kernel command: ${String(value)}`);
 }
 
 function errorMessage(error: unknown): string {

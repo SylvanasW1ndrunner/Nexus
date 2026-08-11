@@ -107,7 +107,63 @@ export type ModelAttemptOptions = {
   retry?: Partial<ModelAttemptRetryPolicy>;
   timeouts?: Partial<ModelAttemptTimeouts>;
   fallbacks?: readonly ModelSession[];
+  observer?: ModelAttemptLifecycleObserver;
+  purpose?: ModelAttemptPurpose;
+  toolsEnabled?: boolean;
 };
+
+export type ModelAttemptPurpose = 'agent-turn' | 'context-compaction' | 'direct';
+
+export type ModelDecodedDeltaEvent = Exclude<
+  DecodedModelStreamEvent,
+  { type: 'block-complete' | 'usage' | 'finish' }
+>;
+
+export type ModelAttemptLifecycleEvent =
+  | Readonly<{
+      type: 'attempt-started';
+      attemptId: string;
+      routeId: string;
+      origin: Readonly<{ connectionId: string; model: string; protocol: string }>;
+      purpose: ModelAttemptPurpose;
+      startedAt: number;
+    }>
+  | Readonly<{
+      type: 'decoded-delta';
+      attemptId: string;
+      routeId: string;
+      event: ModelDecodedDeltaEvent;
+      occurredAt: number;
+    }>
+  | Readonly<{
+      type: 'block-completed';
+      attemptId: string;
+      routeId: string;
+      blockOrdinal: number;
+      block: DecodedModelContentBlock;
+      occurredAt: number;
+    }>
+  | Readonly<{
+      type: 'attempt-failed';
+      attemptId: string;
+      routeId: string;
+      code: ModelGatewayErrorCode;
+      retryable: boolean;
+      phase?: ModelTimeoutPhase;
+      statusCode?: number;
+      occurredAt: number;
+    }>
+  | Readonly<{
+      type: 'attempt-discarded';
+      attemptId: string;
+      routeId: string;
+      reason: string;
+      discardedAt: number;
+    }>;
+
+export interface ModelAttemptLifecycleObserver {
+  onEvent(event: ModelAttemptLifecycleEvent): void | Promise<void>;
+}
 
 export type DiscardedModelAttempt = {
   attemptId: string;
@@ -129,7 +185,8 @@ export type ModelGatewayErrorCode =
   | 'MODEL_PROTOCOL_FAILED'
   | 'MODEL_TRANSPORT_FAILED'
   | 'MODEL_FALLBACK_INCOMPATIBLE'
-  | 'MODEL_SESSION_INVALID';
+  | 'MODEL_SESSION_INVALID'
+  | 'MODEL_OBSERVER_FAILED';
 
 export class ModelGatewayError extends Error {
   constructor(
@@ -234,12 +291,20 @@ export class ModelExecutionGateway {
         false,
       );
     }
+    if (options.toolsEnabled === false && (request.tools?.length ?? 0) > 0) {
+      throw new ModelGatewayError(
+        'MODEL_PROTOCOL_FAILED',
+        'This model attempt explicitly disables Tool exposure.',
+        false,
+      );
+    }
     const fallbacks = [...(bundle?.fallbacks ?? [])];
     const maxRetries = boundedModelAttemptInteger(options.maxRetries ?? 1, 0, 10, 'maxRetries');
     const timeouts = modelAttemptTimeouts(options.timeouts);
     const retry = modelAttemptRetry(options.retry);
     const discarded: DiscardedModelAttempt[] = [];
     let terminalError: ModelGatewayError | undefined;
+    const purpose = options.purpose ?? 'agent-turn';
 
     const candidates = [session, ...fallbacks];
     for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
@@ -255,6 +320,8 @@ export class ModelExecutionGateway {
             timeouts,
             options.signal,
             tentativeBlocks,
+            options.observer,
+            purpose,
           );
           return Object.freeze({
             attempt,
@@ -263,14 +330,39 @@ export class ModelExecutionGateway {
           });
         } catch (error) {
           terminalError = classifyModelAttemptError(error, options.signal, this.clock.now());
-          if (terminalError.code === 'MODEL_CANCELLED') throw terminalError;
-          discarded.push({
+          if (terminalError.code === 'MODEL_OBSERVER_FAILED') {
+            throw withDiscardedModelAttempts(terminalError, discarded);
+          }
+          const discardedAttempt: DiscardedModelAttempt = {
             attemptId,
             routeId: candidate.route.routeId,
             reason: discardReason(error, terminalError),
             blocks: tentativeBlocks.map(cloneDecodedBlock),
             discardedAt: this.clock.now(),
+          };
+          await publishModelAttemptLifecycle(options.observer, {
+            type: 'attempt-failed',
+            attemptId,
+            routeId: candidate.route.routeId,
+            code: terminalError.code,
+            retryable: terminalError.retryable,
+            ...(terminalError.phase === undefined ? {} : { phase: terminalError.phase }),
+            ...(terminalError.statusCode === undefined
+              ? {}
+              : { statusCode: terminalError.statusCode }),
+            occurredAt: discardedAttempt.discardedAt,
           });
+          await publishModelAttemptLifecycle(options.observer, {
+            type: 'attempt-discarded',
+            attemptId,
+            routeId: candidate.route.routeId,
+            reason: discardedAttempt.reason,
+            discardedAt: discardedAttempt.discardedAt,
+          });
+          discarded.push(discardedAttempt);
+          if (terminalError.code === 'MODEL_CANCELLED') {
+            throw withDiscardedModelAttempts(terminalError, discarded);
+          }
           if (!terminalError.retryable) {
             if (
               candidateIndex + 1 < candidates.length &&
@@ -317,6 +409,8 @@ export class ModelExecutionGateway {
     timeouts: ModelAttemptTimeouts,
     sourceSignal: AbortSignal | undefined,
     tentativeBlocks: DecodedModelContentBlock[],
+    observer: ModelAttemptLifecycleObserver | undefined,
+    purpose: ModelAttemptPurpose,
   ): Promise<ValidatedModelAttempt> {
     const controller = new AbortController();
     const abortFromSource = () => controller.abort(sourceSignal?.reason);
@@ -340,6 +434,21 @@ export class ModelExecutionGateway {
     }
 
     const run = async (): Promise<ValidatedModelAttempt> => {
+      await publishModelAttemptLifecycle(observer, {
+        type: 'attempt-started',
+        attemptId,
+        routeId: session.route.routeId,
+        origin: {
+          connectionId: session.route.connectionId,
+          model: session.route.modelId,
+          protocol: session.route.protocol,
+        },
+        purpose,
+        startedAt: this.clock.now(),
+      });
+      if (controller.signal.aborted) {
+        throw modelAttemptAbortError(controller.signal.reason, sourceSignal);
+      }
       const response = await raceModelDeadline(
         session.client.execute({
           attemptId,
@@ -361,7 +470,20 @@ export class ModelExecutionGateway {
         },
       };
       if (response.kind === 'json') {
-        return validateDecodedModelAttempt(session.codec.decode(response.response, context));
+        const decoded = session.codec.decode(response.response, context);
+        for (let blockOrdinal = 0; blockOrdinal < decoded.blocks.length; blockOrdinal += 1) {
+          const block = decoded.blocks[blockOrdinal];
+          if (block === undefined) continue;
+          await publishModelAttemptLifecycle(observer, {
+            type: 'block-completed',
+            attemptId,
+            routeId: session.route.routeId,
+            blockOrdinal,
+            block: cloneDecodedBlock(block),
+            occurredAt: this.clock.now(),
+          });
+        }
+        return validateDecodedModelAttempt(decoded);
       }
       const guardedEvents = guardModelStream(
         response.events,
@@ -371,6 +493,26 @@ export class ModelExecutionGateway {
       );
       let finished: DecodedModelAttempt | undefined;
       for await (const event of session.codec.decodeStream(guardedEvents, context)) {
+        if (event.type === 'block-complete') {
+          await publishModelAttemptLifecycle(observer, {
+            type: 'block-completed',
+            attemptId,
+            routeId: session.route.routeId,
+            blockOrdinal: event.blockOrdinal,
+            block: cloneDecodedBlock(event.block),
+            occurredAt: this.clock.now(),
+          });
+        } else if (
+          event.type !== 'usage' && event.type !== 'finish'
+        ) {
+          await publishModelAttemptLifecycle(observer, {
+            type: 'decoded-delta',
+            attemptId,
+            routeId: session.route.routeId,
+            event: structuredClone(event),
+            occurredAt: this.clock.now(),
+          });
+        }
         trackTentativeBlocks(tentativeBlocks, event);
         if (event.type === 'finish') {
           if (finished !== undefined) {
@@ -1409,6 +1551,24 @@ function trackTentativeBlocks(
     } else if (current.type === expectedType) {
       current.text += event.text;
     }
+  }
+}
+
+async function publishModelAttemptLifecycle(
+  observer: ModelAttemptLifecycleObserver | undefined,
+  event: ModelAttemptLifecycleEvent,
+): Promise<void> {
+  if (observer === undefined) return;
+  const immutableEvent = deepFreeze(structuredClone(event));
+  try {
+    await observer.onEvent(immutableEvent);
+  } catch (error) {
+    throw new ModelGatewayError(
+      'MODEL_OBSERVER_FAILED',
+      `Model attempt lifecycle observer rejected ${event.type}.`,
+      false,
+      { cause: error },
+    );
   }
 }
 

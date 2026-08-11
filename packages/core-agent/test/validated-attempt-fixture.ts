@@ -50,3 +50,36 @@ export async function validatedAttemptFixture(
   return (await new ModelExecutionGateway({ createAttemptId: () => attemptId })
     .executeAttempt(session, request)).attempt;
 }
+
+export async function validatedTextAttemptFixture(
+  attemptId = 'attempt-final',
+  text = 'The requested work is complete.',
+): Promise<ValidatedModelAttempt> {
+  const response = {
+    id: `response-${attemptId}`,
+    model: 'model-current',
+    status: 'completed',
+    output: [{
+      id: 'message-final', type: 'message', role: 'assistant',
+      content: [{ type: 'output_text', text }],
+    }],
+    usage: { input_tokens: 4, output_tokens: 6, total_tokens: 10 },
+  };
+  const client: ModelClient = { execute: () => Promise.resolve({ kind: 'json', response }) };
+  const route: ModelRouteSnapshotInput = {
+    routeId: 'journal-final-route', connectionId: 'connection-1',
+    providerId: 'provider-current', modelId: 'model-1', protocol: 'openai-responses',
+    codecRevision: 'openai-responses@1',
+    capabilities: { toolCalling: 'supported', streaming: 'supported' },
+    contextTokens: 131_072, maxInputTokens: 131_072, maxOutputTokens: 8_192,
+    metadata: { source: 'test', revision: '1', digest: 'journal-final-route' },
+    allowedFallbackRouteIds: [],
+  };
+  const codec = resolveModelProtocolCodec('openai-responses', 'openai-responses@1');
+  if (codec === undefined) throw new Error('Missing registered Responses codec');
+  const session = createModelSession({ route, generation: {}, codec, client });
+  return (await new ModelExecutionGateway({ createAttemptId: () => attemptId }).executeAttempt(
+    session,
+    { model: 'model-1', messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }] },
+  )).attempt;
+}

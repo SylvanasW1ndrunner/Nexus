@@ -14,6 +14,7 @@ import type {
 export const AGENT_EVENT_TYPES = [
   'input.received',
   'run.created',
+  'run.environment_bound',
   'run.started',
   'run.resumed',
   'run.steered',
@@ -34,6 +35,9 @@ export const AGENT_EVENT_TYPES = [
   'model_attempt_discarded',
   'model_failed',
   'turn.closed',
+  'delivery.decided',
+  'plan.created',
+  'plan.updated',
   'tool.proposed',
   'tool.validated',
   'tool.approval_requested',
@@ -189,6 +193,12 @@ export interface AgentEventPayloadMap {
     clientRequestId: string;
     visibility?: 'legacy-import-carrier';
   };
+  'run.environment_bound': {
+    environmentBindingId: string;
+    digest: string;
+    /** Immutable portable payload; required for Journal-only projection rebuilds. */
+    binding?: PortableValue;
+  };
   'run.started': EmptyPayload;
   'run.resumed': { reason?: string };
   'run.steered': { clientRequestId: string; content: PortableValue };
@@ -197,13 +207,19 @@ export interface AgentEventPayloadMap {
   'run.limit_reached': { limit: string; value?: number };
   'run.completed': {
     finalContentRef: string;
-    deliveryStatus: 'delivered' | 'pending' | 'failed';
+    deliveryStatus: 'not-required' | 'verified' | 'unverified';
     evidenceRefs: string[];
   };
   'run.failed': { code: string; detail?: PortableValue };
   'run.cancelled': { reason?: string };
   'run.interrupted': { code: string; detail?: PortableValue };
-  'turn.started': { turnSnapshotId?: string };
+  'turn.started': {
+    turnSnapshotId?: string;
+    environmentBindingId?: string;
+    digest?: string;
+    /** Immutable portable payload; required for Journal-only projection rebuilds. */
+    snapshot?: PortableValue;
+  };
   'turn.context_compiled': { contextRef?: string; tokenEstimate?: number };
   'turn.no_progress': { fingerprint: string };
   model_attempt_started: { origin: { connectionId: string; model: string; protocol: string } };
@@ -225,6 +241,17 @@ export interface AgentEventPayloadMap {
   model_attempt_discarded: { reason: string };
   model_failed: { code: string; retryable: boolean; detail?: PortableValue };
   'turn.closed': { reason: string };
+  'delivery.decided': {
+    evidenceRevision: number;
+    status: 'not-required' | 'verified' | 'unverified';
+    outcome: 'accepted' | 'revision-requested' | 'failed';
+    verifierId?: string;
+    verifierRevision?: string;
+    evidenceRefs: string[];
+    reason?: string;
+  };
+  'plan.created': { planId: string; revision: number; plan: PortableValue };
+  'plan.updated': { planId: string; revision: number; plan: PortableValue };
   'tool.proposed': {
     invocationId: string;
     callId: string;

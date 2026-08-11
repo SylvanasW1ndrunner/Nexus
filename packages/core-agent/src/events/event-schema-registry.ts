@@ -248,8 +248,19 @@ function validateRunLimitReached(payload: unknown): void {
 
 function validateTurnStarted(payload: unknown): void {
   const record = requireRecord(payload);
-  exactKeys(record, ['turnSnapshotId']);
+  exactKeys(record, ['turnSnapshotId', 'environmentBindingId', 'digest', 'snapshot']);
   optionalString(record, 'turnSnapshotId');
+  optionalString(record, 'environmentBindingId');
+  optionalString(record, 'digest');
+  if (record.snapshot !== undefined) requirePresent(record, 'snapshot');
+}
+
+function validateEnvironmentBound(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['environmentBindingId', 'digest', 'binding']);
+  requireString(record, 'environmentBindingId');
+  requireString(record, 'digest');
+  if (record.binding !== undefined) requirePresent(record, 'binding');
 }
 
 function validateTurnContextCompiled(payload: unknown): void {
@@ -298,8 +309,31 @@ function validateRunCompleted(payload: unknown): void {
   const record = requireRecord(payload);
   exactKeys(record, ['finalContentRef', 'deliveryStatus', 'evidenceRefs']);
   requireString(record, 'finalContentRef');
-  requireEnum(record, 'deliveryStatus', ['delivered', 'pending', 'failed']);
+  requireEnum(record, 'deliveryStatus', ['not-required', 'verified', 'unverified']);
   requireStringArray(record, 'evidenceRefs');
+}
+
+function validateDeliveryDecision(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, [
+    'evidenceRevision', 'status', 'outcome', 'verifierId', 'verifierRevision',
+    'evidenceRefs', 'reason',
+  ]);
+  requireNonNegativeInteger(record, 'evidenceRevision');
+  requireEnum(record, 'status', ['not-required', 'verified', 'unverified']);
+  requireEnum(record, 'outcome', ['accepted', 'revision-requested', 'failed']);
+  optionalString(record, 'verifierId');
+  optionalString(record, 'verifierRevision');
+  requireStringArray(record, 'evidenceRefs');
+  optionalString(record, 'reason');
+}
+
+function validatePlanFact(payload: unknown): void {
+  const record = requireRecord(payload);
+  exactKeys(record, ['planId', 'revision', 'plan']);
+  requireString(record, 'planId');
+  requireNonNegativeInteger(record, 'revision');
+  requirePresent(record, 'plan');
 }
 
 function validateUsageRecorded(payload: unknown): void {
@@ -693,19 +727,25 @@ function validateLegacyImported(payload: unknown): void {
 export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
   'input.received': descriptor({ audience: USER, validate: validateInput }),
   'run.created': descriptor({ validate: validateRunCreated }),
+  'run.environment_bound': descriptor({
+    maxPayloadBytes: 1024 * 1024,
+    validate: validateEnvironmentBound,
+  }),
   'run.started': descriptor({ validate: (p) => validateShape(p, []) }),
   'run.resumed': descriptor({ validate: validateRunResumed }),
   'run.steered': descriptor({ audience: USER, validate: validateRunSteered }),
   'run.input_requested': descriptor({ audience: USER, validate: validateRunInputRequested }),
   'run.cancel_requested': descriptor({ validate: validateOptionalReason }),
   'run.limit_reached': descriptor({ audience: USER, validate: validateRunLimitReached }),
-  'run.completed': descriptor({ audience: USER, validate: validateRunCompleted }),
+  'run.completed': descriptor({ schemaVersion: 2, audience: USER, validate: validateRunCompleted }),
   'run.failed': descriptor({ audience: USER, validate: validateRunFailure }),
   'run.cancelled': descriptor({ audience: USER, validate: validateOptionalReason }),
   'run.interrupted': descriptor({ audience: USER, validate: validateRunFailure }),
-  'turn.started': descriptor({ validate: validateTurnStarted }),
+  'turn.started': descriptor({ maxPayloadBytes: 4 * 1024 * 1024, validate: validateTurnStarted }),
   'turn.context_compiled': descriptor({ validate: validateTurnContextCompiled }),
-  'turn.no_progress': descriptor({ audience: MODEL, validate: (p) => validateShape(p, ['fingerprint'], ['fingerprint']) }),
+  'turn.no_progress': descriptor({
+    validate: (p) => validateShape(p, ['fingerprint'], ['fingerprint']),
+  }),
   model_attempt_started: descriptor({ validate: validateOriginPayload }),
   model_delta_batch: descriptor({ persistence: 'diagnostic', validate: validateModelDeltaBatch }),
   model_block_completed: descriptor({ persistence: 'diagnostic', validate: validateModelBlockCompleted }),
@@ -714,9 +754,12 @@ export const AGENT_EVENT_SCHEMA_REGISTRY = Object.freeze({
     maxPayloadBytes: 16 * 1024 * 1024,
     validate: validateCommittedAttempt,
   }),
-  model_attempt_discarded: descriptor({ persistence: 'diagnostic', validate: (p) => validateShape(p, ['reason'], ['reason']) }),
-  model_failed: descriptor({ persistence: 'diagnostic', validate: validateModelFailure }),
+  model_attempt_discarded: descriptor({ validate: (p) => validateShape(p, ['reason'], ['reason']) }),
+  model_failed: descriptor({ validate: validateModelFailure }),
   'turn.closed': descriptor({ validate: (p) => validateShape(p, ['reason'], ['reason']) }),
+  'delivery.decided': descriptor({ validate: validateDeliveryDecision }),
+  'plan.created': descriptor({ validate: validatePlanFact }),
+  'plan.updated': descriptor({ validate: validatePlanFact }),
   'tool.proposed': descriptor({ audience: MODEL, validate: validateToolProposed }),
   'tool.validated': descriptor({ validate: validateToolValidated }),
   'tool.approval_requested': descriptor({ audience: USER, validate: validateToolApprovalRequested }),

@@ -457,11 +457,11 @@ function withDiscardedPreview(events: AgentEvent[]): AgentEvent[] {
     ...events,
     {
       eventId: 'event-final', projectId: scope.projectId, sequence: sequence + 1,
-      schemaVersion: 1, sessionId: scope.sessionId, runId: scope.runId,
+      schemaVersion: 2, sessionId: scope.sessionId, runId: scope.runId,
       type: 'run.completed', occurredAt: '2026-08-09T12:00:59.000Z',
       payload: {
         finalContentRef: 'turn:turn-golden:text:0',
-        deliveryStatus: 'delivered',
+        deliveryStatus: 'not-required',
         evidenceRefs: [GOLDEN_ARTIFACT_ID],
       },
     },

@@ -51,6 +51,21 @@ function currentVersionUpcaster<T extends AgentEventType>(type: T): AgentEventUp
         summary: legacy.summary,
       });
     }
+    if (type === 'run.completed' && schemaVersion === 1) {
+      if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('CORRUPT_EVENT:run.completed v1 payload is invalid.');
+      }
+      const legacy = payload as Record<string, PortableValue>;
+      const deliveryStatus = legacy.deliveryStatus;
+      if (!['delivered', 'pending', 'failed'].includes(String(deliveryStatus))) {
+        throw new Error('CORRUPT_EVENT:run.completed v1 delivery status is invalid.');
+      }
+      return validateAndRedactEventPayload(type, {
+        finalContentRef: legacy.finalContentRef,
+        deliveryStatus: deliveryStatus === 'delivered' ? 'not-required' : 'unverified',
+        evidenceRefs: legacy.evidenceRefs,
+      });
+    }
     if (type === 'artifact.created' && schemaVersion === 2) {
       if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
         throw new Error('CORRUPT_EVENT:artifact.created v2 payload is invalid.');

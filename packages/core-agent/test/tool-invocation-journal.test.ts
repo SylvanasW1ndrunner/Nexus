@@ -119,7 +119,7 @@ describe('authoritative Tool Invocation Journal lifecycle', () => {
     {
       label: 'completed', type: 'run.completed', state: 'Completed',
       payload: {
-        finalContentRef: 'final-content-a', deliveryStatus: 'delivered', evidenceRefs: [],
+        finalContentRef: 'final-content-a', deliveryStatus: 'not-required', evidenceRefs: [],
       },
     },
   ] as const)(
@@ -475,9 +475,10 @@ function appendProtectedRunEvent(
         project_id, sequence, event_id, schema_version, session_id, run_id,
         turn_id, parent_event_id, invocation_id, attempt_id, event_type,
         occurred_at, payload_json, audience_json, persistence
-      ) VALUES (?, ?, ?, 1, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, '[]', 'durable')`,
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, '[]', 'durable')`,
     ).run(
-      'project-a', sequence, `event-protected-${type}-${sequence}`, 'session-a', runId,
+      'project-a', sequence, `event-protected-${type}-${sequence}`,
+      type === 'run.completed' ? 2 : 1, 'session-a', runId,
       type, '2026-08-10T00:00:10.000Z', JSON.stringify(payload),
     );
     database.prepare(

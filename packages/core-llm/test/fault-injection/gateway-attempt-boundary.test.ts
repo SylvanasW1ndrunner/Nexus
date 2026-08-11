@@ -190,9 +190,39 @@ describe('ModelExecutionGateway attempt boundary', () => {
     })).rejects.toMatchObject({ code: 'MODEL_TIMEOUT', phase, retryable: true });
   });
 
-  it('propagates user cancellation to the client and never retries it', async () => {
+  it('cancels during the durable attempt-start boundary without calling the client', async () => {
+    const controller = new AbortController();
+    let releaseStarted!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseStarted = resolve; });
+    const client = new ScriptedModelClient([staticChat('must not run')]);
+    const pending = gateway().executeAttempt(session(client), request(), {
+      maxRetries: 3,
+      signal: controller.signal,
+      timeouts: { connectMs: 1_000, firstEventMs: 1_000, idleMs: 1_000, totalMs: 1_000 },
+      observer: {
+        async onEvent(event) {
+          if (event.type !== 'attempt-started') return;
+          markStarted();
+          await release;
+        },
+      },
+    });
+
+    await started;
+    controller.abort(new Error('user cancelled'));
+    releaseStarted();
+
+    await expect(pending).rejects.toMatchObject({ code: 'MODEL_CANCELLED', retryable: false });
+    expect(client.calls).toBe(0);
+  });
+
+  it('propagates cancellation after client execution begins and never retries it', async () => {
     const controller = new AbortController();
     let transportAborted = false;
+    let markClientStarted!: () => void;
+    const clientStarted = new Promise<void>((resolve) => { markClientStarted = resolve; });
     const client = new ScriptedModelClient([
       (input) => new Promise<ModelClientResponse>((_, reject) => {
         input.signal.addEventListener('abort', () => {
@@ -201,6 +231,7 @@ describe('ModelExecutionGateway attempt boundary', () => {
             ? input.signal.reason
             : new Error(String(input.signal.reason)));
         }, { once: true });
+        markClientStarted();
       }),
     ]);
     const pending = gateway().executeAttempt(session(client), request(), {
@@ -209,6 +240,7 @@ describe('ModelExecutionGateway attempt boundary', () => {
       timeouts: { connectMs: 1_000, firstEventMs: 1_000, idleMs: 1_000, totalMs: 1_000 },
     });
 
+    await clientStarted;
     controller.abort(new Error('user cancelled'));
 
     await expect(pending).rejects.toMatchObject({ code: 'MODEL_CANCELLED', retryable: false });
