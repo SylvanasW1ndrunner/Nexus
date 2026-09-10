@@ -15,8 +15,9 @@
 - 功能认知优先，不采用 TDD；各任务实现后运行聚焦静态/冒烟检查，Task 10 统一运行完整测试和真实环境验收。
 - 保留既有未提交工作，不重置、不覆盖无关改动；只提交任务明确列出的文件。
 - 所有提交作者为 Chandler Niu；不要将真实凭据、`.env` 或生产连接信息提交到 Git，这是仓库卫生要求。
-- 不做任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是未来 BrowserSession Host Port/
-  浏览器连接器复用现有浏览器登录态时，Agent-facing schema 不接受 Cookie、API Header 或 Authorization，且
+- 不做任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是本轮 BrowserSession Host Port/
+  浏览器连接器复用现有浏览器登录态时，产品合同中 Agent 只获得不透明的 browser session/page 引用；Agent-facing
+  schema 不接受 Cookie、API Header 或 Authorization，且
   Cookie/Set-Cookie 不进入 prepared intent、结果或 Journal；这不扫描网页正文、外部命令输出或用户 browser_test
   代码输出。外部 Playwright 仅作无登录截图/测试后端或用户维护的测试配置；当前 CLI 无内嵌 Chromium，不保证
   共享登录态。基础 web_fetch 无状态，web_search API 凭据 HTTPS-only。
@@ -236,30 +237,38 @@
 - `pnpm --filter @dbagent/first-party-capabilities typecheck`
 - `pnpm --filter @dbagent/first-party-capabilities test -- container-capability.test.ts language-capability.test.ts`
 
-## Task 5: 实现 Browser、Documents 与 Data & Notebook
+## Task 5: 实现 BrowserSession Host Port、Documents 与 Data & Notebook
 
 **Files:**
 
+- Add: `packages/first-party-capabilities/src/browser-session-port.ts`
+- Add: `packages/first-party-capabilities/src/browser-connector.ts`
 - Add: `packages/first-party-capabilities/src/browser-capability.ts`
 - Add: `packages/first-party-capabilities/src/document-capability.ts`
 - Add: `packages/first-party-capabilities/src/data-notebook-capability.ts`
 - Modify: `packages/first-party-capabilities/src/index.ts`
+- Add: `packages/first-party-capabilities/test/browser-session-port.test.ts`
+- Add: `packages/first-party-capabilities/test/browser-connector.test.ts`
 - Add: `packages/first-party-capabilities/test/browser-capability.test.ts`
 - Add: `packages/first-party-capabilities/test/document-capability.test.ts`
 - Add: `packages/first-party-capabilities/test/data-notebook-capability.test.ts`
 
 **Requirements:**
 
-1. Browser v1 使用已安装 Playwright CLI，不自动下载浏览器；实现 screenshot、pdf、test，并精确声明 URL、输出文件、网络、写入和代码执行风险。不得把 Playwright 或 notebook 的影响假称为仅限声明路径。
-2. Documents 按操作使用 pandoc/pdftotext/pdfinfo；实现 metadata、extract、convert，模块允许 degraded。
-3. Data & Notebook 内置有界 JSON/JSONL/CSV profile 与 ipynb inspect；Jupyter 缺失只使 notebook_run unavailable。
-4. 所有文件操作准备 canonical target，拒绝越界、symlink 替换、隐式覆盖和无界输入/输出。
-5. notebook_run 视为任意代码执行；批准前不得创建输出文件。
+1. 本轮实现 BrowserSession Host Port/浏览器连接器。v1 连接用户在 SchemaNaut 外启动并登录的本机 Chrome/Edge CDP 会话以复用登录态；后续可以替换为 extension 或 native bridge。
+2. Agent 只获得不透明的 browser session/page 引用和 `browser_navigate`、`browser_read`、`browser_click`、`browser_type_or_interact`、`browser_screenshot`、`browser_test`；允许完成这些操作所需的页面交互。
+3. Cookie、API Header 和 Authorization 不进入 Agent schema，Cookie/Set-Cookie 不进入 prepared intent、结果或 Journal。CLI 不内嵌 Chromium；外部 Playwright 仅作无登录截图/测试回退或用户维护的测试配置，不承担登录态共享。`browser_pdf` 可作为可选导出，而非核心登录会话接口。
+4. 浏览器访问声明联网，输出文件声明写入；`browser_test` 是高风险代码执行，且不得把 Playwright 或 notebook 的影响假称为仅限声明路径。不存在可证明浏览器隔离时，不得称其处于 Sandbox。
+5. Documents 按操作使用 pandoc/pdftotext/pdfinfo；实现 metadata、extract、convert，模块允许 degraded。
+6. Data & Notebook 内置有界 JSON/JSONL/CSV profile 与 ipynb inspect；Jupyter 缺失只使 notebook_run unavailable。
+7. 所有文件操作准备 canonical target，拒绝越界、symlink 替换、隐式覆盖和无界输入/输出。
+8. notebook_run 视为任意代码执行；批准前不得创建输出文件。
 
 **Verification:**
 
 - `pnpm --filter @dbagent/first-party-capabilities typecheck`
-- `pnpm --filter @dbagent/first-party-capabilities test -- browser-capability.test.ts document-capability.test.ts data-notebook-capability.test.ts`
+- `pnpm --filter @dbagent/first-party-capabilities test -- browser-session-port.test.ts browser-connector.test.ts browser-capability.test.ts document-capability.test.ts data-notebook-capability.test.ts`
+- BrowserSession Host Port/浏览器连接器的合同测试覆盖不透明引用、Cookie API 隔离、页面交互和本机外部登录态 CDP 复用；Playwright 回退不应充当该实现。
 
 ## Task 6: 增加 Database 标准外部环境 Provider
 

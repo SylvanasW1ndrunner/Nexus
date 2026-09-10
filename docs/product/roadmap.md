@@ -9,8 +9,9 @@
 - 首批开发中的 Capability 包括 Git、Database、Forge、Containers、Browser Automation、Language Intelligence、
   Documents 和 Data & Notebook；它们按任务使用，不是项目配置或启动前提。
 - 产品授权仅由 default、auto、full-access 和组织规则决定；它不承担内容敏感性识别或第三方信任判断。
-- 狭义 API 隔离是未来 BrowserSession Host Port/浏览器连接器复用用户现有浏览器登录态时，Agent-facing schema
-  不接受 Cookie、API Header 或 Authorization，且 Cookie/Set-Cookie 不进入 intent、结果或 Journal；这不扫描
+- 本轮交付目标中的 BrowserSession Host Port/浏览器连接器复用用户现有浏览器登录态时，产品合同中 Agent
+  只获得不透明的 browser session/page 引用；Agent-facing schema 不接受 Cookie、API Header 或 Authorization，
+  且 Cookie/Set-Cookie 不进入 intent、结果或 Journal；这不扫描
   网页正文、外部命令输出或用户 browser_test 代码输出。外部 Playwright 仅作无登录截图/测试后端或用户维护的
   测试配置，不保证共享登录态；CLI 无内嵌 Chromium。基础 web_fetch 无状态，web_search API 凭据 HTTPS-only。
 

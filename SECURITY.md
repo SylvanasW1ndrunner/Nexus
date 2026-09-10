@@ -23,8 +23,10 @@ of a third-party CLI, Skill, MCP server, or Capability, or make external output
 safe. Command stdout/stderr and provider errors may enter Agent results and
 local retention subject only to general size and lifecycle limits.
 
-The narrow API isolation is for the future BrowserSession Host Port/browser
-connector: Agent-facing schemas accept no Cookie, API Header, or Authorization,
+The narrow API isolation is for the BrowserSession Host Port/browser
+connector, which reuses the user's existing browser session signed in outside
+SchemaNaut. Under its product contract, the Agent receives only opaque browser
+session/page references; Agent-facing schemas accept no Cookie, API Header, or Authorization,
 and Cookie/Set-Cookie never enter prepared intents, results, or the Journal. It
 does not inspect, redact, or classify web bodies, external command output, or
 user browser-test code output. SchemaNaut has no embedded Chromium. External
@@ -61,8 +63,9 @@ SchemaNaut 不检查内容以识别敏感信息，不做 Secret 脱敏，不拦�
 CLI、Skill、MCP Server 或 Capability 是否可信，也不负责使外部输出安全。命令 stdout/stderr 和
 Provider 错误可以进入 Agent 结果和本地 retention，仅受通用大小与生命周期限制。
 
-狭义 API 隔离针对未来的 BrowserSession Host Port/浏览器连接器：面向 Agent 的 schema 不接受 Cookie、API
-Header 或 Authorization，Cookie/Set-Cookie 不会进入 prepared intent、结果或 Journal。它不检查、脱敏或分类
+狭义 API 隔离针对 BrowserSession Host Port/浏览器连接器：它复用用户在 SchemaNaut 外已登录的现有浏览器会话。
+该产品合同中 Agent 只获得不透明的 browser session/page 引用；面向 Agent 的 schema 不接受 Cookie、API Header
+或 Authorization，Cookie/Set-Cookie 不会进入 prepared intent、结果或 Journal。它不检查、脱敏或分类
 网页正文、外部命令输出或用户 browser_test 代码输出。SchemaNaut 没有内嵌 Chromium。外部 Playwright 仅作
 无登录截图/测试后端或用户自行维护的测试配置，不保证共享登录态。基础 web_fetch 无状态；web_search API
 凭据仍只允许 HTTPS。

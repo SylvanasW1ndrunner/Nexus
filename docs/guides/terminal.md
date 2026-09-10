@@ -44,8 +44,10 @@ Those values may enter Agent results and local retention with general size and
 lifecycle limits. You are responsible for their sensitivity and for keeping
 real credentials out of Git.
 
-The future BrowserSession Host Port/browser connector is narrowly isolated from
-Cookie values: Agent-facing schemas accept no Cookie, API Header, or
+The BrowserSession Host Port/browser connector reuses the user's existing
+browser session signed in outside SchemaNaut and is narrowly isolated from Cookie
+values. Under its product contract, the Agent receives only opaque browser session/page
+references; Agent-facing schemas accept no Cookie, API Header, or
 Authorization, and Cookie/Set-Cookie are absent from prepared intents, results,
 and the Journal. It does not inspect page bodies, external command output, or
 user browser-test code output. This CLI has no embedded Chromium. External

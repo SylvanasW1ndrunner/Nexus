@@ -40,9 +40,10 @@ or Capabilities are trustworthy, or make external output safe. Users are
 responsible for the sensitivity of their inputs, tool configuration, model
 endpoints, logs, Journal and Artifacts, and third-party output.
 
-The narrow API isolation is for the future BrowserSession Host Port/browser
+The narrow API isolation is for the BrowserSession Host Port/browser
 connector: it shares the user's existing browser login state without accepting
-Cookie, API Header, or Authorization in Agent-facing schemas; Cookie and
+Cookie, API Header, or Authorization in Agent-facing schemas. Under its product
+contract, the Agent receives only opaque browser session/page references; Cookie and
 Set-Cookie never enter prepared intents, results, or the Journal. This is not
 scanning or redacting page bodies, external command output, or user browser-test
 output. SchemaNaut has no embedded Chromium. External Playwright is only an

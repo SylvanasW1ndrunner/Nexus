@@ -20,8 +20,9 @@ SchemaNaut 不识别敏感信息，不脱敏或拦截类似凭据的内容和参
 外部输出安全。用户负责输入、外部工具和模型 Endpoint 配置、日志、Journal、Artifact 及第三方输出
 的敏感性。不要将真实凭据提交到 Git。
 
-狭义 API 隔离针对未来的 BrowserSession Host Port/浏览器连接器：它复用用户现有浏览器登录态，但面向 Agent 的
-schema 不接受 Cookie、API Header 或 Authorization，Cookie/Set-Cookie 不会进入 prepared intent、结果或
+狭义 API 隔离针对 BrowserSession Host Port/浏览器连接器：它复用用户现有浏览器登录态，但面向 Agent 的
+schema 不接受 Cookie、API Header 或 Authorization。该产品合同中 Agent 只获得不透明的 browser session/page
+引用；Cookie/Set-Cookie 不会进入 prepared intent、结果或
 Journal。这不扫描或脱敏网页正文、外部命令输出或用户 browser_test 代码输出。SchemaNaut 没有内嵌 Chromium；
 外部 Playwright 仅作无登录截图/测试后端或用户自行维护的测试配置，不保证共享登录态。基础 web_fetch 无状态，
 web_search API 凭据仍只允许 HTTPS。

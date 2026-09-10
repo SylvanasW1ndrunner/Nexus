@@ -74,8 +74,9 @@ Capability 是由 Host 注册、由 Agent 按任务发现并激活的增强 Tool
 - execute 必须复核已准备目标、全局权限 revision 与执行边界，并把取消和 deadline 传入进程运行时。
 - 输出使用普通有界 spool 与 Runtime retention；模型接收的内容遵守通用大小和生命周期约束。
 - 外部命令继承用户环境；Runtime 不进行 CommandRedactor、CommandArgumentGuard、凭据参数拒绝或输出脱敏。
-- 不进行任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是未来 BrowserSession Host Port/
-  浏览器连接器复用现有浏览器登录态时，Agent-facing schema 不接受 Cookie、API Header 或 Authorization，且
+- 不进行任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是 BrowserSession Host Port/
+  浏览器连接器复用现有浏览器登录态时，产品合同中 Agent 只获得不透明的 browser session/page 引用；Agent-facing
+  schema 不接受 Cookie、API Header 或 Authorization，且
   Cookie/Set-Cookie 不进入 prepared intent、结果或 Journal；它不扫描网页正文、外部命令输出或用户 browser_test
   代码输出。基础 web_fetch 无状态，web_search API 凭据 HTTPS-only。
 - 外部文件或登录状态改变后可重新 probe；父进程 PATH 或环境改变时必须重启 Host 才能继承新状态。
@@ -143,17 +144,17 @@ Tool：
 
 浏览器 test 是高风险代码执行；不得仅按声明路径描述其影响。
 
-外部事实：未来 BrowserSession Host Port/浏览器连接器复用用户已有浏览器登录态。当前 CLI 没有内嵌 Chromium；
-外部 `playwright` CLI 仅作无登录截图/测试后端或用户自行维护的测试配置，本轮不自动下载浏览器，也不保证共享
-登录态或提供 Cookie/API Header/Authorization 参数。
+本轮交付 BrowserSession Host Port 与外部浏览器连接器。v1 连接用户在 SchemaNaut 外启动并登录的本机 Chrome/Edge
+CDP 会话以复用登录态；后续可以替换为 extension 或 native bridge。其产品合同只将不透明的 browser session/page
+引用交给 Agent，并提供 `browser_navigate`、`browser_read`、`browser_click`、`browser_type_or_interact`、
+`browser_screenshot` 和 `browser_test`；为完成这些操作可以进行必要的页面交互。Cookie、API Header 和
+Authorization 不是 Agent 参数，Cookie/Set-Cookie 不进入 Agent schema、prepared intent、结果或 Journal。
 
-Tool：
+CLI 不内嵌 Chromium。外部 `playwright` CLI 仅作无登录截图/测试回退或用户自行维护的测试配置，不承担登录态共享；
+`browser_pdf` 可作为可选导出，不是核心登录会话接口。
 
-- `browser_screenshot`
-- `browser_pdf`
-- `browser_test`
-
-前两个使用明确 URL 与工作区输出路径；`browser_test` 只运行工作区内明确测试文件。浏览器访问声明联网，输出文件声明写入；执行任意浏览器测试属于高风险代码执行。不存在可证明浏览器隔离时，不得称其处于 Sandbox。
+浏览器访问声明联网，输出文件声明写入；`browser_test` 只运行工作区内明确测试文件，执行任意浏览器测试属于高风险
+代码执行。不存在可证明浏览器隔离时，不得称其处于 Sandbox。
 
 ### 6.6 Language Intelligence — `schemanaut.language`
 

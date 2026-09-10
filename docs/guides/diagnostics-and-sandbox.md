@@ -36,8 +36,10 @@ retained results. They may enter Agent results, logs, Journal, and Artifacts
 with general size and lifecycle limits. Users decide whether those inputs and
 outputs are sensitive. Keep real credentials out of Git as repository hygiene.
 
-The future BrowserSession Host Port/browser connector is the narrow exception to
-Agent-facing API content: schemas accept no Cookie, API Header, or Authorization,
+The BrowserSession Host Port/browser connector reuses the user's existing
+browser session signed in outside SchemaNaut. It is the narrow exception to
+Agent-facing API content: under its product contract, the Agent receives only opaque
+browser session/page references; schemas accept no Cookie, API Header, or Authorization,
 and Cookie/Set-Cookie are omitted from prepared intents, results, and the
 Journal. This does not inspect or redact page bodies, external command output,
 or user browser-test code output. The CLI has no embedded Chromium. External
