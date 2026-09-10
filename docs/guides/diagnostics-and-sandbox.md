@@ -1,51 +1,36 @@
 # Diagnostics and sandbox guide
 
-## Global permission modes
+## Authorization modes
 
-Permission is selected globally in ~/.schemanaut/config.toml. A project, Skill,
-MCP server, or Capability cannot grant itself more access.
+Authorization comes only from the global ~/.schemanaut/config.toml mode and
+organization rules.
 
-| Mode | Expected behavior |
+| Mode | Behavior |
 | --- | --- |
-| default | Ordinary workspace work can proceed; external writes, network access, and risky actions ask for approval. |
-| auto | Actions proceed unless they are dangerous, destructive, credential-related, administrative, unknown-risk, or restricted by organization policy. |
-| full-access | Built-in per-action approval can be removed, but target validation, organization rules, cancellation, recovery, and action records still apply. |
+| default | Internet access and edits outside the workspace need approval. |
+| auto | Only statically declared high-risk actions and organization rules need approval. |
+| full-access | Actions are not automatically blocked for approval. |
 
-Organization rules can deny or require approval regardless of the selected
-mode. Read the action summary before deciding.
+A project, Skill, MCP server, or Capability cannot raise this authority.
 
-## What sandboxing means
+## Sandbox execution rules
 
-Sandboxing is an execution property, not a label. SchemaNaut reports the
-isolation the current Host can actually provide for the requested action.
+If require_sandbox is configured, it is a global organization execution rule.
+It is not a promise to identify sensitive content or make a third-party tool
+safe. When an execution Host cannot provide a required sandbox, it reports
+unavailable; when policy permits an unsandboxed user decision, it reports
+ask-unsandboxed.
 
-- If isolation is not available but the applicable policy permits a user
-  decision, the result is ask-unsandboxed.
-- If policy requires isolation that the Host cannot provide, the result is
-  unavailable.
-- On native Windows without a strong operating-system sandbox, a completed
-  command can report its own exit result, but containment and complete process
-  tree termination remain unverified. After cancellation or termination, any
-  descendant process that cannot be proven stopped remains unknown.
+On native Windows without strong operating-system isolation, a root command can
+report its exit result. Containment and complete descendant termination may be
+unverified or unknown.
 
-This version does not claim a Windows Job Object containment guarantee. Treat
-container daemons, browser runners, notebook execution, and other external
-services as their own security boundaries even when an outer command is
-restricted.
+## External state and output
 
-## Repair, retry, and restart
+Fix missing commands, files, services, or login state outside SchemaNaut, then
+retry. Restart the terminal Host after a parent PATH or environment change.
 
-Diagnostics identify a missing prerequisite and its safe external repair path.
-Fix the command, file, connection, service, secure reference, or login state
-outside SchemaNaut, then ask the Agent to retry or rediscover it. Changes to
-the parent process PATH or environment require restarting the terminal Host so
-the new state can be inherited.
-
-## Redaction
-
-Diagnostic text, command output, and reports are bounded and redacted before
-they are shown or retained. SchemaNaut does not intentionally reveal secrets,
-authorization headers, passwords, URL user information, complete connection
-strings, or raw provider error bodies. If you believe a secret was exposed,
-stop using it, rotate it through its external provider, and review the affected
-local project data.
+SchemaNaut does not redact diagnostics, command output, provider errors, or
+retained results. They may enter Agent results, logs, Journal, and Artifacts
+with general size and lifecycle limits. Users decide whether those inputs and
+outputs are sensitive. Keep real credentials out of Git as repository hygiene.

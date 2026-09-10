@@ -13,7 +13,7 @@
 - 所有 Tool 使用 `prepare → authorize → schedule → execute → observe`，共享全局权限、批准、审计、取消、恢复、结果保留与 provenance。
 - 功能认知优先，不采用 TDD；各任务实现后运行聚焦静态/冒烟检查，Task 10 统一运行完整测试和真实环境验收。
 - 保留既有未提交工作，不重置、不覆盖无关改动；只提交任务明确列出的文件。
-- 所有提交作者为 Chandler Niu；不得提交密钥、`.env`、真实连接串或未脱敏 Provider 输出。
+- 所有提交作者为 Chandler Niu；不要将真实凭据、`.env` 或生产连接信息提交到 Git，这是仓库卫生要求。
 
 ## Task 1: 分离用户文档和开发文档，并冻结本轮产品边界
 
@@ -47,7 +47,7 @@
 2. `docs/engineering/README.md` 成为开发文档唯一入口，索引 architecture、engineering、capabilities 内部资料与本轮 design/plan。
 3. 中英文用户页语义一致；删除 `/mode`、基础 Tool 尚未实现、MCP 必须手动启动等与代码不一致的说明。
 4. 用户 Capability 指南列出八类能力、外部依赖、用户无需在 SchemaNaut 内配置的原则、Agent 自然语言协助方式、缺失依赖诊断和重试方式。
-5. 诊断与沙盒指南解释三档全局权限、真实 sandbox capability、`ask-unsandboxed` / `unavailable`、外部状态修复与脱敏承诺。
+5. 诊断与沙盒指南解释三档全局权限、真实 sandbox capability、`ask-unsandboxed` / `unavailable`、外部状态修复和用户对输出敏感性的责任。
 6. 架构文档只保留稳定合同；实现状态与测试证据只留在 engineering。
 7. `base-tools-problem-audit.md` 首部标为历史审计，链接当前设计与实现报告，不再作为当前用户文档入口。
 
@@ -77,7 +77,7 @@
 2. Capability command runtime 只接受已验证 executable、argv、cwd、权限分类和明确路径/host 目标；不接受 shell 片段。
 3. ToolPrepareContext 必须提供 Run policy mode/revision；prepare 固定执行器 identity、该 policy 快照、边界 revision、真实目标和 resource keys；execute 复核后使用同一 ProcessRuntime、取消、deadline、输出上限与 retention。
 4. 提供 PATH 可执行文件发现器并返回 launch descriptor；不得执行外部命令完成静态 probe，不得在诊断中返回完整 PATH 或敏感目录。Windows npm .cmd 必须安全解析为 node 与入口脚本，禁止 shell fallback。
-5. 覆盖引号/空格/控制字符、目标改变、无 sandbox、企业 requireSandbox、自然退出与取消的 Windows unverified/unknown 事实、长输出和 Secret 脱敏。
+5. 覆盖引号/空格/控制字符、目标改变、无 sandbox、企业 requireSandbox、自然退出与取消的 Windows unverified/unknown 事实，以及普通有界 spool。不得新增 CommandRedactor、CommandArgumentGuard、argv 凭据拒绝或输出脱敏。
 
 **Verification:**
 
@@ -107,9 +107,9 @@
 1. 创建 first-party-capabilities workspace 包，同步根 workspace 与 pnpm-lock.yaml；包声明所需 runtime dependency，并以 tsconfig project reference 引用其直接内部依赖。
 2. 公共骨架实现 bounded probe、available/degraded/unavailable、外部 provider choice、immutable generation、刷新、关闭和可行动诊断。
 3. 实现设计文档中 Git 的六个 Tool 与 Forge 的七个 Tool；所有 argv 由白名单 enum、长度限制和路径参数构造。
-4. Git remote 行为不混入 Git Capability；Forge 只复用 CLI 已有认证，不读取或返回 token。
-5. 所有 Tool 的 access、recoveryClass、danger、network/externalWrite/destructive/credentials/admin/unknownRisk 与实际调用一致。
-6. Tool 输出优先使用 CLI JSON/稳定格式；解析失败返回 typed external failure，不能把原始认证响应写入错误。
+4. Git remote 行为不混入 Git Capability；Forge 只复用 CLI 已有认证，外部登录状态与输出由用户负责。
+5. 所有 Tool 的 access、recoveryClass、danger、network/externalWrite/destructive/admin/unknownRisk 与实际调用一致；这些是静态操作事实，不从参数内容推断凭据或 Secret。
+6. Tool 输出优先使用 CLI JSON/稳定格式；解析失败返回 typed external failure，外部响应使用普通有界结果合同。
 
 **Verification:**
 
@@ -175,10 +175,10 @@
 **Requirements:**
 
 1. 发现 `DATABASE_URL` 与 PostgreSQL 标准环境变量，不读取 SchemaNaut 项目或全局 Capability 配置。
-2. candidate id、label、metadata、fingerprint 不含用户名、密码、token、query 或完整 endpoint；相同非秘密连接身份稳定，外部身份改变时 fingerprint 改变。
-3. resolve 时才创建短生命周期 `DatabaseCredential`；URL 密码、PGPASSWORD 等绝不进入 profile、state、Tool payload、错误或日志。
-4. 同时存在多个标准来源时返回多个候选并要求 Runtime choice；无来源时返回空候选与现有可行动诊断。
-5. 输入错误返回脱敏 typed 失败，不回显原始值。
+2. candidate id、label、metadata、fingerprint 为稳定的连接选择和变更判断服务；Runtime 不将其作为敏感信息识别或脱敏面。
+3. resolve 使用外部环境提供的连接值；profile、state、Tool payload、错误和日志遵守普通大小与生命周期合同，用户负责敏感性。
+4. 同时存在多个标准来源时返回多个候选并要求 Runtime choice；无来源时返回空候选与可行动诊断。
+5. 输入错误返回 typed external failure，不执行原始值的脱敏或凭据拦截。
 
 **Verification:**
 
@@ -242,7 +242,7 @@
 - `pnpm test:script-contracts`
 - `pnpm test:agent-acceptance`
 
-## Task 9: 收束真实 SiliconFlow 验收与 Secret 安全
+## Task 9: 收束真实 SiliconFlow 功能验收
 
 **Files:**
 
@@ -257,8 +257,8 @@
 **Requirements:**
 
 1. 集中校验 endpoint/key/model；默认 endpoint 为 SiliconFlow OpenAI-compatible，默认 model 为 `deepseek-ai/DeepSeek-V4-Flash`。
-2. key 只在内存中传给 Provider；不从命令行、产品 config 或脚本自动加载 `.env`，不序列化、不打印。
-3. 子进程输出、Provider 错误和报告字段统一脱敏；用 dummy bearer/key/userinfo 错误回归证明控制台和 JSON 不泄漏。
+2. key 从当前进程环境传给 Provider 是测试接线事实；不从命令行或产品 Capability config 读取，并不构成产品脱敏、拦截或泄漏保护。
+3. 子进程输出、Provider 错误和报告字段使用普通大小与生命周期合同；不做产品级脱敏或泄漏回归。
 4. 旧 general/capability live 脚本变为统一 runner 的薄入口或兼容选择器，不再维护互相冲突的报告语义。
 5. 真实任务至少覆盖基础代码修复、Git/动态加载、Database/长结果三类；以文件、测试、数据库和 evidence 后置条件验证，不匹配固定回答。
 
@@ -266,7 +266,7 @@
 
 - `pnpm test:script-contracts`
 - 在已注入环境变量的受保护进程中运行 `pnpm test:agent-acceptance:live`
-- 扫描报告与 stdout/stderr 捕获，确认不存在 key、Bearer、Authorization、URL userinfo 或原始连接串。
+- 记录实际功能后置条件与未运行原因；不将输出扫描作为产品级安全验收。
 
 ## Task 10: 统一验证、架构复核与文档证据更新
 
@@ -282,7 +282,7 @@
 **Requirements:**
 
 1. 功能开发结束后一次性运行 build、typecheck、lint、完整测试、Capability runtime、确定性 Agent 验收、真实模型验收和可用的 PostgreSQL 场景。
-2. 复核依赖方向、固定 12 Tool、动态 Tool 预算、全局权限唯一来源、无 Capability 配置、无直接 child_process、无 Secret 泄漏、无 Sandbox 虚假承诺。
+2. 复核依赖方向、固定 12 Tool、动态 Tool 预算、全局权限唯一来源、无 Capability 配置、无直接 child_process，以及无 Sandbox 虚假承诺。
 3. 实现报告只记录本次实际运行证据；未运行项保留 not-run 原因，不用内部测试替代真实环境。
 4. 用户 Capability 指南和 public roadmap 只更新可见能力状态，不写内部测试计数；工程实现报告记录精确命令和结果。
 
@@ -298,4 +298,4 @@
 - `pnpm test:agent-acceptance:live`
 - `git diff --check`
 - `rg -n "child_process" packages/first-party-capabilities packages/database-capability`
-- Secret-safe scan of changed source, docs, tests and generated reports without printing candidate secret values.
+- 不进行 Secret 专项扫描；报告普通功能结果，并遵守仓库不提交真实凭据的卫生要求。

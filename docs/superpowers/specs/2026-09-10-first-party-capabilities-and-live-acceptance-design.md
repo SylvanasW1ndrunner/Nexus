@@ -57,7 +57,7 @@ Capability 是由 Host 注册、由 Agent 按任务发现并激活的增强 Tool
 
 1. **静态注册、延迟激活**：默认产品组合注册模块 manifest，但首轮不把其完整 Tool schema 全部发送给模型；Agent 通过 `tool_search` 发现并激活。
 2. **外部状态即事实**：probe 只观察当前环境，不读取 SchemaNaut 专属 Capability 配置；外部状态改变后再次 probe，暂时失败不永久缓存。
-3. **可行动失败**：不可用结果至少说明缺失依赖、受影响能力、外部修复方式和重试动作；原因必须有界、脱敏，不输出 Secret、认证 Header、连接串或 Provider 原始响应。
+3. **可行动失败**：不可用结果至少说明缺失依赖、受影响能力、外部修复方式和重试动作；原因遵守通用大小和生命周期约束。用户负责外部诊断与输出的敏感性。
 4. **帮助不是配置面**：Agent 可以使用基础 Tool 执行用户要求的外部配置步骤；Capability 可提供帮助 Tool，但不得保存一份 SchemaNaut 所有的“已配置”状态。
 5. **统一执行主干**：所有贡献 Tool 都经过 `prepare → authorize → schedule → execute → observe`，使用 Runtime 的权限、批准、审计、取消、结果保留和恢复合同。
 6. **不可变 generation**：激活或刷新产生完整新 generation；同一 Turn 不混用新旧 Tool；旧 generation 在 lease 排空后关闭。
@@ -70,10 +70,10 @@ Capability 是由 Host 注册、由 Agent 按任务发现并激活的增强 Tool
 `core-tools` 提供内部 `CapabilityCommandRuntime`，复用同一个 `ProcessRuntime` 和 `SandboxExecutor`：
 
 - 命令型 Capability 以 `executable + argv[]` 提交，不拼接 shell 字符串；基础 `process_exec` 仍可接受用户 shell 命令。
-- prepare 固定可执行文件、参数、cwd、路径、主机、网络、写入、破坏性、凭据、管理员和未知风险事实。
+- prepare 固定可执行文件、参数、cwd、路径、主机、网络、写入、破坏性、管理员和未知风险等静态操作事实；不扫描参数识别凭据或 Secret。
 - execute 必须复核已准备目标、全局权限 revision 与执行边界，并把取消和 deadline 传入进程运行时。
-- 输出有字节上限；长输出进入 Runtime retention，模型只收到摘要、预览和引用。
-- 外部命令继承用户环境，只有全局企业策略可以删除环境变量；Tool 结果不得回显环境或 Secret。
+- 输出使用普通有界 spool 与 Runtime retention；模型接收的内容遵守通用大小和生命周期约束。
+- 外部命令继承用户环境；Runtime 不进行 CommandRedactor、CommandArgumentGuard、凭据参数拒绝或输出脱敏。
 - 外部文件或登录状态改变后可重新 probe；父进程 PATH 或环境改变时必须重启 Host 才能继承新状态。
 - 原生 Windows 无强 OS 隔离时，批准后的自然 root exit 可以报告命令退出，但 containment 和完整 process-tree proof 必须标为 unverified；取消或终止时，无法证明停止的 descendant 仍为 unknown。本轮不引入 Job Object。
 - 默认 `NativeSandboxExecutor` 明确表示“无 OS 隔离”。当策略要求强沙盒而 Host 无法提供时返回 `unavailable`；其他情况按策略产生 `ask-unsandboxed`，不得称为已沙盒化。
@@ -101,7 +101,7 @@ Tool：
 
 ### 6.2 Database — `schemanaut.database`
 
-沿用现有 `resource_list`、`resource_get`、`knowledge_search`、`sql_execute`、`sql_explain`。新增标准外部环境 Provider：发现 `DATABASE_URL` 或 PostgreSQL 标准环境变量，候选元数据只包含脱敏身份；凭据只在 resolve 后以短生命周期值进入 connector，绝不持久化。
+沿用现有 `resource_list`、`resource_get`、`knowledge_search`、`sql_execute`、`sql_explain`。新增标准外部环境 Provider：发现 `DATABASE_URL` 或 PostgreSQL 标准环境变量。连接值、候选信息和外部输出遵守普通大小与生命周期合同；用户负责其敏感性。
 
 没有外部连接时模块仍可被发现，但返回缺少连接环境的可行动诊断。多候选必须由 Runtime 签发的 choice reference 选择，不能由模型提交原始连接信息。
 
@@ -119,7 +119,7 @@ Tool：
 - `forge_checks`
 - `forge_pr_create`
 
-读取工具声明联网；`forge_pr_create` 是非幂等外部写入并需要风险批准。Capability 不保存 token、host 或仓库 profile。
+读取工具声明联网；`forge_pr_create` 是非幂等外部写入并需要风险批准。外部 CLI 的登录状态、profile 和输出由用户负责。
 
 ### 6.4 Containers — `schemanaut.containers`
 
@@ -208,7 +208,7 @@ profile/inspect 只读且有行数、字节、列数和嵌套深度上限。`not
 权限只来自全局 `~/.schemanaut/config.toml`，项目、Skill、MCP 和 Capability 都不能覆盖。
 
 - `default`：工作区内普通读写可自动执行；外部写入、联网和风险动作询问。
-- `auto`：仅危险、破坏性、凭据、管理员、未知风险或企业策略要求的动作询问。
+- `auto`：仅静态声明的高风险、破坏性、管理员、未知风险或企业策略要求的动作询问。
 - `full-access`：内置逐次批准可以取消，但企业 `deny/ask`、目标校验、审计、取消与恢复仍生效。
 
 Tool 的 prepared intent 必须描述实际目标。批准前零副作用；批准后同一 action 最多提交一次。外部配置帮助也遵守同一规则。
@@ -242,18 +242,18 @@ Tool 的 prepared intent 必须描述实际目标。批准前零副作用；批�
 - `TEST_SILICONFLOW_BASE_URL`
 - `TEST_SILICONFLOW_MODEL`
 
-脚本不自动读取产品配置或 `.env`，不接受命令行 key。报告只记录 Provider 名、脱敏 Endpoint origin/path 和 model id，不记录 key、Header、完整请求 URL或原始错误正文。
+脚本不自动读取产品配置或 `.env`，不接受命令行 key。key 从当前进程环境传给 Provider 是测试接线事实；真实验收关注功能后置条件，而不提供产品级输出安全治理。
 
 真实模型最少执行三个高价值任务：基础代码修复、Git/动态 Capability 协作、Database/长结果证据协作。已安装的其他外部依赖按场景运行；缺少依赖必须记为 `not-run` 而不是 pass。显式 required live gate 中，任何 required 场景 not-run 都使验收不合格。
 
-所有子进程 stdout/stderr 和错误在写控制台或报告前统一脱敏。报告区分 `passed`、`failed`、`not-run`，并记录环境缺口而不暴露敏感值。
+子进程 stdout/stderr、Provider 错误和报告遵守普通大小与生命周期约束。报告区分 `passed`、`failed`、`not-run`，并记录环境缺口；用户负责这些外部内容的敏感性。
 
 ## 10. 完成标准
 
 - 用户与开发文档入口分离，用户页面不再含旧 `/mode`、旧 MCP 行为、“基础 Tool 尚未实现”或 Control Plane 内部操作说明。
 - 八类模块均由 bundled Host 注册、可被 `tool_search` 发现，并按外部事实激活或返回可行动诊断。
 - 命令型 Capability 全部使用 argv Host Port，没有模块直接导入 `node:child_process`。
-- Capability 没有新增项目/global 配置字段，没有 Secret 持久化或日志泄漏。
+- Capability 没有新增项目/global 配置字段；外部内容遵守普通大小、取消和生命周期合同。
 - 默认确定性验收、构建、类型检查、lint、完整测试通过。
-- 真实 SiliconFlow 场景实际执行并产生脱敏报告；任何未运行场景明确列出原因。
+- 真实 SiliconFlow 场景实际执行并产生功能报告；任何未运行场景明确列出原因。
 - 最终架构扫描确认所有扩展 Tool 共用统一权限、审计、取消、恢复与结果主干。

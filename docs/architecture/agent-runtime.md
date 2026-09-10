@@ -1,28 +1,21 @@
 # Agent Runtime、Journal 与 Session 合同
 
-本文是开发者文档，描述内部稳定合同，而非公共 SDK。
+本文描述内部稳定合同，而非公共 SDK。
 
-## 运行主干
+AgentRuntime 协调模型、项目设置、Tool、Skill、MCP、Capability 和持久化依赖。Run、Turn 和 Tool
+Invocation 是核心执行单位；Journal 是可恢复事实来源。
 
-终端通过私有 Host 组合 AgentRuntime。AgentRuntime 协调模型、项目作用域设置、Tool、Skill、MCP、
-Capability 和持久化依赖；终端只解析命令、显示有界活动并收集用户输入。
+## 授权和结果
 
-Run、Turn 和 Tool Invocation 是核心执行单位。Kernel 推进状态；Invocation Runtime 负责校验、
-许可、调度、执行、观察和终态提交；Journal 是可恢复事实来源；Session 和终端活动是投影。
+Runtime 的唯一授权机制是全局 default、auto、full-access 模式与企业规则。Tool 根据静态声明的
+操作事实进入该机制；Runtime 不从用户输入、命令参数或第三方输出推断敏感性、凭据或可信度。
 
-## 持久化与恢复
+Tool 结果、命令 stdout/stderr、Provider 错误和本地 retention 仅受通用大小、取消和生命周期限制，
+可包含原始外部内容。用户负责输入、外部配置、模型 Endpoint、日志、Journal、Artifact 和第三方输出
+的敏感性。
 
-恢复 Run 时必须读取已提交事实，不能复制一个新的执行循环。取消、steering、批准、上下文压缩和
-子 Agent 命令都进入同一耐久合同。对非幂等外部动作，结果未知时必须要求显式确认或风险重试授权。
+## 进程和沙盒
 
-关闭先停止新工作准入，再持久化中断、排空活动工作和依赖，最后关闭 Provider。被 Turn 或 Tool
-捕获的依赖受 lease 保护，直至释放。
-
-## 进程、取消与隔离
-
-Host 必须如实报告其可证明的进程状态。原生 Windows 没有强 OS 沙盒时，命令自然退出可以报告退出
-结果，但 containment 与完整进程树回收均是 unverified；取消或终止后无法证明停止的 descendant
-仍是 unknown。本轮不以 Job Object 提供额外保证。
-
-需要强隔离但 Host 无法提供时，Runtime 返回 unavailable；可由用户决定的未隔离执行返回
-ask-unsandboxed。每种结果都必须进入 Journal 和 Tool 结果的稳定错误合同。
+require_sandbox 若配置，是全局企业执行规则。Host 无法提供必需沙盒时返回 unavailable；策略允许用户
+决定未沙盒执行时返回 ask-unsandboxed。原生 Windows 无强隔离时，自然退出可报告退出结果，而
+containment 和完整子孙进程终止可能为 unverified 或 unknown。
