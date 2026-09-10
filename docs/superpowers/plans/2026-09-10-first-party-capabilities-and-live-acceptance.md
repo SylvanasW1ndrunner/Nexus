@@ -53,9 +53,9 @@
 
 **Verification:**
 
-- `rg -n "/mode|尚未实现该清单|has not implemented|MCP auto-start is disabled|禁用 MCP 自动启动" README*.md docs/product docs/guides docs/architecture`
-- `rg -n "Control Plane|Registry|generation|lease|通过|passed" README*.md docs/README.md docs/product docs/guides`
-- `git diff --check -- README.md README.zh-CN.md docs`
+- `rg -n "(^|[^[:alnum:]_])/mode([^[:alnum:]_-]|$)|尚未实现该清单|has not implemented|MCP auto-start is disabled|禁用 MCP 自动启动" README.md README.zh-CN.md SECURITY.md docs/product docs/guides docs/architecture`
+- `rg -n "Control Plane|Registry|generation|lease|通过|passed" README.md README.zh-CN.md docs/README.md docs/product docs/guides`
+- `git diff --check -- README.md README.zh-CN.md SECURITY.md docs`
 
 ## Task 2: 增加安全 argv 进程启动与 Capability 命令 Host Port
 
@@ -100,14 +100,16 @@
 - Add: `packages/first-party-capabilities/test/git-capability.test.ts`
 - Add: `packages/first-party-capabilities/test/forge-capability.test.ts`
 - Modify: `package.json`
+- Modify: `pnpm-lock.yaml`
 
 **Requirements:**
 
-1. 公共骨架实现 bounded probe、available/degraded/unavailable、外部 provider choice、immutable generation、刷新、关闭和可行动诊断。
-2. 实现设计文档中 Git 的六个 Tool 与 Forge 的七个 Tool；所有 argv 由白名单 enum、长度限制和路径参数构造。
-3. Git remote 行为不混入 Git Capability；Forge 只复用 CLI 已有认证，不读取或返回 token。
-4. 所有 Tool 的 access、recoveryClass、danger、network/externalWrite/destructive/credentials/admin/unknownRisk 与实际调用一致。
-5. Tool 输出优先使用 CLI JSON/稳定格式；解析失败返回 typed external failure，不能把原始认证响应写入错误。
+1. 创建 first-party-capabilities workspace 包，同步根 workspace 与 pnpm-lock.yaml；包声明所需 runtime dependency，并以 tsconfig project reference 引用其直接内部依赖。
+2. 公共骨架实现 bounded probe、available/degraded/unavailable、外部 provider choice、immutable generation、刷新、关闭和可行动诊断。
+3. 实现设计文档中 Git 的六个 Tool 与 Forge 的七个 Tool；所有 argv 由白名单 enum、长度限制和路径参数构造。
+4. Git remote 行为不混入 Git Capability；Forge 只复用 CLI 已有认证，不读取或返回 token。
+5. 所有 Tool 的 access、recoveryClass、danger、network/externalWrite/destructive/credentials/admin/unknownRisk 与实际调用一致。
+6. Tool 输出优先使用 CLI JSON/稳定格式；解析失败返回 typed external failure，不能把原始认证响应写入错误。
 
 **Verification:**
 
@@ -200,6 +202,7 @@
 - Modify: `apps/terminal/test/cli-user-workflows.integration.test.ts`
 - Modify: `package.json`
 - Modify: `scripts/clean-build.mjs`
+- Modify: `pnpm-lock.yaml`
 
 **Requirements:**
 
@@ -208,7 +211,7 @@
 3. Database 使用环境 Provider；其他 CLI 直接继承用户已配置状态。终端不增加 Capability 配置命令或状态管理 UI。
 4. `new AgentRuntime()` 保持无默认专业能力的内部组合入口；终端继续只调用 bundled factory。
 5. 验证 `tool_search` 能发现、激活、失败后重新 probe；缺少任一外部依赖时基础 Agent 仍可完成任务。PATH、文件或登录状态变化可重试；父进程 PATH/env 变化要求重启 Host。
-6. first-party-capabilities 的包与 lockfile 只在 Task 3 创建和更新；Task 7 只接入既有包。
+6. Task 7 只接入 Task 3 已有的 first-party-capabilities 包；为 agent-host 同步 first-party 与 database capability 的 runtime dependency、相关 tsconfig reference 和 pnpm-lock.yaml，不在此任务重新创建能力包。
 
 **Verification:**
 

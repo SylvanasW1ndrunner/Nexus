@@ -12,8 +12,8 @@ SchemaNaut 使用 schemanaut 操作。本指南说明终端工作流；它不描
 
 ## 创建项目
 
-    schemanaut init ./my-project
-    schemanaut chat -C ./my-project
+    node apps/terminal/dist/cli.js init ./my-project
+    node apps/terminal/dist/cli.js chat -C ./my-project
 
 chat 是默认命令。-C 或 --project 指定项目目录；-h 和 --help 输出帮助。skills 命令列出可用 Skill，
 sessions 命令列出已保存的 Session。
@@ -26,22 +26,22 @@ init 会创建 .schemanaut/AGENT.md、.schemanaut/skills/ 和 artifacts/，但�
 模型连接、生成默认值和组织范围的权限策略都是全局设置，保存在 ~/.schemanaut/config.toml 中。
 模型密钥必须是环境变量名或安全存储引用，不能是明文。
 
-    &#47;models
-    &#47;model 1
+    /models
+    /model 1
 
-所选模型属于当前 Session。&#47;model current 显示有效模型信息；/new 会新建隔离 Session，并要求重新选择模型。
+所选模型属于当前 Session。/model current 显示有效模型信息；/new 会新建隔离 Session，并要求重新选择模型。
 项目设置不保存 Endpoint、密钥、模型连接或 Capability 配置。
 
 ## 交互命令
 
-运行 schemanaut chat 后输入 /help，即可查看当前命令摘要。
+使用上方源码命令启动 chat 后输入 /help，即可查看当前命令摘要。
 
 | 命令 | 作用 |
 | --- | --- |
 | /settings [show\|path\|validate] | 查看、定位或校验项目 MCP 设置。 |
 | /config [show\|path\|validate] | 查看、定位或校验脱敏后的全局配置。 |
-| &#47;models | 从全局连接刷新模型。 |
-| &#47;model [list\|current\|序号\|模型名] | 列出、检查或选择 Session 模型。 |
+| /models | 从全局连接刷新模型。 |
+| /model [list\|current\|序号\|模型名] | 列出、检查或选择 Session 模型。 |
 | /new | 新建未选择模型的隔离 Session。 |
 | /resume <session-id> | 恢复 Session 及其模型绑定。 |
 | /sessions | 在交互视图中列出 Session。 |

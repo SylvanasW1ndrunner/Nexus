@@ -22,9 +22,8 @@ Node 22 仍将 node:sqlite 标为实验性模块，但不需要添加实验性 S
 
 创建或选择一个项目：
 
-    schemanaut init ./my-project
-    cd ./my-project
-    schemanaut chat
+    node apps/terminal/dist/cli.js init ./my-project
+    node apps/terminal/dist/cli.js chat -C ./my-project
 
 请在唯一的全局配置文件 ~/.schemanaut/config.toml 中配置模型连接、模型默认值以及组织范围的权限策略。
 模型密钥只能使用环境变量名或安全存储引用，不能写入明文。项目 .schemanaut/settings.json
@@ -32,8 +31,8 @@ Node 22 仍将 node:sqlite 标为实验性模块，但不需要添加实验性 S
 
 随后刷新模型目录并选择生成模型：
 
-    &#47;models
-    &#47;model 1
+    /models
+    /model 1
     解释这个仓库，并找出最安全的下一项改动。
 
 chat 是默认命令，故 schemanaut -C ./my-project 等价于

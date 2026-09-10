@@ -13,8 +13,8 @@ From a repository checkout:
 
 ## Start a project
 
-    schemanaut init ./my-project
-    schemanaut chat -C ./my-project
+    node apps/terminal/dist/cli.js init ./my-project
+    node apps/terminal/dist/cli.js chat -C ./my-project
 
 chat is the default command. The -C or --project option selects a project
 directory; -h and --help print help. The skills command lists available Skills,
@@ -30,24 +30,25 @@ Model connections, model defaults, and organization-wide permission policy
 are global. Keep them in ~/.schemanaut/config.toml. A model secret must be an
 environment-variable name or secure-store reference, not plaintext.
 
-    &#47;models
-    &#47;model 1
+    /models
+    /model 1
 
-The selected model belongs to the current Session. &#47;model current shows the
+The selected model belongs to the current Session. /model current shows the
 effective model information; /new begins an isolated Session and requires a new
 selection. Project settings do not store endpoints, keys, model connections, or
 Capability configuration.
 
 ## Interactive commands
 
-Run schemanaut chat and enter /help for the current command summary.
+After starting chat with the source command above, enter /help for the current
+command summary.
 
 | Command | What it does |
 | --- | --- |
 | /settings [show\|path\|validate] | View, locate, or validate project MCP settings. |
 | /config [show\|path\|validate] | View, locate, or validate the redacted global configuration. |
-| &#47;models | Refresh models from global connections. |
-| &#47;model [list\|current\|number\|model-id] | List, inspect, or choose the Session model. |
+| /models | Refresh models from global connections. |
+| /model [list\|current\|number\|model-id] | List, inspect, or choose the Session model. |
 | /new | Start an isolated Session with no selected model. |
 | /resume <session-id> | Restore a Session and its model binding. |
 | /sessions | List Sessions in the interactive view. |

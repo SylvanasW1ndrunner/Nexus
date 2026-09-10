@@ -26,9 +26,8 @@ startup flag is required.
 
 Create or select a project:
 
-    schemanaut init ./my-project
-    cd ./my-project
-    schemanaut chat
+    node apps/terminal/dist/cli.js init ./my-project
+    node apps/terminal/dist/cli.js chat -C ./my-project
 
 Configure model connections, model defaults, and any organization-wide
 permission policy in the sole global configuration file,
@@ -38,8 +37,8 @@ or secure-store references, never plaintext values. Project
 
 Then refresh the catalog and select a model:
 
-    &#47;models
-    &#47;model 1
+    /models
+    /model 1
     Explain this repository and identify the safest next change.
 
 chat is the default command, so schemanaut -C ./my-project is equivalent to
