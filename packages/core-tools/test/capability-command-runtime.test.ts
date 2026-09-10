@@ -107,6 +107,24 @@ describe('Capability command Host port', () => {
     }
   });
 
+  it('keeps PWD and OLDPWD workspace paths usable while redacting real password environment values', async () => {
+    const workspace = process.cwd(); const previous = dirname(workspace);
+    const secret = 'dummy-environment-password-value';
+    const allowArgv = vi.fn((_input: ProcessArgvPolicyInput) => true);
+    const f = await fixture({ environment: { ...process.env, PWD: workspace, OLDPWD: previous, pWd: workspace, oldPwd: previous, TEST_PASSWORD: secret }, globalPolicy: { mode: 'full-access', revision: 'directory-env.v1', allowArgv } });
+    const intent = await f.port.prepare(f.input(['-e', 'process.stdout.write(process.argv[1] + "\\n" + process.env.TEST_PASSWORD)', workspace]), f.context);
+    expect(allowArgv).toHaveBeenCalledTimes(1);
+    expect(allowArgv.mock.calls[0]?.[0].argv.at(-1) === workspace).toBe(true);
+    const result = await f.port.execute(intent.input, f.execution(intent)) as { process: { processId: string }; spool: { stdout: { text: string } } };
+    const stored = await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8');
+    expect(result.spool.stdout.text.startsWith(workspace + '\n')).toBe(true);
+    expect(stored.startsWith(workspace + '\n')).toBe(true);
+    expect(JSON.stringify(result).includes(secret)).toBe(false); expect(stored.includes(secret)).toBe(false);
+    const redactor = new CommandRedactor({ PWD: workspace, OLDPWD: previous, pWd: workspace, oldPwd: previous, TEST_PASSWORD: secret });
+    expect(redactor.redact(workspace + '\n' + previous).changed).toBe(false);
+    expect(redactor.redact('pwd=' + secret).text).toBe('pwd=*');
+  });
+
   it('bounds projections and redacts split secrets before spool persistence and retention', async () => {
     const secret = 'dummy-private-command-value';
     const f = await fixture({ maxProjectionBytes: 64, environment: { ...process.env, TEST_API_KEY: secret } });
@@ -161,6 +179,10 @@ describe('Capability command Host port', () => {
       "{'Proxy-Authorization':'token " + secret + "','safe':'preserved'}",
       'X-Public: preserved',
       '{\n"Authorization"\n:\n"Basic ' + basic + '"\n}',
+      'Authorization: Digest username="' + secret + '", realm="fixture", nonce="' + suffix + '", response="' + basic + '"\r',
+      'Proxy-Authorization: Custom identity=' + secret + ', proof=' + suffix + ', signature=' + basic + '} ]\r',
+      'Authorization: Custom identity=' + secret + ', proof=' + suffix + ', signature=' + basic,
+      'X-After-Authentication: preserved',
     ].join('\n');
     const path = join(f.root, 'authentication.txt'); await writeFile(path, original);
     const intent = await f.port.prepare(f.input(['-e', 'const data = require("node:fs").readFileSync(process.argv[1]); process.stdout.write(data); process.stderr.write(data);', path]), f.context);
@@ -173,6 +195,7 @@ describe('Capability command Host port', () => {
     for (const output of stored) {
       expect(Buffer.byteLength(output)).toBeLessThanOrEqual(Buffer.byteLength(original));
       expect(output.includes('X-Public: preserved')).toBe(true);
+      expect(output.includes('X-After-Authentication: preserved')).toBe(true);
       expect(JSON.parse(output.split('\n')[6]!)).toEqual({ Authorization: '*', safe: 'preserved' });
     }
   });
@@ -199,7 +222,9 @@ describe('Capability command Host port', () => {
     const environment = { ...process.env, ...Object.fromEntries(Array.from({ length: 12 }, (_, index) => ['TOKEN_' + index, 'E'])) };
     const f = await fixture({ environment });
     const path = join(f.root, 'emit.cjs'); await writeFile(path, 'process.stdout.write("E".repeat(' + size + '))');
-    const intent = await f.port.prepare(f.input([path]), f.context);
+    // The random temp directory may contain the deliberately single-byte secret.
+    // Launch relative to the already-bound cwd so this is an output-bound test.
+    const intent = await f.port.prepare(f.input(['emit.cjs']), f.context);
     const result = await f.port.execute(intent.input, f.execution(intent)) as { status: string; process: { processId: string }; spool: { stdout: { text: string } } };
     const stored = await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8');
     expect(result.status).toBe('ok');

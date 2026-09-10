@@ -19,7 +19,8 @@ export class CommandRedactor {
 
   constructor(environment: NodeJS.ProcessEnv) {
     const values = [...new Set(Object.entries(environment)
-      .filter(([key, value]) => value && credentialEnvironmentKey.test(key))
+      // Shell directory variables are not passwords, including Windows casing.
+      .filter(([key, value]) => value && !/^(?:old)?pwd$/iu.test(key) && credentialEnvironmentKey.test(key))
       .map(([, value]) => value!))].sort((a, b) => b.length - a.length);
     this.redactAll = values.length > 1024 || values.reduce((total, value) => total + value.length, 0) > 65_536;
     this.secrets = values.length && !this.redactAll ? new RegExp(values.map(value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|'), 'gu') : undefined;
@@ -39,6 +40,17 @@ export class CommandRedactor {
     if (this.secrets) {
       this.secrets.lastIndex = 0;
       for (let match = this.secrets.exec(text); match; match = this.secrets.exec(text)) mark(match.index, match[0].length);
+    }
+    // Raw HTTP authentication headers own the entire line: Digest and custom
+    // schemes may include comma-separated auth-params or structural characters.
+    // Quoted JSON keys cannot match this line-anchored, unquoted header prefix.
+    const headers = /^[\t ]*(?:proxy[_-]?)?authorization[\t ]*:[\t ]*/gimu;
+    for (let match = headers.exec(text); match; match = headers.exec(text)) {
+      const start = headers.lastIndex;
+      let end = start;
+      while (end < text.length && text[end] !== '\r' && text[end] !== '\n') end++;
+      mark(start, end - start);
+      headers.lastIndex = end;
     }
     const fields = new RegExp('["\']?(' + credentialFieldSource + ')["\']?\\s*[:=]\\s*', 'giu');
     for (let match = fields.exec(text); match; match = fields.exec(text)) {
