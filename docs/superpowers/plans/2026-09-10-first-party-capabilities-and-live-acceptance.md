@@ -11,6 +11,7 @@
 - Capability 不直接使用 `node:child_process`。命令型能力必须通过 Host-owned `ProcessRuntime` / `SandboxExecutor` 的 argv 执行端口。
 - 不自研跨平台 OS 沙盒。无强隔离时必须准确报告 `ask-unsandboxed` 或 `unavailable`，不能声称已沙盒化。原生 Windows 的自然 root exit 仅报告命令退出；containment 和完整进程树证明为 unverified，取消/终止后无法证明已停止的 descendant 为 unknown，本轮不使用 Job Object。
 - 所有 Tool 使用 `prepare → authorize → schedule → execute → observe`，共享全局权限、批准、审计、取消、恢复、结果保留与 provenance。
+- Task 2 必须执行全仓主动盘点，清理运行时内容安全机制：删除凡是基于 Secret 或 credential 内容进行识别、拒绝或脱敏的路径及其测试；范围包括进程/Capability 运行时、MCP 配置命令参数和 URL 内容拦截、以及盘点发现的 Agent、Provider、Journal、诊断或结果保留路径。保留静态权限 facts、普通大小/取消/生命周期限制、schema 校验，以及 config.toml 的三档权限和企业规则。
 - 功能认知优先，不采用 TDD；各任务实现后运行聚焦静态/冒烟检查，Task 10 统一运行完整测试和真实环境验收。
 - 保留既有未提交工作，不重置、不覆盖无关改动；只提交任务明确列出的文件。
 - 所有提交作者为 Chandler Niu；不要将真实凭据、`.env` 或生产连接信息提交到 Git，这是仓库卫生要求。
@@ -57,32 +58,123 @@
 - `rg -n "Control Plane|Registry|generation|lease|通过|passed" README.md README.zh-CN.md docs/README.md docs/product docs/guides`
 - `git diff --check -- README.md README.zh-CN.md SECURITY.md docs`
 
-## Task 2: 增加安全 argv 进程启动与 Capability 命令 Host Port
+## Task 2: 增加 argv 进程启动与 Capability 命令 Host Port
 
 **Files:**
 
+- Delete: `packages/core-tools/src/command-redaction.ts`
 - Modify: `packages/core-tools/src/sandbox-executor.ts`
 - Modify: `packages/core-tools/src/process-runtime.ts`
 - Modify: `packages/core-tools/src/process-tools.ts`
+- Modify: `packages/core-tools/src/mcp-config-store.ts`
 - Add: `packages/core-tools/src/capability-command-runtime.ts`
 - Modify: `packages/core-tools/src/index.ts`
 - Modify: `packages/core-agent/src/types.ts`
 - Modify: `packages/core-agent/src/tools/tool-invocation-preparer.ts`
 - Modify: `packages/core-tools/test/process-runtime.test.ts`
+- Modify: `packages/core-tools/test/mcp-config-store.test.ts`
 - Add: `packages/core-tools/test/capability-command-runtime.test.ts`
 
 **Requirements:**
 
-1. 为 ProcessRuntime 增加持久化的 argv launch 形式；`NativeSandboxExecutor` 对 argv 使用 `shell:false`，基础 `process_exec` 的用户 shell command 行为保持独立。
+1. 为命令型 Capability 的 ProcessRuntime 增加持久化的 argv launch 形式；`NativeSandboxExecutor` 对该 argv 使用 `shell:false`，基础 `process_exec` 保留用户 shell command 合同，不被改写为 argv-only。
 2. Capability command runtime 只接受已验证 executable、argv、cwd、权限分类和明确路径/host 目标；不接受 shell 片段。
 3. ToolPrepareContext 必须提供 Run policy mode/revision；prepare 固定执行器 identity、该 policy 快照、边界 revision、真实目标和 resource keys；execute 复核后使用同一 ProcessRuntime、取消、deadline、输出上限与 retention。
-4. 提供 PATH 可执行文件发现器并返回 launch descriptor；不得执行外部命令完成静态 probe，不得在诊断中返回完整 PATH 或敏感目录。Windows npm .cmd 必须安全解析为 node 与入口脚本，禁止 shell fallback。
-5. 覆盖引号/空格/控制字符、目标改变、无 sandbox、企业 requireSandbox、自然退出与取消的 Windows unverified/unknown 事实，以及普通有界 spool。不得新增 CommandRedactor、CommandArgumentGuard、argv 凭据拒绝或输出脱敏。
+4. 提供 PATH 可执行文件发现器并返回 launch descriptor；不得执行外部命令完成静态 probe。诊断只返回普通有界字段（例如候选名称、发现状态和 launch descriptor 类型），不根据目录内容作分类或决策。Windows npm .cmd 必须安全解析为 node 与入口脚本，禁止 shell fallback。
+5. 删除既有 `CommandRedactor`、`CommandArgumentGuard`、argv 凭据拒绝和 Capability 专用聚合/脱敏；修改 ProcessRuntime 及测试，恢复 stdout/stderr 的普通 bounded spool。删除 MCP 配置中对命令参数、URL userinfo、URL 查询参数或其内容的凭据/Secret 拦截，并修改 `mcp-config-store.ts` 及其测试。
+6. 执行全仓主动盘点：删除每一条运行时按 Secret/credential 内容识别、拒绝或脱敏的路径和相关测试；不删除静态操作权限 facts、普通大小/取消/生命周期合同、schema 校验，或 config.toml 的 default/auto/full-access 和企业规则。
 
 **Verification:**
 
 - `pnpm --filter @dbagent/core-tools typecheck`
-- `pnpm --filter @dbagent/core-tools test -- capability-command-runtime.test.ts process-runtime.test.ts`
+- `pnpm --filter @dbagent/core-tools test -- capability-command-runtime.test.ts process-runtime.test.ts mcp-config-store.test.ts`
+
+## Task 2B: 全仓运行时内容安全清理
+
+**Files (以当前审计为起点；发现的每个实际运行时路径及其测试都必须补入本任务文件清单):**
+
+- Task 2 负责一次性删除/修改的配套路径：`packages/core-tools/src/command-redaction.ts`、`packages/core-tools/src/process-runtime.ts`、`packages/core-tools/src/mcp-config-store.ts`、`packages/core-tools/test/process-runtime.test.ts`、`packages/core-tools/test/mcp-config-store.test.ts`。
+- Modify: `packages/core-tools/src/process-tools.ts`
+- Modify: `packages/core-tools/src/secure-web-transport.ts`
+- Modify: `packages/core-tools/src/web-tools.ts`
+- Modify: `packages/core-tools/test/web-tools.test.ts`
+- Modify: `packages/agent-host/src/project-settings.ts`
+- Modify: `packages/agent-host/src/project-mcp-config-store.ts`
+- Modify: `packages/agent-host/src/global-config.ts`
+- Modify: `packages/agent-host/src/global-config.schema.json`
+- Modify: `packages/agent-host/test/project-settings.test.ts`
+- Modify: `packages/agent-host/test/global-config.test.ts`
+- Delete: `packages/core-agent/src/redaction.ts`
+- Modify: `packages/core-agent/src/tools/tool-errors.ts`
+- Modify: `packages/core-agent/src/tools/tool-invocation-runtime.ts`
+- Modify: `packages/core-agent/src/capability-control-plane.ts`
+- Modify: `packages/core-agent/src/capability-discovery-manifest.ts`
+- Modify: `packages/core-agent/src/context/prompt-runtime.ts`
+- Modify: `packages/core-agent/src/kernel/runtime-command.ts`
+- Modify: `packages/core-agent/src/events/event-schema-registry.ts`
+- Modify: `packages/core-agent/src/events/sqlite-agent-journal.ts`
+- Modify: `packages/core-agent/test/tool-errors.test.ts`
+- Modify: `packages/core-agent/test/tool-invocation-runtime.test.ts`
+- Modify: `packages/core-agent/test/event-schema-registry.test.ts`
+- Modify: `packages/core-agent/test/capability-control-plane.test.ts`
+- Modify: `packages/core-agent/test/capability-control-plane-faults.test.ts`
+- Modify: `packages/core-agent/test/runtime-command.test.ts`
+- Modify: `packages/core-resource/src/resource-snapshot-store.ts`
+- Modify: `packages/core-resource/src/resource-registry.ts`
+- Modify: `packages/core-resource/test/resource-snapshot-store.test.ts`
+- Modify: `packages/core-resource/test/resource-registry.test.ts`
+- Modify: `packages/shared/src/contracts/validation.ts`
+- Modify: `packages/shared/test/common-contracts.test.ts`
+- Modify: `packages/shared/test/database-contracts.test.ts`
+- Modify: `packages/shared/test/resource-contracts.test.ts`
+- Modify: `packages/shared/test/contract-compatibility.test.ts`
+- Modify: `packages/core-db/src/connection-store.ts`
+- Modify: `packages/core-db/src/postgres-errors.ts`
+- Modify: `packages/core-db/src/database-access-runtime.ts`
+- Modify: `packages/core-db/src/connector-registry.ts`
+- Modify: `packages/core-db/test/connection-store.test.ts`
+- Modify: `packages/core-db/test/postgres-errors.test.ts`
+- Modify: `packages/core-db/test/database-access-runtime.test.ts`
+- Modify: `packages/database-capability/src/types.ts`
+- Modify: `packages/database-capability/src/database-capability-module.ts`
+- Modify: `packages/database-capability/src/ai-sql-tools.ts`
+- Modify: `packages/database-capability/src/tool-generation.ts`
+- Modify: `packages/database-capability/src/agent-knowledge-projection.ts`
+- Modify: `packages/database-capability/test/public-boundary.test.ts`
+- Modify: `packages/database-capability/test/database-capability-module.test.ts`
+- Modify: `packages/database-capability/test/database-capability-schema-publication.test.ts`
+- Delete: `packages/core-llm/src/known-secret-sanitizer.ts`
+- Modify: `packages/core-llm/src/provider-plugin-registry.ts`
+- Modify: `packages/core-llm/src/connection-resolver.ts`
+- Modify: `packages/core-llm/src/anthropic-provider.ts`
+- Modify: `packages/core-llm/src/openai-compatible-provider.ts`
+- Modify: `packages/core-llm/src/openai-responses-provider.ts`
+- Modify: `packages/core-llm/src/stream-safety.ts`
+- Modify: `packages/core-llm/src/telemetry.ts`
+- Modify: `packages/core-llm/src/index.ts`
+- Modify: `packages/core-llm/test/security/llm-security.test.ts`
+- Modify: `packages/core-llm/test/stream-safety.test.ts`
+- Modify: `packages/core-llm/test/connection-resolver.test.ts`
+- Modify: `packages/core-llm/test/provider-plugin-registry.test.ts`
+
+**Requirements:**
+
+1. 对 core-tools、core-agent、shared、core-llm 和其调用方执行全仓主动盘点；删除运行时按 Secret/credential 的字段名、参数、URL、值或输出内容进行识别、拒绝、掩码、替换、脱敏或“安全摘要”的每一条链路。
+2. core-tools 清理 CommandRedactor、CommandArgumentGuard、argv 拒绝、Capability 专用聚合/脱敏，以及 MCP 配置对命令参数、URL userinfo、URL 查询参数和内容的凭据/Secret 拦截；同时清理 secure-web/web 的 credential-content gate。stdout/stderr 回到普通 bounded spool，HTTP 的普通协议、目标和大小校验保留。
+3. agent-host 清理项目 MCP settings/schema/store 与 global config/schema 对明文 key 或 credential 内容的拒绝、掩码和隐藏治理；稳定摘要 API 可以保留，且不强制显示原始值。全局 config.toml 的模型、默认参数、三档权限和企业规则合同保留。
+4. core-agent 清理 redaction、Tool error、progress、Tool invocation、Capability diagnostics/discovery、runtime command、prompt、event schema 和 SQLite Journal 路径的内容识别、脱敏与拒绝，使原始外部错误和结果只受普通大小、取消和生命周期合同约束。
+5. shared 清理 assertNoSecretMaterial、模式匹配和 credential-content schema 拒绝；保留不依赖内容敏感性判断的结构、类型和范围 schema 校验。
+6. core-resource 清理 snapshot/registry 对间接内容的 Secret/credential scanner；保留资源标识、版本、生命周期和结构校验。
+7. core-db 清理 connection error 与 credential URL/header 的内容 guard；database-capability 清理 candidate、profile、scalar、URL 和 error 的内容隐藏。保留连接目标、普通协议、结构 schema、操作权限与非内容敏感性错误分类。
+8. core-llm 清理 known-secret sanitizer、Provider/resolver/plugin、stream error 和 telemetry 的内容脱敏链；Provider 错误和外部输出可按普通大小/生命周期合同流入 Agent 结果与本地 retention。
+9. C 类稳定 typed 错误和稳定摘要可以保留，只要它们不根据 Secret/credential 内容识别、替换或拒绝；不得借此重新引入内容安全治理。
+10. 不移除静态操作权限 facts、普通大小/取消/生命周期限制、非内容敏感性 schema 校验，或全局 config.toml 的 default/auto/full-access 三档和企业规则。开发和发布脚本中“不提交真实 key”的仓库卫生扫描保留，不得将其改写成产品安全保证。
+
+**Verification:**
+
+- 针对本任务列出的每个包运行聚焦 typecheck 与变更测试。
+- 审计所有运行时命中，确认不存在按 Secret/credential 内容识别、拒绝或脱敏的路径；审计结果必须逐文件列出删除或保留理由。
+- 验证静态权限 facts、普通 spool 上限/取消/生命周期与结构 schema 校验仍有效。
 
 ## Task 3: 建立第一方 Capability 公共骨架并实现 Git 与 Forge
 

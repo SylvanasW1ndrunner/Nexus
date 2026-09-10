@@ -18,5 +18,6 @@ Capability 是否可信。Tool 结果、stdout/stderr、Provider 错误、Journa
 
 ## 执行
 
-所有 Tool 经过 prepare、authorize、schedule、execute、observe。命令型 Tool 使用 Host-owned argv
-Port；不使用 shell fallback。Capability 按任务动态发现，但与基础 Tool 共用同一授权和执行主干。
+所有 Tool 经过 prepare、authorize、schedule、execute、observe。只有命令型 Capability 使用 Host-owned
+argv Port，且不使用 shell fallback。基础 process_exec 保留用户提供 shell command 的执行合同；Capability
+按任务动态发现，但与基础 Tool 共用同一授权和执行主干。

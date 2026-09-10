@@ -17,8 +17,8 @@
 若配置 require_sandbox，它是全局组织执行规则，不承诺识别敏感信息或保证第三方工具安全。执行 Host
 无法提供必需沙盒时报告 unavailable；策略允许用户决定未沙盒执行时报告 ask-unsandboxed。
 
-在没有强操作系统隔离的原生 Windows 上，根命令可以报告退出结果。containment 和完整子孙进程终止
-可能是 unverified 或 unknown。
+在没有强操作系统隔离的原生 Windows 上，已批准 root 命令的自然退出可以报告命令退出，但 containment
+和完整 process-tree proof 必须是 unverified。取消或终止时，无法证明已停止的 descendant 必须是 unknown。
 
 ## 外部状态和输出
 

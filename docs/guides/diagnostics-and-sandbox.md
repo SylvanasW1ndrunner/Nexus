@@ -21,9 +21,10 @@ safe. When an execution Host cannot provide a required sandbox, it reports
 unavailable; when policy permits an unsandboxed user decision, it reports
 ask-unsandboxed.
 
-On native Windows without strong operating-system isolation, a root command can
-report its exit result. Containment and complete descendant termination may be
-unverified or unknown.
+On native Windows without strong operating-system isolation, an approved root
+command's natural exit can report its command exit result, but containment and
+complete process-tree proof are unverified. During cancellation or termination,
+descendants whose stop cannot be proved are unknown.
 
 ## External state and output
 

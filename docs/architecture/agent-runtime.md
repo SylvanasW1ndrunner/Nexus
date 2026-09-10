@@ -17,5 +17,6 @@ Tool 结果、命令 stdout/stderr、Provider 错误和本地 retention 仅受�
 ## 进程和沙盒
 
 require_sandbox 若配置，是全局企业执行规则。Host 无法提供必需沙盒时返回 unavailable；策略允许用户
-决定未沙盒执行时返回 ask-unsandboxed。原生 Windows 无强隔离时，自然退出可报告退出结果，而
-containment 和完整子孙进程终止可能为 unverified 或 unknown。
+决定未沙盒执行时返回 ask-unsandboxed。原生 Windows 无强隔离时，已批准 root 命令的自然退出可以报告
+命令退出，但 containment 和完整 process-tree proof 必须为 unverified。取消或终止时，如无法证明
+descendant 已停止，则必须为 unknown。
