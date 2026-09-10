@@ -78,73 +78,37 @@ describe('McpConfigStore', () => {
     ]);
   });
 
-  it('rejects sensitive env values unless they are stored as keychain refs', async () => {
+  it('round-trips string and reference MCP environment values without content inference', async () => {
     const store = new McpConfigStore(await configPath());
-
-    await expect(
-      store.upsert({
-        id: 'bad',
-        name: 'Bad Server',
-        command: 'node',
-        env: {
-          API_KEY: 'plain-secret-value',
-        },
-      }),
-    ).rejects.toThrow('must be stored as a keychain ref');
-
-    await expect(
-      store.upsert({
-        id: 'also-bad',
-        name: 'Also Bad',
-        command: 'node',
-        env: {
-          SAFE_NAME: ['sk', 'secretsecretsecret'].join('-'),
-        },
-      }),
-    ).rejects.toThrow('must be stored as a keychain ref');
-
-    for (const name of ['DATABASE_URL', 'DB_DSN', 'CONNECTION_STRING', 'REDIS_URL']) {
-      await expect(
-        store.upsert({
-          id: `bad-${name.toLowerCase()}`,
-          name: 'Bad DSN',
-          command: 'node',
-          env: { [name]: 'postgresql://localhost/example' },
-        }),
-      ).rejects.toThrow('must be stored as a keychain ref');
-    }
-
-    await expect(
-      store.upsert({
-        id: 'embedded-password',
-        name: 'Embedded password',
-        command: 'node',
-        env: {
-          SAFE_NAME: 'postgresql://app:plaintext-password@db.example.com/example',
-        },
-      }),
-    ).rejects.toThrow('must be stored as a keychain ref');
+    const server = await store.upsert({
+      id: 'literal-env',
+      name: 'Literal environment',
+      command: 'node',
+      env: {
+        API_KEY: 'fixture-value',
+        DATABASE_URL: 'postgresql://app:pass@db.example.test/example',
+        REFERENCE: { ref: 'mcp:literal-env:reference' },
+      },
+    });
+    expect(server.env).toEqual({
+      API_KEY: 'fixture-value',
+      DATABASE_URL: 'postgresql://app:pass@db.example.test/example',
+      REFERENCE: { ref: 'mcp:literal-env:reference' },
+    });
+    await expect(store.list()).resolves.toEqual([expect.objectContaining({ env: server.env })]);
   });
 
-  it('rejects inline credentials in stdio commands and arguments', async () => {
+  it('retains literal stdio commands and arguments', async () => {
     const store = new McpConfigStore(await configPath());
-
-    await expect(
-      store.upsert({
-        id: 'dsn-arg',
-        name: 'DSN argument',
-        command: 'node',
-        args: ['server.mjs', 'postgresql://app:plaintext@db.example.com/example'],
-      }),
-    ).rejects.toThrow('must not contain inline credentials');
-    await expect(
-      store.upsert({
-        id: 'password-flag',
-        name: 'Password flag',
-        command: 'node',
-        args: ['server.mjs', '--password=plaintext'],
-      }),
-    ).rejects.toThrow('must not contain inline credentials');
+    await expect(store.upsert({
+      id: 'literal-args',
+      name: 'Literal arguments',
+      command: 'node --token=fixture',
+      args: ['server.mjs', 'postgresql://app:pass@db.example.test/example', '--password=fixture'],
+    })).resolves.toMatchObject({
+      command: 'node --token=fixture',
+      args: ['server.mjs', 'postgresql://app:pass@db.example.test/example', '--password=fixture'],
+    });
   });
 
   it('validates stdio commands and remote MCP URLs', () => {
@@ -200,20 +164,18 @@ describe('McpConfigStore', () => {
     ).toThrow('URL must use http or https');
   });
 
-  it('rejects plaintext remote credentials and invalid HTTP header names', () => {
-    expect(() =>
-      normalizeServerInput(
+  it('accepts literal remote headers and still validates header syntax', () => {
+    expect(normalizeServerInput(
         {
           id: 'plaintext-auth',
           name: 'Plaintext Auth',
           transport: 'streamable-http',
           url: 'https://mcp.example.com/mcp',
-          headers: { Authorization: 'Bearer plaintext-secret' },
+          headers: { Authorization: 'Bearer fixture-value' },
         },
         '2026-07-25T10:00:00.000Z',
         'fallback',
-      ),
-    ).toThrow('must be stored as a keychain ref');
+      )).toMatchObject({ headers: { Authorization: 'Bearer fixture-value' } });
 
     expect(() =>
       normalizeServerInput(
@@ -230,7 +192,7 @@ describe('McpConfigStore', () => {
     ).toThrow('Invalid MCP HTTP header name');
   });
 
-  it('rejects remote URL credentials and plaintext non-loopback transport', () => {
+  it('retains remote URL userinfo and query strings while preserving transport policy', () => {
     const normalizeRemote = (url: string) =>
       normalizeServerInput(
         {
@@ -243,17 +205,10 @@ describe('McpConfigStore', () => {
         'fallback',
       );
 
-    expect(() => normalizeRemote('https://user:password@mcp.example.com/mcp')).toThrow(
-      'must not contain userinfo credentials',
-    );
-    expect(() => normalizeRemote('https://mcp.example.com/mcp?access_token=plaintext')).toThrow(
-      'must not contain credential query parameters',
-    );
-    expect(() =>
-      normalizeRemote(
-        'https://mcp.example.com/mcp?dsn=postgresql%3A%2F%2Fapp%3Apassword%40db.example.com%2Fapp',
-      ),
-    ).toThrow('must not contain credential query parameters');
+    expect(normalizeRemote('https://user:password@mcp.example.com/mcp').url).toBe('https://user:password@mcp.example.com/mcp');
+    expect(normalizeRemote('https://mcp.example.com/mcp?access_token=plaintext').url).toBe('https://mcp.example.com/mcp?access_token=plaintext');
+    expect(normalizeRemote('https://mcp.example.com/mcp?dsn=postgresql%3A%2F%2Fapp%3Apassword%40db.example.com%2Fapp').url)
+      .toBe('https://mcp.example.com/mcp?dsn=postgresql%3A%2F%2Fapp%3Apassword%40db.example.com%2Fapp');
     expect(() => normalizeRemote('http://mcp.example.com/mcp')).toThrow(
       'must use HTTPS unless it targets loopback',
     );

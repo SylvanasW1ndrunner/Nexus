@@ -182,7 +182,7 @@ async function classifyCommand(command: string, externalWrite: boolean, raw: Por
     network: declared.network === true || hosts.length > 0 || /(?:curl|wget|ssh|git\s+(?:clone|fetch|pull|push)|npm\s+(?:install|publish)|pnpm\s+(?:install|add)|pip\s+install|aws|gcloud|kubectl)\b/iu.test(command),
     externalWrite: declared.externalWrite === true || externalWrite || outside,
     destructive: declared.destructive === true || /\b(?:rm|rmdir|del|erase|format|drop|truncate|remove-item)\b/iu.test(command),
-    credentials: declared.credentials === true || /\b(?:password|credential|secret|api[_-]?key|login|token)\b/iu.test(command),
+    credentials: declared.credentials === true,
     admin: declared.admin === true || /\b(?:sudo|su|runas|administrator|elevated)\b/iu.test(command),
     // Unparsed arguments may be paths, config indirection or shell expansion.
     // Recognized canonical targets never claim to exhaust command semantics.

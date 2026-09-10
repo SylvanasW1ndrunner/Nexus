@@ -4,7 +4,6 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PreparedToolIntent, ToolExecuteContext, ToolPrepareContext } from '@dbagent/core-agent';
 import { CapabilityCommandRuntime, PathExecutableDiscovery, ProcessRuntime, prepareProcessPath, type CapabilityCommandInput, type ExecutableLaunchDescriptor, type ProcessArgvPolicyInput, type ProcessRuntimeOptions } from '../src/index.js';
-import { CommandRedactor } from '../src/command-redaction.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { await Promise.allSettled(cleanups.splice(0).map(cleanup => cleanup())); });
@@ -96,81 +95,33 @@ describe('Capability command Host port', () => {
     await expect(f.port.prepare(f.input(['status'], f.executable), f.context)).rejects.toThrow('policy rejects');
   });
 
-  it('rejects NUL and explicit secrets without echoing arguments', async () => {
-    const f = await fixture({ environment: { ...process.env, TEST_API_KEY: 'dummy-private-command-value' } });
-    for (const args of [['a\0b'], ['--token', 'dummy-private-command-value'], ['dummy-private-command-value']]) {
-      let rejected = false; let diagnostic = '';
-      try { await f.port.prepare(f.input(args), f.context); }
-      catch (error) { rejected = true; diagnostic = error instanceof Error ? error.message : ''; }
-      expect(rejected).toBe(true);
-      expect(diagnostic.includes('dummy-private-command-value')).toBe(false);
-    }
+  it('rejects NUL argv values while preserving the enterprise argv hook', async () => {
+    const allowArgv = vi.fn(() => true);
+    const f = await fixture({ globalPolicy: { mode: 'full-access', revision: 'nul.v1', allowArgv } });
+    await expect(f.port.prepare(f.input(['a\0b']), f.context)).rejects.toThrow('arguments exceed');
+    expect(allowArgv).not.toHaveBeenCalled();
   });
 
-  it('admits ordinary paths and numeric options despite short environment credentials but rejects exact credentials', async () => {
-    for (const secret of ['E', '1']) {
-      const allowArgv = vi.fn((_input: ProcessArgvPolicyInput) => true);
-      const f = await fixture({ environment: { ...process.env, TOKEN: secret }, globalPolicy: { mode: 'full-access', revision: 'short-secret.v1', allowArgv } });
-      const argv = [join(f.root, 'Example', 'README.md'), '--limit', '100', 'report-2021'];
-      await f.port.prepare(f.input(argv), f.context);
-      expect(allowArgv).toHaveBeenCalledTimes(1);
-      expect(JSON.stringify(allowArgv.mock.calls[0]?.[0].argv) === JSON.stringify(argv)).toBe(true);
-      allowArgv.mockClear();
-      let rejected = false; let safeDiagnostic = false;
-      try { await f.port.prepare(f.input([secret]), f.context); }
-      catch (error) { rejected = true; safeDiagnostic = error instanceof Error && error.message === 'Credentials must be supplied through the external CLI environment, not command arguments.'; }
-      expect(rejected).toBe(true); expect(safeDiagnostic).toBe(true); expect(allowArgv).toHaveBeenCalledTimes(0);
-      expect(new CommandRedactor({ TOKEN: secret }).redact('prefix-' + secret + '-suffix').text.includes(secret)).toBe(false);
-    }
-  });
-
-  it('uses UTF-8 length for environment credential matching without relaxing explicit credential syntax', async () => {
-    for (const secret of ['abcdefg', 'abcdefgh', '密钥', '密码钥']) {
-      const allowArgv = vi.fn(() => true);
-      const f = await fixture({ environment: { ...process.env, TOKEN: secret }, globalPolicy: { mode: 'full-access', revision: 'credential-bytes.v1', allowArgv } });
-      let embeddedRejected = false;
-      try { await f.port.prepare(f.input(['prefix-' + secret + '-suffix']), f.context); } catch { embeddedRejected = true; }
-      expect(embeddedRejected).toBe(Buffer.byteLength(secret) >= 8);
-      allowArgv.mockClear();
-      for (const argv of [[secret], ['--token', secret], ['--password=' + secret], ['pwd=' + secret], ['Authorization: Basic ' + secret], ['https://user:' + secret + '@example.test']]) {
-        let rejected = false; let safeDiagnostic = false;
-        try { await f.port.prepare(f.input(argv), f.context); }
-        catch (error) { rejected = true; safeDiagnostic = error instanceof Error && error.message === 'Credentials must be supplied through the external CLI environment, not command arguments.'; }
-        expect(rejected).toBe(true); expect(safeDiagnostic).toBe(true);
-      }
-      expect(allowArgv).toHaveBeenCalledTimes(0);
-    }
-  });
-
-  it('keeps PWD and OLDPWD workspace paths usable while redacting real password environment values', async () => {
-    const workspace = process.cwd(); const previous = dirname(workspace);
-    const secret = 'dummy-environment-password-value';
+  it('admits literal credential-shaped argv and streams their output without rewriting it', async () => {
     const allowArgv = vi.fn((_input: ProcessArgvPolicyInput) => true);
-    const f = await fixture({ environment: { ...process.env, PWD: workspace, OLDPWD: previous, pWd: workspace, oldPwd: previous, TEST_PASSWORD: secret }, globalPolicy: { mode: 'full-access', revision: 'directory-env.v1', allowArgv } });
-    const intent = await f.port.prepare(f.input(['-e', 'process.stdout.write(process.argv[1] + "\\n" + process.env.TEST_PASSWORD)', workspace]), f.context);
-    expect(allowArgv).toHaveBeenCalledTimes(1);
-    expect(allowArgv.mock.calls[0]?.[0].argv.at(-1) === workspace).toBe(true);
+    const f = await fixture({ globalPolicy: { mode: 'full-access', revision: 'literal-argv.v1', allowArgv } });
+    const literal = ['--token', 'fixture-value', 'https://user:pass@example.test/path'];
+    const intent = await f.port.prepare(f.input(['-e', 'process.stdout.write(process.argv.slice(1).join("\\n"))', '--', ...literal]), f.context);
     const result = await f.port.execute(intent.input, f.execution(intent)) as { process: { processId: string }; spool: { stdout: { text: string } } };
+    expect(allowArgv).toHaveBeenCalledWith(expect.objectContaining({ argv: ['-e', 'process.stdout.write(process.argv.slice(1).join("\\n"))', '--', ...literal] }));
     const stored = await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8');
-    expect(result.spool.stdout.text.startsWith(workspace + '\n')).toBe(true);
-    expect(stored.startsWith(workspace + '\n')).toBe(true);
-    expect(JSON.stringify(result).includes(secret)).toBe(false); expect(stored.includes(secret)).toBe(false);
-    const redactor = new CommandRedactor({ PWD: workspace, OLDPWD: previous, pWd: workspace, oldPwd: previous, TEST_PASSWORD: secret });
-    expect(redactor.redact(workspace + '\n' + previous).changed).toBe(false);
-    expect(redactor.redact('pwd=' + secret).text).toBe('pwd=*');
+    expect(result.spool.stdout.text).toBe(literal.join('\n'));
+    expect(stored).toBe(literal.join('\n'));
   });
 
-  it('bounds projections and redacts split secrets before spool persistence and retention', async () => {
-    const secret = 'dummy-private-command-value';
-    const f = await fixture({ maxProjectionBytes: 64, environment: { ...process.env, TEST_API_KEY: secret } });
-    const source = 'process.stdout.write(process.env.TEST_API_KEY.slice(0, 8)); setTimeout(() => { process.stdout.write(process.env.TEST_API_KEY.slice(8)); process.stdout.write("x".repeat(5000)); }, 10)';
+  it('bounds projections while retaining ordinary spool output', async () => {
+    const f = await fixture({ maxProjectionBytes: 64 });
+    const source = 'process.stdout.write("first-chunk"); setTimeout(() => { process.stdout.write("x".repeat(5000)); }, 10)';
     const intent = await f.port.prepare(f.input(['-e', source]), f.context);
     const result = await f.port.execute(intent.input, f.execution(intent)) as { process: { processId: string; output: { stdout: { truncated: boolean } } }; spool: { stdout: { text: string } } };
     expect(result.process.output.stdout.truncated).toBe(true);
-    expect(result.spool.stdout.text.startsWith('*')).toBe(true);
+    expect(result.spool.stdout.text.startsWith('first-chunk')).toBe(true);
     expect(result.spool.stdout.text.length).toBeGreaterThan(5000);
-    expect(JSON.stringify(result).includes(secret)).toBe(false);
-    expect((await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8')).includes(secret)).toBe(false);
   });
 
   it('does not start after an expired deadline', async () => {
@@ -179,7 +130,7 @@ describe('Capability command Host port', () => {
     await expect(f.port.execute(intent.input, f.execution(intent, { deadline: new Date(0).toISOString() }))).rejects.toThrow('deadline expired');
   });
 
-  it('redacts quoted credentials in real command output before payload and spool retention', async () => {
+  it('retains argv output unchanged in payload and durable spool', async () => {
     const f = await fixture();
     const secret = 'dummy-quoted-credential-value';
     const original = [JSON.stringify({ password: secret, nested: { token: secret } }), "{'password':'" + secret + "'}", 'password="' + secret + '"', "token='" + secret + "'", 'api_key=' + secret, 'Bearer ' + secret, 'https://user:' + secret + '@example.test/path'].join('\n');
@@ -187,84 +138,12 @@ describe('Capability command Host port', () => {
     const intent = await f.port.prepare(f.input(['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]))', inputPath]), f.context);
     const result = await f.port.execute(intent.input, f.execution(intent)) as { process: { processId: string }; spool: { stdout: { text: string } } };
     const stored = await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8');
-    // Boolean assertions ensure a redaction regression never prints credential text.
-    expect(JSON.stringify(result).includes(secret)).toBe(false); expect(stored.includes(secret)).toBe(false);
-    expect(Buffer.byteLength(stored)).toBeLessThanOrEqual(Buffer.byteLength(original));
-    expect(JSON.parse(result.spool.stdout.text.split('\n')[0]!)).toEqual({ password: '*', nested: { token: '*' } });
+    expect(result.spool.stdout.text).toBe(original);
+    expect(stored).toBe(original);
     for (const value of original.split('\n')) {
-      let rejected = false;
-      try { await f.port.prepare(f.input([value]), f.context); } catch { rejected = true; }
-      expect(rejected).toBe(true);
+      await expect(f.port.prepare(f.input([value]), f.context)).resolves.toBeDefined();
     }
   });
-
-  it('masks complete authentication headers and structured values in real payloads and both spools', async () => {
-    const f = await fixture();
-    const secret = 'dummy-auth-header-value';
-    const basic = Buffer.from('fixture-user:' + secret).toString('base64');
-    const suffix = 'dummy-auth-tail-value';
-    const original = [
-      'Authorization: Basic ' + basic,
-      'Proxy-Authorization: token ' + secret,
-      'Authorization=Custom-Scheme ' + secret + ' ' + suffix,
-      'Proxy-Authorization: "Basic ' + basic + '"',
-      "Authorization: 'Custom-Scheme " + secret + "'",
-      'Authorization: Basic "' + secret + ',' + suffix + '"',
-      JSON.stringify({ Authorization: 'Basic ' + basic, safe: 'preserved' }),
-      "{'Proxy-Authorization':'token " + secret + "','safe':'preserved'}",
-      'X-Public: preserved',
-      '{\n"Authorization"\n:\n"Basic ' + basic + '"\n}',
-      'Authorization: Digest username="' + secret + '", realm="fixture", nonce="' + suffix + '", response="' + basic + '"\r',
-      'Proxy-Authorization: Custom identity=' + secret + ', proof=' + suffix + ', signature=' + basic + '} ]\r',
-      'Authorization: Custom identity=' + secret + ', proof=' + suffix + ', signature=' + basic,
-      'X-After-Authentication: preserved',
-    ].join('\n');
-    const path = join(f.root, 'authentication.txt'); await writeFile(path, original);
-    const intent = await f.port.prepare(f.input(['-e', 'const data = require("node:fs").readFileSync(process.argv[1]); process.stdout.write(data); process.stderr.write(data);', path]), f.context);
-    const result = await f.port.execute(intent.input, f.execution(intent)) as { process: { processId: string }; spool: { stdout: { text: string } } };
-    const stored = await Promise.all(['stdout.log', 'stderr.log'].map(file => readFile(join(f.root, '.spool', result.process.processId, file), 'utf8')));
-    for (const value of [secret, basic, suffix]) {
-      expect(JSON.stringify(result).includes(value)).toBe(false);
-      expect(stored.some(output => output.includes(value))).toBe(false);
-    }
-    for (const output of stored) {
-      expect(Buffer.byteLength(output)).toBeLessThanOrEqual(Buffer.byteLength(original));
-      expect(output.includes('X-Public: preserved')).toBe(true);
-      expect(output.includes('X-After-Authentication: preserved')).toBe(true);
-      expect(JSON.parse(output.split('\n')[6]!)).toEqual({ Authorization: '*', safe: 'preserved' });
-    }
-  });
-
-  it('rejects split and assigned long credential flags before an intent or policy input exists', async () => {
-    const allowArgv = vi.fn(() => true);
-    const f = await fixture({ globalPolicy: { mode: 'full-access', revision: 'credential-flags.v1', allowArgv } });
-    const secret = 'dummy-split-flag-value';
-    for (const flag of ['--access-token', '--refresh-token', '--session-token', '--credentials', '--connection-string', '--database-url', '--db-url', '--dsn', '--proxy-authorization', '--authorization', '--api-key', '--passwd', '--pwd', '--credential', '--password', '--secret', '--token']) {
-      for (const argv of [[flag, secret], [flag + '=' + secret]]) {
-        let rejected = false; let diagnostic = '';
-        try { await f.port.prepare(f.input(argv), f.context); }
-        catch (error) { rejected = true; diagnostic = error instanceof Error ? error.message : ''; }
-        expect(rejected).toBe(true); expect(diagnostic.includes(secret)).toBe(false);
-      }
-    }
-    expect(allowArgv).toHaveBeenCalledTimes(0);
-    await expect(f.port.prepare(f.input(['-p', '5432']), f.context)).resolves.toBeDefined();
-    expect(allowArgv).toHaveBeenCalledTimes(1);
-    await expect(access(join(f.root, '.spool'))).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-
-  it.each([16, 8 * 1024 * 1024])('never expands repeated short environment secrets at %i raw bytes', async size => {
-    const environment = { ...process.env, ...Object.fromEntries(Array.from({ length: 12 }, (_, index) => ['TOKEN_' + index, 'E'])) };
-    const f = await fixture({ environment });
-    const path = join(f.root, 'emit.cjs'); await writeFile(path, 'process.stdout.write("E".repeat(' + size + '))');
-    // Keep this output-bound fixture independent of random temp-path spelling.
-    const intent = await f.port.prepare(f.input(['emit.cjs']), f.context);
-    const result = await f.port.execute(intent.input, f.execution(intent)) as { status: string; process: { processId: string }; spool: { stdout: { text: string } } };
-    const stored = await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8');
-    expect(result.status).toBe('ok');
-    expect(stored.includes('E')).toBe(false); expect(stored).toBe('*');
-    expect(Buffer.byteLength(result.spool.stdout.text)).toBeLessThanOrEqual(size);
-  }, 20_000);
 
   it.skipIf(process.platform !== 'win32')('retains unknown outcome on native Windows cancellation', async () => {
     const f = await fixture();
@@ -340,23 +219,5 @@ describe('static PATH discovery', () => {
     const found = await discovery.discover('tsc'); if (found.status !== 'available') throw new Error('Installed workspace TypeScript unavailable.');
     const intent = await f.port.prepare(f.input(['--version'], found.launch), f.context);
     await expect(f.port.execute(intent.input, f.execution(intent))).resolves.toMatchObject({ status: 'ok', spool: { stdout: { text: expect.stringMatching(/^Version \d/u) } } });
-  });
-});
-
-describe('nonexpanding command redaction', () => {
-  it('bounds a maximum-sized quoted credential without regex-stack or output growth', () => {
-    const prefix = '{"password":"'; const suffix = '"}';
-    const input = prefix + 'x'.repeat(8 * 1024 * 1024 - prefix.length - suffix.length) + suffix;
-    const result = new CommandRedactor({}).redact(input);
-    expect(result.changed).toBe(true); expect(result.text).toBe('{"password":"*"}');
-  });
-
-  it('handles overlapping duplicate short secrets, quoted JSON and marker-like values from original text', () => {
-    const redactor = new CommandRedactor({ TOKEN_1: 'E', TOKEN_2: 'E', TOKEN_3: '[REDACTED]', TOKEN_4: '*' });
-    const input = 'E'.repeat(16) + ' [REDACTED] * ' + JSON.stringify({ password: 'dummy-secret' });
-    const result = redactor.redact(input);
-    expect(result.changed).toBe(true);
-    expect(Buffer.byteLength(result.text)).toBeLessThanOrEqual(Buffer.byteLength(input));
-    expect(result.text.includes('dummy-secret')).toBe(false);
   });
 });

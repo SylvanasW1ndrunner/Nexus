@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { RunPolicySnapshot } from '@dbagent/core-agent';
 import { executablePolicyName, validateExecutableDescriptor } from './executable-discovery.js';
-import { CommandArgumentGuard, CommandRedactor } from './command-redaction.js';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { constants } from 'node:fs';
 import { appendFile, lstat, mkdir, open, opendir, realpath, rename, stat, writeFile } from 'node:fs/promises';
@@ -59,7 +58,6 @@ type ProcessRecord = {
   stopReason?: 'timed_out' | 'terminated'; stopPromise?: Promise<void>; terminationFailure?: boolean;
   terminationDrain?: Promise<void>; rootClosed?: boolean;
   confirmationPromise?: Promise<void>; confirmationDrain?: Promise<void>;
-  capabilityOutput?: { stdout: Buffer[]; stderr: Buffer[] };
   lifecycle?: Promise<void>; resolveLifecycle?: () => void; exitStatus?: ProcessRuntimeStatus; outputReadable?: boolean; metadataFailed?: boolean;
   timeout?: ReturnType<typeof setTimeout>; idle?: ReturnType<typeof setTimeout>;
   parentSignal?: AbortSignal; abortListener?: () => void; done: Promise<void>; resolveDone: () => void;
@@ -77,8 +75,6 @@ export class ProcessRuntime {
   private readonly executor: SandboxExecutor;
   private readonly policy: ProcessGlobalPolicy;
   private readonly environment: NodeJS.ProcessEnv;
-  private readonly commandRedactor: CommandRedactor;
-  private readonly commandArgumentGuard: CommandArgumentGuard;
   private readonly now: () => Date;
   private readonly createProcessId: () => string;
   private readonly limits: ProcessRuntimeLimits;
@@ -98,8 +94,6 @@ export class ProcessRuntime {
     this.createProcessId = options.createProcessId ?? randomUUID;
     this.policy = Object.freeze({ ...(options.globalPolicy ?? { revision: 'process-global-default.v1', mode: 'default' as const }), removeEnvironmentVariables: Object.freeze([...(options.globalPolicy?.removeEnvironmentVariables ?? [])]) });
     this.environment = inheritedProcessEnvironment({ ...(options.environment ?? process.env) }, this.policy);
-    this.commandRedactor = new CommandRedactor(this.environment);
-    this.commandArgumentGuard = new CommandArgumentGuard(this.environment);
     this.executor = options.executor ?? new NativeSandboxExecutor(options.hostId ?? 'local', async child => {
       await terminateProcessTree(child);
     });
@@ -123,7 +117,6 @@ export class ProcessRuntime {
     if (launch.kind === 'shell') requiredText(launch.command, 'command', 16_384);
     else if (launch.kind === 'argv') {
       if (!Array.isArray(launch.argv) || launch.argv.length > 256 || launch.argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) || Buffer.byteLength(JSON.stringify(launch.argv)) > 65_536) throw new ProcessRuntimeError('invalid_argument', 'Command arguments exceed the safe launch bounds.');
-      if (launch.argv.some(arg => this.commandArgumentGuard.rejects(arg))) throw new ProcessRuntimeError('invalid_argument', 'Credentials must be supplied through the external CLI environment, not command arguments.');
       try { await validateExecutableDescriptor(launch.executable); } catch { throw new ProcessRuntimeError('target_changed', 'Executable identity is unavailable or changed.'); }
     } else throw new ProcessRuntimeError('invalid_argument', 'Unsupported process launch form.');
     const allowed = launch.kind === 'shell' ? this.policy.allowCommand?.(launch.command) ?? true
@@ -197,7 +190,6 @@ export class ProcessRuntime {
       let resolveDone = () => {};
       const done = new Promise<void>(resolve => { resolveDone = resolve; });
       record = { processId, owner: pickOwner(input), runtimeId: this.runtimeId, directory, stdoutPath: join(directory, 'stdout.log'), stderrPath: join(directory, 'stderr.log'), stdoutBytes: 0, stderrBytes: 0, reservedBytes: 0, stdoutWrite: Promise.resolve(), stderrWrite: Promise.resolve(), metadataWrite: Promise.resolve(), status: 'running', exitCode: null, signal: null, startedAt: this.now().toISOString(), done, resolveDone, finalized: false, revision: 0, waiters: new Set(), outputComplete: true, treeStopped: false };
-      if (input.prepared.launch.kind === 'argv') record.capabilityOutput = { stdout: [], stderr: [] };
       // Publish a starting record before spawn; a crash at either boundary becomes an orphan.
       await boundedWait(this.persist(record), input.signal, 8_000);
       checkSignal(input.signal); this.assertOpen();
@@ -332,11 +324,6 @@ export class ProcessRuntime {
         const key = ownerKey(record.owner);
         if (record.reservedBytes + data.length > this.limits.processBytes || (this.runBytes.get(key) ?? 0) + data.length > this.limits.runBytes) { this.outputFailure(record, new Error('Process spool quota exceeded.')); return; }
         record.reservedBytes += data.length; this.runBytes.set(key, (this.runBytes.get(key) ?? 0) + data.length);
-        if (record.capabilityOutput) {
-          // Retain at most the ordinary spool quota in memory until end-of-stream,
-          // so split credentials and binary output cannot reach durable spools.
-          record.capabilityOutput[stream].push(data); this.touch(record); return;
-        }
         child[stream].pause(); this.touch(record);
         const pending = this.track(record[stream === 'stdout' ? 'stdoutWrite' : 'stderrWrite'].then(async () => {
           await appendFile(stream === 'stdout' ? record.stdoutPath : record.stderrPath, data, { flag: constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0) });
@@ -351,37 +338,12 @@ export class ProcessRuntime {
     child.once('error', () => { record.error = 'Process execution failed.'; record.exitStatus = 'failed'; });
     child.once('close', (code, signal) => {
       record.rootClosed = true;
-      if (record.capabilityOutput) {
-        try { this.flushCapabilityOutput(record); }
-        catch { this.outputFailure(record, new Error('Command output could not be safely retained.')); }
-      }
       void this.track(this.finalize(record, code, signal, record.exitStatus ?? record.stopReason ?? 'exited')).finally(() => {
         // Finalize may have returned an unknown waiter result. Its actual late
         // output/metadata drains still gate the spawn-owned lifecycle.
         void Promise.allSettled([record.stdoutWrite, record.stderrWrite, record.metadataWrite]).then(() => record.resolveLifecycle?.());
       }).catch(() => undefined);
     });
-  }
-
-  private flushCapabilityOutput(record: ProcessRecord): void {
-    const buffers = record.capabilityOutput!;
-    const key = ownerKey(record.owner);
-    const maximumTotal = Math.min(this.limits.processBytes, this.limits.runBytes - ((this.runBytes.get(key) ?? 0) - record.reservedBytes));
-    for (const stream of ['stdout', 'stderr'] as const) {
-      let text: string;
-      try { text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(buffers[stream])); }
-      catch { text = '[Binary command output omitted.]'; record.outputComplete = false; }
-      const bytes = Buffer.from(this.commandRedactor.redact(text).text);
-      buffers[stream] = [];
-      const maximum = maximumTotal - record.stdoutBytes - record.stderrBytes;
-      const data = bytes.subarray(0, Math.max(0, maximum));
-      if (data.length !== bytes.length) record.outputComplete = false;
-      if (stream === 'stdout') record.stdoutBytes = data.length; else record.stderrBytes = data.length;
-      record[stream === 'stdout' ? 'stdoutWrite' : 'stderrWrite'] = this.track(appendFile(stream === 'stdout' ? record.stdoutPath : record.stderrPath, data, { flag: constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0) }).catch(error => this.outputFailure(record, error)));
-    }
-    const additional = Math.max(0, record.stdoutBytes + record.stderrBytes - record.reservedBytes);
-    record.reservedBytes += additional;
-    this.runBytes.set(key, (this.runBytes.get(key) ?? 0) + additional);
   }
 
   private outputFailure(record: ProcessRecord, error: unknown): void {

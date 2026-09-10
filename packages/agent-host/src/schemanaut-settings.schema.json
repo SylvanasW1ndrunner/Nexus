@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nwlworkshop.github.io/schemanaut/settings.schema.json",
+  "title": "SchemaNaut project settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["servers"],
+      "properties": {
+        "servers": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9._-]+$",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["transport"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "transport": {
+                "enum": ["stdio", "sse", "streamable-http"]
+              },
+              "autoStart": {
+                "type": "boolean"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "args": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "maxLength": 16384
+                }
+              },
+              "cwd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "env": {
+                "$ref": "#/$defs/stringOrReferenceMap"
+              },
+              "headers": {
+                "$ref": "#/$defs/stringOrReferenceMap"
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "packageName": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "transport": { "const": "stdio" } },
+                  "required": ["transport"]
+                },
+                "then": {
+                  "properties": { "command": {} },
+                  "required": ["command"]
+                }
+              },
+              {
+                "if": {
+                  "properties": { "transport": { "enum": ["sse", "streamable-http"] } },
+                  "required": ["transport"]
+                },
+                "then": {
+                  "properties": { "url": {} },
+                  "required": ["url"]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stringOrReferenceMap": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "maxLength": 16384
+          },
+          {
+            "$ref": "#/$defs/referenceValue"
+          }
+        ]
+      }
+    },
+    "referenceValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref"],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    }
+  }
+}

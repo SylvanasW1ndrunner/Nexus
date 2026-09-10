@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nwlworkshop.github.io/schemanaut/global-config.schema.json",
+  "title": "SchemaNaut global configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": { "const": 1 },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "connections": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["endpoint"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "endpoint": { "type": "string", "minLength": 1, "maxLength": 2048 },
+              "api_key": { "type": "string", "minLength": 1, "maxLength": 16384 },
+              "api_key_env": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "api_key_ref": { "type": "string", "minLength": 1, "maxLength": 2048 },
+              "headers": { "$ref": "#/$defs/secretReferenceMap" }
+            },
+            "allOf": [
+              {
+                "not": {
+                  "type": "object",
+                  "properties": { "api_key": {}, "api_key_env": {} },
+                  "required": ["api_key", "api_key_env"]
+                }
+              },
+              {
+                "not": {
+                  "type": "object",
+                  "properties": { "api_key": {}, "api_key_ref": {} },
+                  "required": ["api_key", "api_key_ref"]
+                }
+              },
+              {
+                "not": {
+                  "type": "object",
+                  "properties": { "api_key_env": {}, "api_key_ref": {} },
+                  "required": ["api_key_env", "api_key_ref"]
+                }
+              }
+            ]
+          }
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "temperature": { "type": "number", "minimum": 0 },
+            "topP": { "type": "number", "minimum": 0, "maximum": 1 },
+            "maxOutputTokens": { "type": "integer", "minimum": 1 },
+            "seed": { "type": "integer" },
+            "stop": {
+              "type": "array",
+              "maxItems": 16,
+              "items": { "type": "string", "minLength": 1, "maxLength": 1024 }
+            },
+            "reasoningEffort": { "enum": ["low", "medium", "high"] }
+          }
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "permission_mode": { "enum": ["default", "auto", "full-access"] } }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rules": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "decision"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "decision": { "enum": ["allow", "ask", "deny"] },
+              "tools": { "$ref": "#/$defs/selectors" },
+              "actions": { "$ref": "#/$defs/selectors" },
+              "paths": { "$ref": "#/$defs/selectors" },
+              "hosts": { "$ref": "#/$defs/selectors" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "selectors": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2048 }
+    },
+    "secretReferenceMap": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "minLength": 1, "maxLength": 256 },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["env"],
+            "properties": { "env": { "type": "string", "minLength": 1, "maxLength": 256 } }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ref"],
+            "properties": { "ref": { "type": "string", "minLength": 1, "maxLength": 2048 } }
+          }
+        ]
+      }
+    }
+  }
+}

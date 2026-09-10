@@ -56,6 +56,15 @@ export type McpRemovedServer = {
   secretRefs: string[];
 };
 
+export type McpServerNormalizationOptions = {
+  allowInsecureRemote?: boolean;
+};
+
+/** Minimal persistence contract required by the MCP process runtime. */
+export type McpConfigRepository = {
+  list(): Promise<McpServerConfig[]>;
+};
+
 export class McpConfigStore {
   constructor(
     private readonly filePath: string,
@@ -194,12 +203,13 @@ export function normalizeServerInput(
   input: McpServerInput & Partial<Pick<McpServerConfig, 'installedAt'>>,
   now: string,
   fallbackId: string,
+  options: McpServerNormalizationOptions = {},
 ): McpServerConfig {
   const id = normalizeId(input.id ?? fallbackId);
   const source = normalizeSource(input.source);
   const transport = normalizeTransport(input.transport);
-  const base = normalizeServerBase(input, id, source, transport, now, input.installedAt);
-  return normalizeServerByTransport(base);
+  const base = normalizeServerBase(input, id, source, transport, now, input.installedAt, options);
+  return normalizeServerByTransport(base, options);
 }
 
 function normalizeServerRecord(input: unknown): McpServerConfig {
@@ -213,7 +223,7 @@ function normalizeServerRecord(input: unknown): McpServerConfig {
       : new Date(0).toISOString();
   const updatedAt =
     typeof input.updatedAt === 'string' && input.updatedAt ? input.updatedAt : installedAt;
-  const base = normalizeServerBase(input, id, source, transport, updatedAt, installedAt);
+  const base = normalizeServerBase(input, id, source, transport, updatedAt, installedAt, {});
   return normalizeServerByTransport(base);
 }
 
@@ -224,6 +234,7 @@ function normalizeServerBase(
   transport: McpTransport,
   now: string,
   installedAt?: string,
+  options: McpServerNormalizationOptions = {},
 ): McpServerConfig {
   if (typeof input.name !== 'string' || !input.name.trim())
     throw new Error('MCP server name is required.');
@@ -235,13 +246,13 @@ function normalizeServerBase(
     autoStart: input.autoStart === true,
     enabled: input.enabled !== false,
     ...(typeof input.command === 'string' && input.command.trim()
-      ? { command: normalizeCommand(input.command, id) }
+      ? { command: normalizeCommand(input.command, id, options) }
       : {}),
-    ...(Array.isArray(input.args) ? { args: normalizeArgs(input.args, id) } : {}),
+    ...(Array.isArray(input.args) ? { args: normalizeArgs(input.args, id, options) } : {}),
     ...(typeof input.cwd === 'string' && input.cwd.trim() ? { cwd: input.cwd.trim() } : {}),
     ...(typeof input.url === 'string' && input.url.trim() ? { url: input.url.trim() } : {}),
-    ...(isRecord(input.env) ? { env: normalizeEnv(input.env, id) } : {}),
-    ...(isRecord(input.headers) ? { headers: normalizeHeaders(input.headers, id) } : {}),
+    ...(isRecord(input.env) ? { env: normalizeEnv(input.env, id, options) } : {}),
+    ...(isRecord(input.headers) ? { headers: normalizeHeaders(input.headers, id, options) } : {}),
     ...(typeof input.description === 'string' && input.description.trim()
       ? { description: input.description.trim() }
       : {}),
@@ -253,7 +264,10 @@ function normalizeServerBase(
   };
 }
 
-function normalizeServerByTransport(server: McpServerConfig): McpServerConfig {
+function normalizeServerByTransport(
+  server: McpServerConfig,
+  options: McpServerNormalizationOptions = {},
+): McpServerConfig {
   if (server.transport === 'stdio') {
     if (!server.command) throw new Error(`MCP stdio server ${server.id} requires a command.`);
     const stdioServer = { ...server };
@@ -263,7 +277,7 @@ function normalizeServerByTransport(server: McpServerConfig): McpServerConfig {
   }
 
   if (!server.url) throw new Error(`MCP ${server.transport} server ${server.id} requires a URL.`);
-  validateRemoteUrl(server.url, server.id);
+  validateRemoteUrl(server.url, server.id, options);
   const remoteServer = { ...server };
   delete remoteServer.command;
   delete remoteServer.args;
@@ -304,14 +318,15 @@ function assignDefined<T extends object, K extends keyof T>(
   if (value !== undefined) target[key] = value;
 }
 
-function normalizeEnv(env: Record<string, unknown>, serverId: string): Record<string, McpEnvValue> {
+function normalizeEnv(
+  env: Record<string, unknown>,
+  serverId: string,
+  options: McpServerNormalizationOptions,
+): Record<string, McpEnvValue> {
   const output: Record<string, McpEnvValue> = {};
   for (const [rawName, rawValue] of Object.entries(env)) {
     const name = normalizeEnvName(rawName);
     if (typeof rawValue === 'string') {
-      if (looksSensitiveEnvName(name) || looksLikeSecret(rawValue)) {
-        throw new Error(`MCP env ${name} for ${serverId} must be stored as a keychain ref.`);
-      }
       output[name] = rawValue;
       continue;
     }
@@ -368,14 +383,12 @@ function normalizeEnvName(value: string): string {
 function normalizeHeaders(
   headers: Record<string, unknown>,
   serverId: string,
+  options: McpServerNormalizationOptions,
 ): Record<string, McpHeaderValue> {
   const output: Record<string, McpHeaderValue> = {};
   for (const [rawName, rawValue] of Object.entries(headers)) {
     const name = normalizeHeaderName(rawName);
     if (typeof rawValue === 'string') {
-      if (looksSensitiveHeaderName(name) || looksLikeSecret(rawValue)) {
-        throw new Error(`MCP header ${name} for ${serverId} must be stored as a keychain ref.`);
-      }
       output[name] = rawValue;
       continue;
     }
@@ -396,62 +409,27 @@ function normalizeHeaderName(value: string): string {
   return normalized;
 }
 
-function looksSensitiveEnvName(name: string): boolean {
-  return (
-    /(KEY|TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL|PRIVATE)/i.test(name) ||
-    /^(DATABASE_URL|DB_URL|JDBC_URL|POSTGRES(?:QL)?_URL|MYSQL_URL|MARIADB_URL|MONGODB_URI|MONGO_URI|REDIS_URL|CONNECTION_STRING|DSN|DATABASE_DSN|DB_DSN)$/i.test(
-      name,
-    )
-  );
+function normalizeCommand(
+  value: string,
+  _serverId: string,
+  _options: McpServerNormalizationOptions,
+): string {
+  return value.trim();
 }
 
-function looksSensitiveHeaderName(name: string): boolean {
-  return (
-    /^(authorization|proxy-authorization|cookie|set-cookie)$/i.test(name) ||
-    /(api[-_]?key|token|secret|credential)/i.test(name)
-  );
+function normalizeArgs(
+  values: unknown[],
+  _serverId: string,
+  _options: McpServerNormalizationOptions,
+): string[] {
+  return values.filter((value): value is string => typeof value === 'string');
 }
 
-function looksLikeSecret(value: string): boolean {
-  return (
-    /\b(sk-[a-z0-9_-]{12,}|Bearer\s+[a-z0-9._-]{12,})\b/i.test(value) ||
-    /(?:[a-z][a-z0-9+.-]*:\/\/|jdbc:)[^/\s:@]+:[^@\s/]+@/i.test(value) ||
-    /(?:^|[?;&\s])(?:password|passwd|pwd|token|api[-_]?key|secret|credential)\s*=\s*[^;&\s]+/i.test(
-      value,
-    )
-  );
-}
-
-function normalizeCommand(value: string, serverId: string): string {
-  const command = value.trim();
-  if (looksLikeSecret(command) || looksSensitiveArgument(command)) {
-    throw new Error(`MCP command for ${serverId} must not contain inline credentials.`);
-  }
-  return command;
-}
-
-function normalizeArgs(values: unknown[], serverId: string): string[] {
-  const args = values.filter((value): value is string => typeof value === 'string');
-  for (const arg of args) {
-    if (looksLikeSecret(arg) || looksSensitiveArgument(arg)) {
-      throw new Error(`MCP args for ${serverId} must not contain inline credentials.`);
-    }
-  }
-  return args;
-}
-
-function looksSensitiveArgument(value: string): boolean {
-  return (
-    /^--?(?:password|passwd|pwd|token|access-token|api[-_]?key|secret|credential|authorization|auth|dsn|database-url|db-url|connection-string)(?:=|$)/i.test(
-      value.trim(),
-    ) ||
-    /(?:^|[;,\s])(?:DATABASE_URL|DB_URL|JDBC_URL|POSTGRES(?:QL)?_URL|MYSQL_URL|MONGODB_URI|REDIS_URL|CONNECTION_STRING|DSN)\s*=/i.test(
-      value,
-    )
-  );
-}
-
-function validateRemoteUrl(value: string, serverId: string): void {
+function validateRemoteUrl(
+  value: string,
+  serverId: string,
+  options: McpServerNormalizationOptions,
+): void {
   let url: URL;
   try {
     url = new URL(value);
@@ -461,23 +439,9 @@ function validateRemoteUrl(value: string, serverId: string): void {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`MCP server ${serverId} URL must use http or https.`);
   }
-  if (url.username || url.password) {
-    throw new Error(`MCP server ${serverId} URL must not contain userinfo credentials.`);
-  }
-  for (const [name, parameterValue] of url.searchParams) {
-    if (looksSensitiveQueryName(name) || looksLikeSecret(parameterValue)) {
-      throw new Error(`MCP server ${serverId} URL must not contain credential query parameters.`);
-    }
-  }
-  if (url.protocol === 'http:' && !isLoopbackHostname(url.hostname)) {
+  if (!options.allowInsecureRemote && url.protocol === 'http:' && !isLoopbackHostname(url.hostname)) {
     throw new Error(`MCP server ${serverId} must use HTTPS unless it targets loopback.`);
   }
-}
-
-function looksSensitiveQueryName(name: string): boolean {
-  return /^(?:password|passwd|pwd|token|access_token|api[-_]?key|secret|credential|authorization|auth|dsn|database_url|db_url|connection_string)$/i.test(
-    name,
-  );
 }
 
 function isLoopbackHostname(hostname: string): boolean {
