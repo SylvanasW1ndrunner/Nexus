@@ -1,9 +1,10 @@
-import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PreparedToolIntent, ToolExecuteContext, ToolPrepareContext } from '@dbagent/core-agent';
-import { CapabilityCommandRuntime, PathExecutableDiscovery, ProcessRuntime, prepareProcessPath, type CapabilityCommandInput, type ExecutableLaunchDescriptor, type ProcessRuntimeOptions } from '../src/index.js';
+import { CapabilityCommandRuntime, PathExecutableDiscovery, ProcessRuntime, prepareProcessPath, type CapabilityCommandInput, type ExecutableLaunchDescriptor, type ProcessArgvPolicyInput, type ProcessRuntimeOptions } from '../src/index.js';
+import { CommandRedactor } from '../src/command-redaction.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { await Promise.allSettled(cleanups.splice(0).map(cleanup => cleanup())); });
@@ -65,22 +66,44 @@ describe('Capability command Host port', () => {
     await expect(f.port.execute(intent.input, f.execution(intent))).rejects.toMatchObject({ fact: { code: 'target_changed' } });
   });
 
-  it('keeps shell policy input unchanged and gives argv policy an opaque stable identity', async () => {
+  it('keeps legacy shell policy unchanged and fails argv closed until its own hook is configured', async () => {
     const allowCommand = vi.fn((_command: string) => true);
     const f = await fixture({ globalPolicy: { revision: 'host.v2', mode: 'default', allowCommand } });
     await f.runtime.prepareExecution({ hostId: 'local', cwd: f.root, command: 'echo ordinary', requested });
     expect(allowCommand).toHaveBeenLastCalledWith('echo ordinary');
-    await f.port.prepare(f.input(['-e', 'process.exit(0)']), f.context);
-    const key = allowCommand.mock.calls.at(-1)?.[0];
-    expect(key).toMatch(/^argv-sha256:[a-f0-9]{64}$/u);
-    await f.port.prepare(f.input(['-e', 'process.exit(0)']), f.context);
-    expect(allowCommand).toHaveBeenLastCalledWith(key);
+    await expect(f.port.prepare(f.input(['-e', 'process.exit(0)']), f.context)).rejects.toThrow('policy rejects');
+    expect(allowCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies explainable argv allowlists and git push denies independently of executable upgrades', async () => {
+    const allowArgv = vi.fn((input: ProcessArgvPolicyInput) => input.cli === 'git' && input.argv[0] === 'status');
+    const f = await fixture({ globalPolicy: { revision: 'host.v3', mode: 'full-access', allowArgv } });
+    const filename = process.platform === 'win32' ? 'git.exe' : 'git';
+    const path = join(f.root, filename);
+    await copyFile(process.execPath, path);
+    const discovery = new PathExecutableDiscovery({ PATH: f.root });
+    const first = await discovery.discover('git'); if (first.status !== 'available') throw new Error('Fixture CLI unavailable.');
+    await expect(f.port.prepare(f.input(['push', 'origin'], first.launch), f.context)).rejects.toThrow('policy rejects');
+    await f.port.prepare(f.input(['status', '--porcelain'], first.launch), f.context);
+    const before = allowArgv.mock.calls.at(-1)?.[0];
+    expect(before).toEqual({ cli: 'git', argv: ['status', '--porcelain'] });
+    expect(Object.isFrozen(before)).toBe(true); expect(Object.isFrozen(before?.argv)).toBe(true);
+    await utimes(path, new Date(), new Date(Date.now() + 5000));
+    const updated = await discovery.discover('git'); if (updated.status !== 'available') throw new Error('Updated CLI unavailable.');
+    expect(updated.launch.executable.mtimeNs === first.launch.executable.mtimeNs).toBe(false);
+    await f.port.prepare(f.input(['status', '--porcelain'], updated.launch), f.context);
+    expect(allowArgv.mock.calls.at(-1)?.[0]).toEqual(before);
+    await expect(f.port.prepare(f.input(['status'], f.executable), f.context)).rejects.toThrow('policy rejects');
   });
 
   it('rejects NUL and explicit secrets without echoing arguments', async () => {
     const f = await fixture({ environment: { ...process.env, TEST_API_KEY: 'dummy-private-command-value' } });
     for (const args of [['a\0b'], ['--token', 'dummy-private-command-value'], ['dummy-private-command-value']]) {
-      await expect(f.port.prepare(f.input(args), f.context)).rejects.toThrow();
+      let rejected = false; let diagnostic = '';
+      try { await f.port.prepare(f.input(args), f.context); }
+      catch (error) { rejected = true; diagnostic = error instanceof Error ? error.message : ''; }
+      expect(rejected).toBe(true);
+      expect(diagnostic.includes('dummy-private-command-value')).toBe(false);
     }
   });
 
@@ -91,10 +114,10 @@ describe('Capability command Host port', () => {
     const intent = await f.port.prepare(f.input(['-e', source]), f.context);
     const result = await f.port.execute(intent.input, f.execution(intent)) as { process: { processId: string; output: { stdout: { truncated: boolean } } }; spool: { stdout: { text: string } } };
     expect(result.process.output.stdout.truncated).toBe(true);
-    expect(result.spool.stdout.text).toContain('[REDACTED]');
+    expect(result.spool.stdout.text.startsWith('*')).toBe(true);
     expect(result.spool.stdout.text.length).toBeGreaterThan(5000);
-    expect(JSON.stringify(result)).not.toContain(secret);
-    expect(await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8')).not.toContain(secret);
+    expect(JSON.stringify(result).includes(secret)).toBe(false);
+    expect((await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8')).includes(secret)).toBe(false);
   });
 
   it('does not start after an expired deadline', async () => {
@@ -102,6 +125,37 @@ describe('Capability command Host port', () => {
     const intent = await f.port.prepare(f.input(['-e', 'process.exit(0)']), f.context);
     await expect(f.port.execute(intent.input, f.execution(intent, { deadline: new Date(0).toISOString() }))).rejects.toThrow('deadline expired');
   });
+
+  it('redacts quoted credentials in real command output before payload and spool retention', async () => {
+    const f = await fixture();
+    const secret = 'dummy-quoted-credential-value';
+    const original = [JSON.stringify({ password: secret, nested: { token: secret } }), "{'password':'" + secret + "'}", 'password="' + secret + '"', "token='" + secret + "'", 'api_key=' + secret, 'Bearer ' + secret, 'https://user:' + secret + '@example.test/path'].join('\n');
+    const inputPath = join(f.root, 'input.txt'); await writeFile(inputPath, original);
+    const intent = await f.port.prepare(f.input(['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]))', inputPath]), f.context);
+    const result = await f.port.execute(intent.input, f.execution(intent)) as { process: { processId: string }; spool: { stdout: { text: string } } };
+    const stored = await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8');
+    // Boolean assertions ensure a redaction regression never prints credential text.
+    expect(JSON.stringify(result).includes(secret)).toBe(false); expect(stored.includes(secret)).toBe(false);
+    expect(Buffer.byteLength(stored)).toBeLessThanOrEqual(Buffer.byteLength(original));
+    expect(JSON.parse(result.spool.stdout.text.split('\n')[0]!)).toEqual({ password: '*', nested: { token: '*' } });
+    for (const value of original.split('\n')) {
+      let rejected = false;
+      try { await f.port.prepare(f.input([value]), f.context); } catch { rejected = true; }
+      expect(rejected).toBe(true);
+    }
+  });
+
+  it.each([16, 8 * 1024 * 1024])('never expands repeated short environment secrets at %i raw bytes', async size => {
+    const environment = { ...process.env, ...Object.fromEntries(Array.from({ length: 12 }, (_, index) => ['TOKEN_' + index, 'E'])) };
+    const f = await fixture({ environment });
+    const path = join(f.root, 'emit.cjs'); await writeFile(path, 'process.stdout.write("E".repeat(' + size + '))');
+    const intent = await f.port.prepare(f.input([path]), f.context);
+    const result = await f.port.execute(intent.input, f.execution(intent)) as { status: string; process: { processId: string }; spool: { stdout: { text: string } } };
+    const stored = await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8');
+    expect(result.status).toBe('ok');
+    expect(stored.includes('E')).toBe(false); expect(stored).toBe('*');
+    expect(Buffer.byteLength(result.spool.stdout.text)).toBeLessThanOrEqual(size);
+  }, 20_000);
 
   it.skipIf(process.platform !== 'win32')('retains unknown outcome on native Windows cancellation', async () => {
     const f = await fixture();
@@ -125,12 +179,14 @@ describe('static PATH discovery', () => {
     expect(JSON.stringify(failure)).not.toContain('malicious');
   });
 
-  it.skipIf(process.platform !== 'win32')('safely resolves the exact npm Node shim with spaces and Unicode and rejects custom batch', async () => {
+  it.skipIf(process.platform !== 'win32').each([
+    ['npm-else.cmd', 'node_modules/npm/bin/npx-cli.js'],
+    ['npm-final.cmd', 'node_modules/@nwlworkshop/schemanaut/dist/server/cli.js'],
+  ])('resolves the captured %s npm layout with spaces and Unicode', async (sample, entry) => {
     const f = await fixture();
     const root = join(f.root, '含 空格'); await mkdir(root);
-    const script = join(root, 'entry 文件.js'); await writeFile(script, 'process.stdout.write("shim executed")');
-    const prefix = '@ECHO off\nGOTO start\n:find_dp0\nSET dp0=%~dp0\nEXIT /b\n:start\nSETLOCAL\nCALL :find_dp0\n\nIF EXIST "%dp0%\\node.exe" (\n  SET "_prog=%dp0%\\node.exe"\n) ELSE (\n  SET "_prog=node"\n  SET PATHEXT=%PATHEXT:;.JS;=;%\n)\n\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\';
-    await writeFile(join(root, 'safe.cmd'), prefix + 'entry 文件.js" %*\n');
+    const script = join(root, entry); await mkdir(dirname(script), { recursive: true }); await writeFile(script, 'process.stdout.write("shim executed")');
+    await copyFile(new URL('./fixtures/command-shims/' + sample, import.meta.url), join(root, 'safe.cmd'));
     await writeFile(join(root, 'unsafe.cmd'), '@echo off\necho injected\n');
     const discovery = new PathExecutableDiscovery({ PATH: root + ';' + dirname(process.execPath) });
     const found = await discovery.discover('safe');
@@ -141,5 +197,57 @@ describe('static PATH discovery', () => {
     await writeFile(script, 'process.stdout.write("changed")');
     await expect(f.port.execute(second.input, f.execution(second))).rejects.toMatchObject({ fact: { code: 'target_changed' } });
     expect(await discovery.discover('unsafe')).toMatchObject({ status: 'unavailable', reason: 'unsupported_launcher' });
+  });
+
+  it.skipIf(process.platform !== 'win32')('resolves the captured pnpm wrapper and rejects traversal, extra commands and inconsistent branches', async () => {
+    const f = await fixture();
+    const modules = join(f.root, 'node_modules'); const bin = join(modules, '.bin');
+    await mkdir(bin, { recursive: true });
+    const script = join(modules, 'typescript/bin/tsc'); await mkdir(dirname(script), { recursive: true });
+    await writeFile(script, 'process.stdout.write(process.env.NODE_PATH || "missing")');
+    const sample = (await readFile(new URL('./fixtures/command-shims/pnpm-tsc.cmd', import.meta.url), 'utf8')).replaceAll('C:\\fixture', f.root);
+    const path = join(bin, 'tsc.cmd'); await writeFile(path, sample);
+    const discovery = new PathExecutableDiscovery({ PATH: bin + ';' + dirname(process.execPath) });
+    const found = await discovery.discover('tsc'); if (found.status !== 'available') throw new Error('Captured pnpm launcher unavailable.');
+    const intent = await f.port.prepare(f.input([], found.launch), f.context);
+    const result = await f.port.execute(intent.input, f.execution(intent)) as { spool: { stdout: { text: string } } };
+    expect(result.spool.stdout.text.startsWith(found.launch.nodePath.join(';'))).toBe(true);
+    for (const malicious of [
+      sample + '\necho injected\n',
+      sample.replaceAll('..\\typescript\\bin\\tsc', '..\\..\\outside.js'),
+      sample.replaceAll('..\\typescript\\bin\\tsc', '..\\typescript\\..\\outside.js'),
+      sample.replace('node  "%~dp0\\..\\typescript\\bin\\tsc"', 'node  "%~dp0\\..\\typescript\\bin\\other.js"'),
+      sample.replace('@SETLOCAL', '@SETLOCAL & echo injected'),
+      sample.replace('@SET "NODE_PATH=', '@SET "NODE_PATH=& echo injected&'),
+    ]) {
+      await writeFile(path, malicious);
+      expect((await discovery.discover('tsc')).status).toBe('unavailable');
+    }
+  });
+
+  it.skipIf(process.platform !== 'win32')('discovers and launches the installed workspace pnpm TypeScript shim without batch execution', async () => {
+    const f = await fixture();
+    const discovery = new PathExecutableDiscovery({ PATH: resolve('../../node_modules/.bin') + ';' + dirname(process.execPath) });
+    const found = await discovery.discover('tsc'); if (found.status !== 'available') throw new Error('Installed workspace TypeScript unavailable.');
+    const intent = await f.port.prepare(f.input(['--version'], found.launch), f.context);
+    await expect(f.port.execute(intent.input, f.execution(intent))).resolves.toMatchObject({ status: 'ok', spool: { stdout: { text: expect.stringMatching(/^Version \d/u) } } });
+  });
+});
+
+describe('nonexpanding command redaction', () => {
+  it('bounds a maximum-sized quoted credential without regex-stack or output growth', () => {
+    const prefix = '{"password":"'; const suffix = '"}';
+    const input = prefix + 'x'.repeat(8 * 1024 * 1024 - prefix.length - suffix.length) + suffix;
+    const result = new CommandRedactor({}).redact(input);
+    expect(result.changed).toBe(true); expect(result.text).toBe('{"password":"*"}');
+  });
+
+  it('handles overlapping duplicate short secrets, quoted JSON and marker-like values from original text', () => {
+    const redactor = new CommandRedactor({ TOKEN_1: 'E', TOKEN_2: 'E', TOKEN_3: '[REDACTED]', TOKEN_4: '*' });
+    const input = 'E'.repeat(16) + ' [REDACTED] * ' + JSON.stringify({ password: 'dummy-secret' });
+    const result = redactor.redact(input);
+    expect(result.changed).toBe(true);
+    expect(Buffer.byteLength(result.text)).toBeLessThanOrEqual(Buffer.byteLength(input));
+    expect(result.text.includes('dummy-secret')).toBe(false);
   });
 });

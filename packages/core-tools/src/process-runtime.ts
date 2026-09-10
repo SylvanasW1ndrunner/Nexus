@@ -1,6 +1,7 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { RunPolicySnapshot } from '@dbagent/core-agent';
-import { validateExecutableDescriptor } from './executable-discovery.js';
+import { executablePolicyName, validateExecutableDescriptor } from './executable-discovery.js';
+import { CommandRedactor } from './command-redaction.js';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { constants } from 'node:fs';
 import { appendFile, lstat, mkdir, open, opendir, realpath, rename, stat, writeFile } from 'node:fs/promises';
@@ -76,6 +77,7 @@ export class ProcessRuntime {
   private readonly executor: SandboxExecutor;
   private readonly policy: ProcessGlobalPolicy;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly commandRedactor: CommandRedactor;
   private readonly now: () => Date;
   private readonly createProcessId: () => string;
   private readonly limits: ProcessRuntimeLimits;
@@ -95,6 +97,7 @@ export class ProcessRuntime {
     this.createProcessId = options.createProcessId ?? randomUUID;
     this.policy = Object.freeze({ ...(options.globalPolicy ?? { revision: 'process-global-default.v1', mode: 'default' as const }), removeEnvironmentVariables: Object.freeze([...(options.globalPolicy?.removeEnvironmentVariables ?? [])]) });
     this.environment = inheritedProcessEnvironment({ ...(options.environment ?? process.env) }, this.policy);
+    this.commandRedactor = new CommandRedactor(this.environment);
     this.executor = options.executor ?? new NativeSandboxExecutor(options.hostId ?? 'local', async child => {
       await terminateProcessTree(child);
     });
@@ -118,13 +121,13 @@ export class ProcessRuntime {
     if (launch.kind === 'shell') requiredText(launch.command, 'command', 16_384);
     else if (launch.kind === 'argv') {
       if (!Array.isArray(launch.argv) || launch.argv.length > 256 || launch.argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) || Buffer.byteLength(JSON.stringify(launch.argv)) > 65_536) throw new ProcessRuntimeError('invalid_argument', 'Command arguments exceed the safe launch bounds.');
-      if (launch.argv.some(arg => this.redactCommandOutput(arg) !== arg || /^--?(?:password|token|api[-_]?key|secret|authorization|credential)(?:=|$)/iu.test(arg))) throw new ProcessRuntimeError('invalid_argument', 'Credentials must be supplied through the external CLI environment, not command arguments.');
+      if (launch.argv.some(arg => this.commandRedactor.redact(arg).changed || /^--?(?:password|token|api[-_]?key|secret|authorization|credential)(?:=|$)/iu.test(arg))) throw new ProcessRuntimeError('invalid_argument', 'Credentials must be supplied through the external CLI environment, not command arguments.');
       try { await validateExecutableDescriptor(launch.executable); } catch { throw new ProcessRuntimeError('target_changed', 'Executable identity is unavailable or changed.'); }
     } else throw new ProcessRuntimeError('invalid_argument', 'Unsupported process launch form.');
-    // Existing shell policy semantics are unchanged. argv is a stable opaque
-    // identity, never a shell reconstruction or a secret-bearing diagnostic.
-    const policyInput = launch.kind === 'shell' ? launch.command : 'argv-sha256:' + createHash('sha256').update(JSON.stringify(launch)).digest('hex');
-    if (this.policy.allowCommand && !this.policy.allowCommand(policyInput)) throw new ProcessRuntimeError('precondition', 'Global enterprise policy rejects this command.');
+    const allowed = launch.kind === 'shell' ? this.policy.allowCommand?.(launch.command) ?? true
+      : this.policy.allowArgv ? this.policy.allowArgv(Object.freeze({ cli: executablePolicyName(launch.executable), argv: Object.freeze([...launch.argv]) }))
+      : this.policy.allowCommand === undefined;
+    if (!allowed) throw new ProcessRuntimeError('precondition', 'Global enterprise policy rejects this command.');
     const cwd = await realpath(resolve(input.cwd));
     const identity = await stat(cwd, { bigint: true });
     if (!identity.isDirectory()) throw new ProcessRuntimeError('precondition', 'Process cwd is not a directory.');
@@ -201,7 +204,14 @@ export class ProcessRuntime {
         timeoutMs = Math.min(timeoutMs, Date.parse(input.deadline) - Date.now());
         if (timeoutMs <= 0) throw new ProcessRuntimeError('timeout', 'The prepared process deadline expired.');
       }
-      const child = this.executor.spawn({ launch: input.prepared.launch, cwd: input.prepared.cwd, environment: { ...this.environment }, boundary: input.prepared.boundary, signal: input.signal });
+      const environment = { ...this.environment };
+      const launch = input.prepared.launch;
+      if (launch.kind === 'argv' && launch.executable.nodePath.length && !this.policy.removeEnvironmentVariables?.some(key => key.toUpperCase() === 'NODE_PATH')) {
+        const inherited = Object.entries(environment).find(([key]) => key.toUpperCase() === 'NODE_PATH')?.[1];
+        for (const key of Object.keys(environment)) if (key.toUpperCase() === 'NODE_PATH') delete environment[key];
+        environment.NODE_PATH = [...launch.executable.nodePath, ...(inherited ? [inherited] : [])].join(';');
+      }
+      const child = this.executor.spawn({ launch, cwd: input.prepared.cwd, environment, boundary: input.prepared.boundary, signal: input.signal });
       record.child = child;
       record.lifecycle = this.track(new Promise<void>(resolve => { record!.resolveLifecycle = resolve; }));
       if (child.pid !== undefined) record.pid = child.pid;
@@ -339,24 +349,16 @@ export class ProcessRuntime {
     child.once('error', () => { record.error = 'Process execution failed.'; record.exitStatus = 'failed'; });
     child.once('close', (code, signal) => {
       record.rootClosed = true;
-      if (record.capabilityOutput) this.flushCapabilityOutput(record);
+      if (record.capabilityOutput) {
+        try { this.flushCapabilityOutput(record); }
+        catch { this.outputFailure(record, new Error('Command output could not be safely retained.')); }
+      }
       void this.track(this.finalize(record, code, signal, record.exitStatus ?? record.stopReason ?? 'exited')).finally(() => {
         // Finalize may have returned an unknown waiter result. Its actual late
         // output/metadata drains still gate the spawn-owned lifecycle.
         void Promise.allSettled([record.stdoutWrite, record.stderrWrite, record.metadataWrite]).then(() => record.resolveLifecycle?.());
       }).catch(() => undefined);
     });
-  }
-
-  private redactCommandOutput(text: string): string {
-    let redacted = text;
-    for (const [key, value] of Object.entries(this.environment)) {
-      if (value && /(?:token|secret|password|passwd|api[_-]?key|credential|authorization|database_url|dsn)/iu.test(key)) redacted = redacted.split(value).join('[REDACTED]');
-    }
-    return redacted.replace(/\bBearer\s+[^\s"',}]+/giu, 'Bearer [REDACTED]')
-      .replace(/\bsk-[A-Za-z0-9_-]{8,}/gu, '[REDACTED]')
-      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/giu, '$1[REDACTED]@')
-      .replace(/((?:password|passwd|api[_-]?key|secret|token|authorization)\s*[=:]\s*)[^\s"',}]+/giu, '$1[REDACTED]');
   }
 
   private flushCapabilityOutput(record: ProcessRecord): void {
@@ -367,7 +369,7 @@ export class ProcessRuntime {
       let text: string;
       try { text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(buffers[stream])); }
       catch { text = '[Binary command output omitted.]'; record.outputComplete = false; }
-      const bytes = Buffer.from(this.redactCommandOutput(text));
+      const bytes = Buffer.from(this.commandRedactor.redact(text).text);
       buffers[stream] = [];
       const maximum = maximumTotal - record.stdoutBytes - record.stderrBytes;
       const data = bytes.subarray(0, Math.max(0, maximum));

@@ -21,6 +21,7 @@ import {
   ToolExecutionError,
   UserActivityProjector,
   createRuntimeCommandToolResult,
+  preparedIntentDigest,
   type ToolInvocationExecutionContext,
   type AgentInvocationHookContribution,
   type AgentToolPermissionDeclaration,
@@ -55,6 +56,42 @@ async function runtimeModule() {
 }
 
 describe('ToolInvocationRuntime', () => {
+  it('rechecks attempt authorization for legacy intents after a blocked resource lease', async () => {
+    const permissionManager = new PermissionManager({ revision: 'legacy-policy.v1' });
+    const fixture = await createFixture({ mode: 'full-access', permissionManager });
+    const realCommit = openToolLifecycleCommitter(fixture.journal).commit;
+    const journalFacade = new Proxy(fixture.journal, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) as unknown : value;
+      },
+    });
+    bindToolLifecycleCommitter(journalFacade, async (command, options) => {
+      if (command.action !== 'prepare') return realCommit(command, options);
+      // Model a persisted pre-snapshot Journal record through the actual writer.
+      const intent = { ...command.intent }; delete intent.runPolicy;
+      return realCommit({ ...command, intent, intentDigest: preparedIntentDigest(intent) }, options);
+    });
+    let entered!: () => void; let release!: () => void;
+    const acquired = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const { ToolInvocationRuntime } = await runtimeModule();
+    const runtime = new ToolInvocationRuntime({ ...fixture.runtimeOptions(), journal: journalFacade,
+      resourceLeases: { acquire: async () => { entered(); await blocked; return { release: () => {} }; } },
+    });
+    await runtime.resolve();
+    const events = await fixture.journal.readProject('project-a', 0, 10_000);
+    const prepared = events.find(event => event.type === 'tool.prepared' && event.invocationId === fixture.readInvocationId);
+    if (prepared?.type !== 'tool.prepared' || !('intent' in prepared.payload)) throw new Error('Expected a legacy prepared intent.');
+    expect(prepared.payload.intent.runPolicy).toBeUndefined();
+    const execution = runtime.execute(fixture.readInvocationId);
+    await acquired;
+    permissionManager.replacePolicy({ revision: 'legacy-policy.v2', rules: [{ id: 'deny-while-waiting', decision: 'deny', tools: ['query_database'] }] });
+    release();
+    await expect(execution).resolves.toMatchObject({ outcome: 'failed', errorCode: 'target_changed' });
+    expect(fixture.readCalls()).toBe(0);
+  });
+
   it.each(['default', 'auto', 'full-access'] as const)('passes and persists the actual %s Run policy before execution', async mode => {
     let seen: unknown;
     const permissionManager = new PermissionManager({ revision: 'actual-enterprise.v9' });

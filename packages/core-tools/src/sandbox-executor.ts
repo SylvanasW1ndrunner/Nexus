@@ -7,13 +7,16 @@ export type ProcessLaunch = Readonly<{ kind: 'shell'; command: string }> | Reado
 export type ProcessRequestedCapabilities = Readonly<{ network: boolean; externalWrite: boolean; destructive: boolean; credentials: boolean; admin: boolean; unknownRisk: boolean }>;
 export type SandboxCapabilityMatrix = Readonly<{ filesystem: boolean; network: boolean; processTree: boolean }>;
 export type SandboxExecutorIdentity = Readonly<{ hostId: string; executorId: string; executorRevision: string; boundaryRevision: string; capabilities: SandboxCapabilityMatrix }>;
+export type ProcessArgvPolicyInput = Readonly<{ cli: string; argv: readonly string[] }>;
 export type ProcessGlobalPolicy = Readonly<{
   revision: string;
   mode: AgentMode;
   requireSandbox?: boolean;
   removeEnvironmentVariables?: readonly string[];
-  /** Global Host enterprise gate; never supplied by a model or project config. */
+  /** Legacy shell-only gate; never receives an argv reconstruction or digest. */
   allowCommand?: (command: string) => boolean;
+  /** Verified logical CLI name and bounded credential-free arguments; no file identity metadata. */
+  allowArgv?: (input: ProcessArgvPolicyInput) => boolean;
 }>;
 export type SandboxDecision = 'sandboxed-allow' | 'ask' | 'ask-unsandboxed' | 'native-allow' | 'unavailable';
 export type PreparedSandboxBoundary = SandboxExecutorIdentity & Readonly<{

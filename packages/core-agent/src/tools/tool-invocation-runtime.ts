@@ -767,6 +767,14 @@ export class ToolInvocationRuntime {
     }
     const committedStart = invocation.started;
     const intent = this.#prepared(invocation);
+    const attemptPolicy = Object.freeze({ mode: authorization.policyMode, revision: authorization.policyRevision });
+    const assertAttemptPolicy = () => {
+      const current = this.#permissionManager.snapshot(this.#binding.mode);
+      if (attemptPolicy.mode !== current.mode || attemptPolicy.revision !== current.revision ||
+          intent.runPolicy && (intent.runPolicy.mode !== attemptPolicy.mode || intent.runPolicy.revision !== attemptPolicy.revision)) {
+        throw new ToolExecutionError({ code: 'target_changed', category: 'precondition', retryable: true, outcome: 'not_applied' }, 'The prepared Run policy changed; prepare the action again.');
+      }
+    };
     const remainingMs = Date.parse(invocation.deadline!) - this.#now();
     const linked = linkedAbortController(
       callerSignal,
@@ -849,9 +857,7 @@ export class ToolInvocationRuntime {
       | { outcome: 'failed' | 'cancelled' | 'unknown' | 'timed_out' | 'unsupported_revision'; summary: string;
           resultRefs: []; evidenceRefs: []; error: ToolExecutionErrorFact };
     try {
-      if (intent.runPolicy && JSON.stringify(intent.runPolicy) !== JSON.stringify(this.#permissionManager.snapshot(this.#binding.mode))) {
-        throw new ToolExecutionError({ code: 'target_changed', category: 'precondition', retryable: true, outcome: 'not_applied' }, 'The prepared Run policy changed; prepare the action again.');
-      }
+      assertAttemptPolicy();
       if (!effectiveAuthorization(authorization)) {
         throw new ToolExecutionError(
           {
@@ -865,9 +871,7 @@ export class ToolInvocationRuntime {
       }
       if (remainingMs <= 0) throw new ToolExecutionError({ code: 'TOOL_TIMEOUT', category: 'timeout', retryable: true, outcome: 'not_applied' }, 'The prepared invocation deadline expired.');
       resourceLease = await this.#boundary.acquire(intent, context, drain);
-      if (intent.runPolicy && JSON.stringify(intent.runPolicy) !== JSON.stringify(this.#permissionManager.snapshot(this.#binding.mode))) {
-        throw new ToolExecutionError({ code: 'target_changed', category: 'precondition', retryable: true, outcome: 'not_applied' }, 'The prepared Run policy changed; prepare the action again.');
-      }
+      assertAttemptPolicy();
       execution = startToolHandlerExecution(handler, argumentsRecord, context);
       void drain.track(execution.settled);
       const value = await execution.result;
