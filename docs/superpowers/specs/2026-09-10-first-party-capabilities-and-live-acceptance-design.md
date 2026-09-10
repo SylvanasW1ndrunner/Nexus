@@ -74,9 +74,10 @@ Capability 是由 Host 注册、由 Agent 按任务发现并激活的增强 Tool
 - execute 必须复核已准备目标、全局权限 revision 与执行边界，并把取消和 deadline 传入进程运行时。
 - 输出使用普通有界 spool 与 Runtime retention；模型接收的内容遵守通用大小和生命周期约束。
 - 外部命令继承用户环境；Runtime 不进行 CommandRedactor、CommandArgumentGuard、凭据参数拒绝或输出脱敏。
-- 不进行任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是内置 HTTP/browser bridge 不将
-  Cookie/Set-Cookie 值放入 Agent-facing schema、prepared intent、结果或 Journal；它不扫描网页正文、外部命令
-  输出或用户 browser_test 代码输出。
+- 不进行任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是未来 BrowserSession Host Port/
+  浏览器连接器复用现有浏览器登录态时，Agent-facing schema 不接受 Cookie、API Header 或 Authorization，且
+  Cookie/Set-Cookie 不进入 prepared intent、结果或 Journal；它不扫描网页正文、外部命令输出或用户 browser_test
+  代码输出。基础 web_fetch 无状态，web_search API 凭据 HTTPS-only。
 - 外部文件或登录状态改变后可重新 probe；父进程 PATH 或环境改变时必须重启 Host 才能继承新状态。
 - 原生 Windows 无强 OS 隔离时，批准后的自然 root exit 可以报告命令退出，但 containment 和完整 process-tree proof 必须标为 unverified；取消或终止时，无法证明停止的 descendant 仍为 unknown。本轮不引入 Job Object。
 - 默认 `NativeSandboxExecutor` 明确表示“无 OS 隔离”。当策略要求强沙盒而 Host 无法提供时返回 `unavailable`；其他情况按策略产生 `ask-unsandboxed`，不得称为已沙盒化。
@@ -142,8 +143,9 @@ Tool：
 
 浏览器 test 是高风险代码执行；不得仅按声明路径描述其影响。
 
-外部事实：PATH 中已有 `playwright` CLI。浏览器安装、登录 profile 和网络代理由用户在产品外维护；当前 CLI
-没有内嵌 Chromium，本轮不自动下载浏览器，也不提供 Cookie 参数。
+外部事实：未来 BrowserSession Host Port/浏览器连接器复用用户已有浏览器登录态。当前 CLI 没有内嵌 Chromium；
+外部 `playwright` CLI 仅作无登录截图/测试后端或用户自行维护的测试配置，本轮不自动下载浏览器，也不保证共享
+登录态或提供 Cookie/API Header/Authorization 参数。
 
 Tool：
 

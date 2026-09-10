@@ -29,6 +29,7 @@ SchemaNaut 不脱敏诊断、命令输出、Provider 错误或保留结果。它
 和 Artifact，仅受通用大小与生命周期限制。用户决定这些输入和输出是否敏感。不要将真实凭据提交到
 Git，这是仓库卫生。
 
-内置 HTTP/browser bridge 是面向 Agent API 内容的狭义例外：Cookie 和 Set-Cookie 值不会进入 schema、prepared
-intent、结果或 Journal。这不检查或脱敏网页正文、外部命令输出或用户 browser_test 代码输出。浏览器工作使用在
-产品外准备的浏览器/Playwright 环境和登录态；CLI 没有内嵌 Chromium，也不提供 Cookie 参数。
+未来 BrowserSession Host Port/浏览器连接器是面向 Agent API 内容的狭义例外：schema 不接受 Cookie、API Header
+或 Authorization，Cookie/Set-Cookie 不会进入 prepared intent、结果或 Journal。这不检查或脱敏网页正文、外部
+命令输出或用户 browser_test 代码输出。CLI 没有内嵌 Chromium；外部 Playwright 仅作无登录截图/测试后端或用户
+维护的测试配置，不保证共享登录态。基础 web_fetch 无状态；web_search API 凭据仍只允许 HTTPS。

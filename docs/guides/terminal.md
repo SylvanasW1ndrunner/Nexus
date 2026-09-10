@@ -44,9 +44,11 @@ Those values may enter Agent results and local retention with general size and
 lifecycle limits. You are responsible for their sensitivity and for keeping
 real credentials out of Git.
 
-The built-in HTTP/browser bridge is narrowly isolated from Cookie values: Cookie
-and Set-Cookie are absent from Agent-facing schemas, prepared intents, results,
+The future BrowserSession Host Port/browser connector is narrowly isolated from
+Cookie values: Agent-facing schemas accept no Cookie, API Header, or
+Authorization, and Cookie/Set-Cookie are absent from prepared intents, results,
 and the Journal. It does not inspect page bodies, external command output, or
-user browser-test code output. This CLI has no embedded Chromium; browser work
-uses an externally prepared browser/Playwright environment and login state, with
-no Cookie parameter.
+user browser-test code output. This CLI has no embedded Chromium. External
+Playwright is only an unauthenticated screenshot/test backend or user-maintained
+test configuration, not a shared-login-state guarantee. Base web_fetch is
+stateless; web_search API credentials remain HTTPS-only.

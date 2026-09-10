@@ -23,12 +23,14 @@ of a third-party CLI, Skill, MCP server, or Capability, or make external output
 safe. Command stdout/stderr and provider errors may enter Agent results and
 local retention subject only to general size and lifecycle limits.
 
-The one narrow API isolation is for the built-in HTTP/browser bridge: Cookie and
-Set-Cookie values are not placed in Agent-facing schemas, prepared intents,
-results, or the Journal. It does not inspect, redact, or classify web bodies,
-external command output, or user browser-test code output. SchemaNaut has no
-embedded Chromium; Browser Capability uses an externally prepared
-browser/Playwright environment and login state and has no Cookie parameter.
+The narrow API isolation is for the future BrowserSession Host Port/browser
+connector: Agent-facing schemas accept no Cookie, API Header, or Authorization,
+and Cookie/Set-Cookie never enter prepared intents, results, or the Journal. It
+does not inspect, redact, or classify web bodies, external command output, or
+user browser-test code output. SchemaNaut has no embedded Chromium. External
+Playwright is only an unauthenticated screenshot/test backend or user-maintained
+test configuration, not a shared-login-state guarantee. Base web_fetch is
+stateless; web_search API credentials remain HTTPS-only.
 
 You are responsible for your prompts and files, model endpoint and external tool
 configuration, third-party output, and the sensitivity of local logs, Journal,
@@ -59,10 +61,11 @@ SchemaNaut 不检查内容以识别敏感信息，不做 Secret 脱敏，不拦�
 CLI、Skill、MCP Server 或 Capability 是否可信，也不负责使外部输出安全。命令 stdout/stderr 和
 Provider 错误可以进入 Agent 结果和本地 retention，仅受通用大小与生命周期限制。
 
-唯一狭义的 API 隔离针对内置 HTTP/browser bridge：Cookie 和 Set-Cookie 值不会进入面向 Agent 的 schema、
-prepared intent、结果或 Journal。它不检查、脱敏或分类网页正文、外部命令输出或用户 browser_test 代码输出。
-SchemaNaut 没有内嵌 Chromium；Browser Capability 使用在产品外准备好的浏览器/Playwright 环境和登录态，
-不提供 Cookie 参数。
+狭义 API 隔离针对未来的 BrowserSession Host Port/浏览器连接器：面向 Agent 的 schema 不接受 Cookie、API
+Header 或 Authorization，Cookie/Set-Cookie 不会进入 prepared intent、结果或 Journal。它不检查、脱敏或分类
+网页正文、外部命令输出或用户 browser_test 代码输出。SchemaNaut 没有内嵌 Chromium。外部 Playwright 仅作
+无登录截图/测试后端或用户自行维护的测试配置，不保证共享登录态。基础 web_fetch 无状态；web_search API
+凭据仍只允许 HTTPS。
 
 你需要负责 prompt 和文件、模型 Endpoint 和外部工具配置、第三方输出，以及本地日志、Journal、
 Artifact 和保留结果的敏感性。不要把真实凭据提交到 Git 是仓库卫生要求，而不是产品脱敏保证。
