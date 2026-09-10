@@ -1,332 +1,70 @@
-<div align="center">
-
 # SchemaNaut
 
-### Ask in natural language. Get SQL. Keep control.
+![Node.js 22.13+](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)
 
-**An embeddable, open-source database Agent whose first complete capability package is PostgreSQL AI SQL.**
+SchemaNaut is an alpha, terminal-first Agent product. Its supported user entry
+point is the schemanaut command. It keeps project Sessions and Runs durable
+while an Agent works with models, project tools, Markdown Skills, configured
+MCP servers, and optional task-specific capabilities.
 
-[![Status: Alpha](https://img.shields.io/badge/status-alpha-f59e0b)](CHANGELOG.md)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-3b82f6)](LICENSE)
-[![Node.js 22.13+](https://img.shields.io/badge/node-%3E%3D22.13-339933?logo=nodedotjs&logoColor=white)](package.json)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](packages/sdk/src/index.ts)
+[中文](README.zh-CN.md) · [Documentation](docs/README.md) · [Terminal guide](docs/guides/terminal.md)
 
-[中文](README.zh-CN.md) · [CLI Guide](docs/cli/README.md) · [SDK Guide](docs/sdk/README.md) · [API Reference](docs/sdk/api-reference.md) · [Contributing](CONTRIBUTING.md)
+## Run from a source checkout
 
-</div>
+Local distribution work is deferred. Existing tarballs and distribution scripts are
+historical development artifacts, not a current installation route. From a
+repository checkout:
 
-SchemaNaut combines a general technical-Agent kernel with professional database capability packages. Today it turns a natural-language request into a database task by retrieving Schema and business knowledge, planning work, generating SQL, requesting permission when needed, executing through the database, and correcting from real errors. The same kernel also supports project files, processes, web adapters, MCP, and subagents.
+    pnpm install
+    pnpm build:terminal
+    node apps/terminal/dist/cli.js --help
 
-It is built for embedding and automation. The primary surfaces are a TypeScript SDK and local REST API, with an interactive CLI and deliberately small WebUI. It is not a database IDE.
+Node 22 still labels node:sqlite experimental, but no experimental SQLite
+startup flag is required.
 
-> SchemaNaut `0.1.x` is alpha software. PostgreSQL is the first complete connector. Do not use it as a production security boundary without your own database permissions, secret management, and review process.
+## First chat
 
-## What v1 includes
+Create or select a project:
 
-| Capability             | Behavior                                                                                                                                          |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Knowledge-aware AI SQL | Hierarchical Schema catalog, Project/Skill business guidance, hybrid retrieval, and automatic refresh after successful Agent DDL                  |
-| Adaptive Agent loop    | One plan-guided ReAct loop that explores, executes, observes, repairs, and verifies completion; there is no user-facing “strategy mode”           |
-| Durable Sessions       | SQLite-backed isolated conversations, plans, artifacts, token usage, checkpoints, context compaction, and user-scoped long-term preferences       |
-| Project context        | A selected project root with `.schemanaut/AGENT.md`, project Skills, MCP configuration, SQL scripts, and artifacts                                |
-| Explicit authority     | `read`, `edit`, and `full` modes, plus a one-call approval callback for actions outside the current mode                                          |
-| Progressive Skills     | Standard Markdown `SKILL.md` bundles at system, user, project, and Session scope; only the catalog is shown until a Skill is activated            |
-| Standard MCP client    | Official MCP SDK with stdio, Streamable HTTP, and SSE compatibility, dynamic tool discovery, lifecycle, cancellation, and secret references       |
-| Project tools          | Project-scoped files and atomic patches, optional web/background-process tools, and same-capability child Agents with independent context        |
-| Separated query results | The database performs aggregation and filtering; SDK/API callers receive at most 1,000 rows separately while the model sees at most 100 transient rows within 64 KiB |
-| Integration surfaces   | TypeScript SDK, local REST API, interactive CLI, and lightweight local WebUI                                                                      |
+    schemanaut init ./my-project
+    cd ./my-project
+    schemanaut chat
 
-AI database governance and operations are a later product stage. v1 does **not** ship a governance/operations Agent or claim autonomous DBA remediation.
+Configure model connections, model defaults, and any organization-wide
+permission policy in the sole global configuration file,
+~/.schemanaut/config.toml. Model secrets must be environment-variable names
+or secure-store references, never plaintext values. Project
+.schemanaut/settings.json is for project MCP declarations only.
 
-## How it works
+Then refresh the catalog and select a model:
 
-```mermaid
-flowchart LR
-    User["App / CLI / REST"] --> Session["Session + Project"]
-    Session --> Agent["Plan-guided ReAct Agent"]
-    Agent --> Discover["Skills + dynamic Tool discovery"]
-    Discover --> Knowledge["Schema knowledge"]
-    Discover --> Extensions["Built-in Tools + MCP"]
-    Agent --> Policy["read / edit / full"]
-    Policy --> PostgreSQL["PostgreSQL executes SQL"]
-    PostgreSQL --> Results["Bounded query result (max 1,000 rows)"]
-    Results --> Preview["Transient model projection (max 100 rows / 64 KiB)"]
-    Preview --> Agent
-    Results --> Output["Separate result payload"]
-    Agent --> Output["Verified answer + SQL + useful events + artifacts"]
-```
+    &#47;models
+    &#47;model 1
+    Explain this repository and identify the safest next change.
 
-Internal knowledge hashes, node IDs, ranking scores, and evaluation traces do not enter the normal model or user output.
+chat is the default command, so schemanaut -C ./my-project is equivalent to
+schemanaut chat -C ./my-project. Model selection belongs to a Session, while
+durable project state is stored under <project>/.schemanaut/.
 
-## Install
+## What the terminal provides
 
-Requirements:
+- Start, resume, cancel, and compact durable Agent Runs and Sessions.
+- Discover models from global connections and bind one to the current Session.
+- Load and invoke Markdown Skills from user and project scopes.
+- Use configured MCP servers, including their health and lifecycle controls.
+- Apply the global default, auto, or full-access permission policy; organization
+  rules can only make an action more restrictive.
 
-- Node.js 22.13 or newer (durable Sessions use `node:sqlite`; the `--experimental-sqlite` startup flag is not required, but Node 22 still labels the module experimental)
-- PostgreSQL
-- An OpenAI-compatible model endpoint or Anthropic Messages endpoint
-- Tool calling for Agent workflows
+The first optional capabilities are in development for this round. Their
+product boundary is task discovery from conditions prepared outside SchemaNaut,
+not configuration modules. When a capability is bundled, the Agent can explain
+a missing prerequisite, help with a user-requested external setup step, and
+retry after the environment changes. See the [capabilities guide](docs/guides/capabilities.md)
+and the [diagnostics and sandbox guide](docs/guides/diagnostics-and-sandbox.md).
 
-Install the current public Alpha release:
+Start in default mode for an unfamiliar project and review every approval. MCP
+servers, external tools, and workspace contents remain local trust boundaries;
+read [SECURITY.md](SECURITY.md) before adding credentials or using sensitive
+material.
 
-```bash
-npm install @nwlworkshop/schemanaut@alpha
-```
-
-Repository maintainers can regenerate the local archive with:
-
-```bash
-pnpm install
-pnpm package:npm
-```
-
-The generated archive is `./release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz`.
-Users who already have the `.tgz` **do not need pnpm**; they only need the `npm` and `npx` commands bundled with Node.js 22.13+.
-
-### Start from the local `.tgz` package
-
-Install the generated package in the directory where you want to use SchemaNaut. Replace the path below with the absolute path to your local `Nexus` checkout:
-
-```bash
-npm init -y
-npm install /absolute/path/to/Nexus/release/SchemaNaut-v0.1.0-alpha.1/schemanaut-v0.1.0-alpha.1.tgz
-npx schemanaut init .
-```
-
-Create `.env` in that directory:
-
-```dotenv
-SCHEMANAUT_LLM_BASE_URL=https://api.siliconflow.cn/v1
-SCHEMANAUT_LLM_API_KEY=replace-with-your-key
-SCHEMANAUT_LLM_MODEL=replace-with-a-tool-calling-model
-SCHEMANAUT_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/database
-```
-
-Start the interactive CLI:
-
-```bash
-npx schemanaut chat -C .
-```
-
-Or start the local REST API and WebUI:
-
-```bash
-npx schemanaut serve --host 127.0.0.1 --port 3721
-```
-
-Open <http://127.0.0.1:3721>, then enter the model and database connection in the page. Press `Ctrl+C` to stop the service. For local Ollama, use `http://127.0.0.1:11434/v1` as the Base URL and omit the API Key. The SDK does not require a separate service process; import it directly as shown below.
-
-`pnpm test:npm-package:functional` verifies `SHA256SUMS.txt`, release-version
-metadata, secret scanning, an isolated local install, SDK/REST/CLI behavior, and
-TypeScript declarations before the archive is accepted.
-
-The package name is `@nwlworkshop/schemanaut`.
-Commands below use `npx schemanaut`, which resolves the CLI from this local installation.
-Use `npm install --global @nwlworkshop/schemanaut@alpha` only when you explicitly want a global command.
-
-## Fastest path: interactive CLI
-
-Initialize a project:
-
-```bash
-npx schemanaut init ./my-data-project
-```
-
-Set the model and PostgreSQL connection, then start chat:
-
-```bash
-export SCHEMANAUT_LLM_BASE_URL="https://your-openai-compatible-endpoint/v1"
-export SCHEMANAUT_LLM_API_KEY="..."
-export SCHEMANAUT_LLM_MODEL="your-model"
-export SCHEMANAUT_DATABASE_URL="postgresql://user:password@127.0.0.1:5432/app"
-
-npx schemanaut chat -C ./my-data-project
-```
-
-For local Ollama, use an endpoint such as `http://127.0.0.1:11434/v1`; the API key may be omitted.
-
-Useful interactive commands:
-
-```text
-/mode read|edit|full
-/new
-/resume <session-id>
-/sessions
-/skills
-/<skill> [task]
-/compact [focus]
-/trace on|off
-/mcp list
-/mcp start <server-id>
-/mcp stop <server-id>
-/exit
-```
-
-While the Agent is running, ordinary text is added as a new requirement to the active task. `Ctrl+C` cancels the current run while preserving the Session.
-
-## Embed the SDK
-
-```ts
-import { DatabaseAgentRuntime, createProviderFromPreset } from '@nwlworkshop/schemanaut';
-
-const apiKey = process.env.LLM_API_KEY;
-if (!apiKey) throw new Error('LLM_API_KEY is required');
-
-const runtime = new DatabaseAgentRuntime({
-  tenantId: 'team-a',
-  projectDirectory: process.cwd(),
-  provider: createProviderFromPreset('siliconflow', {
-    apiKey,
-  }),
-  model: process.env.LLM_MODEL!,
-  approvalProvider: async ({ mode, tool, toolCall }) => {
-    console.log(`Approval requested: ${mode} -> ${tool.name}`, toolCall.arguments);
-    return false;
-  },
-});
-
-try {
-  await runtime.connect({
-    host: process.env.DB_HOST ?? '127.0.0.1',
-    port: Number(process.env.DB_PORT ?? 5432),
-    database: process.env.DB_NAME!,
-    username: process.env.DB_USER!,
-    password: process.env.DB_PASSWORD,
-    readOnly: true,
-  });
-
-  await runtime.indexSchema();
-
-  const run = await runtime.runAgent({
-    userId: 'user-1',
-    message: 'Show paid revenue by day for the last seven days.',
-    mode: 'read',
-    onEvent: (event) => {
-      console.log(event.type, event.message);
-    },
-  });
-
-  console.log(run.result.finalText);
-  console.table(run.queryResults[0]?.rows ?? []);
-  console.log(run.result.session.id);
-
-  const continued = await runtime.runAgent({
-    sessionId: run.result.session.id,
-    message: 'Compare it with the previous seven days.',
-    mode: 'read',
-  });
-
-  console.log(continued.result.finalText);
-} finally {
-  await runtime.close();
-}
-```
-
-Save `run.result.session.id` if the conversation must continue after the process restarts.
-
-`runAgent()` is the trusted SDK integration surface and returns the complete run, including tool execution records. Application-facing Session views are available through `listAgentSessions()` and `getAgentSession()`; they omit tool messages, internal retrieval identifiers, Skill instructions, and evaluation details.
-
-Query rows are returned through `run.queryResults`, not written into the conversation, Session history, or user preferences. See the [SDK Guide](docs/sdk/README.md) for Projects, Skills, MCP, bounded query results, cancellation, direct model calls, and the lower-level database runtime.
-
-## Permission modes
-
-| Mode   | Runs without approval                                          | Requests one-call approval                                         |
-| ------ | -------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `read` | Schema inspection and read-only SQL                            | Row changes, DDL, destructive, or administrative actions           |
-| `edit` | Everything in `read`, row changes, and Project file edits      | DDL, destructive Schema changes, shell, and administrative actions |
-| `full` | Read, edits, DDL, destructive, shell, and administrative tools | Nothing solely because of the mode                                 |
-
-An approved request applies to that tool call only. A rejection becomes an Agent observation, so it can choose a safer path or explain what it cannot complete.
-
-If `approvalProvider` is omitted, the Runtime uses its built-in approval broker. A UI or API host can call `listAgentApprovals()` and `resolveAgentApproval()` while the Agent waits, for up to five minutes by default. Supplying a custom callback replaces this broker-backed flow.
-
-These modes are application policy—not a replacement for PostgreSQL privileges. Always use an appropriately restricted database account.
-
-## Projects, Skills, and MCP
-
-`schemanaut init` creates:
-
-```text
-my-data-project/
-├── .schemanaut/
-│   ├── AGENT.md
-│   ├── settings.json
-│   ├── mcp.json
-│   └── skills/
-├── sql/
-└── artifacts/
-```
-
-- Put recurring project guidance in `.schemanaut/AGENT.md`; never put credentials there.
-- Add project Skills as `.schemanaut/skills/<name>/SKILL.md`.
-- Add MCP servers to `.schemanaut/mcp.json`; sensitive environment variables and headers must use secret references resolved by the host application.
-- A Session is durable conversation state. A Project is reusable directory context. They are related but not interchangeable.
-
-## Local REST API and WebUI
-
-Start the loopback-only service:
-
-```bash
-npx schemanaut serve --host 127.0.0.1 --port 3721
-```
-
-Open <http://127.0.0.1:3721>. The main AI SQL flow is:
-
-1. `POST /v1/setup`
-2. `POST /v1/schema/index`
-3. `POST /v1/agent/run` for one JSON result, or `POST /v1/agent/run/stream` for semantic SSE events
-
-Both Agent endpoints return a de-internalized `AiSqlAgentRunView` intended for users rather than the SDK's complete integration record. Database rows live in its separate, ephemeral `queryResults` payload and are never embedded in Session messages. Public management endpoints cover Session list/get/delete/steer, Skill list/refresh, pending approval resolution, and MCP configuration/lifecycle. The API also exposes deterministic generate/execute/re-execute endpoints, Session compaction, context checkpoints, model calls, database query jobs, results, resources, and metrics. See the [API Reference](docs/sdk/api-reference.md).
-
-## Development
-
-```bash
-pnpm typecheck
-pnpm lint
-pnpm test
-pnpm test:ai-sql
-pnpm test:ai-sql:performance
-pnpm test:postgres
-pnpm test:npm-package:functional
-```
-
-Live model tests are opt-in and may consume paid tokens:
-
-```bash
-pnpm test:functional:live
-pnpm test:agent-runtime:live
-pnpm test:performance:live
-```
-
-Credentials belong in ignored environment files or an external secret store and must never be committed.
-
-See the [test pipeline](docs/test-pipeline.md) for the three complex PostgreSQL scenarios, Schema-convergence check, database-free Project Agent scenario, performance thresholds, evidence files, and complete release sequence.
-
-## Current boundaries
-
-- PostgreSQL is the only complete database connector in v1.
-- Project guidance and Skills are the public v1 path for business rules; a stable CRUD API for resource-bound business knowledge is not exposed yet.
-- The CLI accepts an OpenAI-compatible endpoint; native Anthropic Messages is available through the SDK and REST setup API.
-- The WebUI is a lightweight local setup and evaluation surface, not an IDE.
-- Interactive Agent results are capped at 1,000 rows and live only in the current response/in-process cache; restored Sessions contain no database rows. Re-run the SQL or use an explicit database export for later access.
-- The default Runtime supports MCP secret references, but does not configure MCP OAuth or provide a credential vault.
-- Foreground/background process tools are not registered unless the host explicitly sets `enableProcessTools: true`. Execution, input, and termination require `full`; handles are Session-scoped and working directories stay inside the Project, but child processes still inherit the host's OS authority. `enableShellTool` remains only as a legacy `shell_run` compatibility switch.
-- MCP servers are configured but not started automatically by default. Start reviewed servers explicitly, or opt into `autoStartMcp` only in a trusted host.
-- Agent quality still depends on the selected model's reasoning and tool-calling behavior.
-- AI governance and operations remain roadmap work and are not part of v1.
-
-## Documentation
-
-- [SDK Guide](docs/sdk/README.md)
-- [SDK API Reference](docs/sdk/api-reference.md)
-- [CLI Guide](docs/cli/README.md)
-- [Product Functional Design](docs/product-functional-overview.md)
-- [Agent and Extension Runtime](docs/agent/README.md)
-- [Test Pipeline](docs/test-pipeline.md)
-- [AI SQL Engineering Documentation](docs/ai-sql/README.md)
-- [Security Policy](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
-
-## License
-
-SchemaNaut is licensed under the [Apache License 2.0](LICENSE).
+SchemaNaut is licensed under [Apache-2.0](LICENSE).
