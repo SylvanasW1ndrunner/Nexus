@@ -9,7 +9,7 @@ task-specific enhancements, not SchemaNaut configuration modules.
 | Database | Database connection information managed outside SchemaNaut. |
 | Forge | A gh or glab command-line client and its external login state. |
 | Containers | A docker or podman command-line client and service when needed. |
-| Browser Automation | An installed Playwright CLI and browser environment. |
+| Browser Automation | An externally prepared Playwright CLI, browser environment, and login state. The CLI has no embedded Chromium and no Cookie parameter. |
 | Language Intelligence | Relevant language tools such as tsc, pyright, ruff, cargo, go, or ctags. |
 | Documents | pandoc, pdftotext, or pdfinfo for the requested operation. |
 | Data & Notebook | Readable data files; Jupyter is needed to run a notebook. |
@@ -28,6 +28,11 @@ retention with general size and lifecycle limits. You are responsible for the
 sensitivity of your input, external configuration, model endpoint, local logs,
 Journal, Artifacts, and third-party output. Do not commit real credentials to
 Git.
+
+The built-in HTTP/browser bridge has one narrow API isolation: Cookie and
+Set-Cookie values never enter Agent-facing schemas, prepared intents, results,
+or the Journal. It does not scan or redact page bodies, external command output,
+or user browser-test code output; users remain responsible for those contents.
 
 Repair missing external conditions with their normal external workflow, then
 retry or rediscover the task. A changed parent PATH or environment requires a

@@ -37,3 +37,7 @@ full-access 不会自动拦截动作等待批准。不存在项目级覆盖。
 SchemaNaut 不脱敏配置视图、命令参数、命令输出或 Provider 错误；不扫描它们以识别 Secret，也不判断
 外部 CLI、Skill、MCP Server 或 Capability 是否可信。这些值可以进入 Agent 结果和本地 retention，
 仅受通用大小与生命周期限制。用户负责其敏感性，并负责不把真实凭据提交到 Git。
+
+内置 HTTP/browser bridge 只对 Cookie 值作狭义 API 隔离：Cookie 和 Set-Cookie 不会进入面向 Agent 的 schema、
+prepared intent、结果或 Journal。它不检查网页正文、外部命令输出或用户 browser_test 代码输出。当前 CLI 没有
+内嵌 Chromium；浏览器工作使用在产品外准备的浏览器/Playwright 环境和登录态，不提供 Cookie 参数。

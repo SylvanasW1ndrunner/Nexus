@@ -8,7 +8,7 @@
 | Database | 在 SchemaNaut 外管理的数据库连接信息。 |
 | Forge | gh 或 glab 命令行客户端及其外部登录状态。 |
 | Containers | docker 或 podman 命令行客户端；需要时还需对应服务。 |
-| Browser Automation | 已安装的 Playwright CLI 和浏览器环境。 |
+| Browser Automation | 在产品外准备的 Playwright CLI、浏览器环境和登录态；CLI 没有内嵌 Chromium，也不提供 Cookie 参数。 |
 | Language Intelligence | tsc、pyright、ruff、cargo、go 或 ctags 等语言工具。 |
 | Documents | 当前操作所需的 pandoc、pdftotext 或 pdfinfo。 |
 | Data & Notebook | 可读取的数据文件；运行 notebook 还需要 Jupyter。 |
@@ -22,6 +22,9 @@ default、auto、full-access 和组织规则决定授权。
 外部命令输出和 Provider 错误可以进入 Agent 结果和本地 retention，仅受通用大小与生命周期限制。
 用户负责输入、外部配置、模型 Endpoint、本地日志、Journal、Artifact 和第三方输出的敏感性。不要把
 真实凭据提交到 Git。
+
+内置 HTTP/browser bridge 有唯一狭义的 API 隔离：Cookie 和 Set-Cookie 值不会进入面向 Agent 的 schema、prepared
+intent、结果或 Journal。它不扫描或脱敏网页正文、外部命令输出或用户 browser_test 代码输出；用户仍负责这些内容。
 
 请使用相应外部流程修复缺少条件，然后重试或重新发现任务。父进程 PATH 或环境改变时，需要重启终端
 Host。

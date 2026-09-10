@@ -15,6 +15,10 @@
 - 功能认知优先，不采用 TDD；各任务实现后运行聚焦静态/冒烟检查，Task 10 统一运行完整测试和真实环境验收。
 - 保留既有未提交工作，不重置、不覆盖无关改动；只提交任务明确列出的文件。
 - 所有提交作者为 Chandler Niu；不要将真实凭据、`.env` 或生产连接信息提交到 Git，这是仓库卫生要求。
+- 不做任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是内置 HTTP/browser bridge 不把
+  Cookie/Set-Cookie 值放入 Agent-facing schema、prepared intent、结果或 Journal；这不扫描网页正文、外部命令
+  输出或用户 browser_test 代码输出。Browser Capability 使用外部准备的浏览器/Playwright 环境和登录态；当前
+  CLI 无内嵌 Chromium，也不提供 Cookie 参数。
 
 ## Task 1: 分离用户文档和开发文档，并冻结本轮产品边界
 

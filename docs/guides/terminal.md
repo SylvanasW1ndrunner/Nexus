@@ -43,3 +43,10 @@ whether external CLIs, Skills, MCP servers, or Capabilities are trustworthy.
 Those values may enter Agent results and local retention with general size and
 lifecycle limits. You are responsible for their sensitivity and for keeping
 real credentials out of Git.
+
+The built-in HTTP/browser bridge is narrowly isolated from Cookie values: Cookie
+and Set-Cookie are absent from Agent-facing schemas, prepared intents, results,
+and the Journal. It does not inspect page bodies, external command output, or
+user browser-test code output. This CLI has no embedded Chromium; browser work
+uses an externally prepared browser/Playwright environment and login state, with
+no Cookie parameter.

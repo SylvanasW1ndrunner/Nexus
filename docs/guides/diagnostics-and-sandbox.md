@@ -35,3 +35,10 @@ SchemaNaut does not redact diagnostics, command output, provider errors, or
 retained results. They may enter Agent results, logs, Journal, and Artifacts
 with general size and lifecycle limits. Users decide whether those inputs and
 outputs are sensitive. Keep real credentials out of Git as repository hygiene.
+
+The built-in HTTP/browser bridge is the narrow exception to Agent-facing API
+content: Cookie and Set-Cookie values are omitted from schemas, prepared
+intents, results, and the Journal. This does not inspect or redact page bodies,
+external command output, or user browser-test code output. Browser work uses an
+externally prepared browser/Playwright environment and login state; the CLI has
+no embedded Chromium or Cookie parameter.

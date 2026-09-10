@@ -34,6 +34,11 @@ SchemaNaut 不承担敏感信息识别、Secret 脱敏、类似凭据参数拦�
 Capability 可信度判断，也不负责使外部输出安全。用户负责输入、工具配置、模型 Endpoint、日志、
 Journal、Artifact 和第三方输出的敏感性。
 
+唯一狭义的 API 隔离针对内置 HTTP/browser bridge：Cookie 和 Set-Cookie 值不会进入面向 Agent 的 schema、
+prepared intent、结果或 Journal。这不是扫描或脱敏网页正文、外部命令输出或用户 browser_test 代码输出；
+用户仍负责这些外部内容。SchemaNaut 没有内嵌 Chromium。Browser Capability 使用在产品外准备好的浏览器/
+Playwright 环境和登录态，不提供 Cookie 参数。
+
 首批可选 Capability 正在本轮开发中。它们是按任务发现的增强，不是配置模块。请参阅
 [Capability 指南](docs/guides/capabilities.zh-CN.md)和[诊断与沙盒指南](docs/guides/diagnostics-and-sandbox.zh-CN.md)。
 
