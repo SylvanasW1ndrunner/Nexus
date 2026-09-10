@@ -145,6 +145,56 @@ describe('Capability command Host port', () => {
     }
   });
 
+  it('masks complete authentication headers and structured values in real payloads and both spools', async () => {
+    const f = await fixture();
+    const secret = 'dummy-auth-header-value';
+    const basic = Buffer.from('fixture-user:' + secret).toString('base64');
+    const suffix = 'dummy-auth-tail-value';
+    const original = [
+      'Authorization: Basic ' + basic,
+      'Proxy-Authorization: token ' + secret,
+      'Authorization=Custom-Scheme ' + secret + ' ' + suffix,
+      'Proxy-Authorization: "Basic ' + basic + '"',
+      "Authorization: 'Custom-Scheme " + secret + "'",
+      'Authorization: Basic "' + secret + ',' + suffix + '"',
+      JSON.stringify({ Authorization: 'Basic ' + basic, safe: 'preserved' }),
+      "{'Proxy-Authorization':'token " + secret + "','safe':'preserved'}",
+      'X-Public: preserved',
+      '{\n"Authorization"\n:\n"Basic ' + basic + '"\n}',
+    ].join('\n');
+    const path = join(f.root, 'authentication.txt'); await writeFile(path, original);
+    const intent = await f.port.prepare(f.input(['-e', 'const data = require("node:fs").readFileSync(process.argv[1]); process.stdout.write(data); process.stderr.write(data);', path]), f.context);
+    const result = await f.port.execute(intent.input, f.execution(intent)) as { process: { processId: string }; spool: { stdout: { text: string } } };
+    const stored = await Promise.all(['stdout.log', 'stderr.log'].map(file => readFile(join(f.root, '.spool', result.process.processId, file), 'utf8')));
+    for (const value of [secret, basic, suffix]) {
+      expect(JSON.stringify(result).includes(value)).toBe(false);
+      expect(stored.some(output => output.includes(value))).toBe(false);
+    }
+    for (const output of stored) {
+      expect(Buffer.byteLength(output)).toBeLessThanOrEqual(Buffer.byteLength(original));
+      expect(output.includes('X-Public: preserved')).toBe(true);
+      expect(JSON.parse(output.split('\n')[6]!)).toEqual({ Authorization: '*', safe: 'preserved' });
+    }
+  });
+
+  it('rejects split and assigned long credential flags before an intent or policy input exists', async () => {
+    const allowArgv = vi.fn(() => true);
+    const f = await fixture({ globalPolicy: { mode: 'full-access', revision: 'credential-flags.v1', allowArgv } });
+    const secret = 'dummy-split-flag-value';
+    for (const flag of ['--access-token', '--refresh-token', '--session-token', '--credentials', '--connection-string', '--database-url', '--db-url', '--dsn', '--proxy-authorization', '--authorization', '--api-key', '--passwd', '--pwd', '--credential', '--password', '--secret', '--token']) {
+      for (const argv of [[flag, secret], [flag + '=' + secret]]) {
+        let rejected = false; let diagnostic = '';
+        try { await f.port.prepare(f.input(argv), f.context); }
+        catch (error) { rejected = true; diagnostic = error instanceof Error ? error.message : ''; }
+        expect(rejected).toBe(true); expect(diagnostic.includes(secret)).toBe(false);
+      }
+    }
+    expect(allowArgv).toHaveBeenCalledTimes(0);
+    await expect(f.port.prepare(f.input(['-p', '5432']), f.context)).resolves.toBeDefined();
+    expect(allowArgv).toHaveBeenCalledTimes(1);
+    await expect(access(join(f.root, '.spool'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it.each([16, 8 * 1024 * 1024])('never expands repeated short environment secrets at %i raw bytes', async size => {
     const environment = { ...process.env, ...Object.fromEntries(Array.from({ length: 12 }, (_, index) => ['TOKEN_' + index, 'E'])) };
     const f = await fixture({ environment });

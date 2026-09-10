@@ -1,3 +1,17 @@
+/** One vocabulary for output fields, environment values and explicit argv flags. */
+export const COMMAND_CREDENTIAL_FIELDS = Object.freeze([
+  'password', 'passwd', 'pwd', 'api-key', 'access-token', 'refresh-token', 'session-token',
+  'secret', 'token', 'proxy-authorization', 'authorization', 'credential', 'credentials',
+  'connection-string', 'database-url', 'db-url', 'dsn',
+] as const);
+const credentialFieldSource = COMMAND_CREDENTIAL_FIELDS.map(name => name.replaceAll('-', '[_-]?')).join('|');
+const credentialEnvironmentKey = new RegExp(credentialFieldSource, 'iu');
+const credentialArgument = new RegExp('^--?(?:' + credentialFieldSource + ')(?:=|$)', 'iu');
+
+export function isCredentialArgument(argument: string): boolean {
+  return credentialArgument.test(argument);
+}
+
 /** All offsets refer to the original text. Replacements are never scanned again. */
 export class CommandRedactor {
   private readonly secrets: RegExp | undefined;
@@ -5,7 +19,7 @@ export class CommandRedactor {
 
   constructor(environment: NodeJS.ProcessEnv) {
     const values = [...new Set(Object.entries(environment)
-      .filter(([key, value]) => value && /(?:token|secret|password|passwd|api[_-]?key|credential|authorization|database_url|dsn)/iu.test(key))
+      .filter(([key, value]) => value && credentialEnvironmentKey.test(key))
       .map(([, value]) => value!))].sort((a, b) => b.length - a.length);
     this.redactAll = values.length > 1024 || values.reduce((total, value) => total + value.length, 0) > 65_536;
     this.secrets = values.length && !this.redactAll ? new RegExp(values.map(value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|'), 'gu') : undefined;
@@ -26,8 +40,9 @@ export class CommandRedactor {
       this.secrets.lastIndex = 0;
       for (let match = this.secrets.exec(text); match; match = this.secrets.exec(text)) mark(match.index, match[0].length);
     }
-    const fields = /["']?(?:password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|secret|token|authorization|credential|credentials|connection[_-]?string|database[_-]?url|db[_-]?url|dsn)["']?\s*[:=]\s*/giu;
+    const fields = new RegExp('["\']?(' + credentialFieldSource + ')["\']?\\s*[:=]\\s*', 'giu');
     for (let match = fields.exec(text); match; match = fields.exec(text)) {
+      const authentication = /^(?:proxy[_-]?)?authorization$/iu.test(match[1]!);
       const quote = text[fields.lastIndex];
       const quoted = quote === '"' || quote === "'";
       const start = fields.lastIndex + (quoted ? 1 : 0);
@@ -38,6 +53,20 @@ export class CommandRedactor {
         if (quoted) {
           if (text[end] === quote) break;
           if (text[end] === '\\') { end = Math.min(end + 2, text.length); continue; }
+        } else if (authentication) {
+          if (/[\r\n,}\]]/u.test(text[end]!)) break;
+          // Authentication headers may contain a scheme plus a quoted token.
+          // Keep that whole value in the mask, including commas inside quotes.
+          const innerQuote = text[end];
+          if (innerQuote === '"' || innerQuote === "'") {
+            end++;
+            while (end < text.length && text[end] !== innerQuote && !/[\r\n]/u.test(text[end]!)) {
+              if (text[end] === '\\' && end + 1 < text.length && !/[\r\n]/u.test(text[end + 1]!)) end++;
+              end++;
+            }
+            if (text[end] === innerQuote) end++;
+            continue;
+          }
         } else if (/[\s"',}\]]/u.test(text[end]!)) break;
         end++;
       }
