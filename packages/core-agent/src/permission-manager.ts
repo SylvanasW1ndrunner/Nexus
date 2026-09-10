@@ -1,96 +1,177 @@
 import type {
   AgentMode,
-  AgentAccessMode,
-  ApprovalProvider,
-  ApprovalProviderResult,
-  PermissionRequest,
+  AgentPermissionRule,
+  AgentToolPermissionFacts,
   ToolPermissionDecision,
 } from './types.js';
 
-export type PermissionCheckSource = 'automatic' | 'approval-provider' | 'missing-approval-provider';
-
-export type PermissionCheckResult = {
+export type ToolPermissionEvaluation = Readonly<{
   decision: ToolPermissionDecision;
-  source: PermissionCheckSource;
-  approvalRequestId?: string;
-  approvedAt?: string;
-  approvedBy?: string;
-  reason?: string;
-};
+  mode: AgentMode;
+  policyRevision: string;
+  facts: AgentToolPermissionFacts;
+  matchedRuleIds: readonly string[];
+}>;
 
 export class PermissionManager {
-  constructor(private readonly approvalProvider?: ApprovalProvider) {}
+  #policy: Readonly<{ revision: string; rules: readonly AgentPermissionRule[] }>;
+
+  snapshot(mode: AgentMode): Readonly<{ mode: AgentMode; revision: string }> {
+    return Object.freeze({ mode, revision: this.#policy.revision });
+  }
+
+  constructor(
+    options: Readonly<{
+      rules?: readonly AgentPermissionRule[];
+      revision?: string;
+    }> = {},
+  ) {
+    this.#policy = snapshotPolicy(options.rules ?? [], options.revision);
+  }
+
+  /** Atomically publishes a new global enterprise policy for subsequent evaluations. */
+  replacePolicy(input: Readonly<{
+    rules: readonly AgentPermissionRule[];
+    revision: string;
+  }>): void {
+    this.#policy = snapshotPolicy(input.rules, input.revision);
+  }
 
   /** Pure policy resolution used by the Journal-backed Invocation runtime. */
-  decide(
-    mode: AgentMode,
-    tool: Parameters<typeof decideAutomaticPermission>[1],
-  ): ToolPermissionDecision {
-    return decideAutomaticPermission(mode, tool);
+  decide(mode: AgentMode, facts: AgentToolPermissionFacts): ToolPermissionDecision {
+    return this.evaluate(mode, facts).decision;
   }
 
-  async check(request: PermissionRequest): Promise<ToolPermissionDecision> {
-    return (await this.checkDetailed(request)).decision;
+  evaluate(mode: AgentMode, facts: AgentToolPermissionFacts): ToolPermissionEvaluation {
+    const policy = this.#policy;
+    const normalized = snapshotFacts(facts);
+    const matching = policy.rules.filter((rule) => ruleMatches(rule, normalized));
+    const explicit = strictestDecision(matching.map((rule) => rule.decision));
+    return Object.freeze({
+      decision: strictestDecision([decideAutomaticPermission(mode, normalized), ...(explicit === undefined ? [] : [explicit])])!,
+      mode,
+      policyRevision: policy.revision,
+      facts: normalized,
+      matchedRuleIds: Object.freeze(matching.map((rule) => rule.id)),
+    });
   }
-
-  async checkDetailed(
-    request: PermissionRequest,
-    onApprovalRequired?: (request: PermissionRequest) => void | Promise<void>,
-  ): Promise<PermissionCheckResult> {
-    const automatic = decideAutomaticPermission(request.mode, request.tool);
-    if (automatic !== 'ask') return { decision: automatic, source: 'automatic' };
-    if (!this.approvalProvider) return { decision: 'ask', source: 'missing-approval-provider' };
-    await onApprovalRequired?.(request);
-    const approval = normalizeApprovalProviderResult(await this.approvalProvider(request));
-    return {
-      decision: approval.approved ? 'allow' : 'deny',
-      source: 'approval-provider',
-      ...(approval.requestId === undefined ? {} : { approvalRequestId: approval.requestId }),
-      ...(approval.approvedAt === undefined ? {} : { approvedAt: approval.approvedAt }),
-      ...(approval.approvedBy === undefined ? {} : { approvedBy: approval.approvedBy }),
-      ...(approval.reason === undefined ? {} : { reason: approval.reason }),
-    };
-  }
-}
-
-function normalizeApprovalProviderResult(result: ApprovalProviderResult): {
-  approved: boolean;
-  requestId?: string;
-  approvedAt?: string;
-  approvedBy?: string;
-  reason?: string;
-} {
-  if (typeof result === 'boolean') return { approved: result };
-  return result;
 }
 
 export function decideAutomaticPermission(
   mode: AgentMode,
-  tool: {
-    dangerLevel: 'safe' | 'medium' | 'high' | 'critical';
-    readonly?: boolean;
-    requiredPermission?: AgentAccessMode;
-  },
+  facts: AgentToolPermissionFacts,
 ): ToolPermissionDecision {
-  const required = requiredPermissionForTool(tool);
-  if (accessRank(mode) >= accessRank(required)) return 'allow';
-  return 'ask';
+  if (mode === 'full-access') return 'allow';
+  const risky =
+    facts.dangerLevel === 'high' ||
+    facts.dangerLevel === 'critical' ||
+    facts.destructive ||
+    facts.credentials ||
+    facts.admin || facts.unknownRisk || facts.access === 'destructive' ||
+    facts.actions.some(action => ['delete', 'credential', 'admin', 'unknown'].includes(action));
+  if (risky) return 'ask';
+  if (mode === 'default' && (facts.network || facts.externalWrite || facts.actions.includes('network') || facts.hosts.length > 0 || facts.resolvedAddresses.length > 0)) return 'ask';
+  return 'allow';
 }
 
-export function requiredPermissionForTool(tool: {
-  dangerLevel: 'safe' | 'medium' | 'high' | 'critical';
-  readonly?: boolean;
-  requiredPermission?: AgentAccessMode;
-}): AgentAccessMode {
-  if (tool.requiredPermission !== undefined) return tool.requiredPermission;
-  if (tool.readonly || tool.dangerLevel === 'safe') return 'read';
-  if (tool.dangerLevel === 'medium') return 'edit';
-  return 'full';
+function ruleMatches(rule: AgentPermissionRule, facts: AgentToolPermissionFacts): boolean {
+  return (
+    selectorMatches(rule.tools, [facts.toolName]) &&
+    selectorMatches(rule.actions, facts.actions) &&
+    selectorMatches(rule.paths, facts.paths, true) &&
+    selectorMatches(rule.hosts, facts.hosts, true)
+  );
 }
 
-function accessRank(mode: AgentAccessMode): number {
-  if (mode === 'read') return 0;
-  if (mode === 'edit') return 1;
-  if (mode === 'full') return 2;
-  throw new Error(`Unsupported Agent access mode: ${String(mode)}.`);
+function selectorMatches(
+  patterns: readonly string[] | undefined,
+  values: readonly string[],
+  caseInsensitive = false,
+): boolean {
+  if (patterns === undefined) return true;
+  if (patterns.length === 0) return false;
+  if (values.length === 0) return false;
+  return patterns.some((pattern) =>
+    values.some((value) => wildcardMatches(pattern, value, caseInsensitive)),
+  );
+}
+
+function snapshotPolicy(
+  rules: readonly AgentPermissionRule[],
+  revision = 'permission-policy:unversioned',
+): Readonly<{ revision: string; rules: readonly AgentPermissionRule[] }> {
+  const normalizedRevision = revision.trim();
+  if (!normalizedRevision || normalizedRevision.length > 128) throw new Error('Permission policy revision must be bounded.');
+  if (rules.length > 128) throw new Error('Permission policy supports at most 128 rules.');
+  return Object.freeze({
+    revision: normalizedRevision,
+    rules: Object.freeze(rules.map(snapshotRule)),
+  });
+}
+
+function wildcardMatches(pattern: string, value: string, caseInsensitive: boolean): boolean {
+  const source = globRegExp(pattern);
+  return new RegExp(`^${source}$`, caseInsensitive ? 'iu' : 'u').test(value);
+}
+
+function globRegExp(pattern: string): string {
+  let result = '';
+  for (const character of pattern) {
+    if (character === '*') result += '.*';
+    else if (character === '?') result += '.';
+    else result += character.replace(/[\\^$.*+?()[\]{}|]/gu, '\\$&');
+  }
+  return result;
+}
+
+function strictestDecision(
+  decisions: readonly ToolPermissionDecision[],
+): ToolPermissionDecision | undefined {
+  if (decisions.includes('deny')) return 'deny';
+  if (decisions.includes('ask')) return 'ask';
+  if (decisions.includes('allow')) return 'allow';
+  return undefined;
+}
+
+function snapshotRule(rule: AgentPermissionRule): AgentPermissionRule {
+  const id = rule.id.trim();
+  if (!id || id.length > 2_048) throw new Error('Permission rule id must be bounded.');
+  if (!['allow', 'ask', 'deny'].includes(rule.decision)) {
+    throw new Error(`Permission rule decision is invalid: ${id}.`);
+  }
+  return Object.freeze({
+    id,
+    decision: rule.decision,
+    ...(rule.tools === undefined ? {} : { tools: Object.freeze(uniqueStrings(rule.tools)) }),
+    ...(rule.actions === undefined ? {} : { actions: Object.freeze(uniqueStrings(rule.actions)) }),
+    ...(rule.paths === undefined ? {} : { paths: Object.freeze(uniqueStrings(rule.paths)) }),
+    ...(rule.hosts === undefined
+      ? {}
+      : {
+          hosts: Object.freeze(uniqueStrings(rule.hosts).map((host) => host.toLocaleLowerCase())),
+        }),
+  });
+}
+
+function snapshotFacts(facts: AgentToolPermissionFacts): AgentToolPermissionFacts {
+  return Object.freeze({
+    ...facts,
+    actions: Object.freeze([...facts.actions]),
+    paths: Object.freeze([...facts.paths]),
+    hosts: Object.freeze([...facts.hosts]),
+    resolvedAddresses: Object.freeze([...facts.resolvedAddresses]),
+    targets: Object.freeze(structuredClone([...facts.targets])),
+  });
+}
+
+function uniqueStrings<T extends string>(values: readonly T[] | undefined): T[] {
+  const result: T[] = [];
+  const seen = new Set<string>();
+  for (const value of values ?? []) {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized as T);
+  }
+  return result;
 }

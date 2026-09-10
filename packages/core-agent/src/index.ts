@@ -1,29 +1,294 @@
-export * from './audit-log-store.js';
-export * from './approval-broker.js';
-export * from './behavior-evaluation.js';
-export * from './checkpoint-store.js';
-export * from './capability-control-plane.js';
-export * from './capability-types.js';
-export * from './context-manager.js';
-export * from './completion-verifier.js';
-export * from './completion-controller.js';
-export * from './evaluation-report-store.js';
-export * from './events/agent-event.js';
-export * from './events/agent-journal.js';
-export * from './events/event-projectors.js';
-export * from './events/event-schema-registry.js';
-export * from './events/event-upcasters.js';
-export * from './events/run-event-committer.js';
-export * from './events/sqlite-agent-journal.js';
-export * from './instruction-compiler.js';
-export * from './journal-session-store.js';
-export * from './permission-manager.js';
-export * from './project-context.js';
-export * from './react-agent.js';
-export * from './run-coordinator.js';
-export * from './session.js';
-export * from './session-store.js';
-export * from './session/session-projection.js';
+export {
+  CapabilityControlPlane,
+  CapabilityPublicationPoisonedError,
+  CapabilityShutdownTimeoutError,
+  CapabilityTeardownTimeoutError,
+  type CapabilityControlPlaneOptions,
+  type ExternalProviderGenerationPublication,
+} from './capability-control-plane.js';
+export {
+  createAgentCapabilityServiceToken,
+  type AgentCapabilityAggregateSnapshot,
+  type AgentCapabilityAvailability,
+  type AgentCapabilityActivationBinding,
+  type AgentCapabilityExternalContextRequirement,
+  type AgentCapabilityContextProviderContribution,
+  type AgentCapabilityContextRequest,
+  type AgentCapabilityContributionSummary,
+  type AgentCapabilityDefinition,
+  type AgentCapabilityDiscoveryManifestEntry,
+  type AgentCapabilityDiscoveryTarget,
+  type AgentCapabilityLifecycleFailure,
+  type AgentCapabilityLifecycleContext,
+  type AgentCapabilityTeardownContext,
+  type AgentCapabilityModule,
+  type AgentCapabilityModuleContributions,
+  type AgentCapabilityModuleManifest,
+  type AgentCapabilityModuleRegistration,
+  type AgentCapabilityModuleRuntime,
+  type AgentCapabilityModuleSnapshot,
+  type AgentCapabilityProbeResult,
+  type AgentCapabilityProbeChoice,
+  type AgentCapabilityProviderSnapshot,
+  type AgentCapabilityRequirement,
+  type AgentCapabilityRuntimeSnapshot,
+  type AgentCapabilityRuntimeSnapshotIdentity,
+  type AgentCapabilityServiceContribution,
+  type AgentCapabilityServiceLease,
+  type AgentCapabilityServiceSelector,
+  type AgentCapabilityServiceToken,
+  type AgentCapabilitySkillSourceContribution,
+  type AgentCapabilitySnapshot,
+  type AgentCapabilityStateContribution,
+  type AgentCapabilityStatus,
+  type AgentExternalCapabilityProvider,
+  type AgentExternalCapabilityProviderSnapshot,
+  type AgentInvocationHookAfterInput,
+  type AgentInvocationHookContribution,
+  type AgentInvocationHookInput,
+} from './capability-types.js';
+export {
+  PromptRuntime,
+  PromptRuntimeError,
+  snapshotPromptSection,
+  type CompilePromptInput,
+  type CompiledPrompt,
+  type PromptRuntimeErrorCode,
+  type PromptRuntimeOptions,
+  type PromptSection,
+  type PromptSectionSource,
+} from './context/prompt-runtime.js';
+export {
+  AGENT_EVENT_TYPES,
+  type AgentEvent,
+  type AgentEventDraft,
+  type AgentEventPayloadMap,
+  type AgentEventType,
+  type AgentResumableState,
+  type AgentRunState,
+  type CanonicalToolIdFact,
+  type LegacyImportedSessionRecord,
+  type LegacyImportedToolCall,
+  type PersistedValidatedAttempt,
+  type RunIngressConfigurationSnapshot,
+  type ToolApprovalFact,
+  type ToolRecoveryClassFact,
+  type ToolExecutionErrorFact,
+  type ToolObservationFact,
+  type ToolPermissionAuditFact,
+} from './events/agent-event.js';
+export {
+  AgentJournalError,
+  type AcquireRunLeaseInput,
+  type AgentJournal,
+  type AgentJournalErrorCode,
+  type AgentObservationProjection,
+  type AuthorizeToolRetryCommand,
+  type CreateRunCommand,
+  type CreateRunResult,
+  type DecideToolApprovalCommand,
+  type FinishToolInvocationCommand,
+  type GetPendingContextCompactionInput,
+  type GetRuntimeCommandProjectionInput,
+  type GetToolApprovalInput,
+  type GetTurnLifecycleInput,
+  type JournalCommand,
+  type JournalCommitResult,
+  type ListToolApprovalsInput,
+  type ListTurnInvocationsInput,
+  type ObserveToolInvocationCommand,
+  type PendingContextCompaction,
+  type PublishToolProgressCommand,
+  type RejectToolInvocationCommand,
+  type ReleaseRunLeaseInput,
+  type RenewRunLeaseInput,
+  type ResolveUnknownToolOutcomeCommand,
+  type RunLease,
+  type RunLeaseReference,
+  type StartRunCommand,
+  type StartToolInvocationCommand,
+  type StartTurnCommand,
+  type ToolApprovalPage,
+  type ToolInvocationCommitResult,
+  type ToolInvocationJournalCommand,
+  type TurnLifecycleProjection,
+  type ValidateToolInvocationCommand,
+  type WaitRunEventsInput,
+  type WaitRunEventsResult,
+} from './events/agent-journal.js';
+export {
+  replayAgentEvents,
+  type AgentAttemptProjection,
+  type AgentInvocationProjection,
+  type AgentReplayProjection,
+  type AgentRunProjection,
+  type AgentTurnProjection,
+} from './events/event-projectors.js';
+export {
+  AGENT_EVENT_SCHEMA_REGISTRY,
+  isAgentEventType,
+  validateAndRedactEventPayload,
+  validatePersistedAttempt,
+  type AgentEventAudience,
+  type AgentEventPersistence,
+  type AgentEventSchemaDescriptor,
+} from './events/event-schema-registry.js';
+export {
+  AGENT_EVENT_UPCASTERS,
+  upcastAgentEvent,
+  type AgentEventUpcaster,
+  type AgentEventUpcasterRegistry,
+  type StoredAgentEvent,
+} from './events/event-upcasters.js';
+export {
+  RunEventCommitter,
+  type CommitValidatedAttemptCommand,
+  type ModelTurnCommitResult,
+} from './events/run-event-committer.js';
+export type { RunPolicySnapshot } from './types.js';
+export type {
+  DeliveryEvidenceSelection,
+  DeliveryEvidenceSnapshot,
+  DeliveryToolEvidenceSnapshot,
+  DeliveryVerifier,
+  DeliveryVerifierDecision,
+} from './delivery/delivery-verifier.js';
+export {
+  SqliteAgentJournal,
+  type KernelCommitFaultPoint,
+  type ModelCommitFaultPoint,
+  type RuntimeCommandCommitFaultPoint,
+  type SqliteAgentJournalOptions,
+  type ProjectUsageTotal,
+} from './events/sqlite-agent-journal.js';
+export {
+  AgentKernelError,
+  createJournalAgentKernel,
+  type AdvanceRunOptions,
+  type AgentKernel,
+  type AgentPendingRequest,
+  type AgentRunLimits,
+  type ApproveRunInput,
+  type AuthorizeRiskyRetryInput,
+  type CancelRunInput,
+  type CreateJournalAgentKernelOptions,
+  type ManualCompactionInput,
+  type ResolveOutcomeInput,
+  type ResumeRunInput,
+  type StartRunInput,
+  type SteerRunInput,
+} from './kernel/agent-kernel.js';
+export {
+  JournalAgentModelResolutionError,
+  type JournalAgentCostMeter,
+  type JournalAgentModelResolutionErrorCode,
+  type JournalAgentModelResolver,
+  type JournalAgentPersistedModelBinding,
+  type JournalAgentTurnRuntimeCapture,
+  type JournalAgentTurnRuntimeLease,
+  type JournalAgentToolCatalogLease,
+  type JournalAgentToolCatalogResolver,
+} from './kernel/journal-agent-kernel-port.js';
+export {
+  SessionModelBindingStore,
+  describeRuntimeBinding,
+  type SessionModelBinding,
+  type PersistedModelRuntimeBinding,
+} from './kernel/session-model-binding.js';
+export {
+  JournalSessionStore,
+  type JournalSessionListFilter,
+  type JournalSessionListPage,
+  type JournalSessionModelBindingView,
+  type JournalSessionView,
+} from './journal-session-store.js';
+export {
+  PermissionManager,
+  decideAutomaticPermission,
+  type ToolPermissionEvaluation,
+} from './permission-manager.js';
+export {
+  agentProjectPathsEqual,
+  agentProjectReference,
+  agentProjectStorageIdentity,
+  assertSameAgentProject,
+  createAgentProjectContext,
+  defaultAgentUserSkillsDirectory,
+  findAgentProject,
+  initializeAgentProject,
+  normalizeAgentProjectRoot,
+  openAgentProject,
+} from './project-context.js';
+export {
+  createRuntimeCommandToolResult,
+  type RuntimeCommandIntent,
+  type RuntimeCommandToolContent,
+  type RuntimeCommandToolResult,
+} from './runtime-command-tool-result.js';
+export type {
+  RuntimeCommand,
+  RuntimeCapabilityDiscoveryTarget,
+  RuntimeCapabilityActivationBinding,
+  RuntimeCommandProjection,
+  RuntimeSkillActivation,
+  RuntimeToolActivation,
+} from './kernel/runtime-command.js';
+export {
+  ToolInvocationRuntime,
+  type RiskyRetryAuthorization,
+  type RuntimeCommandPostCommitExecutor,
+  type RuntimeCommandPostCommitInput,
+  type ToolApprovalDecision,
+  type ToolInvocationCrashPoint,
+  type ToolInvocationRuntimeBinding,
+  type ToolInvocationRuntimeOptions,
+  type UnknownOutcomeResolution,
+} from './tools/tool-invocation-runtime.js';
+export {
+  AuditProjectionAccumulator,
+  AuditProjector,
+  EVENT_TO_ACTIVITY,
+  ProjectionError,
+  ProjectionEventValidator,
+  SessionProjectionAccumulator,
+  UserActivityProjectionAccumulator,
+  UserActivityProjector,
+  projectSession,
+  projectTrustedRunUserActivity,
+  type AuditProjectionEvent,
+  type ProjectionErrorCode,
+  type ProjectionOptions,
+  type ProjectionPage,
+  type ProjectionRetainedScopes,
+  type SessionProjection,
+  type SessionProjectionArtifact,
+  type SessionProjectionLegacySession,
+  type SessionProjectionMessage,
+  type SessionProjectionRun,
+  type UserActivityEvent,
+} from './session/session-projection.js';
+export {
+  SESSION_JOURNAL_EVENT_TYPES,
+  upcastSessionJournalEvent,
+  validateSessionJournalPayload,
+  type BootstrapSessionCommand,
+  type ConfigureSessionSkillsCommand,
+  type ListSessionIndexesInput,
+  type SessionArchiveProjection,
+  type SessionBootstrapProjection,
+  type SessionIndexCursorKey,
+  type SessionIndexProjection,
+  type SessionJournalEvent,
+  type SessionJournalEventPayloadMap,
+  type SessionJournalEventType,
+  type SessionSkillConfiguration,
+  type SessionSkillDefinition,
+  type SessionStateCommand,
+  type SessionStateCommitter,
+  type SessionStateProjection,
+  type SetSessionArchivedCommand,
+  type StoredSessionJournalEvent,
+} from './session/session-journal.js';
 export {
   StateMigrationError,
   openProjectStateMigration,
@@ -31,17 +296,186 @@ export {
   type StateMigrationHandle,
   type StateMigrationOptions,
 } from './session/state-migrations.js';
-export * from './artifacts/project-artifact-store.js';
-export * from './stream-store.js';
-export * from './subagent-pool.js';
-export * from './task-plan.js';
-export * from './tool-failure-classifier.js';
-export * from './tool-call-ledger.js';
-export * from './tool-execution-authorization.js';
-export * from './tool-execution-router.js';
-export * from './tool-exposure-planner.js';
-export * from './tool-registry.js';
-export * from './tool-result.js';
-export * from './tool-search-index.js';
-export * from './types.js';
-export * from './user-events.js';
+export {
+  ProjectArtifactStore,
+  type ArtifactCrashPoint,
+  type ProjectArtifactStoreOptions,
+} from './artifacts/project-artifact-store.js';
+export type {
+  AgentArtifactStore,
+  ArtifactAvailability,
+  ArtifactGcReport,
+  ArtifactRef,
+  ReadableArtifactRef,
+  StageArtifactInput,
+  StagedArtifact,
+} from './artifacts/artifact-store.js';
+export {
+  CONTENT_CURSOR_REVISION,
+  CONTENT_REFERENCE_REVISION,
+  RESULT_READ_STRUCTURE_BUDGET,
+  assertResultReadOutputBudget,
+  ContentReferenceError,
+  assertContentAccess,
+  assertContentLimit,
+  assertReadMode,
+  mintContentCursor,
+  mintContentReference,
+  normalizeContentAccess,
+  normalizeContentOwner,
+  parseContentReference,
+  resolveContentOffset,
+  type ContentAccessScope,
+  type ContentOwnerScope,
+  type ContentReadMode,
+  type ContentReadRequest,
+  type ContentReadResult,
+  type ContentReferenceRecord,
+} from './artifacts/content-reference.js';
+export {
+  JournalAgentSubagentRuntime,
+  JournalAgentSubagentScheduler,
+  deriveChildAgentIdentity,
+  type AgentSubagentExecutionOptions,
+  type AgentSubagentObservation,
+  type ChildAgentIdentity,
+  type ChildAgentIdentityInput,
+} from './subagent-pool.js';
+export type { DurableSubagentOutcomeRecovery } from './internal/subagent-outcome-authority.js';
+export {
+  applyAgentTaskPlanFact,
+  createAgentTaskPlan,
+  currentAgentTask,
+  isAgentTaskPlanComplete,
+  renderAgentTaskPlanContext,
+  unresolvedAgentTasks,
+  updateAgentTask,
+  type AgentTaskPlanFact,
+  type AgentTaskPlanProjection,
+  type CreateAgentTaskPlanInput,
+  type UpdateAgentTaskInput,
+} from './task-plan.js';
+export {
+  ToolExposurePlanner,
+  type ToolDiscoveryMode,
+  type ToolExposurePlan,
+  type ToolExposurePlanInput,
+} from './tool-exposure-planner.js';
+export {
+  overlayToolCatalogSnapshot,
+  replaceCapturedBaseToolInvocation,
+  ToolCatalogSnapshot,
+  ToolRegistry,
+  type AgentToolSnapshotLifecycle,
+  type ToolInvocationAuthorization,
+  type ToolInvocationContribution,
+  type ToolInvocationDefinition,
+  type ToolInvocationExecutionContext,
+  type ToolInvocationHandler,
+  type ToolInvocationHandlerRuntime,
+  type ToolInvocationRecoveryHandler,
+  type ToolResultRetentionHandler,
+  type ToolRetainedResultContent,
+  type ToolRevisionReference,
+  type ToolRevisionResolver,
+  type ToolRevisionResolution,
+} from './tool-registry.js';
+export {
+  ProjectProbeChoiceAuthority,
+  type ProbeChoiceOwner,
+  type ProbeChoiceRecord,
+} from './probe-choice-authority.js';
+export {
+  ToolExecutionError,
+  expectedToolError,
+  type ExpectedToolErrorKind,
+} from './tools/tool-errors.js';
+export {
+  materializeNormalizedToolResult,
+  normalizeAgentToolResult,
+  type MaterializedToolResult,
+  type NormalizedToolResult,
+  type RetainedToolResultContent,
+  type RuntimeProvenance,
+  type ToolObservation,
+  type ToolResultProjectionBudget,
+} from './tool-result.js';
+export {
+  EVIDENCE_REFERENCE_REVISION,
+  assertEvidenceReferenceAccess,
+  isAgentEvidenceRef,
+  mintRuntimeEvidenceReference,
+  normalizeAgentEvidenceRefs,
+  parseRuntimeEvidenceReference,
+  MAX_AGENT_EVIDENCE_REFS,
+  MAX_AGENT_EVIDENCE_REF_LENGTH,
+  type EvidenceReferenceResolution,
+  type EvidenceReferenceResolver,
+  type RuntimeEvidenceReferenceRecord,
+} from './evidence-reference.js';
+export {
+  compareUnicodeCodePoints,
+} from './canonical-text-order.js';
+export {
+  LexicalToolSearchIndex,
+  tokenizeToolSearchText,
+  type ToolSearchPage,
+  type ToolSearchIndex,
+  type ToolSearchMatch,
+  type ToolSearchOptions,
+} from './tool-search-index.js';
+export {
+  type AgentPermissionMode,
+  type AgentPermissionRule,
+  type AgentArtifactReference,
+  type AgentCapabilityStateReference,
+  type AgentMode,
+  type AgentProjectContext,
+  type AgentProjectReference,
+  type AgentTaskEvidence,
+  type AgentTaskItem,
+  type AgentTaskPlan,
+  type AgentTaskStatus,
+  type AgentToolAuditEvidence,
+  type AgentToolCatalogChange,
+  type AgentToolCompletionEvidence,
+  type AgentToolCompletionPolicy,
+  type AgentToolCompletionRole,
+  type AgentToolConcurrency,
+  type AgentToolDefinition,
+  type AgentToolDescriptor,
+  type AgentToolExecutionMetadata,
+  type AgentToolFailureKind,
+  type AgentToolFailurePolicy,
+  type AgentToolId,
+  type AgentToolPresentation,
+  type AgentToolPermissionDeclaration,
+  type AgentToolPermissionFacts,
+  type AgentToolProtocolMetadata,
+  type AgentToolSource,
+  type ToolDangerLevel,
+  type ToolExposure,
+  type ToolPermissionDecision,
+  type ToolPermissionAction,
+} from './types.js';
+export { BASE_TOOL_MANIFEST, isBaseToolName, type BaseToolName } from './base-tool-manifest.js';
+export {
+  assertInvocationLimits,
+  PREPARED_TOOL_INTENT_REVISION,
+  TOOL_PROTOCOL_BOUNDS,
+  type InvocationLimits,
+  type PreparedToolIntent,
+  type ToolAccess,
+  type ToolActionSummary,
+  type ToolExecuteContext,
+  type ToolPrepareContext,
+  type ToolRecoveryClass,
+} from './tools/tool-protocol.js';
+
+export { validatePreparedIntent, preparedIntentDigest, assertPreparedDigest } from './tools/prepared-invocation.js';
+export { RunToolResourceLeases, ToolExecutionBoundary, type ToolResourceLease, type ToolResourceLeaseProvider, type ToolTargetRevalidator } from './tools/tool-resource-leases.js';
+export { ToolInvocationPreparer } from './tools/tool-invocation-preparer.js';
+export { decideInvocationRecovery, type InvocationRecoveryDecision } from './tools/tool-invocation-recovery.js';
+export { createToolQuestionWaitRequest, validateToolQuestions, validateToolQuestionBundle } from './tools/tool-question.js';
+export type { ToolQuestion, ToolQuestionAnswer, ToolQuestionBundle, QuestionRuntimeCommand } from './tools/tool-question.js';
+export type { SubmitQuestionInput } from './kernel/agent-kernel.js';
