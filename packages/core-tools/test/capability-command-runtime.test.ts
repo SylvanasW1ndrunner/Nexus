@@ -107,6 +107,41 @@ describe('Capability command Host port', () => {
     }
   });
 
+  it('admits ordinary paths and numeric options despite short environment credentials but rejects exact credentials', async () => {
+    for (const secret of ['E', '1']) {
+      const allowArgv = vi.fn((_input: ProcessArgvPolicyInput) => true);
+      const f = await fixture({ environment: { ...process.env, TOKEN: secret }, globalPolicy: { mode: 'full-access', revision: 'short-secret.v1', allowArgv } });
+      const argv = [join(f.root, 'Example', 'README.md'), '--limit', '100', 'report-2021'];
+      await f.port.prepare(f.input(argv), f.context);
+      expect(allowArgv).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(allowArgv.mock.calls[0]?.[0].argv) === JSON.stringify(argv)).toBe(true);
+      allowArgv.mockClear();
+      let rejected = false; let safeDiagnostic = false;
+      try { await f.port.prepare(f.input([secret]), f.context); }
+      catch (error) { rejected = true; safeDiagnostic = error instanceof Error && error.message === 'Credentials must be supplied through the external CLI environment, not command arguments.'; }
+      expect(rejected).toBe(true); expect(safeDiagnostic).toBe(true); expect(allowArgv).toHaveBeenCalledTimes(0);
+      expect(new CommandRedactor({ TOKEN: secret }).redact('prefix-' + secret + '-suffix').text.includes(secret)).toBe(false);
+    }
+  });
+
+  it('uses UTF-8 length for environment credential matching without relaxing explicit credential syntax', async () => {
+    for (const secret of ['abcdefg', 'abcdefgh', '密钥', '密码钥']) {
+      const allowArgv = vi.fn(() => true);
+      const f = await fixture({ environment: { ...process.env, TOKEN: secret }, globalPolicy: { mode: 'full-access', revision: 'credential-bytes.v1', allowArgv } });
+      let embeddedRejected = false;
+      try { await f.port.prepare(f.input(['prefix-' + secret + '-suffix']), f.context); } catch { embeddedRejected = true; }
+      expect(embeddedRejected).toBe(Buffer.byteLength(secret) >= 8);
+      allowArgv.mockClear();
+      for (const argv of [[secret], ['--token', secret], ['--password=' + secret], ['pwd=' + secret], ['Authorization: Basic ' + secret], ['https://user:' + secret + '@example.test']]) {
+        let rejected = false; let safeDiagnostic = false;
+        try { await f.port.prepare(f.input(argv), f.context); }
+        catch (error) { rejected = true; safeDiagnostic = error instanceof Error && error.message === 'Credentials must be supplied through the external CLI environment, not command arguments.'; }
+        expect(rejected).toBe(true); expect(safeDiagnostic).toBe(true);
+      }
+      expect(allowArgv).toHaveBeenCalledTimes(0);
+    }
+  });
+
   it('keeps PWD and OLDPWD workspace paths usable while redacting real password environment values', async () => {
     const workspace = process.cwd(); const previous = dirname(workspace);
     const secret = 'dummy-environment-password-value';
@@ -222,8 +257,7 @@ describe('Capability command Host port', () => {
     const environment = { ...process.env, ...Object.fromEntries(Array.from({ length: 12 }, (_, index) => ['TOKEN_' + index, 'E'])) };
     const f = await fixture({ environment });
     const path = join(f.root, 'emit.cjs'); await writeFile(path, 'process.stdout.write("E".repeat(' + size + '))');
-    // The random temp directory may contain the deliberately single-byte secret.
-    // Launch relative to the already-bound cwd so this is an output-bound test.
+    // Keep this output-bound fixture independent of random temp-path spelling.
     const intent = await f.port.prepare(f.input(['emit.cjs']), f.context);
     const result = await f.port.execute(intent.input, f.execution(intent)) as { status: string; process: { processId: string }; spool: { stdout: { text: string } } };
     const stored = await readFile(join(f.root, '.spool', result.process.processId, 'stdout.log'), 'utf8');

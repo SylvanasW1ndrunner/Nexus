@@ -12,17 +12,46 @@ export function isCredentialArgument(argument: string): boolean {
   return credentialArgument.test(argument);
 }
 
+function environmentCredentialValues(environment: NodeJS.ProcessEnv): string[] {
+  return [...new Set(Object.entries(environment)
+    // Shell directory variables are not passwords, including Windows casing.
+    .filter(([key, value]) => value && !/^(?:old)?pwd$/iu.test(key) && credentialEnvironmentKey.test(key))
+    .map(([, value]) => value!))].sort((a, b) => b.length - a.length);
+}
+
+function exceedsCredentialBounds(values: readonly string[]): boolean {
+  return values.length > 1024 || values.reduce((total, value) => total + value.length, 0) > 65_536;
+}
+
+/** Argv admission is distinct from conservative output masking. */
+export class CommandArgumentGuard {
+  // Share syntax recognition without applying any Host environment values.
+  private readonly syntax = new CommandRedactor({});
+  private readonly exactSecrets: ReadonlySet<string>;
+  private readonly substringSecrets: readonly string[];
+  private readonly rejectAll: boolean;
+
+  constructor(environment: NodeJS.ProcessEnv) {
+    const values = environmentCredentialValues(environment);
+    this.rejectAll = exceedsCredentialBounds(values);
+    this.exactSecrets = new Set(this.rejectAll ? [] : values.filter(value => Buffer.byteLength(value) < 8));
+    this.substringSecrets = this.rejectAll ? [] : values.filter(value => Buffer.byteLength(value) >= 8);
+  }
+
+  rejects(argument: string): boolean {
+    return this.rejectAll || isCredentialArgument(argument) || this.syntax.redact(argument).changed
+      || this.exactSecrets.has(argument) || this.substringSecrets.some(value => argument.includes(value));
+  }
+}
+
 /** All offsets refer to the original text. Replacements are never scanned again. */
 export class CommandRedactor {
   private readonly secrets: RegExp | undefined;
   private readonly redactAll: boolean;
 
   constructor(environment: NodeJS.ProcessEnv) {
-    const values = [...new Set(Object.entries(environment)
-      // Shell directory variables are not passwords, including Windows casing.
-      .filter(([key, value]) => value && !/^(?:old)?pwd$/iu.test(key) && credentialEnvironmentKey.test(key))
-      .map(([, value]) => value!))].sort((a, b) => b.length - a.length);
-    this.redactAll = values.length > 1024 || values.reduce((total, value) => total + value.length, 0) > 65_536;
+    const values = environmentCredentialValues(environment);
+    this.redactAll = exceedsCredentialBounds(values);
     this.secrets = values.length && !this.redactAll ? new RegExp(values.map(value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|'), 'gu') : undefined;
   }
 

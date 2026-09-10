@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { RunPolicySnapshot } from '@dbagent/core-agent';
 import { executablePolicyName, validateExecutableDescriptor } from './executable-discovery.js';
-import { CommandRedactor, isCredentialArgument } from './command-redaction.js';
+import { CommandArgumentGuard, CommandRedactor } from './command-redaction.js';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { constants } from 'node:fs';
 import { appendFile, lstat, mkdir, open, opendir, realpath, rename, stat, writeFile } from 'node:fs/promises';
@@ -78,6 +78,7 @@ export class ProcessRuntime {
   private readonly policy: ProcessGlobalPolicy;
   private readonly environment: NodeJS.ProcessEnv;
   private readonly commandRedactor: CommandRedactor;
+  private readonly commandArgumentGuard: CommandArgumentGuard;
   private readonly now: () => Date;
   private readonly createProcessId: () => string;
   private readonly limits: ProcessRuntimeLimits;
@@ -98,6 +99,7 @@ export class ProcessRuntime {
     this.policy = Object.freeze({ ...(options.globalPolicy ?? { revision: 'process-global-default.v1', mode: 'default' as const }), removeEnvironmentVariables: Object.freeze([...(options.globalPolicy?.removeEnvironmentVariables ?? [])]) });
     this.environment = inheritedProcessEnvironment({ ...(options.environment ?? process.env) }, this.policy);
     this.commandRedactor = new CommandRedactor(this.environment);
+    this.commandArgumentGuard = new CommandArgumentGuard(this.environment);
     this.executor = options.executor ?? new NativeSandboxExecutor(options.hostId ?? 'local', async child => {
       await terminateProcessTree(child);
     });
@@ -121,7 +123,7 @@ export class ProcessRuntime {
     if (launch.kind === 'shell') requiredText(launch.command, 'command', 16_384);
     else if (launch.kind === 'argv') {
       if (!Array.isArray(launch.argv) || launch.argv.length > 256 || launch.argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) || Buffer.byteLength(JSON.stringify(launch.argv)) > 65_536) throw new ProcessRuntimeError('invalid_argument', 'Command arguments exceed the safe launch bounds.');
-      if (launch.argv.some(arg => isCredentialArgument(arg) || this.commandRedactor.redact(arg).changed)) throw new ProcessRuntimeError('invalid_argument', 'Credentials must be supplied through the external CLI environment, not command arguments.');
+      if (launch.argv.some(arg => this.commandArgumentGuard.rejects(arg))) throw new ProcessRuntimeError('invalid_argument', 'Credentials must be supplied through the external CLI environment, not command arguments.');
       try { await validateExecutableDescriptor(launch.executable); } catch { throw new ProcessRuntimeError('target_changed', 'Executable identity is unavailable or changed.'); }
     } else throw new ProcessRuntimeError('invalid_argument', 'Unsupported process launch form.');
     const allowed = launch.kind === 'shell' ? this.policy.allowCommand?.(launch.command) ?? true
