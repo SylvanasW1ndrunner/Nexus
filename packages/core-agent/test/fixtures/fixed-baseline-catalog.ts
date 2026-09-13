@@ -6,9 +6,11 @@ import { PREPARED_TOOL_INTENT_REVISION } from '../../src/tools/tool-protocol.js'
 /** Publishes the immutable complete Runtime baseline for catalog-facing tests. */
 export function fixedBaselineRegistry(options: Readonly<{
   handlers?: Readonly<Record<string, ToolInvocationHandler>>;
+  timeoutMsByTool?: Readonly<Record<string, number>>;
 }> = {}): ToolRegistry {
   const registry = new ToolRegistry();
   registry.publishBaselineInvocations(BASE_TOOL_MANIFEST.map(({ name, schemaRevision }) => {
+    const timeoutMs = options.timeoutMsByTool?.[name] ?? 1_000;
     const handlerRevision = `${schemaRevision}:handler@1`;
     return {
       definition: {
@@ -23,7 +25,7 @@ export function fixedBaselineRegistry(options: Readonly<{
         access: 'read' as const,
         recoveryClass: 'read' as const,
         limits: {
-          timeoutMs: 1_000,
+          timeoutMs,
           maxInputBytes: 4_096,
           maxOutputBytes: 65_536,
           maxArtifactBytes: 1_048_576,
@@ -33,7 +35,7 @@ export function fixedBaselineRegistry(options: Readonly<{
         toolRevision: schemaRevision,
         handlerRevision,
         intentRevision: PREPARED_TOOL_INTENT_REVISION,
-        execution: { concurrency: 'read' as const, timeoutMs: 1_000 },
+        execution: { concurrency: 'read' as const, timeoutMs },
         failurePolicy: { onUnknown: { failureKind: 'unknown' as const, retryable: false } },
       },
       runtime: {

@@ -2088,6 +2088,7 @@ export class JournalAgentKernelPort {
         lease: controller.currentLease(),
         mode: policy.mode,
       },
+      maintainLease: async () => { await controller.ensureLeaseFresh(); },
       ...(this.#options.maxToolConcurrency === undefined
         ? {}
         : { maxConcurrency: this.#options.maxToolConcurrency }),

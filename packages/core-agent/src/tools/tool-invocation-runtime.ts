@@ -131,6 +131,8 @@ export type ToolInvocationRuntimeOptions = Readonly<{
   leasePollIntervalMs?: number;
   /** Authoritative clock paired with the Journal clock; injectable for deterministic recovery. */
   now?: () => number;
+  /** Optional kernel-owned checkpoint for keeping the enclosing Run lease current during long batches. */
+  maintainLease?: () => void | Promise<void>;
   onCrashPoint?: (point: ToolInvocationCrashPoint) => void | Promise<void>;
   runtimeCommandExecutor?: RuntimeCommandPostCommitExecutor;
   /** Exact revisioned Hook generation captured for this Turn. */
@@ -219,6 +221,8 @@ export class ToolInvocationRuntime {
   readonly #runtimeId = randomUUID();
   readonly #leasePollIntervalMs: number;
   readonly #now: () => number;
+  readonly #maintainLease: (() => void | Promise<void>) | undefined;
+  #leaseCheckpointTail: Promise<void> = Promise.resolve();
   readonly #terminalInflight = new Map<string, Promise<AgentInvocationProjection>>();
   readonly #onCrashPoint: ToolInvocationRuntimeOptions['onCrashPoint'];
   readonly #runtimeCommandExecutor: RuntimeCommandPostCommitExecutor | undefined;
@@ -269,6 +273,7 @@ export class ToolInvocationRuntime {
     }
     this.#now = options.now ?? Date.now;
     if (!Number.isFinite(this.#now())) throw new TypeError('Tool Runtime clock must be finite.');
+    this.#maintainLease = options.maintainLease;
     this.#onCrashPoint = options.onCrashPoint;
     this.#runtimeCommandExecutor = options.runtimeCommandExecutor;
     this.#invocationHooks = captureInvocationHooks(options.invocationHooks ?? []);
@@ -279,6 +284,7 @@ export class ToolInvocationRuntime {
     const preparationInterruptions = new Map<string, ToolPreparationInterruption>();
     for (const invocation of await this.#boundInvocations()) {
       if (invocation.state === 'waiting_for_user' && invocation.question?.deadline !== null && invocation.question?.deadline !== undefined && this.#now() >= Date.parse(invocation.question.deadline)) {
+        await this.#checkpointLease();
         await this.submitQuestion(invocation.invocationId, { kind: 'question.timeout', commandId: `timeout:${invocation.question.questionId}`, questionId: invocation.question.questionId, questionRevision: invocation.question.questionRevision });
       }
     }
@@ -323,6 +329,7 @@ export class ToolInvocationRuntime {
       );
     }
     if (decision.state === 'ExecutingTools') {
+      await this.#checkpointLease();
       const result = await this.#terminalForQualifiedInvocation(invocationId, options.signal);
       if (result.state === 'waiting_for_user') return undefined;
     }
@@ -336,12 +343,14 @@ export class ToolInvocationRuntime {
   ): Promise<ToolObservationFact[]> {
     const observations: ToolObservationFact[] = [];
     while (true) {
+      await this.#checkpointLease();
       const decision = await this.resolve(options);
       if (options.signal?.aborted && decision.state !== 'ApplyingObservations') break;
       if (decision.state === 'AwaitingUser' || decision.state === 'TurnReadyToClose') break;
       if (decision.state === 'ResolvingActions') continue;
       if (decision.invocationIds.length === 0) break;
       if (decision.state === 'ExecutingTools') {
+        await this.#checkpointLease();
         await Promise.all(decision.invocationIds.map(async (invocationId) =>
           await this.#terminalForQualifiedInvocation(invocationId, options.signal)));
         continue;
@@ -674,6 +683,7 @@ export class ToolInvocationRuntime {
     for (let retry = 0; retry < MAX_TOOL_RUN_CAS_RETRIES; retry += 1) {
       try {
         executionAuthorization = await this.#authorization(invocation);
+        await this.#checkpointLease();
         const started = await this.#toolLifecycle.commit({
           action: 'start',
         intentDigest: invocation.intentDigest!,
@@ -871,6 +881,7 @@ export class ToolInvocationRuntime {
       if (remainingMs <= 0) throw new ToolExecutionError({ code: 'TOOL_TIMEOUT', category: 'timeout', retryable: true, outcome: 'not_applied' }, 'The prepared invocation deadline expired.');
       resourceLease = await this.#boundary.acquire(intent, context, drain);
       assertAttemptPolicy();
+      await this.#checkpointLease();
       execution = startToolHandlerExecution(handler, argumentsRecord, context);
       void drain.track(execution.settled);
       const value = await execution.result;
@@ -1201,6 +1212,7 @@ export class ToolInvocationRuntime {
       const finishCommandId =
         `tool-finish:${invocation.invocationId}:${committedStart.attempt}:${this.#runtimeId}`;
       for (let retry = 0; retry < MAX_TOOL_RUN_CAS_RETRIES; retry += 1) {
+        await this.#checkpointLease();
         if (terminal.outcome === 'succeeded' && (this.#now() >= Date.parse(context.deadline) || context.signal.aborted)) {
           if (preparedArtifact !== undefined) this.#artifactCommitter?.release(preparedArtifact);
           preparedArtifact = undefined;
@@ -1617,6 +1629,7 @@ export class ToolInvocationRuntime {
     invocation: AgentInvocationProjection,
     modelProjection?: PortableValue,
   ): Promise<ToolObservationFact> {
+    await this.#checkpointLease();
     if (invocation.observation !== undefined) return publicObservation(invocation.observation);
     const terminal = invocation.terminal;
     if (terminal === undefined) {
@@ -1718,6 +1731,7 @@ export class ToolInvocationRuntime {
     callerSignal: AbortSignal | undefined = undefined,
     priorInterruption: ToolPreparationInterruption | undefined = undefined,
   ): Promise<ToolPreparationInterruption | undefined> {
+    await this.#checkpointLease();
     let invocation = await this.#requireBoundInvocation(invocationId);
     if (invocation.state !== 'proposed' && invocation.state !== 'prepared') return undefined;
     let descriptor: AgentToolDescriptor;
@@ -1761,6 +1775,7 @@ export class ToolInvocationRuntime {
         const deadline = new Date(this.#now() + intent.limits.timeoutMs).toISOString();
         const catalogRevision = this.#registry.invocationRevision(invocation.name)!;
         assertPreparedLifecycleRepresentable(invocation, intent, descriptor.id, catalogRevision, deadline);
+        await this.#checkpointLease();
         const result = await this.#toolLifecycle.commit({
           action: 'prepare', projectId: invocation.projectId, sessionId: invocation.sessionId,
           runId: invocation.runId, turnId: invocation.turnId, invocationId: invocation.invocationId,
@@ -1793,6 +1808,7 @@ export class ToolInvocationRuntime {
       matchedRuleIds: completePermissionAudit.matchedRuleIds,
       facts: completePermissionAudit.facts,
     };
+    await this.#checkpointLease();
     await this.#toolLifecycle.commit({
       action: 'validate', projectId: invocation.projectId, sessionId: invocation.sessionId,
       runId: invocation.runId, turnId: invocation.turnId, invocationId: invocation.invocationId,
@@ -1948,6 +1964,16 @@ export class ToolInvocationRuntime {
       }
       afterActionOrdinal = last.actionOrdinal;
     }
+  }
+
+  #checkpointLease(): Promise<void> {
+    const maintainLease = this.#maintainLease;
+    if (maintainLease === undefined) return Promise.resolve();
+    const checkpoint = this.#leaseCheckpointTail.then(async () => {
+      await maintainLease();
+    });
+    this.#leaseCheckpointTail = checkpoint;
+    return checkpoint;
   }
 
   async #currentDecision(): Promise<ToolScheduleDecision> {

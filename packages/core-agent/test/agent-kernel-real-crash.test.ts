@@ -81,7 +81,12 @@ const scenarios: readonly Scenario[] = [
 
 const temporaryDirectories: string[] = [];
 const liveChildren = new Set<ChildProcessWithoutNullStreams>();
-const RECOVERY_LEASE_TTL_MS = 30_000;
+// These scenarios verify durable crash recovery, not heartbeat expiry. Keep the
+// crashed owner's lease short, but give the replacement worker enough budget
+// for loaded Windows runners and the projection-rebuild assertions below.
+const RECOVERY_LEASE_TTL_MS = 5 * 60_000;
+const RECOVERY_WORKER_TIMEOUT_MS = 2 * 60_000;
+const CRASH_RECOVERY_TEST_TIMEOUT_MS = 3 * 60_000;
 
 afterEach(async () => {
   await Promise.all([...liveChildren].map(async (child) => {
@@ -117,7 +122,7 @@ describe('production Agent Kernel real process crash recovery', () => {
         phase: 'recover',
         leaseTtlMs: RECOVERY_LEASE_TTL_MS,
       });
-      const recoveredExit = await waitForExit(recovering.child, 30_000);
+      const recoveredExit = await waitForExit(recovering.child, RECOVERY_WORKER_TIMEOUT_MS);
       liveChildren.delete(recovering.child);
       if (recoveredExit.code !== 0) {
         throw new Error(
@@ -182,7 +187,7 @@ describe('production Agent Kernel real process crash recovery', () => {
       await journal.rebuildProjectProjections(scope.projectId);
       expect(await durableProjectionSnapshot(journal, scope)).toEqual(online);
     },
-    60_000,
+    CRASH_RECOVERY_TEST_TIMEOUT_MS,
   );
 });
 

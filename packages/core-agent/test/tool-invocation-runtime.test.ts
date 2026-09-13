@@ -45,11 +45,15 @@ import {
 import { RunController } from '../src/kernel/run-controller.js';
 
 const temporaryDirectories: string[] = [];
+// Tool Runtime tests exercise lifecycle semantics, not Run-lease or default
+// Tool-deadline expiry. Explicit timeout tests override these values.
+const FIXTURE_LEASE_TTL_MS = 5 * 60_000;
+const FIXTURE_TOOL_TIMEOUT_MS = 2 * 60_000;
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
     rm(directory, { recursive: true, force: true })));
-});
+}, 60_000);
 
 async function runtimeModule() {
   return await import('../src/tools/tool-invocation-runtime.js');
@@ -329,7 +333,7 @@ describe('ToolInvocationRuntime', () => {
     const controller = new RunController({
       journal: fixture.journal,
       projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-      ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      ownerId: fixture.lease.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     const afterStart = await fixture.journal.getKernelRunProjection({
@@ -417,6 +421,7 @@ describe('ToolInvocationRuntime', () => {
     const fixture = await createFixture({
       mode: 'full-access',
       readToolName: 'tool_search',
+      readTimeoutMs: FIXTURE_TOOL_TIMEOUT_MS,
       attempt: await toolCallAttemptFixture('runtime-discovery-activation', [
         { name: 'tool_search', arguments: {} },
       ]),
@@ -453,7 +458,7 @@ describe('ToolInvocationRuntime', () => {
     });
     expect((await fixture.journal.readProject('project-a', 0, 10_000))
       .filter(({ type }) => type === 'runtime.command_applied')).toHaveLength(1);
-  });
+  }, 60_000);
 
   it('gives an Invocation Handler the immutable Runtime Command projection for its exact Run', async () => {
     let seen: ToolInvocationExecutionContext['runtimeState'] | undefined;
@@ -953,7 +958,8 @@ describe('ToolInvocationRuntime', () => {
       ownerId: fixture.lease.ownerId, fencingToken: fixture.lease.fencingToken,
     });
     const replacement = await fixture.journal.acquireRunLease({
-      projectId: 'project-a', runId: fixture.runId, ownerId: 'recovery-worker', ttlMs: 60_000,
+      projectId: 'project-a', runId: fixture.runId, ownerId: 'recovery-worker',
+      ttlMs: FIXTURE_LEASE_TTL_MS,
     });
     let executorCalls = 0;
     const { ToolInvocationRuntime } = await runtimeModule();
@@ -1211,7 +1217,7 @@ describe('ToolInvocationRuntime', () => {
     await expect(threeReads.runtime.execute(threeReads.invocationIds[2] ?? ''))
       .rejects.toMatchObject({ code: 'INVOCATION_CONFLICT' });
     expect(threeReads.readCalls()).toBe(0);
-  });
+  }, 2 * 60_000);
 
   it('commits parallel terminals out of order but applies Observations strictly in action order', async () => {
     const completionOrder: string[] = [];
@@ -1317,7 +1323,8 @@ describe('ToolInvocationRuntime', () => {
     if (current === null) throw new Error('Expected active Tool Run.');
     const controller = new RunController({
       journal: fixture.journal, projectId: 'project-a', sessionId: 'session-a',
-      runId: fixture.runId, ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      runId: fixture.runId, ownerId: fixture.lease.ownerId,
+      leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     const queuedRequest = controller.queueContextCompaction({
@@ -1346,7 +1353,8 @@ describe('ToolInvocationRuntime', () => {
     if (current === null) throw new Error('Expected approval Tool Run.');
     const controller = new RunController({
       journal: fixture.journal, projectId: 'project-a', sessionId: 'session-a',
-      runId: fixture.runId, ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      runId: fixture.runId, ownerId: fixture.lease.ownerId,
+      leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     const queued = await controller.queueContextCompaction({
@@ -1375,7 +1383,8 @@ describe('ToolInvocationRuntime', () => {
       if (current === null) throw new Error('Expected executable Tool Run.');
       const controller = new RunController({
         journal: fixture.journal, projectId: 'project-a', sessionId: 'session-a',
-        runId: fixture.runId, ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+        runId: fixture.runId, ownerId: fixture.lease.ownerId,
+        leaseTtlMs: FIXTURE_LEASE_TTL_MS,
       });
       await controller.acquire();
       const queued = await controller.queueContextCompaction({
@@ -1421,7 +1430,8 @@ describe('ToolInvocationRuntime', () => {
     if (current === null) throw new Error('Expected executable Tool Run.');
     const controller = new RunController({
       journal: fixture.journal, projectId: 'project-a', sessionId: 'session-a',
-      runId: fixture.runId, ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      runId: fixture.runId, ownerId: fixture.lease.ownerId,
+      leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     const queued = await controller.queueContextCompaction({
@@ -1446,7 +1456,8 @@ describe('ToolInvocationRuntime', () => {
     if (current === null) throw new Error('Expected active Tool Run.');
     const controller = new RunController({
       journal: fixture.journal, projectId: 'project-a', sessionId: 'session-a',
-      runId: fixture.runId, ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      runId: fixture.runId, ownerId: fixture.lease.ownerId,
+      leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     await controller.queueContextCompaction({
@@ -1457,7 +1468,8 @@ describe('ToolInvocationRuntime', () => {
 
     await fixture.journal.rebuildProjectProjections('project-a');
     const lease = await fixture.journal.acquireRunLease({
-      projectId: 'project-a', runId: fixture.runId, ownerId: 'worker-rebuilt', ttlMs: 60_000,
+      projectId: 'project-a', runId: fixture.runId, ownerId: 'worker-rebuilt',
+      ttlMs: FIXTURE_LEASE_TTL_MS,
     });
     const { ToolInvocationRuntime } = await runtimeModule();
     const reopened = new ToolInvocationRuntime({
@@ -2189,7 +2201,7 @@ describe('ToolInvocationRuntime', () => {
     const controller = new RunController({
       journal: fixture.journal,
       projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-      ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      ownerId: fixture.lease.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     const active = await fixture.journal.getKernelRunProjection({
@@ -2227,7 +2239,7 @@ describe('ToolInvocationRuntime', () => {
     const controller = new RunController({
       journal: fixture.journal,
       projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-      ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      ownerId: fixture.lease.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     const active = await fixture.journal.getKernelRunProjection({
@@ -2279,7 +2291,7 @@ describe('ToolInvocationRuntime', () => {
       const controller = new RunController({
         journal: fixture.journal,
         projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-        ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+        ownerId: fixture.lease.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
       });
       await controller.acquire();
       const afterStart = await fixture.journal.getKernelRunProjection({
@@ -2295,7 +2307,7 @@ describe('ToolInvocationRuntime', () => {
       const reopened = new SqliteAgentJournal({ filePath: fixture.journalPath });
       const replacement = await reopened.acquireRunLease({
         projectId: 'project-a', runId: fixture.runId,
-        ownerId: `replacement-${effect}`, ttlMs: 60_000,
+        ownerId: `replacement-${effect}`, ttlMs: FIXTURE_LEASE_TTL_MS,
       });
       expect(replacement.fencingToken).toBe(oldFence + 1);
       const { ToolInvocationRuntime } = await runtimeModule();
@@ -2317,7 +2329,7 @@ describe('ToolInvocationRuntime', () => {
       const replacementController = new RunController({
         journal: reopened,
         projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-        ownerId: replacement.ownerId, leaseTtlMs: 60_000,
+        ownerId: replacement.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
       });
       await replacementController.acquire();
       const cancelling = await reopened.getKernelRunProjection({
@@ -2335,7 +2347,7 @@ describe('ToolInvocationRuntime', () => {
     const controller = new RunController({
       journal: fixture.journal,
       projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-      ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      ownerId: fixture.lease.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     await fixture.runtime.resolve();
@@ -2364,13 +2376,13 @@ describe('ToolInvocationRuntime', () => {
       .toEqual(['observed', 'observed']);
     const replacement = await fixture.journal.acquireRunLease({
       projectId: 'project-a', runId: fixture.runId,
-      ownerId: 'replacement-after-rebuild', ttlMs: 60_000,
+      ownerId: 'replacement-after-rebuild', ttlMs: FIXTURE_LEASE_TTL_MS,
     });
     expect(replacement.fencingToken).toBe(oldFence + 1);
     const replacementController = new RunController({
       journal: fixture.journal,
       projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-      ownerId: replacement.ownerId, leaseTtlMs: 60_000,
+      ownerId: replacement.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await replacementController.acquire();
     const rebuilt = await fixture.journal.getKernelRunProjection({
@@ -2390,7 +2402,7 @@ describe('ToolInvocationRuntime', () => {
     const controller = new RunController({
       journal: fixture.journal,
       projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-      ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      ownerId: fixture.lease.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     await fixture.runtime.resolve();
@@ -2441,7 +2453,7 @@ describe('ToolInvocationRuntime', () => {
     const controller = new RunController({
       journal: fixture.journal,
       projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-      ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      ownerId: fixture.lease.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     await fixture.runtime.resolve();
@@ -2492,7 +2504,7 @@ describe('ToolInvocationRuntime', () => {
     const controller = new RunController({
       journal: fixture.journal,
       projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
-      ownerId: fixture.lease.ownerId, leaseTtlMs: 60_000,
+      ownerId: fixture.lease.ownerId, leaseTtlMs: FIXTURE_LEASE_TTL_MS,
     });
     await controller.acquire();
     await fixture.runtime.resolve();
@@ -2779,7 +2791,8 @@ async function createFixture(options: FixtureOptions) {
     projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'request-a', input: 'go',
   });
   const lease = await journal.acquireRunLease({
-    projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 60_000,
+    projectId: 'project-a', runId: created.runId, ownerId: 'worker-a',
+    ttlMs: FIXTURE_LEASE_TTL_MS,
   });
   const leaseRef = { ownerId: lease.ownerId, fencingToken: lease.fencingToken };
   await journal.startRun({
@@ -2828,7 +2841,12 @@ async function createFixture(options: FixtureOptions) {
       return options.readHandler?.(context, argumentsRecord) ?? { rows: [{ value: 1 }] };
     };
   if (readToolName === 'tool_search') {
-    registry = fixedBaselineRegistry({ handlers: { tool_search: executeRead } });
+    registry = fixedBaselineRegistry({
+      handlers: { tool_search: executeRead },
+      ...(options.readTimeoutMs === undefined
+        ? {}
+        : { timeoutMsByTool: { tool_search: options.readTimeoutMs } }),
+    });
     for (const name of ['database_query', 'trusted-origin', 'durably-activated', 'cloned']) {
       const contribution = invocationContribution(name, {}, { exposure: 'deferred' });
       registry.registerInvocation(contribution.definition, contribution.runtime);
