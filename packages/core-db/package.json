@@ -10,7 +10,7 @@
     "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --pool=forks --maxWorkers=1 --minWorkers=1",
     "test:postgres": "node ../../scripts/run-postgres-tests.mjs"
   },
   "dependencies": {
