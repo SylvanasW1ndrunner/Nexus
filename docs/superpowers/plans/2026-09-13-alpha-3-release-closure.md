@@ -116,6 +116,6 @@
 - Consumes: all prior tasks.
 - Produces: a release/no-release judgment and an explicit branch integration choice.
 
-- [ ] **Step 1:** Review the complete staged/committed baseline against the spec, including version, docs, package closure, CLI-only boundary and known limitations.
-- [ ] **Step 2:** Confirm no Critical or Important findings remain and no npm publish occurred.
+- [x] **Step 1:** Review the complete staged/committed baseline against the spec, including version, docs, package closure, CLI-only boundary and known limitations.
+- [x] **Step 2:** Confirm no Critical or Important findings remain and no npm publish occurred.
 - [ ] **Step 3:** Apply the branch-finishing workflow: keep locally, or push and trigger CI only after the selected integration action is authorized.

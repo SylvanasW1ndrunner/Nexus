@@ -76,6 +76,8 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 - `corepack pnpm test:script-contracts`：43/43 项通过。
 - `corepack pnpm test:capability-runtime`：106/106 项通过。
 - `corepack pnpm test:npm-package:contracts`：11/11 项通过。
+- `corepack pnpm run ci`：本地完整 `verify` 流程通过，包含 LLM、数据库访问、公共合同、资源状态、
+  Schema knowledge、上下文压缩和 Agent Runtime 七组确定性性能门禁；原始结果保存在 `reports/`。
 - 隔离安装 smoke 成功验证 `--help`、`init`、`skills`、`sessions` 和交互退出。
 
 ### 真实环境证据与未重跑项
@@ -83,3 +85,4 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 - 既有真实模型证据显示：代码修复、动态 Git、电商数据库分析和长结果数据库分析已通过；churn-ML 失败，因为
   Run 是 `interrupted`。
 - 付费模型、外部 PostgreSQL、浏览器、容器和 Forge 均未在本次发布收口中重跑。
+- GitHub 上的 Linux、Windows 与 PostgreSQL CI 作业尚未触发；需要推送 `dev` 后由远端执行。

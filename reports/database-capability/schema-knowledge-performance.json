@@ -1,0 +1,105 @@
+{
+  "kind": "database-schema-knowledge-performance",
+  "status": "passed",
+  "generatedAt": "2026-09-13T10:23:46.428Z",
+  "environment": {
+    "node": "v24.18.1",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "cpuCount": 32,
+    "memory": {
+      "rssMiB": 608.32,
+      "heapUsedMiB": 403.41
+    }
+  },
+  "dataset": {
+    "catalogNodes": 10000,
+    "resources": 9999,
+    "relations": 10996,
+    "tables": 998,
+    "searchableDocuments": 10000,
+    "wideParentChildren": 10000,
+    "samples": {
+      "rootHashComparison": 10000,
+      "merkleDiff": 100,
+      "localRetrieval": 80,
+      "twoHopGraphRetrieval": 80,
+      "directChildBrowse": 500
+    }
+  },
+  "measurement": "Deterministic local benchmark. Database, model, embedding provider and network latency are excluded.",
+  "thresholds": {
+    "catalogBuildMs": 1500,
+    "rootHashComparisonP95Ms": 1,
+    "merkleDiffP95Ms": 20,
+    "directChildBrowseP95Ms": 20,
+    "localRetrievalP95Ms": 100,
+    "twoHopGraphRetrievalP95Ms": 50
+  },
+  "metrics": {
+    "catalogBuildMs": 285.926,
+    "rootHashComparisonMs": {
+      "samples": 10000,
+      "p50": 0,
+      "p95": 0,
+      "max": 0.014
+    },
+    "merkleDiffMs": {
+      "samples": 100,
+      "p50": 0.014,
+      "p95": 0.041,
+      "max": 0.185
+    },
+    "directChildBrowseMs": {
+      "samples": 500,
+      "p50": 1.243,
+      "p95": 1.381,
+      "max": 7.892
+    },
+    "localRetrievalMs": {
+      "samples": 80,
+      "p50": 5.133,
+      "p95": 6.133,
+      "max": 6.515
+    },
+    "twoHopGraphRetrievalMs": {
+      "samples": 80,
+      "p50": 5.449,
+      "p95": 6.259,
+      "max": 9.046
+    }
+  },
+  "checks": {
+    "catalogBuild": {
+      "actual": 285.926,
+      "maximum": 1500,
+      "passed": true
+    },
+    "rootHashComparison": {
+      "actual": 0,
+      "maximum": 1,
+      "passed": true
+    },
+    "merkleDiff": {
+      "actual": 0.041,
+      "maximum": 20,
+      "passed": true
+    },
+    "directChildBrowse": {
+      "actual": 1.381,
+      "maximum": 20,
+      "passed": true
+    },
+    "localRetrieval": {
+      "actual": 6.133,
+      "maximum": 100,
+      "passed": true
+    },
+    "twoHopGraphRetrieval": {
+      "actual": 6.259,
+      "maximum": 50,
+      "passed": true
+    }
+  }
+}
