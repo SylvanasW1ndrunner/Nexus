@@ -81,6 +81,7 @@ const scenarios: readonly Scenario[] = [
 
 const temporaryDirectories: string[] = [];
 const liveChildren = new Set<ChildProcessWithoutNullStreams>();
+const RECOVERY_LEASE_TTL_MS = 30_000;
 
 afterEach(async () => {
   await Promise.all([...liveChildren].map(async (child) => {
@@ -111,7 +112,11 @@ describe('production Agent Kernel real process crash recovery', () => {
       liveChildren.delete(crashing.child);
       await delay(fixture.worker.leaseTtlMs + 100);
 
-      const recovering = startWorker({ ...fixture.worker, phase: 'recover' });
+      const recovering = startWorker({
+        ...fixture.worker,
+        phase: 'recover',
+        leaseTtlMs: RECOVERY_LEASE_TTL_MS,
+      });
       const recoveredExit = await waitForExit(recovering.child, 30_000);
       liveChildren.delete(recovering.child);
       if (recoveredExit.code !== 0) {
@@ -206,8 +211,8 @@ async function scenarioFixture(mode: CrashMode) {
   const runPath = join(directory, 'run.json');
   const resultPath = join(directory, 'result.json');
   const errorPath = join(directory, 'worker-error.json');
-  // This suite verifies crash recovery, not sub-second scheduler timing. Lease renewal under
-  // a long-running dependency has its own acceptance test, so leave CI/Windows scheduling room.
+  // The crashed owner's lease stays short so takeover is observable without slowing every case.
+  // Recovery uses its own production-like lease budget; renewal timing has separate acceptance.
   const leaseTtlMs = 2_000;
   return {
     mode,

@@ -91,8 +91,8 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 - 既有真实模型证据显示：代码修复、动态 Git、电商数据库分析和长结果数据库分析已通过；churn-ML 失败，因为
   Run 是 `interrupted`。
 - 付费模型、外部 PostgreSQL、浏览器、容器和 Forge 均未在本次发布收口中重跑。
-- 前五次 GitHub Actions 发布复验（runs `34757899868`、`34761714006`、`34763736333`、`34764907067`、
-  `34767085788`）
+- 前六次 GitHub Actions 发布复验（runs `34757899868`、`34761714006`、`34763736333`、`34764907067`、
+  `34767085788`、`34768751691`）
   先后暴露发布环境合同
   缺口：Windows Node 22 文件设备号差异、Linux 缺少系统 `rg`、PostgreSQL 报告依赖已删除的旧占位测试、
   确定性测试夹具依赖 Windows 短路径与 `.cmd`、慢速 Windows 文件 I/O 下的测试同步与预算不足，以及 Linux
@@ -102,4 +102,6 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
   终止的测试子进程。第五次运行进一步确认两处测试夹具边界：256 次真实 SQLite 提交会超过低层夹具的 60 秒
   Run Lease，而真实 Artifact 保留链路无法在通用夹具的 1 秒 Tool deadline 内完成。生产围栏和超时分类保持不变；
   数量边界用例改用覆盖其工作量的专用租约，结果保留用例同步放宽测试 Tool 的执行 deadline，并在删除临时目录前
-  等待 Artifact Store 排空；最终状态以最新 Actions 运行结果为准。
+  等待 Artifact Store 排空。第六次运行确认真实进程崩溃夹具又把用于快速制造旧 Owner 过期的 2 秒 Lease 同时
+  用作恢复 Worker 的活动预算；当前候选保留旧 Owner 的短租约，但让恢复 Worker 使用独立的生产型租约预算，
+  不更改 Runtime 的租约续期、围栏或接管语义；最终状态以最新 Actions 运行结果为准。
