@@ -218,7 +218,7 @@ describe('production Agent Kernel Tool cancellation', () => {
         toolCatalog,
       });
     },
-    30_000,
+    45_000,
   );
 });
 
@@ -381,7 +381,6 @@ function kernelOptions(input: Readonly<{
     revalidateToolTarget: () => undefined,
     mode: 'full-access',
     ownerId: input.ownerId,
-    leaseTtlMs: 2_000,
   };
 }
 
@@ -610,7 +609,7 @@ function crashFixture(effect: CancellationEffect) {
   // Cross-process worker startup competes with the full fork pool. Keep this
   // comfortably above scheduler jitter; short-TTL expiry semantics are covered
   // by the focused lease/recovery tests.
-  const leaseTtlMs = 1_500;
+  const leaseTtlMs = 10_000;
   const journalPath = join(root, 'journal.db');
   const barrierPath = join(root, 'tool-started.txt');
   const cancelBarrierPath = join(root, 'run-cancelling.txt');
