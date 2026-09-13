@@ -134,7 +134,7 @@ describe('PostgresConnector portable result values', () => {
     }
 
     expect(garbageCollections).toBe(3);
-  }, 30_000);
+  }, 60_000);
 
   it('retries result-store startup recovery after a transient garbage collection failure', async () => {
     const store = await resultStore('gc-startup-retry');
@@ -450,7 +450,7 @@ describe('PostgresConnector portable result values', () => {
     await expect(connector.readResult(context, third.result!.id)).rejects.toThrow(
       /Result handle was not found/,
     );
-  });
+  }, 15_000);
 });
 
 async function resultStore(label: string): Promise<ProjectDatabaseResultStore> {

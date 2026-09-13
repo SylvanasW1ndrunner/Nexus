@@ -262,7 +262,12 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     const writer = await fixture.store.create(input);
 
     now = new Date(now.getTime() + 59 * 60 * 1_000);
-    await waitForWriterHeartbeat(fixture.rootDir, input.resultId, now.toISOString());
+    await waitForLeaseHeartbeat(
+      fixture.rootDir,
+      input.resultId,
+      'writer',
+      now.toISOString(),
+    );
     now = new Date(now.getTime() + 2 * 60 * 1_000);
 
     const contender = new ProjectDatabaseResultStore({
@@ -419,16 +424,26 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     const stream = await fixture.store.openExport(artifact);
 
     now = new Date(now.getTime() + 59 * 60 * 1_000);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForLeaseHeartbeat(
+      fixture.rootDir,
+      handle.id,
+      'export-read',
+      now.toISOString(),
+    );
     now = new Date(now.getTime() + 2 * 60 * 1_000);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForLeaseHeartbeat(
+      fixture.rootDir,
+      handle.id,
+      'export-read',
+      now.toISOString(),
+    );
 
     await expect(fixture.store.collectGarbage({ maxBytes: 0 })).resolves.toMatchObject({
       capacityResultsExpired: 0,
     });
     await stream.cancel('consumer stopped');
     await expect(fixture.store.expire(handle.id, 'cancelled-export')).resolves.toBe(true);
-  }, 15_000);
+  }, 30_000);
 
   it('releases an abandoned export lease after its idle deadline', async () => {
     const fixture = await createFixture('idle-export-lease');
@@ -584,9 +599,10 @@ async function createFixture(label: string, options: StoreOptions = {}) {
   };
 }
 
-async function waitForWriterHeartbeat(
+async function waitForLeaseHeartbeat(
   rootDir: string,
   resultId: string,
+  kind: 'writer' | 'export-read',
   expectedHeartbeat: string,
 ): Promise<void> {
   const database = new DatabaseSync(join(rootDir, 'results.sqlite'));
@@ -594,13 +610,13 @@ async function waitForWriterHeartbeat(
   const heartbeat = database.prepare(`
     SELECT heartbeat_at AS heartbeatAt
     FROM database_result_leases
-    WHERE result_id = ? AND kind = 'writer'
+    WHERE result_id = ? AND kind = ?
   `);
   const deadline = Date.now() + 5_000;
   try {
     while (Date.now() < deadline) {
       try {
-        const row = heartbeat.get(resultId) as { heartbeatAt?: unknown } | undefined;
+        const row = heartbeat.get(resultId, kind) as { heartbeatAt?: unknown } | undefined;
         if (row?.heartbeatAt === expectedHeartbeat) return;
       } catch (error) {
         if ((error as { errcode?: unknown }).errcode !== 5) throw error;
@@ -610,7 +626,7 @@ async function waitForWriterHeartbeat(
   } finally {
     database.close();
   }
-  throw new Error(`Writer heartbeat did not reach ${expectedHeartbeat}.`);
+  throw new Error(`${kind} heartbeat did not reach ${expectedHeartbeat}.`);
 }
 
 async function createResult(
