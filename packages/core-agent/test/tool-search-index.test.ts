@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { LexicalToolSearchIndex, ToolRegistry } from '../src/index.js';
+import { PREPARED_TOOL_INTENT_REVISION } from '../src/tools/tool-protocol.js';
+import { preparedToolIntent } from './permission-audit-fixture.js';
 
 describe('LexicalToolSearchIndex', () => {
   it('retrieves tools from mixed Chinese/English names, aliases, tags and parameter descriptions', () => {
@@ -136,7 +138,7 @@ function register(
     properties: Record<string, unknown>;
   },
 ) {
-  registry.register(
+  registry.registerInvocation(
     {
       ...(input.namespace === undefined ? {} : { namespace: input.namespace }),
       name: input.name,
@@ -145,9 +147,18 @@ function register(
       aliases: input.aliases,
       tags: input.tags,
       inputSchema: { type: 'object', properties: input.properties },
-      dangerLevel: 'safe',
-      readonly: true,
+      outputSchema: { type: 'object' }, dangerLevel: 'safe', readonly: true,
+      source: 'unknown', access: 'read', recoveryClass: 'read',
+      toolRevision: `${input.name}@1`, handlerRevision: `${input.name}-handler@1`,
+      intentRevision: PREPARED_TOOL_INTENT_REVISION,
+      limits: { timeoutMs: 1_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+      execution: { concurrency: 'read', timeoutMs: 1_000 },
+      failurePolicy: { onUnknown: { failureKind: 'unknown', retryable: false } },
     },
-    () => undefined,
+    {
+      revision: { toolName: input.name, toolRevision: `${input.name}@1`, handlerRevision: `${input.name}-handler@1`, intentRevision: PREPARED_TOOL_INTENT_REVISION },
+      prepare: () => preparedToolIntent({ toolName: input.name, toolRevision: `${input.name}@1`, handlerRevision: `${input.name}-handler@1` }).intent,
+      execute: () => ({}),
+    },
   );
 }

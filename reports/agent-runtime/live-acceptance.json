@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "unified-siliconflow-agent-acceptance",
+  "generatedAt": "2026-09-11T10:04:43.223Z",
+  "endpoint": "https://api.siliconflow.cn/v1",
+  "transportUnderTest": "openai-compatible",
+  "model": "deepseek-ai/DeepSeek-V4-Flash",
+  "status": "failed",
+  "passed": false,
+  "requiredScenarios": [
+    "code-repair",
+    "git-dynamic",
+    "database-long-result",
+    "database-commerce-analysis",
+    "database-churn-ml",
+    "database-fraud-investigation"
+  ],
+  "selectedScenarios": [
+    "database-churn-ml"
+  ],
+  "scenarios": [
+    {
+      "scenario": "database-churn-ml",
+      "status": "failed",
+      "durationMs": 269864,
+      "error": "Live scenario failed with exit code 1."
+    }
+  ]
+}

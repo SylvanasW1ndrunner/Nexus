@@ -3,12 +3,20 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RunEventCommitter } from '../src/events/run-event-committer.js';
+import {
+  ModelExecutionGateway,
+  createModelSessionBundle,
+  describeModelSessionBundle,
+  type ModelSession,
+} from '@dbagent/core-llm';
+import { afterEach, describe, expect, it } from 'vitest';
 import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
-import { JournalDrivenAgentKernel, type AgentKernelPort } from '../src/kernel/agent-kernel.js';
-import { RunController, type KernelRunProjection } from '../src/kernel/run-controller.js';
-import { validatedAttemptFixture } from './validated-attempt-fixture.js';
+import { createJournalAgentKernel } from '../src/kernel/agent-kernel.js';
+import { RunController } from '../src/kernel/run-controller.js';
+import { PermissionManager } from '../src/permission-manager.js';
+import { ToolRegistry } from '../src/tool-registry.js';
+import { createTestModelSession } from './model-session-fixture.js';
+import { resolveViteNodeEntry } from './fixtures/vite-node-entry.js';
 
 const roots: string[] = [];
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -16,54 +24,39 @@ const repositoryRoot = dirname(dirname(packageRoot));
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })));
 
 describe('Agent Kernel process restart recovery', () => {
-  it('discards an uncommitted Attempt after hard process exit and never exposes its Tool actions', async () => {
+  it('recovers an uncommitted Attempt through the production factory', async () => {
     const fixture = await preparedFixture();
-    expect(await runWorker(fixture, 'before-commit')).toBe(73);
+    const exited = await runWorker(fixture, 'before-commit');
+    expect(exited.code, exited.output).toBe(73);
+    await delay(fixture.leaseTtlMs + 50);
     const journal = new SqliteAgentJournal({ filePath: fixture.journalPath });
     expect(await journal.listInvocations(fixture.runId)).toEqual([]);
     expect(await journal.countEvents('tool.proposed')).toBe(0);
-    const controller = controllerFor(journal, fixture.runId);
-    await controller.acquire();
-    const active = await journal.getKernelRunProjection(scope(fixture.runId));
-    if (active === null) throw new Error('Missing Run');
-    const discarded = await controller.discardModelAttempt({
-      commandId: 'restart-discard', expectedRunRevision: active.revision,
-      turnId: 'turn-crash', expectedTurnRevision: 1, attemptId: 'attempt-crash',
-      reason: 'runtime-restarted', failure: { code: 'MODEL_ATTEMPT_INTERRUPTED', retryable: true },
-    });
-    const started = await controller.startModelAttempt({
-      commandId: 'restart-attempt', expectedRunRevision: discarded.run.revision,
-      turnId: 'turn-crash', expectedTurnRevision: 1, attemptId: 'attempt-retry',
-      origin: { connectionId: 'connection-current', model: 'model-current', protocol: 'openai-responses' },
-    });
-    appendFileSync(fixture.counterPath, 'provider-call\n');
-    const attempt = await validatedAttemptFixture('attempt-retry');
-    await new RunEventCommitter(journal).commitValidatedAttempt({
-      projectId: 'project-1', sessionId: 'session-1', runId: fixture.runId,
-      turnId: 'turn-crash', commandId: 'restart-commit',
-      lease: { ownerId: 'owner-1', fencingToken: 1 },
-      expectedRunRevision: started.run.revision, expectedTurnRevision: 1, attempt,
-    });
-    expect(readFileSync(fixture.counterPath, 'utf8').trim().split('\n')).toHaveLength(2);
-    expect(await journal.listInvocations(fixture.runId)).toHaveLength(2);
-    expect(await journal.countEvents('model_attempt_discarded')).toBe(1);
-  });
+    const kernel = productionKernel(journal, fixture.session, 'recovery-one');
 
-  it('reopens a committed Attempt in a second Kernel without another model call', async () => {
+    await expect(kernel.advance(fixture.runId)).resolves.toMatchObject({ state: 'Completed' });
+    expect(readFileSync(fixture.counterPath, 'utf8').trim().split('\n')).toHaveLength(2);
+    expect(await journal.listInvocations(fixture.runId)).toHaveLength(0);
+    expect(await journal.countEvents('model_attempt_committed')).toBe(1);
+    expect(await journal.countEvents('model_attempt_discarded')).toBe(1);
+  }, 15_000);
+
+  it('reopens a committed Attempt through the production factory without another model call', async () => {
     const fixture = await preparedFixture();
-    expect(await runWorker(fixture, 'after-commit')).toBe(74);
+    const exited = await runWorker(fixture, 'after-commit');
+    expect(exited.code, exited.output).toBe(74);
+    await delay(fixture.leaseTtlMs + 50);
     const journal = new SqliteAgentJournal({ filePath: fixture.journalPath });
     const committed = await journal.getKernelRunProjection(scope(fixture.runId));
     if (committed === null) throw new Error('Missing Run');
-    expect(committed.state).toBe('ResolvingActions');
-    expect(await journal.listInvocations(fixture.runId)).toHaveLength(2);
-    const modelCall = vi.fn();
-    const port = recoveryPort(committed, modelCall);
-    const result = await new JournalDrivenAgentKernel({ port }).advance(fixture.runId);
-    expect(result.state).toBe('AwaitingUser');
-    expect(modelCall).not.toHaveBeenCalled();
+    expect(committed.state).toBe('Finalizing');
+    expect(await journal.listInvocations(fixture.runId)).toHaveLength(0);
+    const kernel = productionKernel(journal, fixture.session, 'recovery-two');
+
+    await expect(kernel.advance(fixture.runId)).resolves.toMatchObject({ state: 'Completed' });
     expect(readFileSync(fixture.counterPath, 'utf8').trim().split('\n')).toHaveLength(1);
-  });
+    expect(await journal.countEvents('model_attempt_committed')).toBe(1);
+  }, 15_000);
 });
 
 async function preparedFixture() {
@@ -77,33 +70,42 @@ async function preparedFixture() {
   });
   const controller = controllerFor(journal, ingress.runId);
   await controller.acquire();
-  await controller.prepareTurn({
+  const session = await createTestModelSession({
+    connectionId: 'connection-1', modelId: 'model-1', outputText: 'Recovered.',
+    onExecute: () => { appendFileSync(counterPath, 'provider-call\n'); },
+  });
+  const captured = await controller.captureTurn({
     commandId: 'prepare', expectedRunRevision: 1, turnId: 'turn-crash',
     environment: {
       environmentBindingId: 'environment-1', settingsRevision: 'settings-r1',
       permissionPolicyRevision: 'permission-r1',
-      modelRoute: {
-        routeRevision: 'route-r1',
-        primary: {
-          connectionId: 'connection-current', modelId: 'model-current',
-          protocol: 'openai-responses', codecRevision: 'openai-responses@1',
-          maxInputTokens: 12_288, maxOutputTokens: 4_096, generation: {},
-        }, fallbacks: [],
-      },
+      modelSession: describeModelSessionBundle(createModelSessionBundle({ primary: session })),
     },
     snapshot: {
       turnSnapshotId: 'snapshot-crash', capability: { snapshotId: 'cap-1', revision: 'r1' },
-      promptRevision: 'prompt-r1', tools: [{ name: 'query_database', revision: 'r1' }],
+      promptRevision: 'prompt-r1', tools: [],
       skills: [], verifiers: [],
     },
   });
-  return { journalPath, counterPath, runId: ingress.runId };
+  const ready = await controller.commitContextReady({
+    commandId: 'context-ready', expectedRunRevision: captured.run.revision,
+    turnId: 'turn-crash', expectedTurnRevision: 1,
+  });
+  await controller.release();
+  const leaseTtlMs = 250;
+  return {
+    journalPath, counterPath, runId: ingress.runId, session, leaseTtlMs,
+    expectedRunRevision: ready.run.revision,
+  };
 }
 
 function controllerFor(journal: SqliteAgentJournal, runId: string) {
   return new RunController({
     journal, projectId: 'project-1', sessionId: 'session-1', runId,
-    ownerId: 'owner-1', leaseTtlMs: 60_000,
+    // Fixture preparation is not the crash boundary under test. Keep this lease
+    // above parallel-runner scheduling stalls; the spawned crash worker still
+    // uses the short lease returned by preparedFixture().
+    ownerId: 'fixture-owner', leaseTtlMs: 5_000,
   });
 }
 
@@ -114,46 +116,56 @@ function scope(runId: string) {
 function runWorker(
   fixture: Awaited<ReturnType<typeof preparedFixture>>,
   mode: 'before-commit' | 'after-commit',
-): Promise<number | null> {
-  const viteNode = join(
-    repositoryRoot, 'node_modules', '.pnpm', 'vite-node@2.1.9_@types+node@22.19.20',
-    'node_modules', 'vite-node', 'vite-node.mjs',
-  );
+): Promise<Readonly<{ code: number | null; output: string }>> {
+  const viteNode = resolveViteNodeEntry();
   const worker = join(packageRoot, 'test', 'fixtures', 'model-attempt-crash-worker.ts');
   const child = spawn(process.execPath, [viteNode, worker], {
-    cwd: repositoryRoot, stdio: 'ignore', env: {
+    cwd: repositoryRoot, stdio: ['ignore', 'pipe', 'pipe'], env: {
       ...process.env,
-      DBAGENT_MODEL_CRASH_INPUT: JSON.stringify({ ...fixture, mode }),
+      DBAGENT_MODEL_CRASH_INPUT: JSON.stringify({
+        journalPath: fixture.journalPath,
+        counterPath: fixture.counterPath,
+        runId: fixture.runId,
+        expectedRunRevision: fixture.expectedRunRevision,
+        leaseTtlMs: fixture.leaseTtlMs,
+        mode,
+      }),
     },
   });
+  const output: string[] = [];
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => output.push(chunk));
+  child.stderr.on('data', (chunk: string) => output.push(chunk));
   return new Promise((resolve, reject) => {
     child.once('error', reject);
-    child.once('exit', resolve);
+    child.once('exit', (code) => resolve({ code, output: output.join('') }));
   });
 }
 
-function recoveryPort(
-  initial: KernelRunProjection,
-  modelCall: ReturnType<typeof vi.fn>,
-): AgentKernelPort {
-  let current = initial;
-  const unexpected = async () => { throw new Error('unexpected recovery branch'); };
-  return {
-    async read() { return current; }, async start() { return current; },
-    prepare: unexpected, async callModel() { modelCall(); return unexpected(); },
-    async runTools() {
-      current = { ...current, state: 'AwaitingUser', waitReason: 'approval', revision: current.revision + 1 };
-      return {
-        run: current,
-        signal: {
-          type: 'schedule-decided' as const,
-          decision: { state: 'AwaitingUser' as const, reason: 'approval' as const, invocationIds: [] },
-        },
-      };
+function productionKernel(
+  journal: SqliteAgentJournal,
+  session: ModelSession,
+  ownerId: string,
+) {
+  return createJournalAgentKernel({
+    journal,
+    gateway: new ModelExecutionGateway(),
+    resolveModelSession: () => session,
+    resolveUsageBillingMode: () => 'byok',
+    toolCatalog: new ToolRegistry().captureSnapshot(),
+    permissionManager: new PermissionManager(),
+    runtimeProtocol: {
+      id: 'runtime-protocol', source: 'runtime', scope: 'static', priority: 0,
+      revision: 'runtime-r1', cacheability: 'stable', tokenEstimate: 4,
+      content: [{ type: 'text', text: 'Complete the current task.' }],
     },
-    finalize: unexpected, settleCancellation: unexpected,
-    steer: unexpected, approve: unexpected, cancel: unexpected, resume: unexpected,
-    requestManualCompaction: unexpected, recordNoProgress: unexpected,
-    async listPending() { return []; }, async checkLimits() { return null; },
-  };
+    capability: { snapshotId: 'cap-1', revision: 'r1' },
+    promptRevision: 'prompt-r1', settingsRevision: 'settings-r1',
+    permissionPolicyRevision: 'permission-r1', ownerId, leaseTtlMs: 2_000,
+  });
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

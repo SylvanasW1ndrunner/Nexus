@@ -8,668 +8,449 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { verifyPublicPackageManifest, verifyReleaseMetadata } from './lib/release-gates.mjs';
-import { resolvePublicRuntimeDependencies } from './lib/public-dependencies.mjs';
-import { createSupplyChainDocuments, SUPPLY_CHAIN_FILES } from './lib/supply-chain.mjs';
+import { PUBLIC_DOCUMENT_FILES } from './lib/public-documents.mjs';
+import {
+  NPM_ARCHIVE_NAME,
+  NPM_PACKAGE_NAME,
+  NPM_PACKAGE_VERSION,
+  RUNTIME_WORKSPACES,
+  assertChildPath,
+  assertSafeTextFiles,
+  collectFiles,
+  createFileSnapshot,
+  createPublicPackageManifest,
+  externalPackageSpecifiers,
+  npmInvocation,
+  publicPackageFiles,
+  rewriteInternalImports,
+  unresolvedInternalSpecifiers,
+  verifyPackagePaths,
+  verifyPublicPackageManifest,
+} from './lib/npm-package.mjs';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, '..');
-const repositoryManifest = readJson(join(repositoryRoot, 'package.json'));
-const serverManifest = readJson(join(repositoryRoot, 'apps', 'server', 'package.json'));
-const version = verifyReleaseMetadata({
-  rootManifest: repositoryManifest,
-  serverManifest,
-  readmeEnglish: readFileSync(join(repositoryRoot, 'README.md'), 'utf8'),
-  readmeChinese: readFileSync(join(repositoryRoot, 'README.zh-CN.md'), 'utf8'),
-  changelog: readFileSync(join(repositoryRoot, 'CHANGELOG.md'), 'utf8'),
-});
-const nodeEngine = requireString(
-  repositoryManifest.engines?.node,
-  'root package.json engines.node',
-);
-const packageName = '@nwlworkshop/schemanaut';
-const provenanceFileName = 'PROVENANCE.json';
-const runtimeWorkspaces = [
-  'packages/shared',
-  'packages/core-usage',
-  'packages/core-llm',
-  'packages/core-resource',
-  'packages/core-db',
-  'packages/core-rag',
-  'packages/core-skills',
-  'packages/core-agent',
-  'packages/core-tools',
-  'packages/sdk',
-  'apps/server',
-];
-const publicRootFiles = [
-  'README.md',
-  'README.zh-CN.md',
-  'LICENSE',
-  'NOTICE',
-  'THIRD_PARTY_NOTICES.md',
-];
-const publicDocFiles = ['docs/product-functional-overview.md', 'docs/test-pipeline.md'];
-const publicDocDirectories = [
-  'docs/agent',
-  'docs/ai-sql',
-  'docs/cli',
-  'docs/foundation',
-  'docs/sdk',
-];
 const releaseRoot = join(repositoryRoot, 'release');
-const releaseDirectory = join(releaseRoot, `SchemaNaut-v${version}`);
-const artifactName = `schemanaut-v${version}.tgz`;
-const artifactPath = join(releaseDirectory, artifactName);
-const checksumPath = join(releaseDirectory, 'SHA256SUMS.txt');
-const provenancePath = join(releaseDirectory, provenanceFileName);
+const releaseDirectory = join(releaseRoot, `SchemaNaut-v${NPM_PACKAGE_VERSION}`);
 const stagingDirectory = mkdtempSync(join(tmpdir(), 'schemanaut-npm-'));
+const npmCacheDirectory = mkdtempSync(join(tmpdir(), 'schemanaut-npm-cache-'));
 
 assertChildPath(releaseRoot, releaseDirectory);
-mkdirSync(releaseDirectory, { recursive: true });
-rmSync(artifactPath, { force: true });
-rmSync(checksumPath, { force: true });
-rmSync(provenancePath, { force: true });
+mkdirSync(releaseRoot, { recursive: true });
+const pendingReleaseDirectory = mkdtempSync(
+  join(releaseRoot, `.SchemaNaut-v${NPM_PACKAGE_VERSION}-pending-`),
+);
+const artifactPath = join(pendingReleaseDirectory, NPM_ARCHIVE_NAME);
+const checksumPath = join(pendingReleaseDirectory, 'SHA256SUMS.txt');
+const provenancePath = join(pendingReleaseDirectory, 'PROVENANCE.json');
+const finalArtifactPath = join(releaseDirectory, NPM_ARCHIVE_NAME);
+const finalProvenancePath = join(releaseDirectory, 'PROVENANCE.json');
 
 try {
+  verifyWorkspaceVersions();
   const sourceInputs = captureSourceInputs();
   const buildOutputs = captureBuildOutputs();
+  const buildEnvironment = captureBuildEnvironment();
+  const sourceControl = captureSourceControl();
   const distDirectory = join(stagingDirectory, 'dist');
   mkdirSync(distDirectory, { recursive: true });
-  copyPublicRuntime(distDirectory);
-  chmodSync(join(distDirectory, 'server', 'cli.js'), 0o755);
+
+  copyRuntime(distDirectory);
+  copyRuntimeAssets(distDirectory);
   copyPublicFiles(stagingDirectory);
 
-  const packageManifest = {
-    name: packageName,
-    version,
-    description:
-      'Embeddable AI SQL agent runtime with durable sessions, Skills, MCP and safe database execution.',
-    type: 'module',
-    main: './dist/index.js',
-    types: './dist/index.d.ts',
-    exports: {
-      '.': {
-        types: './dist/index.d.ts',
-        import: './dist/index.js',
-        default: './dist/index.js',
-      },
-      './server': {
-        types: './dist/server/index.d.ts',
-        import: './dist/server/index.js',
-        default: './dist/server/index.js',
-      },
-    },
-    bin: { schemanaut: './dist/server/cli.js' },
-    files: [
-      'dist',
-      'docs',
-      'README.md',
-      'README.zh-CN.md',
-      'LICENSE',
-      'NOTICE',
-      'THIRD_PARTY_NOTICES.md',
-      ...Object.values(SUPPLY_CHAIN_FILES),
-    ],
-    engines: { node: nodeEngine },
-    dependencies: resolvePublicRuntimeDependencies(repositoryRoot),
-    keywords: [
-      'ai',
-      'agent',
-      'database',
-      'database-agent',
-      'postgresql',
-      'nl2sql',
-      'text-to-sql',
-      'rag',
-      'mcp',
-      'skills',
-      'sdk',
-      'cli',
-    ],
-    author: 'NWLworkshop contributors',
-    license: 'Apache-2.0',
-    repository: {
-      type: 'git',
-      url: 'git+https://github.com/SylvanasW1ndrunner/Nexus.git',
-    },
-    homepage: 'https://github.com/SylvanasW1ndrunner/Nexus#readme',
-    bugs: {
-      url: 'https://github.com/SylvanasW1ndrunner/Nexus/issues',
-    },
-    publishConfig: { access: 'public' },
-    sideEffects: false,
-  };
-  verifyPublicPackageManifest(packageManifest);
-
+  const rootManifest = readJson(join(repositoryRoot, 'package.json'));
+  const packageManifest = verifyPublicPackageManifest(
+    createPublicPackageManifest(rootManifest.engines?.node),
+  );
   writeFileSync(
     join(stagingDirectory, 'package.json'),
     `${JSON.stringify(packageManifest, null, 2)}\n`,
     'utf8',
   );
-  writeSupplyChainMetadata(stagingDirectory, packageManifest);
+  chmodSync(join(distDirectory, 'terminal', 'cli.js'), 0o755);
   rewritePackageMarkdownLinks(stagingDirectory);
-  pack(stagingDirectory, artifactPath);
-  const packagePayload = captureArchivePayload(artifactPath);
-  assertSnapshotUnchanged(sourceInputs, captureSourceInputs(), 'source inputs');
-  assertSnapshotUnchanged(buildOutputs, captureBuildOutputs(), 'compiled build outputs');
-  const checksum = createHash('sha256').update(readFileSync(artifactPath)).digest('hex');
-  writeFileSync(checksumPath, `${checksum}  ${artifactName}\n`, 'utf8');
-  const provenance = {
-    schemaVersion: 1,
-    package: {
-      name: packageName,
-      version,
-    },
-    workspaceIdentity: {
-      method: 'sha256-file-manifest',
-      workingTreeState: 'not-asserted',
-    },
-    sourceInputs,
-    buildOutputs,
-    packagePayload,
-    artifact: {
-      file: artifactName,
-      sha256: checksum,
-      size: statSync(artifactPath).size,
-    },
-  };
-  writeFileSync(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`, 'utf8');
 
-  process.stdout.write(`npm package: ${artifactPath}\n`);
+  const stagedFiles = collectFiles(stagingDirectory);
+  verifyPackagePaths(stagedFiles.map(({ path }) => path));
+  assertSafeTextFiles(stagedFiles);
+  verifyNoInternalSpecifiers(stagedFiles);
+  verifyRuntimeDependencies(stagedFiles, packageManifest);
+
+  pack(stagingDirectory, artifactPath, npmCacheDirectory);
+  const packagePayload = inspectArchive(artifactPath, packageManifest);
+  verifyPackagePaths(packagePayload.files.map(({ path }) => path));
+
+  const artifact = readFileSync(artifactPath);
+  const checksum = createHash('sha256').update(artifact).digest('hex');
+  writeFileSync(checksumPath, `${checksum}  ${NPM_ARCHIVE_NAME}\n`, 'utf8');
+  writeFileSync(
+    provenancePath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        createdAt: new Date().toISOString(),
+        package: { name: NPM_PACKAGE_NAME, version: NPM_PACKAGE_VERSION },
+        distribution: 'local-npm-tarball',
+        remotePublished: false,
+        buildCommand: 'node scripts/release-local.mjs',
+        buildEnvironment,
+        sourceControl,
+        sourceInputs,
+        buildOutputs,
+        packagePayload,
+        artifact: {
+          file: NPM_ARCHIVE_NAME,
+          sha256: checksum,
+          size: statSync(artifactPath).size,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+
+  promoteRelease(pendingReleaseDirectory, releaseDirectory);
+  process.stdout.write(`Local npm package: ${finalArtifactPath}\n`);
   process.stdout.write(`SHA256: ${checksum}\n`);
-  process.stdout.write(`provenance: ${provenancePath}\n`);
+  process.stdout.write(`Provenance: ${finalProvenancePath}\n`);
 } finally {
   rmSync(stagingDirectory, { recursive: true, force: true });
+  rmSync(npmCacheDirectory, { recursive: true, force: true });
+  rmSync(pendingReleaseDirectory, { recursive: true, force: true });
 }
 
-function copyPublicFiles(targetRoot) {
-  for (const name of publicRootFiles) {
-    const source = join(repositoryRoot, name);
-    if (!existsSync(source)) throw new Error(`Missing public release file: ${source}`);
-    copyFileSync(source, join(targetRoot, name));
+function verifyWorkspaceVersions() {
+  const rootManifest = readJson(join(repositoryRoot, 'package.json'));
+  if (rootManifest.version !== NPM_PACKAGE_VERSION || rootManifest.private !== true) {
+    throw new Error(`Root manifest must be private at version ${NPM_PACKAGE_VERSION}.`);
   }
-  const publicDocsTarget = join(targetRoot, 'docs');
-  mkdirSync(publicDocsTarget, { recursive: true });
-  for (const relativePath of publicDocFiles) {
-    const name = relativePath.slice('docs/'.length);
-    copyFileSync(join(repositoryRoot, ...relativePath.split('/')), join(publicDocsTarget, name));
-  }
-  for (const relativePath of publicDocDirectories) {
-    const name = relativePath.slice('docs/'.length);
-    copyMarkdownDirectory(
-      join(repositoryRoot, ...relativePath.split('/')),
-      join(publicDocsTarget, name),
-    );
-  }
-}
-
-function writeSupplyChainMetadata(targetRoot, packageManifest) {
-  const documents = createSupplyChainDocuments({
-    repositoryRoot,
-    packageManifest,
-  });
-  for (const [key, fileName] of Object.entries(SUPPLY_CHAIN_FILES)) {
-    writeFileSync(
-      join(targetRoot, fileName),
-      `${JSON.stringify(documents[key], null, 2)}\n`,
-      'utf8',
-    );
-  }
-}
-
-function copyMarkdownDirectory(source, target) {
-  mkdirSync(target, { recursive: true });
-  for (const entry of readdirSync(source, { withFileTypes: true })) {
-    const sourcePath = join(source, entry.name);
-    const targetPath = join(target, entry.name);
-    if (entry.isDirectory()) {
-      copyMarkdownDirectory(sourcePath, targetPath);
-    } else if (entry.isFile() && entry.name.endsWith('.md')) {
-      copyFileSync(sourcePath, targetPath);
+  for (const workspace of RUNTIME_WORKSPACES) {
+    const manifest = readJson(join(repositoryRoot, workspace.path, 'package.json'));
+    if (
+      manifest.name !== workspace.packageName ||
+      manifest.version !== NPM_PACKAGE_VERSION ||
+      manifest.private !== true
+    ) {
+      throw new Error(
+        `${workspace.path}/package.json must remain private with identity ` +
+          `${workspace.packageName}@${NPM_PACKAGE_VERSION}.`,
+      );
     }
   }
 }
 
-function rewritePackageMarkdownLinks(packageRoot) {
-  for (const markdownPath of markdownFiles(packageRoot)) {
-    const relativeMarkdownPath = relative(packageRoot, markdownPath);
-    const repositoryMarkdownPath = join(repositoryRoot, relativeMarkdownPath);
-    const original = readFileSync(markdownPath, 'utf8');
-    const rewritten = original.replace(
-      /(!?\[[^\]\n]*\]\()([^)]+)(\))/g,
-      (match, prefix, rawTarget, suffix) => {
-        const parsed = parseMarkdownTarget(rawTarget);
-        if (!parsed || isExternalMarkdownTarget(parsed.target)) return match;
-        const packageTarget = resolve(dirname(markdownPath), decodeMarkdownPath(parsed.target));
-        if (existsSync(packageTarget)) return match;
-        const repositoryTarget = resolve(
-          dirname(repositoryMarkdownPath),
-          decodeMarkdownPath(parsed.target),
-        );
-        const repositoryRelative = relative(repositoryRoot, repositoryTarget);
-        if (
-          repositoryRelative === '..' ||
-          repositoryRelative.startsWith('../') ||
-          repositoryRelative.startsWith('..\\') ||
-          isAbsolute(repositoryRelative)
-        ) {
-          throw new Error(
-            `Markdown link escapes the repository: ${relativeMarkdownPath} -> ${parsed.target}`,
-          );
-        }
-        if (!existsSync(repositoryTarget)) {
-          throw new Error(
-            `Markdown link target does not exist: ${relativeMarkdownPath} -> ${parsed.target}`,
-          );
-        }
-        const repositoryRelativeTarget = repositoryRelative.replaceAll('\\', '/');
-        const encodedTarget = repositoryRelativeTarget
-          .split('/')
-          .map((segment) => encodeURIComponent(segment))
-          .join('/');
-        const view = statSync(repositoryTarget).isDirectory() ? 'tree' : 'blob';
-        const url =
-          `https://github.com/SylvanasW1ndrunner/Nexus/${view}/dev/` +
-          `${encodedTarget}${parsed.suffix}`;
-        return `${prefix}${url}${suffix}`;
-      },
-    );
-    if (rewritten !== original) {
-      writeFileSync(markdownPath, rewritten, 'utf8');
-    }
+function copyRuntime(distDirectory) {
+  for (const workspace of RUNTIME_WORKSPACES) {
+    const source = join(repositoryRoot, workspace.path, 'dist');
+    const target = join(distDirectory, ...workspace.target.split('/'));
+    copyRuntimeDirectory(source, target, distDirectory);
   }
-}
-
-function markdownFiles(directory) {
-  const files = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...markdownFiles(path));
-    else if (entry.isFile() && entry.name.endsWith('.md')) files.push(path);
-  }
-  return files;
-}
-
-function parseMarkdownTarget(rawTarget) {
-  const normalized = rawTarget.trim();
-  if (!normalized) return undefined;
-  const unwrapped =
-    normalized.startsWith('<') && normalized.endsWith('>') ? normalized.slice(1, -1) : normalized;
-  const suffixIndex = unwrapped.search(/[?#]/);
-  return suffixIndex === -1
-    ? { target: unwrapped, suffix: '' }
-    : {
-        target: unwrapped.slice(0, suffixIndex),
-        suffix: unwrapped.slice(suffixIndex),
-      };
-}
-
-function isExternalMarkdownTarget(target) {
-  return target.startsWith('#') || target.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(target);
-}
-
-function decodeMarkdownPath(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function copyPublicRuntime(distDirectory) {
-  const runtimePackages = [
-    {
-      source: join(repositoryRoot, 'packages', 'sdk', 'dist'),
-      target: distDirectory,
-    },
-    ...[
-      'shared',
-      'core-usage',
-      'core-llm',
-      'core-resource',
-      'core-db',
-      'core-rag',
-      'core-skills',
-      'core-agent',
-      'core-tools',
-    ].map((name) => ({
-      source: join(repositoryRoot, 'packages', name, 'dist'),
-      target: join(distDirectory, 'internal', name),
-    })),
-    {
-      source: join(repositoryRoot, 'apps', 'server', 'dist'),
-      target: join(distDirectory, 'server'),
-    },
-  ];
-  for (const runtimePackage of runtimePackages) {
-    copyRuntimeDirectory(runtimePackage.source, runtimePackage.target, distDirectory);
-  }
-  copyAssetDirectory(
-    join(repositoryRoot, 'packages', 'core-skills', 'skills'),
-    join(distDirectory, 'internal', 'core-skills', 'skills'),
-  );
 }
 
 function copyRuntimeDirectory(source, target, distDirectory) {
-  if (!existsSync(source)) {
-    throw new Error(`Missing compiled runtime directory: ${source}`);
-  }
+  if (!existsSync(source)) throw new Error(`Missing compiled runtime directory: ${source}`);
   mkdirSync(target, { recursive: true });
   for (const entry of readdirSync(source, { withFileTypes: true })) {
     const sourcePath = join(source, entry.name);
     const targetPath = join(target, entry.name);
     if (entry.isDirectory()) {
       copyRuntimeDirectory(sourcePath, targetPath, distDirectory);
-      continue;
+    } else if (entry.isFile() && (entry.name.endsWith('.js') || entry.name.endsWith('.json'))) {
+      const content = readFileSync(sourcePath, 'utf8');
+      writeFileSync(
+        targetPath,
+        entry.name.endsWith('.js')
+          ? rewriteInternalImports(content, targetPath, distDirectory)
+          : content,
+        'utf8',
+      );
     }
-    if (
-      !entry.isFile() ||
-      (!entry.name.endsWith('.js') &&
-        !entry.name.endsWith('.d.ts') &&
-        !entry.name.endsWith('.json'))
-    ) {
-      continue;
-    }
-    const moduleSource = rewriteInternalImports(
-      readFileSync(sourcePath, 'utf8'),
-      targetPath,
-      distDirectory,
-    );
-    writeFileSync(targetPath, moduleSource, 'utf8');
   }
 }
 
-function copyAssetDirectory(source, target) {
-  if (!existsSync(source)) {
-    throw new Error(`Missing runtime asset directory: ${source}`);
+function copyRuntimeAssets(distDirectory) {
+  copyDirectory(
+    join(repositoryRoot, 'packages', 'core-skills', 'skills'),
+    join(distDirectory, 'internal', 'core-skills', 'skills'),
+  );
+  copyDirectory(
+    join(repositoryRoot, 'packages', 'database-capability', 'skills'),
+    join(distDirectory, 'internal', 'database-capability', 'skills'),
+  );
+}
+
+function copyPublicFiles(targetRoot) {
+  for (const path of publicPackageFiles()) {
+    copyFile(sourcePath(path), join(targetRoot, ...path.split('/')));
   }
+}
+
+function copyDirectory(source, target) {
+  if (!existsSync(source)) throw new Error(`Missing runtime asset directory: ${source}`);
   mkdirSync(target, { recursive: true });
   for (const entry of readdirSync(source, { withFileTypes: true })) {
     const sourcePath = join(source, entry.name);
     const targetPath = join(target, entry.name);
-    if (entry.isDirectory()) {
-      copyAssetDirectory(sourcePath, targetPath);
-    } else if (entry.isFile()) {
-      copyFileSync(sourcePath, targetPath);
-    } else {
-      throw new Error(`Unsupported runtime asset entry: ${sourcePath}`);
-    }
+    if (entry.isDirectory()) copyDirectory(sourcePath, targetPath);
+    else if (entry.isFile()) copyFileSync(sourcePath, targetPath);
+    else throw new Error(`Unsupported runtime asset entry: ${sourcePath}`);
   }
 }
 
-function rewriteInternalImports(content, destinationPath, distDirectory) {
-  const packageTargets = {
-    '@dbagent/sdk': join(distDirectory, 'index.js'),
-    '@dbagent/shared': join(distDirectory, 'internal', 'shared', 'index.js'),
-    '@dbagent/core-usage': join(distDirectory, 'internal', 'core-usage', 'index.js'),
-    '@dbagent/core-llm': join(distDirectory, 'internal', 'core-llm', 'index.js'),
-    '@dbagent/core-resource': join(distDirectory, 'internal', 'core-resource', 'index.js'),
-    '@dbagent/core-db': join(distDirectory, 'internal', 'core-db', 'index.js'),
-    '@dbagent/core-rag': join(distDirectory, 'internal', 'core-rag', 'index.js'),
-    '@dbagent/core-skills': join(distDirectory, 'internal', 'core-skills', 'index.js'),
-    '@dbagent/core-agent': join(distDirectory, 'internal', 'core-agent', 'index.js'),
-    '@dbagent/core-tools': join(distDirectory, 'internal', 'core-tools', 'index.js'),
-  };
-  let rewritten = content.replace(/^\/\/# sourceMappingURL=.*$/gm, '');
-  for (const [specifier, targetPath] of Object.entries(packageTargets)) {
-    let pathFromDeclaration = relative(dirname(destinationPath), targetPath).replaceAll('\\', '/');
-    if (!pathFromDeclaration.startsWith('.')) pathFromDeclaration = `./${pathFromDeclaration}`;
-    rewritten = rewritten
-      .replaceAll(`'${specifier}'`, `'${pathFromDeclaration}'`)
-      .replaceAll(`"${specifier}"`, `"${pathFromDeclaration}"`);
+function copyFile(source, target) {
+  if (!existsSync(source)) throw new Error(`Missing release file: ${source}`);
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(source, target);
+}
+
+function rewritePackageMarkdownLinks(packageRoot) {
+  for (const { path: relativePath, absolutePath } of collectFiles(packageRoot)) {
+    if (!relativePath.endsWith('.md')) continue;
+    const repositoryDocument = sourcePath(relativePath);
+    const original = readFileSync(absolutePath, 'utf8');
+    const rewritten = original.replace(
+      /(!?\[[^\]\n]*\]\()([^)]+)(\))/g,
+      (match, prefix, rawTarget, suffix) => {
+        const target = parseMarkdownTarget(rawTarget);
+        if (!target || isExternalTarget(target.path)) return match;
+        const packageTarget = resolve(dirname(absolutePath), decodePath(target.path));
+        if (existsSync(packageTarget)) return match;
+        if (!existsSync(repositoryDocument)) return match;
+        const repositoryTarget = resolve(dirname(repositoryDocument), decodePath(target.path));
+        const fromRoot = relative(repositoryRoot, repositoryTarget).replaceAll('\\', '/');
+        if (!fromRoot || fromRoot.startsWith('../') || !existsSync(repositoryTarget)) return match;
+        const view = statSync(repositoryTarget).isDirectory() ? 'tree' : 'blob';
+        const encoded = fromRoot.split('/').map(encodeURIComponent).join('/');
+        return `${prefix}https://github.com/SylvanasW1ndrunner/Nexus/${view}/dev/${encoded}${target.suffix}${suffix}`;
+      },
+    );
+    if (rewritten !== original) writeFileSync(absolutePath, rewritten, 'utf8');
   }
-  return `${rewritten.trimEnd()}\n`;
+}
+
+function verifyNoInternalSpecifiers(files) {
+  const findings = [];
+  for (const file of files) {
+    if (!file.path.endsWith('.js')) continue;
+    const unresolved = unresolvedInternalSpecifiers(readFileSync(file.absolutePath, 'utf8'));
+    if (unresolved.length > 0) findings.push(`${file.path}: ${unresolved.join(', ')}`);
+  }
+  if (findings.length > 0) {
+    throw new Error(`Unresolved workspace imports in npm package:\n${findings.join('\n')}`);
+  }
+}
+
+function verifyRuntimeDependencies(files, manifest) {
+  const declared = new Set(Object.keys(manifest.dependencies ?? {}));
+  const findings = [];
+  for (const file of files) {
+    if (!file.path.endsWith('.js')) continue;
+    const content = readFileSync(file.absolutePath, 'utf8');
+    for (const packageName of externalPackageSpecifiers(content)) {
+      if (!declared.has(packageName)) findings.push(`${file.path}: ${packageName}`);
+    }
+  }
+  if (findings.length > 0) {
+    throw new Error(`Undeclared runtime package imports:\n${[...new Set(findings)].join('\n')}`);
+  }
 }
 
 function captureSourceInputs() {
-  const paths = [
+  const files = [];
+  const addFile = (path) => files.push({ path, absolutePath: sourcePath(path) });
+  for (const path of [
     'package.json',
     'pnpm-lock.yaml',
     'pnpm-workspace.yaml',
     'tsconfig.base.json',
-    'scripts/clean-public-build.mjs',
+    'scripts/clean-build.mjs',
+    'scripts/release-local.mjs',
+    'CHANGELOG.md',
+    'README.md',
+    'README.zh-CN.md',
+    'LICENSE',
+    'NOTICE',
+    'THIRD_PARTY_NOTICES.md',
     'scripts/package-npm.mjs',
     'scripts/verify-npm-package.mjs',
-    'scripts/lib/release-gates.mjs',
-    'scripts/lib/public-dependencies.mjs',
-    'scripts/lib/public-api.mjs',
-    'scripts/lib/supply-chain.mjs',
-    'scripts/generate-public-api-baseline.mjs',
-    'scripts/verify-public-api.mjs',
-    'scripts/generate-sbom.mjs',
-    'scripts/baselines/public-api.json',
-    'CHANGELOG.md',
-    ...publicRootFiles,
-    ...publicDocFiles,
-  ];
-  for (const directory of publicDocDirectories) {
-    paths.push(...relativeFiles(directory, (path) => path.endsWith('.md')));
+    'scripts/lib/npm-package.mjs',
+    'scripts/lib/public-documents.mjs',
+  ]) addFile(path);
+  for (const path of PUBLIC_DOCUMENT_FILES) {
+    if (!files.some((file) => file.path === path)) addFile(path);
   }
-  for (const workspace of runtimeWorkspaces) {
-    paths.push(`${workspace}/package.json`, `${workspace}/tsconfig.json`);
-    paths.push(...relativeFiles(`${workspace}/src`));
-  }
-  paths.push(...relativeFiles('packages/core-skills/skills'));
-  return capturePathsSnapshot(paths);
-}
-
-function captureBuildOutputs() {
-  const paths = [];
-  for (const workspace of runtimeWorkspaces) {
-    paths.push(
-      ...relativeFiles(
-        `${workspace}/dist`,
-        (path) =>
-          path.endsWith('.js') || path.endsWith('.d.ts') || path.endsWith('.json'),
-      ),
-    );
-  }
-  return capturePathsSnapshot(paths);
-}
-
-function captureDirectorySnapshot(directory) {
-  const absoluteRoot = resolve(directory);
-  const files = collectDirectoryFiles(absoluteRoot, absoluteRoot);
-  return createSnapshot(
-    files.map((path) => ({
-      path: relative(absoluteRoot, path).replaceAll('\\', '/'),
-      absolutePath: path,
-    })),
-  );
-}
-
-function captureArchivePayload(path) {
-  const inspectionDirectory = mkdtempSync(join(tmpdir(), 'schemanaut-payload-'));
-  try {
-    run('tar', ['-xf', path, '-C', inspectionDirectory], repositoryRoot);
-    const packageRoot = join(inspectionDirectory, 'package');
-    if (!existsSync(packageRoot)) {
-      throw new Error('Packed archive does not contain the expected package directory.');
+  for (const workspace of RUNTIME_WORKSPACES) {
+    addFile(`${workspace.path}/package.json`);
+    addFile(`${workspace.path}/tsconfig.json`);
+    for (const folder of ['src', ...(workspace.path === 'packages/core-skills' || workspace.path === 'packages/database-capability' ? ['skills'] : [])]) {
+      const directory = sourcePath(`${workspace.path}/${folder}`);
+      for (const file of collectFiles(directory)) {
+        files.push({ path: `${workspace.path}/${folder}/${file.path}`, absolutePath: file.absolutePath });
+      }
     }
-    return captureDirectorySnapshot(packageRoot);
-  } finally {
-    rmSync(inspectionDirectory, { recursive: true, force: true });
   }
+  return createFileSnapshot(files);
 }
 
-function capturePathsSnapshot(paths) {
-  const uniquePaths = [...new Set(paths)].sort();
-  return createSnapshot(
-    uniquePaths.map((path) => {
-      const normalized = normalizeRepositoryPath(path);
-      const absolutePath = resolve(repositoryRoot, ...normalized.split('/'));
-      assertRepositoryFile(absolutePath, normalized);
-      return { path: normalized, absolutePath };
-    }),
-  );
-}
-
-function createSnapshot(files) {
-  const entries = files
-    .map(({ path, absolutePath }) => {
-      const content = readFileSync(absolutePath);
-      return {
-        path,
-        sha256: createHash('sha256').update(content).digest('hex'),
-        size: content.length,
-      };
-    })
-    .sort((left, right) => comparePaths(left.path, right.path));
-  const digest = createHash('sha256');
-  for (const entry of entries) {
-    digest.update(entry.path);
-    digest.update('\0');
-    digest.update(entry.sha256);
-    digest.update('\0');
-    digest.update(String(entry.size));
-    digest.update('\n');
-  }
+function captureBuildEnvironment() {
+  const npm = npmInvocation(['--version']);
   return {
-    algorithm: 'sha256',
-    digest: digest.digest('hex'),
-    files: entries,
+    node: process.version,
+    npm: runCapture(npm.command, npm.args, repositoryRoot).trim(),
+    typescript: readJson(join(repositoryRoot, 'node_modules', 'typescript', 'package.json')).version,
+    platform: process.platform,
+    architecture: process.arch,
   };
 }
 
-function relativeFiles(relativeDirectory, predicate = () => true) {
-  const normalizedDirectory = normalizeRepositoryPath(relativeDirectory);
-  const absoluteDirectory = resolve(repositoryRoot, ...normalizedDirectory.split('/'));
-  if (!existsSync(absoluteDirectory)) {
-    throw new Error(`Missing package provenance directory: ${normalizedDirectory}`);
-  }
-  return collectDirectoryFiles(absoluteDirectory, repositoryRoot)
-    .map((path) => relative(repositoryRoot, path).replaceAll('\\', '/'))
-    .filter(predicate);
+function captureSourceControl() {
+  const commit = runCapture('git', ['rev-parse', 'HEAD'], repositoryRoot).trim();
+  const status = runCapture(
+    'git',
+    ['status', '--porcelain=v1', '--untracked-files=normal'],
+    repositoryRoot,
+  ).trimEnd();
+  return {
+    commit,
+    dirty: status.length > 0,
+    statusSha256: createHash('sha256').update(status).digest('hex'),
+  };
 }
 
-function collectDirectoryFiles(directory, root) {
+function captureBuildOutputs() {
   const files = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...collectDirectoryFiles(path, root));
-    } else if (entry.isFile()) {
-      files.push(path);
-    } else {
-      throw new Error(
-        `Package provenance does not support non-file entries: ${relative(root, path)}`,
-      );
+  for (const workspace of RUNTIME_WORKSPACES) {
+    const directory = sourcePath(`${workspace.path}/dist`);
+    for (const file of collectFiles(directory)) {
+      if (!file.path.endsWith('.js') && !file.path.endsWith('.json')) continue;
+      files.push({ path: `${workspace.path}/dist/${file.path}`, absolutePath: file.absolutePath });
     }
   }
-  return files.sort();
+  return createFileSnapshot(files);
 }
 
-function normalizeRepositoryPath(path) {
-  if (
-    typeof path !== 'string' ||
-    !path ||
-    path.includes('\\') ||
-    path.startsWith('/') ||
-    /^[a-z]:/i.test(path)
-  ) {
-    throw new Error(`Invalid package provenance path: ${String(path)}`);
-  }
-  const normalized = path
-    .split('/')
-    .filter((segment) => segment && segment !== '.')
-    .join('/');
-  if (!normalized || normalized.split('/').includes('..') || normalized !== path) {
-    throw new Error(`Invalid package provenance path: ${path}`);
-  }
-  return normalized;
-}
-
-function assertRepositoryFile(path, relativePath) {
-  const fromRoot = relative(repositoryRoot, path);
-  if (
-    !fromRoot ||
-    fromRoot.startsWith('..') ||
-    isAbsolute(fromRoot) ||
-    !existsSync(path) ||
-    !statSync(path).isFile()
-  ) {
-    throw new Error(`Missing package provenance input: ${relativePath}`);
+function inspectArchive(path, manifest) {
+  const inspectionRoot = mkdtempSync(join(tmpdir(), 'schemanaut-inspect-'));
+  try {
+    run('tar', ['-xf', path, '-C', inspectionRoot], repositoryRoot);
+    const packageRoot = join(inspectionRoot, 'package');
+    if (!existsSync(packageRoot)) throw new Error('Archive does not contain package/.');
+    const files = collectFiles(packageRoot);
+    verifyPackagePaths(files.map(({ path: packagePath }) => packagePath));
+    assertSafeTextFiles(files);
+    verifyNoInternalSpecifiers(files);
+    verifyRuntimeDependencies(files, manifest);
+    return createFileSnapshot(files);
+  } finally {
+    rmSync(inspectionRoot, { recursive: true, force: true });
   }
 }
 
-function assertSnapshotUnchanged(before, after, label) {
-  if (before.digest === after.digest && before.files.length === after.files.length) return;
-  const beforeByPath = new Map(before.files.map((file) => [file.path, file]));
-  const afterByPath = new Map(after.files.map((file) => [file.path, file]));
-  const changedPath = [...new Set([...beforeByPath.keys(), ...afterByPath.keys()])]
-    .sort()
-    .find((path) => {
-      const left = beforeByPath.get(path);
-      const right = afterByPath.get(path);
-      return (
-        left?.sha256 !== right?.sha256 ||
-        left?.size !== right?.size ||
-        left === undefined ||
-        right === undefined
-      );
-    });
-  throw new Error(
-    `Package ${label} changed while the archive was being created` +
-      `${changedPath ? `: ${changedPath}` : ''}. Rebuild from a stable workspace.`,
+function promoteRelease(pendingDirectory, finalDirectory) {
+  assertChildPath(releaseRoot, pendingDirectory);
+  assertChildPath(releaseRoot, finalDirectory);
+  const backupDirectory = join(
+    releaseRoot,
+    `.SchemaNaut-v${NPM_PACKAGE_VERSION}-backup-${process.pid}-${Date.now()}`,
   );
-}
-
-function comparePaths(left, right) {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function pack(cwd, outputPath) {
-  const pnpmCli = process.env.npm_execpath;
-  if (!pnpmCli || !existsSync(pnpmCli)) {
-    throw new Error('Run packaging through `pnpm package:npm` so the pnpm CLI can be located.');
+  assertChildPath(releaseRoot, backupDirectory);
+  const hadPreviousRelease = existsSync(finalDirectory);
+  if (hadPreviousRelease) renameSync(finalDirectory, backupDirectory);
+  try {
+    renameSync(pendingDirectory, finalDirectory);
+  } catch (error) {
+    if (hadPreviousRelease && existsSync(backupDirectory)) {
+      renameSync(backupDirectory, finalDirectory);
+    }
+    throw error;
   }
-  const generatedName = `${packageName.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
+  if (hadPreviousRelease) rmSync(backupDirectory, { recursive: true, force: true });
+}
+
+function pack(cwd, outputPath, cacheDirectory) {
+  const invocation = npmInvocation([
+    'pack',
+    '--ignore-scripts',
+    '--json',
+    '--cache',
+    cacheDirectory,
+    '--pack-destination',
+    dirname(outputPath),
+  ]);
+  const result = spawnSync(
+    invocation.command,
+    invocation.args,
+    { cwd, encoding: 'utf8', windowsHide: true },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`npm pack failed: ${result.stderr || result.stdout}`);
+  const report = JSON.parse(result.stdout);
+  const generatedName = report[0]?.filename;
+  if (typeof generatedName !== 'string') throw new Error('npm pack did not report an archive name.');
   const generatedPath = join(dirname(outputPath), generatedName);
   assertChildPath(releaseRoot, generatedPath);
-  rmSync(generatedPath, { force: true });
-  run(process.execPath, [pnpmCli, 'pack', '--pack-destination', dirname(outputPath)], cwd);
-  if (!existsSync(generatedPath)) {
-    throw new Error(`pnpm did not produce the expected archive: ${generatedPath}`);
-  }
   renameSync(generatedPath, outputPath);
 }
 
-function run(command, args, cwd) {
-  const result = spawnSync(command, args, {
-    cwd,
-    env: process.env,
-    stdio: 'inherit',
-    windowsHide: true,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`Packaging command failed with exit code ${result.status ?? 1}.`);
+function parseMarkdownTarget(rawTarget) {
+  const value = rawTarget.trim().replace(/^<|>$/g, '');
+  if (!value) return undefined;
+  const suffixIndex = value.search(/[?#]/);
+  return suffixIndex === -1
+    ? { path: value, suffix: '' }
+    : { path: value.slice(0, suffixIndex), suffix: value.slice(suffixIndex) };
+}
+
+function isExternalTarget(path) {
+  return path.startsWith('#') || path.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(path);
+}
+
+function decodePath(path) {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
   }
+}
+
+function sourcePath(path) {
+  const resolvedPath = resolve(repositoryRoot, ...path.split('/'));
+  assertChildPath(repositoryRoot, resolvedPath);
+  return resolvedPath;
 }
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-function requireString(value, name) {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} is missing.`);
-  return value.trim();
+function run(command, args, cwd) {
+  const result = spawnSync(command, args, { cwd, stdio: 'inherit', windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${command} failed with exit code ${result.status ?? 1}.`);
 }
 
-function assertChildPath(parent, child) {
-  const pathFromParent = relative(resolve(parent), resolve(child));
-  if (!pathFromParent || pathFromParent.startsWith('..') || isAbsolute(pathFromParent)) {
-    throw new Error(`Release path escapes the release directory: ${child}`);
+function runCapture(command, args, cwd) {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`${command} failed: ${result.stderr || result.stdout}`);
   }
+  return result.stdout;
 }

@@ -6,9 +6,9 @@ import type {
 } from '@dbagent/core-llm';
 import {
   ContextLifecycle,
-  ContextLifecycleError,
   decideContextLifecycle,
   readBoundedCommittedContext,
+  readBoundedContextItems,
 } from '../src/context/context-lifecycle.js';
 import {
   PromptRuntime,
@@ -101,13 +101,13 @@ describe('Context lifecycle', () => {
         finishReason: 'stop',
         opaqueBlockRefs: [],
       },
-      session: {},
+      session: { route: { routeId: 'compaction-route', modelId: 'model' } },
       discardedAttempts: [],
     } as unknown as ModelAttemptExecution;
     const gateway = {
-      async executeAttempt(session: ModelSession | ModelSessionBundle, request: unknown, options: unknown) {
+      executeAttempt(session: ModelSession | ModelSessionBundle, request: unknown, options: unknown) {
         calls.push({ session, request, options });
-        return execution;
+        return Promise.resolve(execution);
       },
     };
     const session = { route: { modelId: 'model' } } as unknown as ModelSession;
@@ -124,6 +124,7 @@ describe('Context lifecycle', () => {
       committedThroughSequence: 41,
       summary: 'bounded committed summary',
       attemptId: 'attempt-compact',
+      routeId: 'compaction-route',
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.request).toEqual(expect.objectContaining({ model: 'model' }));
@@ -138,9 +139,9 @@ describe('Context lifecycle', () => {
     let calls = 0;
     const lifecycle = new ContextLifecycle({
       gateway: {
-        async executeAttempt() {
+        executeAttempt() {
           calls += 1;
-          throw new Error('provider unavailable');
+          return Promise.reject(new Error('provider unavailable'));
         },
       },
       session: { route: { modelId: 'model' } } as unknown as ModelSession,
@@ -149,9 +150,7 @@ describe('Context lifecycle', () => {
       decisionId: 'decision-2',
       committedThroughSequence: 9,
       messages: [],
-    })).rejects.toThrowError(expect.objectContaining<Partial<ContextLifecycleError>>({
-      code: 'CONTEXT_COMPACTION_FAILED',
-    }));
+    })).rejects.toMatchObject({ code: 'CONTEXT_COMPACTION_FAILED' });
     expect(calls).toBe(1);
   });
 
@@ -266,24 +265,24 @@ describe('Context lifecycle', () => {
     { type: 'reasoning-summary', text: 'summary', derivedFromOpaqueRef: 'opaque-1' },
     { type: 'unknown-protocol-block', value: 'raw' },
   ])('rejects protocol/opaque content from semantic prompt sections: $type', (content) => {
-    expect(() => new PromptRuntime({
+    expectErrorCode(() => new PromptRuntime({
       runtimeProtocol: {
         ...section('runtime', 'runtime', 0, 'General runtime protocol'),
         content: [content as never],
       },
-    })).toThrowError(expect.objectContaining({ code: 'PROMPT_SECTION_INVALID' }));
+    }), 'PROMPT_SECTION_INVALID');
   });
 
   it('reads a huge history through bounded run-scoped cursor pages', async () => {
-    const readPage = vi.fn(async ({ afterSequence, limit }: {
+    const readPage = vi.fn(({ afterSequence, limit }: {
       afterSequence: number; limit: number;
     }) => {
       if (limit > 64) throw new Error('unbounded page');
-      return Array.from({ length: limit }, (_, index) => ({
+      return Promise.resolve(Array.from({ length: limit }, (_, index) => ({
         sequence: afterSequence + index + 1,
         committed: true,
         semantic: `fact-${afterSequence + index + 1}`,
-      }));
+      })));
     });
     const result = await readBoundedCommittedContext({
       readPage,
@@ -297,7 +296,64 @@ describe('Context lifecycle', () => {
     expect(result.truncated).toBe(true);
     expect(readPage).toHaveBeenCalledTimes(2);
   });
+
+  it('advances a filtered Session cursor to its fixed boundary after the source is exhausted', async () => {
+    const readPage = vi.fn(({ afterSequence }: { afterSequence: number }) =>
+      Promise.resolve(afterSequence === 10
+        ? [{ sequence: 20 }, { sequence: 40 }]
+        : []),
+    );
+    const result = await readBoundedContextItems({
+      readPage,
+      afterSequence: 10,
+      throughSequence: 100,
+      pageSize: 3,
+      maxItems: 8,
+    });
+    expect(result).toEqual({
+      items: [{ sequence: 20 }, { sequence: 40 }],
+      nextSequence: 100,
+      truncated: false,
+    });
+    expect(readPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses one bounded lookahead when a filtered Session page exactly fills the item limit', async () => {
+    const readPage = vi.fn(({ afterSequence }: { afterSequence: number }) =>
+      Promise.resolve(afterSequence === 10
+        ? [{ sequence: 20 }, { sequence: 40 }]
+        : []),
+    );
+    const result = await readBoundedContextItems({
+      readPage,
+      afterSequence: 10,
+      throughSequence: 100,
+      pageSize: 2,
+      maxItems: 2,
+    });
+    expect(result).toEqual({
+      items: [{ sequence: 20 }, { sequence: 40 }],
+      nextSequence: 100,
+      truncated: false,
+    });
+    expect(readPage).toHaveBeenLastCalledWith({
+      afterSequence: 40, throughSequence: 100, limit: 1,
+    });
+  });
 });
+
+function expectErrorCode(action: () => unknown, code: string): void {
+  let caught: unknown;
+  try {
+    action();
+  } catch (error) {
+    caught = error;
+  }
+  if (caught === null || typeof caught !== 'object' || !('code' in caught)) {
+    throw new Error(`Expected an error with code ${code}.`);
+  }
+  expect(caught.code).toBe(code);
+}
 
 function section(
   id: string,

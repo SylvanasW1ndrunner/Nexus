@@ -1,90 +1,25 @@
-import { createHash, randomUUID } from 'node:crypto';
-import type { RoundContext, UsageTracker } from '@dbagent/core-usage';
-import { LlmAsyncJobManager, type LlmAsyncJob } from './async-jobs.js';
+import { randomUUID } from 'node:crypto';
 import {
-  LlmBudgetController,
-  type LlmBudgetLimits,
-  type LlmBudgetScope,
-  type LlmBudgetReservation,
-} from './budget.js';
-import {
-  LlmModelRegistry,
-  type RegisterModelInput,
-  type RegisteredLlmModel,
-} from './model-registry.js';
-import { estimateMessagesTokens } from './prompt-runtime.js';
-import {
-  generationConfigFromRequest,
-  resolveLlmOutputReservation,
-} from './generation-config.js';
-import { LlmReliabilityController, type LlmReliabilityConfig } from './reliability.js';
-import { LlmResponseCache } from './response-cache.js';
-import {
-  createModelSession,
-  createModelSessionBundle,
   isAuthenticModelSession,
   isAuthenticModelSessionBundle,
   ModelClientError,
-  type ModelClient,
   type ModelSessionBundle,
   type ModelSession,
 } from './model-client.js';
-import {
-  legacyProviderCodec,
-  LegacyProviderModelClient,
-  legacyAttemptToResponse,
-  legacyRequestToCanonical,
-} from './legacy-model-compatibility.js';
 import {
   ModelProtocolError,
   type CanonicalModelRequest,
 } from './protocol/codec.js';
 import type {
   DecodedModelAttempt,
+  ModelTokenUsage,
   ValidatedModelAttempt,
 } from './protocol/envelope.js';
 import type { DecodedModelContentBlock } from './protocol/content.js';
 import type { DecodedModelStreamEvent } from './protocol/model-stream.js';
 import { mintAuthenticValidatedModelAttempt } from './protocol/validated-attempt-authenticity.js';
 import { retryAfterMilliseconds, retryDelayFromError } from './retry-policy.js';
-import {
-  estimateModelCost,
-  LlmTaskRouter,
-  type LlmPolicyLayers,
-  type LlmRouteDecision,
-  type LlmTaskProfile,
-} from './routing.js';
-import { StructuredOutputValidator } from './structured-output.js';
-import { assertNoTextualToolInvocation } from './tool-protocol.js';
-import {
-  CompositeLlmTelemetrySink,
-  InMemoryLlmTelemetrySink,
-  LlmMetricsCollector,
-  type LlmMetricsSnapshot,
-  type LlmTelemetryEvent,
-  type LlmTelemetrySink,
-} from './telemetry.js';
-import {
-  LlmProviderError,
-  type LlmCapabilityName,
-  type LlmChatRequest,
-  type LlmChatResponse,
-  type LlmChatStreamEvent,
-  type LlmEmbeddingRequest,
-  type LlmEmbeddingResponse,
-  type LlmProvider,
-  type LlmRerankRequest,
-  type LlmRerankResponse,
-  type LlmUsage,
-} from './types.js';
-
-export type LlmGatewayContext = {
-  tenantId: string;
-  taskType: string;
-  userId?: string;
-  requestId?: string;
-  traceId?: string;
-};
+import { LlmProviderError } from './types.js';
 
 export type ModelAttemptTimeouts = {
   connectMs: number;
@@ -141,6 +76,14 @@ export type ModelAttemptLifecycleEvent =
       routeId: string;
       blockOrdinal: number;
       block: DecodedModelContentBlock;
+      occurredAt: number;
+    }>
+  | Readonly<{
+      type: 'usage-observed';
+      attemptId: string;
+      routeId: string;
+      purpose: ModelAttemptPurpose;
+      usage: ModelTokenUsage;
       occurredAt: number;
     }>
   | Readonly<{
@@ -312,6 +255,7 @@ export class ModelExecutionGateway {
       for (let retryIndex = 0; retryIndex <= maxRetries; retryIndex += 1) {
         const attemptId = this.createAttemptId();
         const tentativeBlocks: DecodedModelContentBlock[] = [];
+        const lifecycle = { started: false };
         try {
           const attempt = await this.executeOne(
             candidate,
@@ -322,6 +266,7 @@ export class ModelExecutionGateway {
             tentativeBlocks,
             options.observer,
             purpose,
+            lifecycle,
           );
           return Object.freeze({
             attempt,
@@ -331,6 +276,9 @@ export class ModelExecutionGateway {
         } catch (error) {
           terminalError = classifyModelAttemptError(error, options.signal, this.clock.now());
           if (terminalError.code === 'MODEL_OBSERVER_FAILED') {
+            throw withDiscardedModelAttempts(terminalError, discarded);
+          }
+          if (!lifecycle.started) {
             throw withDiscardedModelAttempts(terminalError, discarded);
           }
           const discardedAttempt: DiscardedModelAttempt = {
@@ -411,14 +359,15 @@ export class ModelExecutionGateway {
     tentativeBlocks: DecodedModelContentBlock[],
     observer: ModelAttemptLifecycleObserver | undefined,
     purpose: ModelAttemptPurpose,
+    lifecycle: { started: boolean },
   ): Promise<ValidatedModelAttempt> {
     const controller = new AbortController();
     const abortFromSource = () => controller.abort(sourceSignal?.reason);
     sourceSignal?.addEventListener('abort', abortFromSource, { once: true });
     if (sourceSignal?.aborted) controller.abort(sourceSignal.reason);
-    const canonicalRequest = applySessionGeneration(request, session);
     let encoded: ReturnType<ModelSession['codec']['encode']>;
     try {
+      const canonicalRequest = applySessionGeneration(request, session);
       encoded = session.codec.encode(canonicalRequest, {
         requestId: attemptId,
         target: {
@@ -426,6 +375,9 @@ export class ModelExecutionGateway {
           model: session.route.modelId,
           protocol: session.route.protocol,
         },
+        ...(session.route.encoding === undefined
+          ? {}
+          : { routeEncoding: session.route.encoding }),
         replay: session.replay,
       });
     } catch (error) {
@@ -434,6 +386,30 @@ export class ModelExecutionGateway {
     }
 
     const run = async (): Promise<ValidatedModelAttempt> => {
+      let observedUsage: ModelTokenUsage | undefined;
+      const observeUsage = async (sourceUsage: ModelTokenUsage | undefined): Promise<void> => {
+        if (sourceUsage === undefined) return;
+        const usage = validObservedModelUsage(sourceUsage);
+        if (observedUsage !== undefined) {
+          if (!sameModelTokenUsage(observedUsage, usage)) {
+            throw new ModelProtocolError(
+              'INVALID_WIRE_RESPONSE',
+              'One model attempt emitted conflicting token usage values.',
+            );
+          }
+          return;
+        }
+        observedUsage = usage;
+        await publishModelAttemptLifecycle(observer, {
+          type: 'usage-observed',
+          attemptId,
+          routeId: session.route.routeId,
+          purpose,
+          usage,
+          occurredAt: this.clock.now(),
+        });
+      };
+
       await publishModelAttemptLifecycle(observer, {
         type: 'attempt-started',
         attemptId,
@@ -446,6 +422,7 @@ export class ModelExecutionGateway {
         purpose,
         startedAt: this.clock.now(),
       });
+      lifecycle.started = true;
       if (controller.signal.aborted) {
         throw modelAttemptAbortError(controller.signal.reason, sourceSignal);
       }
@@ -471,6 +448,7 @@ export class ModelExecutionGateway {
       };
       if (response.kind === 'json') {
         const decoded = session.codec.decode(response.response, context);
+        await observeUsage(decoded.usage);
         for (let blockOrdinal = 0; blockOrdinal < decoded.blocks.length; blockOrdinal += 1) {
           const block = decoded.blocks[blockOrdinal];
           if (block === undefined) continue;
@@ -493,7 +471,9 @@ export class ModelExecutionGateway {
       );
       let finished: DecodedModelAttempt | undefined;
       for await (const event of session.codec.decodeStream(guardedEvents, context)) {
-        if (event.type === 'block-complete') {
+        if (event.type === 'usage') {
+          await observeUsage(event.usage);
+        } else if (event.type === 'block-complete') {
           await publishModelAttemptLifecycle(observer, {
             type: 'block-completed',
             attemptId,
@@ -502,9 +482,7 @@ export class ModelExecutionGateway {
             block: cloneDecodedBlock(event.block),
             occurredAt: this.clock.now(),
           });
-        } else if (
-          event.type !== 'usage' && event.type !== 'finish'
-        ) {
+        } else if (event.type !== 'finish') {
           await publishModelAttemptLifecycle(observer, {
             type: 'decoded-delta',
             attemptId,
@@ -515,6 +493,7 @@ export class ModelExecutionGateway {
         }
         trackTentativeBlocks(tentativeBlocks, event);
         if (event.type === 'finish') {
+          await observeUsage(event.attempt.usage);
           if (finished !== undefined) {
             throw new ModelProtocolError(
               'INVALID_WIRE_RESPONSE',
@@ -553,766 +532,6 @@ export class ModelExecutionGateway {
   }
 }
 
-export type LlmGatewayChatRequest = Omit<LlmChatRequest, 'model'> & { model?: string };
-
-export type LlmGatewayChatInput = {
-  request: LlmGatewayChatRequest;
-  context: LlmGatewayContext;
-  task?: Omit<LlmTaskProfile, 'taskType'>;
-  policies?: LlmPolicyLayers;
-  providerId?: string;
-  modelId?: string;
-  budget?: LlmBudgetLimits;
-  round?: RoundContext;
-  cache?: { enabled: boolean; ttlMs?: number; namespace?: string };
-  timeoutMs?: number;
-  maxRetries?: number;
-  maxFallbacks?: number;
-  /** Enables explicitly prepared cross-provider/model fallback candidates. */
-  allowCrossProviderFallbacks?: boolean;
-  maxStructuredCorrections?: number;
-  /** Compatibility escape hatch for runtimes that apply their own tool permission checks. */
-  validateToolCalls?: boolean;
-};
-
-export type LlmGatewayResult = {
-  requestId: string;
-  traceId: string;
-  response: LlmChatResponse;
-  route: LlmRouteDecision;
-  providerId: string;
-  modelId: string;
-  attempts: number;
-  cacheHit: boolean;
-  usage: LlmUsage;
-  cost?: number;
-};
-
-export type LlmGatewayOptions = {
-  registry?: LlmModelRegistry;
-  usageTracker?: UsageTracker;
-  telemetry?: LlmTelemetrySink[];
-  metrics?: LlmMetricsCollector;
-  cache?: LlmResponseCache;
-  budget?: LlmBudgetController;
-  reliability?: LlmReliabilityController;
-  now?: () => Date;
-  createRequestId?: () => string;
-};
-
-type AttemptUsage = { model: RegisteredLlmModel; usage: LlmUsage };
-
-export class LlmGateway {
-  readonly registry: LlmModelRegistry;
-  readonly telemetry: InMemoryLlmTelemetrySink;
-  readonly metrics: LlmMetricsCollector;
-  readonly cache: LlmResponseCache;
-  readonly budget: LlmBudgetController;
-  readonly reliability: LlmReliabilityController;
-
-  private readonly router: LlmTaskRouter;
-  private readonly validator = new StructuredOutputValidator();
-  private readonly telemetrySink: LlmTelemetrySink;
-  private readonly usageTracker: UsageTracker | undefined;
-  private readonly legacyCacheHitClients = new WeakSet<ModelClient>();
-  private readonly now: () => Date;
-  private readonly createRequestId: () => string;
-  private readonly jobs: LlmAsyncJobManager<LlmGatewayChatInput, LlmGatewayResult>;
-
-  constructor(options: LlmGatewayOptions = {}) {
-    this.registry = options.registry ?? new LlmModelRegistry();
-    this.telemetry = new InMemoryLlmTelemetrySink();
-    this.metrics = options.metrics ?? new LlmMetricsCollector();
-    this.telemetrySink = new CompositeLlmTelemetrySink([
-      this.telemetry,
-      this.metrics,
-      ...(options.telemetry ?? []),
-    ]);
-    this.cache = options.cache ?? new LlmResponseCache();
-    this.budget = options.budget ?? new LlmBudgetController();
-    this.reliability = options.reliability ?? new LlmReliabilityController();
-    this.usageTracker = options.usageTracker;
-    this.now = options.now ?? (() => new Date());
-    this.createRequestId = options.createRequestId ?? randomUUID;
-    this.router = new LlmTaskRouter(this.registry, this.now);
-    this.jobs = new LlmAsyncJobManager(async (input, signal) => {
-      const request = { ...input.request, signal };
-      return await this.execute({ ...input, request });
-    }, this.now);
-  }
-
-  registerProvider(
-    provider: LlmProvider,
-    models: Array<Omit<RegisterModelInput, 'providerId'>> = [],
-  ): void {
-    this.registry.registerProvider(provider);
-    for (const model of models) this.registerModel({ ...model, providerId: provider.id });
-  }
-
-  registerModel(input: RegisterModelInput): RegisteredLlmModel {
-    const model = this.registry.registerModel(input);
-    const providerModels = this.registry
-      .listModels()
-      .filter((candidate) => candidate.providerId === model.providerId);
-    const maxConcurrency = minimumDefined(
-      providerModels.map((candidate) => candidate.limits.maxConcurrency),
-    );
-    const requestsPerMinute = minimumDefined(
-      providerModels.map((candidate) => candidate.limits.requestsPerMinute),
-    );
-    const tokensPerMinute = minimumDefined(
-      providerModels.map((candidate) => candidate.limits.tokensPerMinute),
-    );
-    this.reliability.configure(model.providerId, {
-      ...(maxConcurrency === undefined ? {} : { maxConcurrency }),
-      ...(requestsPerMinute === undefined ? {} : { requestsPerMinute }),
-      ...(tokensPerMinute === undefined ? {} : { tokensPerMinute }),
-    });
-    return model;
-  }
-
-  configureReliability(providerId: string, config: Partial<LlmReliabilityConfig>): void {
-    this.reliability.configure(providerId, config);
-  }
-
-  private async executeThroughModelGateway(
-    input: LlmGatewayChatInput,
-    streaming = false,
-  ): Promise<LlmGatewayResult> {
-    const execution = this.prepareExecution(input, streaming);
-    const startedAt = performance.now();
-    const primary = execution.candidates[0] as RegisteredLlmModel;
-    await this.emit(
-      execution.event('request.started', { estimatedTokens: execution.estimatedInputTokens }),
-    );
-    await this.emit(
-      execution.event('route.decided', {
-        providerId: primary.providerId,
-        modelId: primary.id,
-        latencyMs: execution.routeLatencyMs,
-        attributes: { fallbackCount: execution.candidates.length - 1 },
-      }),
-    );
-    const cached = input.cache?.enabled
-      ? this.cache.get(
-          input.context.tenantId,
-          primary.providerId,
-          withSelectedModel(input.request, primary.model),
-          input.cache.namespace,
-        )
-      : undefined;
-    if (cached !== undefined) {
-      await this.emit(execution.event('cache.hit'));
-      return {
-        requestId: execution.requestId,
-        traceId: execution.traceId,
-        response: cached,
-        route: execution.route,
-        providerId: primary.providerId,
-        modelId: primary.id,
-        attempts: 0,
-        cacheHit: true,
-        usage: cached.usage ?? zeroUsage(),
-      };
-    }
-    if (input.cache?.enabled) await this.emit(execution.event('cache.miss'));
-
-    let reservation: LlmBudgetReservation | undefined;
-    try {
-      reservation = this.reserveBudget(input, execution);
-      const bundle = this.legacyModelSessionBundle(execution, input, streaming);
-      const gateway = new ModelExecutionGateway({
-        createAttemptId: this.createRequestId,
-      });
-      let correctionRequest = input.request;
-      let response!: LlmChatResponse;
-      let selected = primary;
-      let selectedSessionClient = bundle.primary.client;
-      let attempts = 0;
-      const attemptUsages: AttemptUsage[] = [];
-      for (let correction = 0; ; correction += 1) {
-        const result = await gateway.executeAttempt(
-          bundle,
-          legacyRequestToCanonical(correctionRequest, primary.model),
-          {
-            maxRetries: execution.maxRetries,
-            ...(input.request.signal === undefined ? {} : { signal: input.request.signal }),
-            ...(input.timeoutMs === undefined
-              ? {}
-              : {
-                  timeouts: {
-                    connectMs: input.timeoutMs,
-                    firstEventMs: input.timeoutMs,
-                    idleMs: input.timeoutMs,
-                    totalMs: input.timeoutMs,
-                  },
-                }),
-          },
-        );
-        response = legacyAttemptToResponse(
-          result.attempt.blocks,
-          result.attempt.usage,
-          result.attempt.providerResponseId,
-        );
-        if (result.attempt.finishReason !== undefined) {
-          response.finishReason = result.attempt.finishReason;
-        }
-        selected = execution.candidates.find(
-          (candidate) => candidate.id === result.session.route.routeId,
-        ) ?? primary;
-        selectedSessionClient = result.session.client;
-        for (const discarded of result.discardedAttempts) {
-          const candidate = execution.candidates.find((item) => item.id === discarded.routeId) ?? primary;
-          attemptUsages.push({
-            model: candidate,
-            usage: estimateFailedAttemptUsage(correctionRequest, candidate.model),
-          });
-          attempts += 1;
-          await this.emit(execution.event('provider.attempt', {
-            providerId: candidate.providerId,
-            modelId: candidate.id,
-            attempt: attempts,
-          }));
-        }
-        const selectedUsage = response.usage ?? estimateResponseUsage(
-          withSelectedModel(correctionRequest, selected.model),
-          response,
-        );
-        attemptUsages.push({ model: selected, usage: selectedUsage });
-        attempts += 1;
-        await this.emit(execution.event('provider.attempt', {
-          providerId: selected.providerId,
-          modelId: selected.id,
-          attempt: attempts,
-        }));
-        try {
-          this.validateResponse(
-            response,
-            withSelectedModel(correctionRequest, result.session.route.modelId),
-            input.validateToolCalls ?? true,
-          );
-          break;
-        } catch (error) {
-          if (
-            !(error instanceof LlmProviderError) ||
-            error.code !== 'LLM_STRUCTURED_OUTPUT_INVALID' ||
-            correction >= execution.maxCorrections
-          ) {
-            throw error;
-          }
-          await this.emit(execution.event('provider.retry', {
-            providerId: selected.providerId,
-            modelId: selected.id,
-            errorCode: error.code,
-            attributes: { correction: true, correctionNumber: correction + 1 },
-          }));
-          correctionRequest = {
-            ...correctionRequest,
-            messages: [
-              ...correctionRequest.messages,
-              { role: 'assistant', content: response.text },
-              { role: 'user', content: this.validator.correctionInstruction(error) },
-            ],
-          };
-        }
-      }
-      const usage = sumUsage(attemptUsages.map((attempt) => attempt.usage));
-      response.usage = usage;
-      if (selected.id !== primary.id) {
-        await this.emit(execution.event('provider.fallback', {
-          providerId: selected.providerId,
-          modelId: selected.id,
-        }));
-      }
-      const cost = sumAttemptCost(attemptUsages);
-      if (reservation) this.budget.commitActual(reservation.id, usage.totalTokens, cost);
-      await this.recordAttemptUsage(input.round, attemptUsages);
-      const cacheHit = this.legacyCacheHitClients.has(selectedSessionClient);
-      const reportedAttempts = cacheHit ? Math.max(0, attempts - 1) : attempts;
-      if (input.cache?.enabled && !cacheHit) {
-        this.cache.set(
-          input.context.tenantId,
-          selected.providerId,
-          withSelectedModel(input.request, selected.model),
-          response,
-          {
-            ...(input.cache.namespace === undefined ? {} : { namespace: input.cache.namespace }),
-            ...(input.cache.ttlMs === undefined ? {} : { ttlMs: input.cache.ttlMs }),
-          },
-        );
-      }
-      await this.emit(execution.event('request.completed', {
-        providerId: selected.providerId,
-        modelId: selected.id,
-        latencyMs: performance.now() - startedAt,
-        promptTokens: usage.promptTokens,
-        completionTokens: usage.completionTokens,
-        attributes: { attempts: reportedAttempts, cacheHit },
-      }));
-      return {
-        requestId: execution.requestId,
-        traceId: execution.traceId,
-        response,
-        route: execution.route,
-        providerId: selected.providerId,
-        modelId: selected.id,
-        attempts: reportedAttempts,
-        cacheHit,
-        usage,
-      };
-    } catch (error) {
-      const discarded = error instanceof ModelGatewayError
-        ? error.options.discardedAttempts ?? []
-        : [];
-      const failedUsages: AttemptUsage[] = discarded.map((attempt) => {
-        const candidate = execution.candidates.find((item) => item.id === attempt.routeId) ?? primary;
-        return {
-          model: candidate,
-          usage: estimateFailedAttemptUsage(input.request, candidate.model),
-        };
-      });
-      if (reservation) {
-        if (failedUsages.length > 0) {
-          const usage = sumUsage(failedUsages.map((attempt) => attempt.usage));
-          this.budget.commitActual(reservation.id, usage.totalTokens, sumAttemptCost(failedUsages));
-        } else {
-          this.budget.release(reservation.id);
-        }
-      }
-      if (failedUsages.length > 0) await this.recordAttemptUsage(input.round, failedUsages);
-      const normalized = modelGatewayToLegacyError(error);
-      await this.emit(execution.event(
-        normalized.code === 'LLM_ABORTED' ? 'request.cancelled' : 'request.failed',
-        {
-          latencyMs: performance.now() - startedAt,
-          errorCode: normalized.code,
-        },
-      ));
-      throw normalized;
-    }
-  }
-
-  private legacyModelSessionBundle(
-    execution: ReturnType<LlmGateway['prepareExecution']>,
-    input: LlmGatewayChatInput,
-    streaming: boolean,
-  ): ModelSessionBundle {
-    const candidates = execution.candidates;
-    const primary = candidates[0] as RegisteredLlmModel;
-    const fallbackIds = candidates.slice(1).map((candidate) => candidate.id);
-    const makeSession = (candidate: RegisteredLlmModel, fallback: boolean): ModelSession => {
-      const provider = this.requireProvider(candidate.providerId);
-      const baseClient = new LegacyProviderModelClient(provider, streaming);
-      const client: ModelClient = {
-        execute: async (request) => {
-          if (fallback && input.cache?.enabled) {
-            const cached = this.cache.get(
-              input.context.tenantId,
-              candidate.providerId,
-              withSelectedModel(input.request, candidate.model),
-              input.cache.namespace,
-            );
-            if (cached !== undefined) {
-              this.legacyCacheHitClients.add(client);
-              return { kind: 'json' as const, response: cached };
-            }
-          }
-          try {
-            const response = await this.reliability.execute(
-              candidate.providerId,
-              () => baseClient.execute(request),
-              request.signal,
-              execution.estimatedInputTokens + (candidate.limits.maxOutputTokens ?? 4_096),
-            );
-            this.reliability.recordSuccess(candidate.providerId);
-            return response;
-          } catch (error) {
-            if (shouldAffectModelClientCircuit(error)) {
-              this.reliability.recordFailure(candidate.providerId);
-            }
-            throw error;
-          }
-        },
-      };
-      return createModelSession({
-        route: {
-          routeId: candidate.id,
-          connectionId: `legacy:${candidate.providerId}`,
-          providerId: candidate.providerId,
-          modelId: candidate.model,
-          protocol: legacyProviderCodec.protocol,
-          codecRevision: legacyProviderCodec.revision,
-          capabilities: { ...candidate.capabilities },
-          generationParameters: { ...candidate.generationParameters },
-          contextTokens: candidate.limits.contextTokens,
-          maxInputTokens: candidate.limits.maxInputTokens,
-          maxOutputTokens: candidate.limits.maxOutputTokens,
-          metadata: {
-            source: 'legacy-registry',
-            revision: candidate.id,
-            digest: 'computed-by-createModelSession',
-          },
-          allowedFallbackRouteIds: fallback ? [] : fallbackIds,
-          compatibility: {
-            mode: 'compatible-protocol',
-            family: legacyCompatibilityFamily(input),
-          },
-        },
-        generation: generationConfigFromRequest(
-          withSelectedModel(input.request, candidate.model),
-        ),
-        codec: legacyProviderCodec,
-        client,
-        replay: { mode: 'new' },
-      });
-    };
-    return createModelSessionBundle({
-      primary: makeSession(primary, false),
-      fallbacks: candidates.slice(1).map((candidate) => makeSession(candidate, true)),
-      policy: {
-        allowCrossConnection: input.allowCrossProviderFallbacks ?? false,
-        allowCrossModel: input.allowCrossProviderFallbacks ?? false,
-      },
-    });
-  }
-
-  async chat(input: LlmGatewayChatInput): Promise<LlmChatResponse> {
-    return (await this.execute(input)).response;
-  }
-
-  async execute(input: LlmGatewayChatInput): Promise<LlmGatewayResult> {
-    return await this.executeThroughModelGateway(input);
-  }
-
-  async *stream(input: LlmGatewayChatInput): AsyncIterable<LlmChatStreamEvent> {
-    const result = await this.executeThroughModelGateway(input, true);
-    if (result.response.text) yield { type: 'text-delta', text: result.response.text };
-    for (const toolCall of result.response.toolCalls) yield { type: 'tool-call', toolCall };
-    if (result.response.usage) yield { type: 'usage', usage: result.response.usage };
-    yield {
-      type: 'finish',
-      response: result.response,
-      ...(result.response.finishReason === undefined
-        ? {}
-        : { reason: result.response.finishReason }),
-    };
-  }
-
-  submitBatch(
-    inputs: LlmGatewayChatInput[],
-    options: { concurrency?: number; ownerId?: string } = {},
-  ): LlmAsyncJob<LlmGatewayResult> {
-    if (inputs.length === 0) throw new Error('An async LLM job requires at least one item.');
-    const tenantId = inputs[0]?.context?.tenantId;
-    if (typeof tenantId !== 'string' || !tenantId.trim()) {
-      throw new Error('tenantId is required for async LLM job isolation.');
-    }
-    if (inputs.some((input) => input.context?.tenantId !== tenantId)) {
-      throw new Error('All items in an async LLM batch must belong to the same tenant.');
-    }
-    return this.jobs.submit(inputs, {
-      ownerId: asyncJobOwnerKey(tenantId, options.ownerId),
-      ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
-    });
-  }
-
-  getJob(
-    id: string,
-    tenantId: string,
-    ownerId?: string,
-  ): LlmAsyncJob<LlmGatewayResult> | undefined {
-    return this.jobs.get(id, asyncJobOwnerKey(tenantId, ownerId));
-  }
-
-  cancelJob(
-    id: string,
-    tenantId: string,
-    ownerId?: string,
-  ): LlmAsyncJob<LlmGatewayResult> | undefined {
-    return this.jobs.cancel(id, asyncJobOwnerKey(tenantId, ownerId));
-  }
-
-  listJobs(tenantId: string, ownerId?: string): Array<LlmAsyncJob<LlmGatewayResult>> {
-    return this.jobs.list(asyncJobOwnerKey(tenantId, ownerId));
-  }
-
-  metricsSnapshot(): LlmMetricsSnapshot {
-    return this.metrics.snapshot();
-  }
-
-  async embed(input: {
-    request: LlmEmbeddingRequest;
-    context: LlmGatewayContext;
-    providerId?: string;
-    modelId?: string;
-    task?: Omit<LlmTaskProfile, 'taskType'>;
-    policies?: LlmPolicyLayers;
-  }): Promise<LlmEmbeddingResponse> {
-    const model = this.routeCapability(input, 'embeddings', input.request.model);
-    const provider = this.requireProvider(model.providerId);
-    if (!provider.embed)
-      throw new LlmProviderError(
-        'LLM_CAPABILITY_UNSUPPORTED',
-        `Provider does not implement embeddings: ${model.providerId}`,
-        false,
-      );
-    const response = await this.reliability.execute(
-      model.providerId,
-      async () =>
-        provider.embed?.({ ...input.request, model: model.model }) as Promise<LlmEmbeddingResponse>,
-      input.request.signal,
-      input.request.input.reduce(
-        (total, value) => total + Math.max(1, Math.ceil(value.length / 3)),
-        0,
-      ),
-    );
-    this.reliability.recordSuccess(model.providerId);
-    return response;
-  }
-
-  async rerank(input: {
-    request: LlmRerankRequest;
-    context: LlmGatewayContext;
-    providerId?: string;
-    modelId?: string;
-    task?: Omit<LlmTaskProfile, 'taskType'>;
-    policies?: LlmPolicyLayers;
-  }): Promise<LlmRerankResponse> {
-    const model = this.routeCapability(input, 'rerank', input.request.model);
-    const provider = this.requireProvider(model.providerId);
-    if (!provider.rerank)
-      throw new LlmProviderError(
-        'LLM_CAPABILITY_UNSUPPORTED',
-        `Provider does not implement rerank: ${model.providerId}`,
-        false,
-      );
-    const response = await this.reliability.execute(
-      model.providerId,
-      async () =>
-        provider.rerank?.({ ...input.request, model: model.model }) as Promise<LlmRerankResponse>,
-      input.request.signal,
-      Math.max(
-        1,
-        Math.ceil((input.request.query.length + input.request.documents.join('').length) / 3),
-      ),
-    );
-    this.reliability.recordSuccess(model.providerId);
-    return response;
-  }
-
-  private prepareExecution(input: LlmGatewayChatInput, streaming: boolean) {
-    validateGatewayInput(input);
-    const exactModel =
-      input.providerId && input.request.model
-        ? this.ensureModel(input.providerId, input.request.model)
-        : input.modelId
-          ? this.registry.model(input.modelId)
-          : undefined;
-    const requiredModelIds = input.modelId
-      ? [input.modelId]
-      : input.providerId && input.request.model
-        ? [`${input.providerId}:${input.request.model}`]
-        : input.task?.requirements?.requiredModelIds;
-    const capabilities = new Set<LlmCapabilityName>(input.task?.requirements?.capabilities ?? []);
-    capabilities.add('chat');
-    if (streaming) capabilities.add('streaming');
-    if (input.request.tools?.length) capabilities.add('toolCalling');
-    if (input.request.responseFormat && input.request.responseFormat.type !== 'text')
-      capabilities.add('structuredOutput');
-    const estimatedInputTokens = estimateMessagesTokens(input.request.messages);
-    const requestedOutputTokens =
-      input.request.maxTokens ??
-      (exactModel === undefined
-        ? 4_096
-        : (resolveLlmOutputReservation(
-            exactModel.limits.contextTokens,
-            exactModel.limits.maxOutputTokens,
-          ) ?? 4_096));
-    const task: LlmTaskProfile = {
-      taskType: input.context.taskType,
-      ...(input.task?.preferences === undefined ? {} : { preferences: input.task.preferences }),
-      requirements: {
-        ...input.task?.requirements,
-        capabilities: [...capabilities],
-        minContextTokens: Math.max(
-          input.task?.requirements?.minContextTokens ?? 0,
-          estimatedInputTokens + requestedOutputTokens,
-        ),
-        minOutputTokens: Math.max(
-          input.task?.requirements?.minOutputTokens ?? 0,
-          requestedOutputTokens,
-        ),
-        ...(requiredModelIds === undefined ? {} : { requiredModelIds }),
-      },
-    };
-    const routeStartedAt = performance.now();
-    const route = this.router.route({
-      task,
-      ...(input.policies === undefined ? {} : { policies: input.policies }),
-      estimatedInputTokens,
-      requestedOutputTokens,
-    });
-    const maxFallbacks = boundedInteger(input.maxFallbacks ?? 2, 0, 10, 'maxFallbacks');
-    const candidates = input.allowCrossProviderFallbacks === true
-      ? [
-          route.selected.model,
-          ...route.fallbacks.slice(0, maxFallbacks).map((item) => item.model),
-        ]
-      : [route.selected.model];
-    const requestId = input.context.requestId ?? this.createRequestId();
-    const traceId = input.context.traceId ?? requestId;
-    const baseEvent = {
-      timestamp: this.now().toISOString(),
-      requestId,
-      traceId,
-      tenantHash: hashTenant(input.context.tenantId),
-      taskType: input.context.taskType,
-    };
-    return {
-      requestId,
-      traceId,
-      route,
-      routeLatencyMs: performance.now() - routeStartedAt,
-      candidates,
-      estimatedInputTokens,
-      maxRetries: boundedInteger(input.maxRetries ?? 1, 0, 3, 'maxRetries'),
-      maxCorrections: boundedInteger(
-        input.maxStructuredCorrections ?? 1,
-        0,
-        2,
-        'maxStructuredCorrections',
-      ),
-      event: (
-        type: LlmTelemetryEvent['type'],
-        fields: Partial<LlmTelemetryEvent> = {},
-      ): LlmTelemetryEvent => ({
-        ...baseEvent,
-        ...fields,
-        type,
-        timestamp: this.now().toISOString(),
-      }),
-    };
-  }
-
-  private reserveBudget(
-    input: LlmGatewayChatInput,
-    execution: ReturnType<LlmGateway['prepareExecution']>,
-  ): LlmBudgetReservation | undefined {
-    if (!input.budget) return undefined;
-    const callsPerCandidate = (execution.maxRetries + 1) * (execution.maxCorrections + 1);
-    const worstCallCount = callsPerCandidate * execution.candidates.length;
-    const maxOutput = (input.request.maxTokens ?? 4_096) * worstCallCount;
-    const maxInput = execution.estimatedInputTokens * worstCallCount;
-    const reservationModel = [...execution.candidates].sort((left, right) => {
-      const leftCost = estimateModelCost(left, maxInput, maxOutput) ?? Number.POSITIVE_INFINITY;
-      const rightCost = estimateModelCost(right, maxInput, maxOutput) ?? Number.POSITIVE_INFINITY;
-      return rightCost - leftCost;
-    })[0] as RegisteredLlmModel;
-    return this.budget.reserve({
-      scope: budgetScope(input.context),
-      limits: input.budget,
-      model: reservationModel,
-      estimatedInputTokens: maxInput,
-      maxOutputTokens: maxOutput,
-    });
-  }
-
-  private validateResponse(
-    response: LlmChatResponse,
-    request: LlmChatRequest,
-    validateToolCalls: boolean,
-  ): void {
-    assertNoTextualToolInvocation({
-      text: response.text,
-      toolCalls: response.toolCalls,
-      toolsRequested: Boolean(request.tools?.length),
-      toolNames: request.tools?.map((tool) => tool.name) ?? [],
-      protocol: 'the configured Provider protocol',
-    });
-    if (validateToolCalls && request.tools)
-      this.validator.validateToolCalls(response.toolCalls, request.tools);
-    if (request.responseFormat?.type === 'json_schema') {
-      this.validator.parseAndValidate(response.text, request.responseFormat.schema);
-    } else if (request.responseFormat?.type === 'json_object') {
-      this.validator.parseAndValidate(response.text, { type: 'object' });
-    }
-  }
-
-  private ensureModel(providerId: string, model: string): RegisteredLlmModel {
-    return (
-      this.registry.find(providerId, model) ?? this.registry.registerModel({ providerId, model })
-    );
-  }
-
-  private requireProvider(providerId: string): LlmProvider {
-    const provider = this.registry.provider(providerId);
-    if (!provider)
-      throw new LlmProviderError(
-        'LLM_NO_ROUTE',
-        `LLM provider is not registered: ${providerId}`,
-        false,
-      );
-    return provider;
-  }
-
-  private async recordAttemptUsage(
-    round: RoundContext | undefined,
-    attempts: AttemptUsage[],
-  ): Promise<void> {
-    if (!this.usageTracker) return;
-    if (round) {
-      await this.usageTracker.recordLlmCall(
-        round,
-        sumUsage(attempts.map((attempt) => attempt.usage)),
-      );
-      return;
-    }
-    for (const attempt of attempts) {
-      await this.usageTracker.recordTokens(
-        attempt.model.mode === 'managed' ? 'managed' : 'byok',
-        attempt.usage,
-      );
-    }
-  }
-
-  private async emit(event: LlmTelemetryEvent): Promise<void> {
-    await this.telemetrySink.emit(event);
-  }
-
-  private routeCapability(
-    input: {
-      context: LlmGatewayContext;
-      providerId?: string;
-      modelId?: string;
-      task?: Omit<LlmTaskProfile, 'taskType'>;
-      policies?: LlmPolicyLayers;
-    },
-    capability: LlmCapabilityName,
-    modelName: string,
-  ): RegisteredLlmModel {
-    if (input.providerId) this.ensureModel(input.providerId, modelName);
-    const requiredModelIds = input.modelId
-      ? [input.modelId]
-      : input.providerId
-        ? [`${input.providerId}:${modelName}`]
-        : input.task?.requirements?.requiredModelIds;
-    return this.router.route({
-      task: {
-        taskType: input.context.taskType,
-        ...(input.task?.preferences === undefined ? {} : { preferences: input.task.preferences }),
-        requirements: {
-          ...input.task?.requirements,
-          capabilities: [
-            ...new Set([...(input.task?.requirements?.capabilities ?? []), capability]),
-          ],
-          ...(requiredModelIds === undefined ? {} : { requiredModelIds }),
-        },
-      },
-      ...(input.policies === undefined ? {} : { policies: input.policies }),
-    }).selected.model;
-  }
-}
-
 function applySessionGeneration(
   request: CanonicalModelRequest,
   session: ModelSession,
@@ -1328,11 +547,15 @@ function applySessionGeneration(
     ...(session.generation.maxOutputTokens === undefined
       ? {}
       : { maxOutputTokens: session.generation.maxOutputTokens }),
+    ...(session.generation.seed === undefined ? {} : { seed: session.generation.seed }),
     ...(session.generation.stop === undefined ? {} : { stop: [...session.generation.stop] }),
+    ...(session.generation.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: session.generation.reasoningEffort }),
   };
 }
 
-export function modelGatewayToLegacyError(error: unknown): LlmProviderError {
+export function modelGatewayToProviderError(error: unknown): LlmProviderError {
   const providerError = findProviderError(error);
   if (providerError !== undefined) {
     const parameter = unsupportedGenerationParameter(providerError.message);
@@ -1357,6 +580,10 @@ export function modelGatewayToLegacyError(error: unknown): LlmProviderError {
       ? 'LLM_ABORTED'
       : error.code === 'MODEL_TIMEOUT'
         ? 'LLM_TIMEOUT'
+        : error.statusCode === 401 || error.statusCode === 403
+          ? 'LLM_AUTH_FAILED'
+          : error.statusCode === 429
+            ? 'LLM_RATE_LIMITED'
         : error.code === 'MODEL_PROTOCOL_FAILED'
           ? 'LLM_BAD_RESPONSE'
           : 'LLM_PROVIDER_ERROR';
@@ -1407,6 +634,43 @@ function withDiscardedModelAttempts(
     ...error.options,
     discardedAttempts: Object.freeze(attempts.map(freezeDiscardedAttempt)),
   });
+}
+
+function validObservedModelUsage(usage: ModelTokenUsage): ModelTokenUsage {
+  const inputTokens = validObservedTokenCount(usage.inputTokens, 'inputTokens');
+  const outputTokens = validObservedTokenCount(usage.outputTokens, 'outputTokens');
+  const totalTokens = validObservedTokenCount(usage.totalTokens, 'totalTokens');
+  if (usage.cachedInputTokens === undefined) {
+    return Object.freeze({ inputTokens, outputTokens, totalTokens });
+  }
+  const cachedInputTokens = validObservedTokenCount(
+    usage.cachedInputTokens,
+    'cachedInputTokens',
+  );
+  if (cachedInputTokens > inputTokens) {
+    throw new ModelProtocolError(
+      'INVALID_WIRE_RESPONSE',
+      'Model token usage cachedInputTokens cannot exceed inputTokens.',
+    );
+  }
+  return Object.freeze({ inputTokens, outputTokens, totalTokens, cachedInputTokens });
+}
+
+function validObservedTokenCount(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ModelProtocolError(
+      'INVALID_WIRE_RESPONSE',
+      `Model token usage ${name} must be a non-negative safe integer.`,
+    );
+  }
+  return value;
+}
+
+function sameModelTokenUsage(left: ModelTokenUsage, right: ModelTokenUsage): boolean {
+  return left.inputTokens === right.inputTokens &&
+    left.outputTokens === right.outputTokens &&
+    left.totalTokens === right.totalTokens &&
+    left.cachedInputTokens === right.cachedInputTokens;
 }
 
 function validateDecodedModelAttempt(attempt: DecodedModelAttempt): ValidatedModelAttempt {
@@ -1737,93 +1001,6 @@ async function modelAttemptDelay(milliseconds: number, signal?: AbortSignal): Pr
   });
 }
 
-function validateGatewayInput(input: LlmGatewayChatInput): void {
-  if (!input.context.tenantId.trim())
-    throw new LlmProviderError('LLM_POLICY_VIOLATION', 'tenantId is required.', false);
-  if (!input.context.taskType.trim())
-    throw new LlmProviderError('LLM_POLICY_VIOLATION', 'taskType is required.', false);
-  if (input.request.messages.length === 0)
-    throw new LlmProviderError('LLM_BAD_RESPONSE', 'At least one LLM message is required.', false);
-  if (
-    (input.providerId && !input.request.model) ||
-    (!input.providerId && input.request.model && !input.modelId)
-  ) {
-    throw new LlmProviderError(
-      'LLM_POLICY_VIOLATION',
-      'providerId and request.model must be supplied together for a fixed route.',
-      false,
-    );
-  }
-}
-
-function withSelectedModel(request: LlmGatewayChatRequest, model: string): LlmChatRequest {
-  return { ...request, model };
-}
-
-function budgetScope(context: LlmGatewayContext): LlmBudgetScope {
-  return {
-    tenantId: context.tenantId,
-    taskType: context.taskType,
-    ...(context.userId === undefined ? {} : { userId: context.userId }),
-  };
-}
-
-function estimateResponseUsage(request: LlmChatRequest, response: LlmChatResponse): LlmUsage {
-  const promptTokens = estimateMessagesTokens(request.messages);
-  const completionTokens = Math.max(
-    1,
-    Math.ceil((response.text.length + JSON.stringify(response.toolCalls).length) / 3),
-  );
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens: promptTokens + completionTokens,
-    estimated: true,
-  };
-}
-
-function estimateFailedAttemptUsage(request: LlmGatewayChatRequest, model: string): LlmUsage {
-  const normalized = withSelectedModel(request, model);
-  const promptTokens = estimateMessagesTokens(normalized.messages);
-  const completionTokens = Math.max(1, Math.min(normalized.maxTokens ?? 4_096, 32));
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens: promptTokens + completionTokens,
-    estimated: true,
-  };
-}
-
-function sumUsage(usages: LlmUsage[]): LlmUsage {
-  return usages.reduce<LlmUsage>(
-    (total, usage) => ({
-      promptTokens: total.promptTokens + usage.promptTokens,
-      completionTokens: total.completionTokens + usage.completionTokens,
-      totalTokens: total.totalTokens + usage.totalTokens,
-      cachedPromptTokens: (total.cachedPromptTokens ?? 0) + (usage.cachedPromptTokens ?? 0),
-      ...((total.estimated ?? false) || (usage.estimated ?? false) ? { estimated: true } : {}),
-    }),
-    zeroUsage(),
-  );
-}
-
-function zeroUsage(): LlmUsage {
-  return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-}
-
-function sumAttemptCost(attempts: AttemptUsage[]): number {
-  return attempts.reduce(
-    (total, attempt) =>
-      total +
-      (estimateModelCost(
-        attempt.model,
-        attempt.usage.promptTokens,
-        attempt.usage.completionTokens,
-      ) ?? 0),
-    0,
-  );
-}
-
 function normalizeProviderError(error: unknown): LlmProviderError {
   if (error instanceof LlmProviderError) return error;
   return new LlmProviderError(
@@ -1844,16 +1021,6 @@ function markStreamResponseStarted(error: unknown): LlmProviderError {
   );
 }
 
-function shouldAffectCircuit(error: unknown): boolean {
-  return error instanceof LlmProviderError && error.retryable && error.code !== 'LLM_RATE_LIMITED';
-}
-
-function shouldAffectModelClientCircuit(error: unknown): boolean {
-  const providerError = findProviderError(error);
-  if (providerError !== undefined) return shouldAffectCircuit(providerError);
-  return error instanceof ModelClientError && error.retryable && error.statusCode !== 429;
-}
-
 function findProviderError(error: unknown): LlmProviderError | undefined {
   let current: unknown = error;
   const visited = new Set<unknown>();
@@ -1863,41 +1030,4 @@ function findProviderError(error: unknown): LlmProviderError | undefined {
     current = current.cause;
   }
   return undefined;
-}
-
-function hashTenant(tenantId: string): string {
-  return createHash('sha256').update(tenantId).digest('hex').slice(0, 24);
-}
-
-function legacyCompatibilityFamily(input: LlmGatewayChatInput): string {
-  const contract = JSON.stringify({
-    tools: (input.request.tools ?? []).map((tool) => ({
-      name: tool.name,
-      inputSchema: tool.inputSchema,
-    })),
-    responseFormat: input.request.responseFormat ?? { type: 'text' },
-  });
-  return `legacy-normalized:v1:${createHash('sha256').update(contract).digest('hex')}`;
-}
-
-function asyncJobOwnerKey(tenantId: string, ownerId?: string): string {
-  if (typeof tenantId !== 'string' || !tenantId.trim()) {
-    throw new Error('tenantId is required for async LLM job isolation.');
-  }
-  const scopeId = ownerId ?? tenantId;
-  if (typeof scopeId !== 'string' || !scopeId.trim()) {
-    throw new Error('ownerId is required for async LLM job isolation.');
-  }
-  return JSON.stringify([tenantId, scopeId]);
-}
-
-function boundedInteger(value: number, min: number, max: number, name: string): number {
-  if (!Number.isInteger(value) || value < min || value > max)
-    throw new Error(`${name} must be between ${min} and ${max}.`);
-  return value;
-}
-
-function minimumDefined(values: Array<number | undefined>): number | undefined {
-  const defined = values.filter((value): value is number => value !== undefined);
-  return defined.length === 0 ? undefined : Math.min(...defined);
 }

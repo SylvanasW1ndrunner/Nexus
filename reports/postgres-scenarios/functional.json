@@ -1,9 +1,8 @@
 {
-  "generatedAt": "2026-08-06T12:27:52.825Z",
-  "runId": "2026-08-06T12-27-32-486Z-bacc25fe-e28c-4345-a78d-e124f162d043",
+  "generatedAt": "2026-09-03T23:25:29.513Z",
+  "runId": "2026-09-03T23-24-14-847Z-042060d4-a31f-49e9-ab22-da59c4d7da7f",
   "database": "PostgreSQL",
   "deterministicModel": true,
-  "expectedRunCount": 9,
   "actualRunCount": 9,
   "passed": true,
   "runs": [
@@ -11,918 +10,114 @@
       "scenario": "ecommerce",
       "step": "finance-query",
       "passed": true,
-      "sessionId": "050cad39-ac0a-44af-9990-ec7b2028ac85",
-      "status": "done",
-      "iterations": 4,
-      "tools": [
-        {
-          "name": "knowledge_search",
-          "status": "success",
-          "durationMs": 33,
-          "argumentPreview": "{\"query\":\"commerce orders customers payments refunds 电商运营 渠道目标 净收入\",\"limit\":30,\"expandHops\":2}",
-          "resultPreview": "{\"items\":[{\"document\":{\"kind\":\"column\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"column\":\"目标净收入\",\"title\":\"电商运营.渠道目标.目标净收入\",\"text\":\"事实: dataType=numeric(14,2); nullable=false\"}},{\"document\":{\"kind\":\"constraint\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"title\":\"电商运营.渠道目标.渠道目标_目标净收入_check\",\"text\":\"事实: definition=CHECK (\\\"目标净收入\\\" >= 0::numeric)\"}},{\"document\":{\"kind\":\"table\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"title\":\"电商运营.渠道目标\",\"text\":\"事实: comment=中文业务对象；用于比较渠道实际净收入与月度目标\"}},{\"document\":{\"kind\":\"column\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"column\":\"渠道\",\"title\":\"电商运营.渠道目标.渠道\",\"text\":\"事实: dataType=text; nullable=false\"}},{\"document\":{\"kind\":\"column\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"column\":\"月份\",\"title\":\"电商运营.渠道目标.月份\",\"text\":\"事实: dataType=date; nullable=false\"}},{\"document\":{\"kind\":\"constraint\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"title\":\"电商运营.渠道目标.渠道目标_pkey\",\"text\":\"事实: definition=PRIMARY KEY (\\\"月份\\\", \\\"渠道\\\")\"}},{\"document\":{\"kind\":\"grant\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"title\":\"电商运营.渠道目标.TRUNCATE to postgres\",\"text\":\"事实: grantable=true, grantee=postgres, grantor=postgres, privilege=TRUNCATE\"}},{\"document\":{\"kind\":\"grant\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"title\":\"电商运营.渠道目标.REFERENCES to postgres\",\"text\":\"事实: grantable=true, grantee=postgres, grantor=postgres, privilege=REFERENCES\"}},{\"document\":{\"kind\":\"grant\",\"schema\":\"电商运营\",\"table\":\"渠道目标\",\"title\":\"电商运营.渠道目标.DELETE to postgres\",\"text\":\"事实: grantable=true, grantee=postgres, grantor=postgres, privilege=DELETE\"}},{\"document\":{\"kind\":\"grant\",\"schema\":\"电商运营...[truncated]"
-        },
-        {
-          "name": "sql_explain",
-          "status": "success",
-          "durationMs": 48,
-          "argumentPreview": "{\"sql\":\"\\n  WITH settled_payments AS (\\n    SELECT\\n      order_id,\\n      sum(paid_amount)::numeric(14, 2) AS paid_amount\\n    FROM commerce.payments\\n    WHERE status = 'settled'\\n    GROUP BY order_id\\n  ),\\n  successful_refunds AS (\\n    SELECT\\n      p.order_id,\\n      sum(r.refund_amount)::numeric(14, 2) AS refund_amount\\n    FROM commerce.refunds r\\n    JOIN commerce.payments p ON p.payment_id = r.payment_id\\n    WHERE r.status = 'succeeded'\\n    GROUP BY p.order_id\\n  ),\\n  order_finance AS (\\n    SELECT\\n      o.order_id,\\n      o.order_no,\\n      date_trunc('month', o.created_at AT TIME ZONE 'Asia/Shanghai')::date\\n        AS month,\\n      o.channel,\\n      c.customer_no,\\n      sp.paid_amount,\\n      coalesce(sr.refund_amount, 0)::numeric(14, 2) AS refund_amount,\\n      (sp.paid_amount - coalesce(sr.refund_amount, 0))::numeric(14, 2)\\n        AS net_revenue\\n    FROM commerce.orders o\\n    JOIN commerce.customers c ON c.customer_id = o.customer_id\\n    JOIN settled_payments sp ON sp.order_id = o.order_id\\n    LEFT JOIN successful_refunds sr ON sr.order_id = o.order_id\\n  ),\\n  ranked AS (\\n    SELECT\\n      order_finance.*,\\n      row_number() OVER (\\n        PARTITION BY month, channel\\n        ORDER BY net_revenue DESC, order_id\\n      ) AS revenue_rank\\n    FROM order_finance\\n  )\\n  SELECT\\n    to_char(r.month, 'YYYY-MM') AS month,\\n    r.channel,\\n    count(DISTINCT r.customer_no)::bigint AS customer_count,\\n    sum(r.paid_amount)::numeric(14, 2) AS settled_amount,\\n    sum(r.refund_amount)::numeric(14, 2) AS refunded_amount,\\n    sum(r.net_revenue)::numeric(14, 2) AS net_revenue,\\n    t.\\\"目标净收入\\\" AS target_net_revenue,\\n    (sum(r.net_revenue) - t.\\\"目标净收入\\\")::numeric(14, 2)\\n      AS target_variance,\\n    max(r.order_no) FILTER (WHERE r.revenue_rank = 1) AS top_order_no\\n  FROM ranked r\\n  JOIN \\\"电商运营\\\".\\\"渠道目标\\\" t\\n    ON t.\\\"月份\\\" = r.month\\n   AND t.\\\"渠道\\\" = r.channel\\n  GROUP BY r.month, r.channel, t.\\\"目标净收入\\\"\\n  ORDER BY r.month, r.channel\\n\"}",
-          "resultPreview": "{\"plan\":{\"QUERY PLAN\":[{\"Plan\":{\"Node Type\":\"Aggregate\",\"Strategy\":\"Sorted\",\"Partial Mode\":\"Simple\",\"Parallel Aware\":false,\"Async Capable\":false,\"Startup Cost\":3771.9,\"Total Cost\":4981.04,\"Plan Rows\":495,\"Plan Width\":170,\"Group Key\":[\"((date_trunc('month'::text, (o.created_at AT TIME ZONE 'Asia/Shanghai'::text)))::date)\",\"o.channel\",\"t.\\\"目标净收入\\\"\"],\"Plans\":[{\"Node Type\":\"Incremental Sort\",\"Parent Relationship\":\"Outer\",\"Parallel Aware\":false,\"Async Capable\":false,\"Startup Cost\":3771.9,\"Total Cost\":4952.58,\"Plan Rows\":495,\"Plan Width\":134,\"Sort Key\":[\"((date_trunc('month'::text, (o.created_at AT TIME ZONE 'Asia/Shanghai'::text)))::date)\",\"o.channel\",\"t.\\\"目标净收入\\\"\",\"c.customer_no\"],\"Presorted Key\":[\"((date_trunc('month'::text, (o.created_at AT TIME ZONE 'Asia/Shanghai'::text)))::date)\",\"o.channel\"],\"Plans\":[{\"Node Type\":\"Merge Join\",\"Parent Relationship\":\"Outer\",\"Parallel Aware\":false,\"Async Capable\":false,\"Join Type\":\"Inner\",\"Startup Cost\":3766.02,\"Total Cost\":4939.15,\"Plan Rows\":495,\"Plan Width\":134,\"Inner Unique\":true,\"Merge Cond\":\"((((date_trunc('month'::text, (o.created_at AT TIME ZONE 'Asia/Shanghai'::text)))::date) = t.\\\"月份\\\") AND (o.channel = t.\\\"渠道\\\"))\",\"Plans\":[{\"Node Type\":\"WindowAgg\",\"Parent Relationship\":\"Outer\",\"Parallel Aware\":false,\"Async Capable\":false,\"Startup Cost\":3765.87,\"Total Cost\":4566.15,\"Plan Rows\":20007,\"Plan Width\":124,\"Plans\":[{\"Node Type\":\"Sort\",\"Parent Relationship\":\"Outer\",\"Parallel Aware\":false,\"Async Capable\":false,\"Startup Cost\":37...[truncated]"
-        },
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 90,
-          "argumentPreview": "{\"sql\":\"\\n  WITH settled_payments AS (\\n    SELECT\\n      order_id,\\n      sum(paid_amount)::numeric(14, 2) AS paid_amount\\n    FROM commerce.payments\\n    WHERE status = 'settled'\\n    GROUP BY order_id\\n  ),\\n  successful_refunds AS (\\n    SELECT\\n      p.order_id,\\n      sum(r.refund_amount)::numeric(14, 2) AS refund_amount\\n    FROM commerce.refunds r\\n    JOIN commerce.payments p ON p.payment_id = r.payment_id\\n    WHERE r.status = 'succeeded'\\n    GROUP BY p.order_id\\n  ),\\n  order_finance AS (\\n    SELECT\\n      o.order_id,\\n      o.order_no,\\n      date_trunc('month', o.created_at AT TIME ZONE 'Asia/Shanghai')::date\\n        AS month,\\n      o.channel,\\n      c.customer_no,\\n      sp.paid_amount,\\n      coalesce(sr.refund_amount, 0)::numeric(14, 2) AS refund_amount,\\n      (sp.paid_amount - coalesce(sr.refund_amount, 0))::numeric(14, 2)\\n        AS net_revenue\\n    FROM commerce.orders o\\n    JOIN commerce.customers c ON c.customer_id = o.customer_id\\n    JOIN settled_payments sp ON sp.order_id = o.order_id\\n    LEFT JOIN successful_refunds sr ON sr.order_id = o.order_id\\n  ),\\n  ranked AS (\\n    SELECT\\n      order_finance.*,\\n      row_number() OVER (\\n        PARTITION BY month, channel\\n        ORDER BY net_revenue DESC, order_id\\n      ) AS revenue_rank\\n    FROM order_finance\\n  )\\n  SELECT\\n    to_char(r.month, 'YYYY-MM') AS month,\\n    r.channel,\\n    count(DISTINCT r.customer_no)::bigint AS customer_count,\\n    sum(r.paid_amount)::numeric(14, 2) AS settled_amount,\\n    sum(r.refund_amount)::numeric(14, 2) AS refunded_amount,\\n    sum(r.net_revenue)::numeric(14, 2) AS net_revenue,\\n    t.\\\"目标净收入\\\" AS target_net_revenue,\\n    (sum(r.net_revenue) - t.\\\"目标净收入\\\")::numeric(14, 2)\\n      AS target_variance,\\n    max(r.order_no) FILTER (WHERE r.revenue_rank = 1) AS top_order_no\\n  FROM ranked r\\n  JOIN \\\"电商运营\\\".\\\"渠道目标\\\" t\\n    ON t.\\\"月份\\\" = r.month\\n   AND t.\\\"渠道\\\" = r.channel\\n  GROUP BY r.month, r.channel, t.\\\"目标净收入\\\"\\n  ORDER BY r.month, r.channel\\n\",\"previewRows\":12}",
-          "resultPreview": "{\"columns\":[{\"name\":\"month\"},{\"name\":\"channel\"},{\"name\":\"customer_count\"},{\"name\":\"settled_amount\"},{\"name\":\"refunded_amount\"},{\"name\":\"net_revenue\"},{\"name\":\"target_net_revenue\"},{\"name\":\"target_variance\"},{\"name\":\"top_order_no\"}],\"rowCount\":6,\"returnedRowCount\":6,\"storedRowCount\":6,\"hasMoreInDatabase\":false,\"truncatedByDriver\":false,\"previewTruncated\":false,\"elapsedMs\":75,\"messages\":[]}"
-        }
+      "status": "completed",
+      "finalText": "已按月和渠道完成净收入、目标差额及客户统计；2026-01 的 wechat 渠道净收入为 150.00。",
+      "deliveryStatus": "verified",
+      "evidenceRefs": [
+        "result:result_1f37846d-d356-4a46-841a-adbf8c7e68a6"
       ],
-      "finalText": "已按月和渠道完成净收入、目标差额及客户统计。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": [
-          "database-result"
-        ]
-      },
-      "finalQuery": {
-        "sql": "\n  WITH settled_payments AS (\n    SELECT\n      order_id,\n      sum(paid_amount)::numeric(14, 2) AS paid_amount\n    FROM commerce.payments\n    WHERE status = 'settled'\n    GROUP BY order_id\n  ),\n  successful_refunds AS (\n    SELECT\n      p.order_id,\n      sum(r.refund_amount)::numeric(14, 2) AS refund_amount\n    FROM commerce.refunds r\n    JOIN commerce.payments p ON p.payment_id = r.payment_id\n    WHERE r.status = 'succeeded'\n    GROUP BY p.order_id\n  ),\n  order_finance AS (\n    SELECT\n      o.order_id,\n      o.order_no,\n      date_trunc('month', o.created_at AT TIME ZONE 'Asia/Shanghai')::date\n        AS month,\n      o.channel,\n      c.customer_no,\n      sp.paid_amount,\n      coalesce(sr.refund_amount, 0)::numeric(14, 2) AS refund_amount,\n      (sp.paid_amount - coalesce(sr.refund_amount, 0))::numeric(14, 2)\n        AS net_revenue\n    FROM commerce.orders o\n    JOIN commerce.customers c ON c.customer_id = o.customer_id\n    JOIN settled_payments sp ON sp.order_id = o.order_id\n    LEFT JOIN successful_refunds sr ON sr.order_id = o.order_id\n  ),\n  ranked AS (\n    SELECT\n      order_finance.*,\n      row_number() OVER (\n        PARTITION BY month, channel\n        ORDER BY net_revenue DESC, order_id\n      ) AS revenue_rank\n    FROM order_finance\n  )\n  SELECT\n    to_char(r.month, 'YYYY-MM') AS month,\n    r.channel,\n    count(DISTINCT r.customer_no)::bigint AS customer_count,\n    sum(r.paid_amount)::numeric(14, 2) AS settled_amount,\n    sum(r.refund_amount)::numeric(14, 2) AS refunded_amount,\n    sum(r.net_revenue)::numeric(14, 2) AS net_revenue,\n    t.\"目标净收入\" AS target_net_revenue,\n    (sum(r.net_revenue) - t.\"目标净收入\")::numeric(14, 2)\n      AS target_variance,\n    max(r.order_no) FILTER (WHERE r.revenue_rank = 1) AS top_order_no\n  FROM ranked r\n  JOIN \"电商运营\".\"渠道目标\" t\n    ON t.\"月份\" = r.month\n   AND t.\"渠道\" = r.channel\n  GROUP BY r.month, r.channel, t.\"目标净收入\"\n  ORDER BY r.month, r.channel\n",
-        "returnedRowCount": 6,
-        "hasMore": false,
-        "rows": [
-          {
-            "month": "2026-01",
-            "channel": "app",
-            "customer_count": "1",
-            "settled_amount": "200.00",
-            "refunded_amount": "40.00",
-            "net_revenue": "160.00",
-            "target_net_revenue": "180.00",
-            "target_variance": "-20.00",
-            "top_order_no": "EC-2026-1002"
-          },
-          {
-            "month": "2026-01",
-            "channel": "web",
-            "customer_count": "1",
-            "settled_amount": "300.00",
-            "refunded_amount": "0.00",
-            "net_revenue": "300.00",
-            "target_net_revenue": "250.00",
-            "target_variance": "50.00",
-            "top_order_no": "EC-2026-1003"
-          },
-          {
-            "month": "2026-01",
-            "channel": "wechat",
-            "customer_count": "1",
-            "settled_amount": "150.00",
-            "refunded_amount": "0.00",
-            "net_revenue": "150.00",
-            "target_net_revenue": "100.00",
-            "target_variance": "50.00",
-            "top_order_no": "EC-2026-1001"
-          },
-          {
-            "month": "2026-02",
-            "channel": "app",
-            "customer_count": "1",
-            "settled_amount": "250.00",
-            "refunded_amount": "0.00",
-            "net_revenue": "250.00",
-            "target_net_revenue": "200.00",
-            "target_variance": "50.00",
-            "top_order_no": "EC-2026-2002"
-          },
-          {
-            "month": "2026-02",
-            "channel": "web",
-            "customer_count": "2",
-            "settled_amount": "520.00",
-            "refunded_amount": "100.00",
-            "net_revenue": "420.00",
-            "target_net_revenue": "500.00",
-            "target_variance": "-80.00",
-            "top_order_no": "EC-2026-2003"
-          },
-          {
-            "month": "2026-02",
-            "channel": "wechat",
-            "customer_count": "1",
-            "settled_amount": "500.00",
-            "refunded_amount": "0.00",
-            "net_revenue": "500.00",
-            "target_net_revenue": "450.00",
-            "target_variance": "50.00",
-            "top_order_no": "EC-2026-2001"
-          }
-        ]
-      },
-      "tokenUsage": {
-        "promptTokens": 960,
-        "completionTokens": 192,
-        "totalTokens": 1152
-      }
+      "activityCount": 14,
+      "toolActivityCount": 12
     },
     {
       "scenario": "ecommerce",
       "step": "read-mode-edit-denied",
       "passed": true,
-      "sessionId": "f15547fb-3c3b-47e2-821c-6092c30ca617",
-      "status": "done",
-      "iterations": 2,
-      "tools": [
-        {
-          "name": "sql_execute",
-          "status": "denied",
-          "durationMs": 2,
-          "failureKind": "unknown",
-          "argumentPreview": "{\"sql\":\"\\n  UPDATE commerce.inventory AS i\\n  SET\\n    reserved_qty = i.reserved_qty + 2,\\n    updated_at = '2026-03-02 00:00:00+00'\\n  FROM commerce.warehouses AS w, commerce.products AS p\\n  WHERE i.warehouse_id = w.warehouse_id\\n    AND i.product_id = p.product_id\\n    AND w.warehouse_code = 'WH-SH-01'\\n    AND p.sku = 'EC-KEYBOARD'\\n    AND i.reserved_qty + 2 <= i.on_hand_qty\\n\"}",
-          "resultPreview": "Permission: deny"
-        }
-      ],
+      "status": "completed",
       "finalText": "用户拒绝本次许可，库存没有变化。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": []
-      },
-      "tokenUsage": {
-        "promptTokens": 480,
-        "completionTokens": 96,
-        "totalTokens": 576
-      }
+      "deliveryStatus": "verified",
+      "evidenceRefs": [],
+      "activityCount": 7,
+      "toolActivityCount": 3
     },
     {
       "scenario": "ecommerce",
       "step": "edit-mode-update",
       "passed": true,
-      "sessionId": "956304fc-dda9-4523-801f-5dacf65ed165",
-      "status": "done",
-      "iterations": 2,
-      "tools": [
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 24,
-          "argumentPreview": "{\"sql\":\"\\n  UPDATE commerce.inventory AS i\\n  SET\\n    reserved_qty = i.reserved_qty + 2,\\n    updated_at = '2026-03-02 00:00:00+00'\\n  FROM commerce.warehouses AS w, commerce.products AS p\\n  WHERE i.warehouse_id = w.warehouse_id\\n    AND i.product_id = p.product_id\\n    AND w.warehouse_code = 'WH-SH-01'\\n    AND p.sku = 'EC-KEYBOARD'\\n    AND i.reserved_qty + 2 <= i.on_hand_qty\\n\"}",
-          "resultPreview": "{\"columns\":[],\"rowCount\":0,\"returnedRowCount\":0,\"storedRowCount\":0,\"hasMoreInDatabase\":false,\"truncatedByDriver\":false,\"previewTruncated\":false,\"elapsedMs\":22,\"messages\":[]}"
-        }
-      ],
+      "status": "completed",
       "finalText": "已更新预留库存。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": [
-          "database-write"
-        ]
-      },
-      "finalQuery": {
-        "sql": "\n  UPDATE commerce.inventory AS i\n  SET\n    reserved_qty = i.reserved_qty + 2,\n    updated_at = '2026-03-02 00:00:00+00'\n  FROM commerce.warehouses AS w, commerce.products AS p\n  WHERE i.warehouse_id = w.warehouse_id\n    AND i.product_id = p.product_id\n    AND w.warehouse_code = 'WH-SH-01'\n    AND p.sku = 'EC-KEYBOARD'\n    AND i.reserved_qty + 2 <= i.on_hand_qty\n",
-        "returnedRowCount": 0,
-        "hasMore": false,
-        "rows": []
-      },
-      "tokenUsage": {
-        "promptTokens": 480,
-        "completionTokens": 96,
-        "totalTokens": 576
-      }
+      "deliveryStatus": "verified",
+      "evidenceRefs": [
+        "database-execution:90e5c33d-ed4e-42f1-84b4-405b0ead8bd9"
+      ],
+      "activityCount": 6,
+      "toolActivityCount": 4
     },
     {
       "scenario": "ecommerce",
       "step": "inventory-verification",
       "passed": true,
-      "sessionId": "853dbee6-8377-4521-9bb7-34b267b047a4",
-      "status": "done",
-      "iterations": 2,
-      "tools": [
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 21,
-          "argumentPreview": "{\"sql\":\"\\n  SELECT\\n    w.warehouse_code,\\n    p.sku,\\n    i.on_hand_qty,\\n    i.reserved_qty,\\n    i.on_hand_qty - i.reserved_qty AS available_qty\\n  FROM commerce.inventory i\\n  JOIN commerce.warehouses w ON w.warehouse_id = i.warehouse_id\\n  JOIN commerce.products p ON p.product_id = i.product_id\\n  WHERE w.warehouse_code = 'WH-SH-01'\\n    AND p.sku = 'EC-KEYBOARD'\\n\",\"previewRows\":5}",
-          "resultPreview": "{\"columns\":[{\"name\":\"warehouse_code\"},{\"name\":\"sku\"},{\"name\":\"on_hand_qty\"},{\"name\":\"reserved_qty\"},{\"name\":\"available_qty\"}],\"rowCount\":1,\"returnedRowCount\":1,\"storedRowCount\":1,\"hasMoreInDatabase\":false,\"truncatedByDriver\":false,\"previewTruncated\":false,\"elapsedMs\":18,\"messages\":[]}"
-        }
-      ],
+      "status": "completed",
       "finalText": "WH-SH-01 的 EC-KEYBOARD 预留数量为 3。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": [
-          "database-result"
-        ]
-      },
-      "finalQuery": {
-        "sql": "\n  SELECT\n    w.warehouse_code,\n    p.sku,\n    i.on_hand_qty,\n    i.reserved_qty,\n    i.on_hand_qty - i.reserved_qty AS available_qty\n  FROM commerce.inventory i\n  JOIN commerce.warehouses w ON w.warehouse_id = i.warehouse_id\n  JOIN commerce.products p ON p.product_id = i.product_id\n  WHERE w.warehouse_code = 'WH-SH-01'\n    AND p.sku = 'EC-KEYBOARD'\n",
-        "returnedRowCount": 1,
-        "hasMore": false,
-        "rows": [
-          {
-            "warehouse_code": "WH-SH-01",
-            "sku": "EC-KEYBOARD",
-            "on_hand_qty": 111,
-            "reserved_qty": 3,
-            "available_qty": 108
-          }
-        ]
-      },
-      "tokenUsage": {
-        "promptTokens": 480,
-        "completionTokens": 96,
-        "totalTokens": 576
-      }
+      "deliveryStatus": "verified",
+      "evidenceRefs": [
+        "result:result_23e2b545-6e01-4544-8883-667f28a63ae6"
+      ],
+      "activityCount": 6,
+      "toolActivityCount": 4
     },
     {
       "scenario": "ecommerce",
       "step": "edit-mode-ddl-denied",
       "passed": true,
-      "sessionId": "63784bce-0a3d-4671-970f-8d7dd9ba2482",
-      "status": "done",
-      "iterations": 2,
-      "tools": [
-        {
-          "name": "sql_execute",
-          "status": "denied",
-          "durationMs": 2,
-          "failureKind": "unknown",
-          "argumentPreview": "{\"sql\":\"\\n  CREATE TABLE commerce.permission_probe (\\n    probe_id bigint PRIMARY KEY,\\n    created_at timestamptz NOT NULL DEFAULT now()\\n  )\\n\"}",
-          "resultPreview": "Permission: deny"
-        }
-      ],
+      "status": "completed",
       "finalText": "用户拒绝结构变更许可，没有创建验证表。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": []
-      },
-      "tokenUsage": {
-        "promptTokens": 480,
-        "completionTokens": 96,
-        "totalTokens": 576
-      }
+      "deliveryStatus": "verified",
+      "evidenceRefs": [],
+      "activityCount": 7,
+      "toolActivityCount": 3
     },
     {
       "scenario": "ecommerce",
       "step": "full-mode-ddl",
       "passed": true,
-      "sessionId": "ccd22375-d634-4460-8ba5-c3fb62f0ddf4",
-      "status": "done",
-      "iterations": 2,
-      "tools": [
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 169,
-          "argumentPreview": "{\"sql\":\"\\n  CREATE TABLE commerce.permission_probe (\\n    probe_id bigint PRIMARY KEY,\\n    created_at timestamptz NOT NULL DEFAULT now()\\n  )\\n\"}",
-          "resultPreview": "{\"columns\":[],\"rowCount\":0,\"returnedRowCount\":0,\"storedRowCount\":0,\"hasMoreInDatabase\":false,\"truncatedByDriver\":false,\"previewTruncated\":false,\"elapsedMs\":14,\"messages\":[]}"
-        }
-      ],
+      "status": "completed",
       "finalText": "已经在完全权限下创建验证表。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": [
-          "database-write"
-        ]
-      },
-      "finalQuery": {
-        "sql": "\n  CREATE TABLE commerce.permission_probe (\n    probe_id bigint PRIMARY KEY,\n    created_at timestamptz NOT NULL DEFAULT now()\n  )\n",
-        "returnedRowCount": 0,
-        "hasMore": false,
-        "rows": []
-      },
-      "tokenUsage": {
-        "promptTokens": 480,
-        "completionTokens": 96,
-        "totalTokens": 576
-      }
+      "deliveryStatus": "verified",
+      "evidenceRefs": [
+        "database-execution:c2c2c2a0-3157-4892-98ac-a8a84ab50d9f"
+      ],
+      "activityCount": 6,
+      "toolActivityCount": 4
     },
     {
       "scenario": "traffic-cleaning",
       "step": "json-repair-and-anomaly",
       "passed": true,
-      "sessionId": "ccf7e48a-1d60-4d48-88a5-80f8b5b21c25",
-      "status": "done",
-      "iterations": 5,
-      "tools": [
-        {
-          "name": "sql_execute",
-          "status": "failed",
-          "durationMs": 27,
-          "failureKind": "sql_repairable",
-          "argumentPreview": "{\"sql\":\"SELECT event_time FROM traffic_lab.raw_kafka_events LIMIT 1\"}",
-          "resultPreview": "PostgreSQL query failed. 字段 \"event_time\" 不存在"
-        },
-        {
-          "name": "resource_get",
-          "status": "success",
-          "durationMs": 20,
-          "argumentPreview": "{\"resource\":\"traffic_lab.raw_kafka_events\"}",
-          "resultPreview": "{\"resource\":{\"kind\":\"table\",\"name\":\"traffic_lab.raw_kafka_events\",\"displayName\":\"raw_kafka_events\",\"facts\":{\"owner\":\"postgres\",\"schema\":\"traffic_lab\",\"comment\":\"Kafka 原始消息；业务字段、事件时间、枚举和摄取时间全部位于 value JSONB\",\"partitioned\":false,\"persistence\":\"p\",\"estimatedRows\":20017}},\"columns\":[{\"kind\":\"column\",\"name\":\"traffic_lab.raw_kafka_events.value\",\"displayName\":\"value\",\"facts\":{\"comment\":\"常用路径：event_id、event_time、ingested_at、event_type、visitor_id、latency_ms、page、source\",\"ordinal\":1,\"dataType\":\"jsonb\",\"nullable\":false}}],\"constraints\":[{\"kind\":\"constraint\",\"name\":\"traffic_lab.raw_kafka_events.raw_kafka_events_value_check\",\"displayName\":\"raw_kafka_events_value_check\",\"facts\":{\"validated\":true,\"deferrable\":false,\"definition\":\"CHECK (jsonb_typeof(value) = 'object'::text)\",\"constraintType\":\"c\"}}],\"indexes\":[{\"kind\":\"index\",\"name\":\"traffic_lab.idx_traffic_raw_event_id\",\"displayName\":\"idx_traffic_raw_event_id\",\"facts\":{\"ready\":true,\"valid\":true,\"unique\":false,\"primary\":false,\"definition\":\"CREATE INDEX idx_traffic_raw_event_id ON traffic_lab.raw_kafka_events USING btree (((value ->> 'event_id'::text)))\"}},{\"kind\":\"index\",\"name\":\"traffic_lab.idx_traffic_raw_event_time\",\"displayName\":\"idx_traffic_raw_event_time\",\"facts\":{\"ready\":true,\"valid\":true,\"unique\":false,\"primary\":false,\"definition\":\"CREATE INDEX idx_traffic_raw_event_time ON traffic_lab.raw_kafka_events USING btree (((value ->> 'event_time'::text)))\"}},{\"kind\":\"index\",\"name\":\"traffic_lab.idx_traffic_raw_value_gin\",\"displa...[truncated]"
-        },
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 20,
-          "argumentPreview": "{\"sql\":\"SELECT value FROM traffic_lab.raw_kafka_events LIMIT 5\",\"previewRows\":5}",
-          "resultPreview": "{\"columns\":[{\"name\":\"value\"}],\"rowCount\":5,\"returnedRowCount\":5,\"storedRowCount\":5,\"hasMoreInDatabase\":false,\"truncatedByDriver\":false,\"previewTruncated\":false,\"elapsedMs\":19,\"messages\":[]}"
-        },
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 204,
-          "argumentPreview": "{\"sql\":\"\\n  WITH extracted AS MATERIALIZED (\\n    SELECT\\n      nullif(value ->> 'event_id', '') AS event_id,\\n      nullif(value ->> 'visitor_id', '') AS visitor_id,\\n      value ->> 'event_type' AS event_type,\\n      CASE\\n        WHEN value ->> 'event_time'\\n          ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'\\n        THEN (value ->> 'event_time')::timestamptz\\n      END AS event_time,\\n      CASE\\n        WHEN value ->> 'ingested_at'\\n          ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'\\n        THEN (value ->> 'ingested_at')::timestamptz\\n      END AS ingested_at,\\n      CASE\\n        WHEN value ->> 'latency_ms' ~ '^[0-9]+([.][0-9]+)?$'\\n        THEN (value ->> 'latency_ms')::numeric\\n      END AS latency_ms\\n    FROM traffic_lab.raw_kafka_events\\n  ),\\n  validated AS (\\n    SELECT\\n      e.event_id,\\n      e.event_time,\\n      e.ingested_at,\\n      e.latency_ms,\\n      row_number() OVER (\\n        PARTITION BY e.event_id\\n        ORDER BY e.ingested_at DESC NULLS LAST\\n      ) AS duplicate_rank\\n    FROM extracted e\\n    JOIN traffic_lab.event_type_dictionary d\\n      ON d.event_type = e.event_type\\n     AND d.active\\n    WHERE e.event_id IS NOT NULL\\n      AND e.visitor_id IS NOT NULL\\n      AND e.event_time IS NOT NULL\\n      AND e.ingested_at IS NOT NULL\\n      AND e.latency_ms IS NOT NULL\\n  ),\\n  deduplicated AS (\\n    SELECT event_time, latency_ms\\n    FROM validated\\n    WHERE duplicate_rank = 1\\n  ),\\n  bucketed AS (\\n    SELECT\\n      date_trunc('minute', event_time) AS minute,\\n      count(*)::bigint AS event_count,\\n      avg(latency_ms) AS avg_latency_ms,\\n      count(*) FILTER (\\n        WHERE latency_ms > (\\n          SELECT threshold\\n          FROM traffic_lab.anomaly_thresholds\\n          WHERE metric_name = 'latency_ms'\\n        )\\n      )::bigint AS high_latency_events\\n    FROM deduplicated\\n    GROUP BY 1\\n  )\\n  SELECT\\n    minute,\\n    event_count,\\n    round(avg_latency_ms, 2) AS avg_latency_ms,\\n    high_latency_events,\\n    event_count > (\\n      SELECT threshold\\n      FROM traffic_lab.anomaly_thresholds\\n      WHERE metric_name = 'events_per_minute'\\n    ) AS volume_anomaly\\n  FROM bucketed\\n  ORDER BY minute\\n\",\"previewRows\":10}",
-          "resultPreview": "{\"columns\":[{\"name\":\"minute\"},{\"name\":\"event_count\"},{\"name\":\"avg_latency_ms\"},{\"name\":\"high_latency_events\"},{\"name\":\"volume_anomaly\"}],\"rowCount\":203,\"returnedRowCount\":203,\"storedRowCount\":203,\"hasMoreInDatabase\":false,\"truncatedByDriver\":false,\"previewTruncated\":true,\"elapsedMs\":200,\"messages\":[]}"
-        }
-      ],
+      "status": "completed",
       "finalText": "10:00 有 1 条高延迟异常，10:02 的每分钟事件数超过阈值；统计已在 PostgreSQL 内完成。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": [
-          "database-result"
-        ]
-      },
-      "finalQuery": {
-        "sql": "\n  WITH extracted AS MATERIALIZED (\n    SELECT\n      nullif(value ->> 'event_id', '') AS event_id,\n      nullif(value ->> 'visitor_id', '') AS visitor_id,\n      value ->> 'event_type' AS event_type,\n      CASE\n        WHEN value ->> 'event_time'\n          ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'\n        THEN (value ->> 'event_time')::timestamptz\n      END AS event_time,\n      CASE\n        WHEN value ->> 'ingested_at'\n          ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'\n        THEN (value ->> 'ingested_at')::timestamptz\n      END AS ingested_at,\n      CASE\n        WHEN value ->> 'latency_ms' ~ '^[0-9]+([.][0-9]+)?$'\n        THEN (value ->> 'latency_ms')::numeric\n      END AS latency_ms\n    FROM traffic_lab.raw_kafka_events\n  ),\n  validated AS (\n    SELECT\n      e.event_id,\n      e.event_time,\n      e.ingested_at,\n      e.latency_ms,\n      row_number() OVER (\n        PARTITION BY e.event_id\n        ORDER BY e.ingested_at DESC NULLS LAST\n      ) AS duplicate_rank\n    FROM extracted e\n    JOIN traffic_lab.event_type_dictionary d\n      ON d.event_type = e.event_type\n     AND d.active\n    WHERE e.event_id IS NOT NULL\n      AND e.visitor_id IS NOT NULL\n      AND e.event_time IS NOT NULL\n      AND e.ingested_at IS NOT NULL\n      AND e.latency_ms IS NOT NULL\n  ),\n  deduplicated AS (\n    SELECT event_time, latency_ms\n    FROM validated\n    WHERE duplicate_rank = 1\n  ),\n  bucketed AS (\n    SELECT\n      date_trunc('minute', event_time) AS minute,\n      count(*)::bigint AS event_count,\n      avg(latency_ms) AS avg_latency_ms,\n      count(*) FILTER (\n        WHERE latency_ms > (\n          SELECT threshold\n          FROM traffic_lab.anomaly_thresholds\n          WHERE metric_name = 'latency_ms'\n        )\n      )::bigint AS high_latency_events\n    FROM deduplicated\n    GROUP BY 1\n  )\n  SELECT\n    minute,\n    event_count,\n    round(avg_latency_ms, 2) AS avg_latency_ms,\n    high_latency_events,\n    event_count > (\n      SELECT threshold\n      FROM traffic_lab.anomaly_thresholds\n      WHERE metric_name = 'events_per_minute'\n    ) AS volume_anomaly\n  FROM bucketed\n  ORDER BY minute\n",
-        "returnedRowCount": 203,
-        "hasMore": false,
-        "rows": [
-          {
-            "minute": "2026-03-01T10:00:00.000Z",
-            "event_count": "3",
-            "avg_latency_ms": "376.67",
-            "high_latency_events": "1",
-            "volume_anomaly": false
-          },
-          {
-            "minute": "2026-03-01T10:01:00.000Z",
-            "event_count": "3",
-            "avg_latency_ms": "111.67",
-            "high_latency_events": "0",
-            "volume_anomaly": false
-          },
-          {
-            "minute": "2026-03-01T10:02:00.000Z",
-            "event_count": "5",
-            "avg_latency_ms": "140.00",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:00:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "130.50",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:01:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "133.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:02:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "137.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:03:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "141.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:04:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "145.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:05:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "149.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:06:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "130.50",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:07:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "133.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:08:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "137.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:09:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "141.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:10:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "145.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:11:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "149.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:12:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "130.50",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:13:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "133.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:14:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "137.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:15:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "141.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          },
-          {
-            "minute": "2026-03-01T11:16:00.000Z",
-            "event_count": "100",
-            "avg_latency_ms": "145.30",
-            "high_latency_events": "0",
-            "volume_anomaly": true
-          }
-        ]
-      },
-      "tokenUsage": {
-        "promptTokens": 1200,
-        "completionTokens": 240,
-        "totalTokens": 1440
-      }
+      "deliveryStatus": "verified",
+      "evidenceRefs": [
+        "result:result_dfbc52a5-cffa-4e56-86dc-7352c6f3cf19"
+      ],
+      "activityCount": 14,
+      "toolActivityCount": 12
     },
     {
       "scenario": "big-science",
       "step": "partition-statistics",
       "passed": true,
-      "sessionId": "6da40f43-e5ac-4a8b-9adb-9ae51be754f3",
-      "status": "done",
-      "iterations": 5,
-      "tools": [
-        {
-          "name": "knowledge_search",
-          "status": "success",
-          "durationMs": 19,
-          "argumentPreview": "{\"query\":\"science experiments samples observations partition signal background quality_flags\",\"limit\":30,\"expandHops\":2}",
-          "resultPreview": "{\"items\":[{\"document\":{\"kind\":\"column\",\"schema\":\"science\",\"table\":\"observations\",\"column\":\"quality_flags\",\"title\":\"science.observations.quality_flags\",\"text\":\"事实: dataType=integer[]; nullable=false\"}},{\"document\":{\"kind\":\"column\",\"schema\":\"science\",\"table\":\"observations_2026_02\",\"column\":\"quality_flags\",\"title\":\"science.observations_2026_02.quality_flags\",\"text\":\"事实: dataType=integer[]; nullable=false\"}},{\"document\":{\"kind\":\"column\",\"schema\":\"science\",\"table\":\"observations_2026_01\",\"column\":\"quality_flags\",\"title\":\"science.observations_2026_01.quality_flags\",\"text\":\"事实: dataType=integer[]; nullable=false\"}},{\"document\":{\"kind\":\"index\",\"schema\":\"science\",\"table\":\"observations\",\"title\":\"science.observations.idx_science_observations_quality_flags\",\"text\":\"事实: definition=CREATE INDEX idx_science_observations_quality_flags ON ONLY science.observations USING gin (quality_flags)\"}},{\"document\":{\"kind\":\"index\",\"schema\":\"science\",\"table\":\"observations_2026_01\",\"title\":\"science.observations_2026_01.observations_2026_01_quality_flags_idx\",\"text\":\"事实: definition=CREATE INDEX observations_2026_01_quality_flags_idx ON science.observations_2026_01 USING gin (quality_flags)\"}},{\"document\":{\"kind\":\"index\",\"schema\":\"science\",\"table\":\"observations_2026_02\",\"title\":\"science.observations_2026_02.observations_2026_02_quality_flags_idx\",\"text\":\"事实: definition=CREATE INDEX observations_2026_02_quality_flags_idx ON science.observations_2026_02 USING gin (quality_flags)\"}},{\"document\":{...[truncated]"
-        },
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 29,
-          "argumentPreview": "{\"sql\":\"\\n  SELECT\\n    tableoid::regclass::text AS partition_name,\\n    count(*)::bigint AS observation_count\\n  FROM science.observations\\n  GROUP BY tableoid\\n  ORDER BY partition_name\\n\",\"previewRows\":5}",
-          "resultPreview": "{\"columns\":[{\"name\":\"partition_name\"},{\"name\":\"observation_count\"}],\"rowCount\":2,\"returnedRowCount\":2,\"storedRowCount\":2,\"hasMoreInDatabase\":false,\"truncatedByDriver\":false,\"previewTruncated\":false,\"elapsedMs\":25,\"messages\":[]}"
-        },
-        {
-          "name": "sql_explain",
-          "status": "success",
-          "durationMs": 27,
-          "argumentPreview": "{\"sql\":\"\\n  WITH calibrated AS (\\n    SELECT\\n      e.experiment_code,\\n      s.sample_code,\\n      (o.signal - o.background)::numeric(24, 8) AS net_signal\\n    FROM science.observations o\\n    JOIN science.experiments e\\n      ON e.experiment_id = o.experiment_id\\n    JOIN science.samples s\\n      ON s.sample_id = o.sample_id\\n    WHERE o.observed_at >= '2026-01-01 00:00:00+00'\\n      AND o.observed_at < '2026-03-01 00:00:00+00'\\n  ),\\n  sample_statistics AS (\\n    SELECT\\n      experiment_code,\\n      sample_code,\\n      count(*)::bigint AS observation_count,\\n      avg(net_signal) AS mean_net_signal,\\n      stddev_samp(net_signal) AS stddev_net_signal\\n    FROM calibrated\\n    GROUP BY experiment_code, sample_code\\n  ),\\n  ranked_samples AS (\\n    SELECT\\n      sample_statistics.*,\\n      dense_rank() OVER (\\n        PARTITION BY experiment_code\\n        ORDER BY mean_net_signal DESC, sample_code\\n      ) AS signal_rank\\n    FROM sample_statistics\\n  )\\n  SELECT\\n    experiment_code,\\n    count(*)::bigint AS sample_count,\\n    sum(observation_count)::bigint AS observation_count,\\n    round(avg(mean_net_signal), 6) AS mean_of_sample_means,\\n    round(max(stddev_net_signal), 6) AS max_sample_stddev,\\n    max(sample_code) FILTER (WHERE signal_rank = 1) AS top_sample\\n  FROM ranked_samples\\n  GROUP BY experiment_code\\n  ORDER BY experiment_code\\n\"}",
-          "resultPreview": "{\"plan\":{\"QUERY PLAN\":[{\"Plan\":{\"Node Type\":\"Aggregate\",\"Strategy\":\"Sorted\",\"Partial Mode\":\"Simple\",\"Parallel Aware\":false,\"Async Capable\":false,\"Startup Cost\":2040.55,\"Total Cost\":2327.05,\"Plan Rows\":200,\"Plan Width\":144,\"Group Key\":[\"sample_statistics.experiment_code\"],\"Plans\":[{\"Node Type\":\"WindowAgg\",\"Parent Relationship\":\"Outer\",\"Parallel Aware\":false,\"Async Capable\":false,\"Startup Cost\":2040.55,\"Total Cost\":2167.45,\"Plan Rows\":5640,\"Plan Width\":118,\"Plans\":[{\"Node Type\":\"Sort\",\"Parent Relationship\":\"Outer\",\"Parallel Aware\":false,\"Async Capable\":false,\"Startup Cost\":2040.55,\"Total Cost\":2054.65,\"Plan Rows\":5640,\"Plan Width\":110,\"Sort Key\":[\"sample_statistics.experiment_code\",\"sample_statistics.mean_net_signal DESC\",\"sample_statistics.sample_code\"],\"Plans\":[{\"Node Type\":\"Subquery Scan\",\"Parent Relationship\":\"Outer\",\"Parallel Aware\":false,\"Async Capable\":false,\"Alias\":\"sample_statistics\",\"Startup Cost\":1604.53,\"Total Cost\":1689.13,\"Plan Rows\":5640,\"Plan Width\":110,\"Plans\":[{\"Node Type\":\"Aggregate\",\"Strategy\":\"Hashed\",\"Partial Mode\":\"Simple\",\"Parent Relationship\":\"Subquery\",\"Parallel Aware\":false,\"Async Capable\":false,\"Startup Cost\":1604.53,\"Total Cost\":1689.13,\"Plan Rows\":5640,\"Plan Width\":110,\"Group Key\":[\"e.experiment_code\",\"s.sample_code\"],\"Planned Partitions\":0,\"Plans\":[{\"Node Type\":\"Hash Join\",\"Parent Relationship\":\"Outer\",\"Parallel Aware\":false,\"Async Capable\":false,\"Join Type\":\"Inner\",\"Startup Cost\":21.84,\"Total Cost\":1064.62,\"Plan Rows\":23996,\"Plan W...[truncated]"
-        },
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 23,
-          "argumentPreview": "{\"sql\":\"\\n  WITH calibrated AS (\\n    SELECT\\n      e.experiment_code,\\n      s.sample_code,\\n      (o.signal - o.background)::numeric(24, 8) AS net_signal\\n    FROM science.observations o\\n    JOIN science.experiments e\\n      ON e.experiment_id = o.experiment_id\\n    JOIN science.samples s\\n      ON s.sample_id = o.sample_id\\n    WHERE o.observed_at >= '2026-01-01 00:00:00+00'\\n      AND o.observed_at < '2026-03-01 00:00:00+00'\\n  ),\\n  sample_statistics AS (\\n    SELECT\\n      experiment_code,\\n      sample_code,\\n      count(*)::bigint AS observation_count,\\n      avg(net_signal) AS mean_net_signal,\\n      stddev_samp(net_signal) AS stddev_net_signal\\n    FROM calibrated\\n    GROUP BY experiment_code, sample_code\\n  ),\\n  ranked_samples AS (\\n    SELECT\\n      sample_statistics.*,\\n      dense_rank() OVER (\\n        PARTITION BY experiment_code\\n        ORDER BY mean_net_signal DESC, sample_code\\n      ) AS signal_rank\\n    FROM sample_statistics\\n  )\\n  SELECT\\n    experiment_code,\\n    count(*)::bigint AS sample_count,\\n    sum(observation_count)::bigint AS observation_count,\\n    round(avg(mean_net_signal), 6) AS mean_of_sample_means,\\n    round(max(stddev_net_signal), 6) AS max_sample_stddev,\\n    max(sample_code) FILTER (WHERE signal_rank = 1) AS top_sample\\n  FROM ranked_samples\\n  GROUP BY experiment_code\\n  ORDER BY experiment_code\\n\",\"previewRows\":5}",
-          "resultPreview": "{\"columns\":[{\"name\":\"experiment_code\"},{\"name\":\"sample_count\"},{\"name\":\"observation_count\"},{\"name\":\"mean_of_sample_means\"},{\"name\":\"max_sample_stddev\"},{\"name\":\"top_sample\"}],\"rowCount\":2,\"returnedRowCount\":2,\"storedRowCount\":2,\"hasMoreInDatabase\":false,\"truncatedByDriver\":false,\"previewTruncated\":false,\"elapsedMs\":17,\"messages\":[]}"
-        }
-      ],
+      "status": "completed",
       "finalText": "两个实验各包含 6 个样本和 12000 条观测，统计由分区表原生完成。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": [
-          "database-result"
-        ]
-      },
-      "finalQuery": {
-        "sql": "\n  WITH calibrated AS (\n    SELECT\n      e.experiment_code,\n      s.sample_code,\n      (o.signal - o.background)::numeric(24, 8) AS net_signal\n    FROM science.observations o\n    JOIN science.experiments e\n      ON e.experiment_id = o.experiment_id\n    JOIN science.samples s\n      ON s.sample_id = o.sample_id\n    WHERE o.observed_at >= '2026-01-01 00:00:00+00'\n      AND o.observed_at < '2026-03-01 00:00:00+00'\n  ),\n  sample_statistics AS (\n    SELECT\n      experiment_code,\n      sample_code,\n      count(*)::bigint AS observation_count,\n      avg(net_signal) AS mean_net_signal,\n      stddev_samp(net_signal) AS stddev_net_signal\n    FROM calibrated\n    GROUP BY experiment_code, sample_code\n  ),\n  ranked_samples AS (\n    SELECT\n      sample_statistics.*,\n      dense_rank() OVER (\n        PARTITION BY experiment_code\n        ORDER BY mean_net_signal DESC, sample_code\n      ) AS signal_rank\n    FROM sample_statistics\n  )\n  SELECT\n    experiment_code,\n    count(*)::bigint AS sample_count,\n    sum(observation_count)::bigint AS observation_count,\n    round(avg(mean_net_signal), 6) AS mean_of_sample_means,\n    round(max(stddev_net_signal), 6) AS max_sample_stddev,\n    max(sample_code) FILTER (WHERE signal_rank = 1) AS top_sample\n  FROM ranked_samples\n  GROUP BY experiment_code\n  ORDER BY experiment_code\n",
-        "returnedRowCount": 2,
-        "hasMore": false,
-        "rows": [
-          {
-            "experiment_code": "EXP-GENOME-002",
-            "sample_count": "6",
-            "observation_count": "12000",
-            "mean_of_sample_means": "1022.425000",
-            "max_sample_stddev": "29.160850",
-            "top_sample": "S-007"
-          },
-          {
-            "experiment_code": "EXP-PHOTON-001",
-            "sample_count": "6",
-            "observation_count": "12000",
-            "mean_of_sample_means": "1012.425000",
-            "max_sample_stddev": "29.160850",
-            "top_sample": "S-003"
-          }
-        ]
-      },
-      "tokenUsage": {
-        "promptTokens": 1200,
-        "completionTokens": 240,
-        "totalTokens": 1440
-      }
+      "deliveryStatus": "verified",
+      "evidenceRefs": [
+        "result:result_97f8cf94-3330-46e7-8af8-ae99bd89f538"
+      ],
+      "activityCount": 16,
+      "toolActivityCount": 14
     },
     {
       "scenario": "big-science",
       "step": "large-bounded-result",
       "passed": true,
-      "sessionId": "70c5c30e-a114-4959-bfae-94ab620fff0c",
-      "status": "done",
-      "iterations": 2,
-      "tools": [
-        {
-          "name": "sql_execute",
-          "status": "success",
-          "durationMs": 40,
-          "argumentPreview": "{\"sql\":\"\\n  SELECT\\n    observation_id,\\n    experiment_id,\\n    sample_id,\\n    instrument_id,\\n    observed_at,\\n    signal,\\n    background,\\n    quality_flags,\\n    metadata\\n  FROM science.observations\\n  ORDER BY observed_at, observation_id\\n\",\"maxRows\":1000,\"previewRows\":3}",
-          "resultPreview": "{\"columns\":[{\"name\":\"observation_id\"},{\"name\":\"experiment_id\"},{\"name\":\"sample_id\"},{\"name\":\"instrument_id\"},{\"name\":\"observed_at\"},{\"name\":\"signal\"},{\"name\":\"background\"},{\"name\":\"quality_flags\"},{\"name\":\"metadata\"}],\"rowCount\":1000,\"returnedRowCount\":1000,\"storedRowCount\":1000,\"hasMoreInDatabase\":true,\"truncatedByDriver\":true,\"previewTruncated\":true,\"elapsedMs\":21,\"messages\":[]}"
-        }
+      "status": "completed",
+      "finalText": "大结果查询已完成，最多 1000 行的交互结果可单独读取或导出。",
+      "deliveryStatus": "verified",
+      "evidenceRefs": [
+        "result:result_15c4aef2-1ff1-4868-9b8d-b09029d30a68"
       ],
-      "finalText": "大结果查询已完成，最多 1000 行的交互结果已单独返回。",
-      "completion": {
-        "verified": true,
-        "deliveryReady": true,
-        "finalResponseReady": true,
-        "phase": "done",
-        "unresolvedTaskIds": [],
-        "missing": [],
-        "evidenceKinds": [
-          "database-result"
-        ]
-      },
-      "finalQuery": {
-        "sql": "\n  SELECT\n    observation_id,\n    experiment_id,\n    sample_id,\n    instrument_id,\n    observed_at,\n    signal,\n    background,\n    quality_flags,\n    metadata\n  FROM science.observations\n  ORDER BY observed_at, observation_id\n",
-        "returnedRowCount": 1000,
-        "hasMore": true,
-        "rows": [
-          {
-            "observation_id": "1",
-            "experiment_id": 1,
-            "sample_id": 1,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:00.000Z",
-            "signal": "1010.25000000",
-            "background": "50.10000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00001",
-              "replicate": 2
-            }
-          },
-          {
-            "observation_id": "2",
-            "experiment_id": 1,
-            "sample_id": 2,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:01.000Z",
-            "signal": "1010.50000000",
-            "background": "50.20000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00002",
-              "replicate": 3
-            }
-          },
-          {
-            "observation_id": "3",
-            "experiment_id": 1,
-            "sample_id": 3,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:02.000Z",
-            "signal": "1010.75000000",
-            "background": "50.30000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00003",
-              "replicate": 1
-            }
-          },
-          {
-            "observation_id": "4",
-            "experiment_id": 1,
-            "sample_id": 4,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:03.000Z",
-            "signal": "1011.00000000",
-            "background": "50.40000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00004",
-              "replicate": 2
-            }
-          },
-          {
-            "observation_id": "5",
-            "experiment_id": 1,
-            "sample_id": 5,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:04.000Z",
-            "signal": "1011.25000000",
-            "background": "50.50000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00005",
-              "replicate": 3
-            }
-          },
-          {
-            "observation_id": "6",
-            "experiment_id": 1,
-            "sample_id": 6,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:05.000Z",
-            "signal": "1011.50000000",
-            "background": "50.60000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00006",
-              "replicate": 1
-            }
-          },
-          {
-            "observation_id": "7",
-            "experiment_id": 2,
-            "sample_id": 7,
-            "instrument_id": 2,
-            "observed_at": "2026-01-01T00:00:06.000Z",
-            "signal": "1021.75000000",
-            "background": "50.70000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00007",
-              "replicate": 2
-            }
-          },
-          {
-            "observation_id": "8",
-            "experiment_id": 2,
-            "sample_id": 8,
-            "instrument_id": 2,
-            "observed_at": "2026-01-01T00:00:07.000Z",
-            "signal": "1022.00000000",
-            "background": "50.80000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00008",
-              "replicate": 3
-            }
-          },
-          {
-            "observation_id": "9",
-            "experiment_id": 2,
-            "sample_id": 9,
-            "instrument_id": 2,
-            "observed_at": "2026-01-01T00:00:08.000Z",
-            "signal": "1022.25000000",
-            "background": "50.90000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00009",
-              "replicate": 1
-            }
-          },
-          {
-            "observation_id": "10",
-            "experiment_id": 2,
-            "sample_id": 10,
-            "instrument_id": 2,
-            "observed_at": "2026-01-01T00:00:09.000Z",
-            "signal": "1022.50000000",
-            "background": "51.00000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00010",
-              "replicate": 2
-            }
-          },
-          {
-            "observation_id": "11",
-            "experiment_id": 2,
-            "sample_id": 11,
-            "instrument_id": 2,
-            "observed_at": "2026-01-01T00:00:10.000Z",
-            "signal": "1022.75000000",
-            "background": "51.10000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00011",
-              "replicate": 3
-            }
-          },
-          {
-            "observation_id": "12",
-            "experiment_id": 2,
-            "sample_id": 12,
-            "instrument_id": 2,
-            "observed_at": "2026-01-01T00:00:11.000Z",
-            "signal": "1023.00000000",
-            "background": "51.20000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00012",
-              "replicate": 1
-            }
-          },
-          {
-            "observation_id": "13",
-            "experiment_id": 1,
-            "sample_id": 1,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:12.000Z",
-            "signal": "1013.25000000",
-            "background": "51.30000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00013",
-              "replicate": 2
-            }
-          },
-          {
-            "observation_id": "14",
-            "experiment_id": 1,
-            "sample_id": 2,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:13.000Z",
-            "signal": "1013.50000000",
-            "background": "51.40000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00014",
-              "replicate": 3
-            }
-          },
-          {
-            "observation_id": "15",
-            "experiment_id": 1,
-            "sample_id": 3,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:14.000Z",
-            "signal": "1013.75000000",
-            "background": "51.50000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00015",
-              "replicate": 1
-            }
-          },
-          {
-            "observation_id": "16",
-            "experiment_id": 1,
-            "sample_id": 4,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:15.000Z",
-            "signal": "1014.00000000",
-            "background": "51.60000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00016",
-              "replicate": 2
-            }
-          },
-          {
-            "observation_id": "17",
-            "experiment_id": 1,
-            "sample_id": 5,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:16.000Z",
-            "signal": "1014.25000000",
-            "background": "51.70000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00017",
-              "replicate": 3
-            }
-          },
-          {
-            "observation_id": "18",
-            "experiment_id": 1,
-            "sample_id": 6,
-            "instrument_id": 1,
-            "observed_at": "2026-01-01T00:00:17.000Z",
-            "signal": "1014.50000000",
-            "background": "51.80000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00018",
-              "replicate": 1
-            }
-          },
-          {
-            "observation_id": "19",
-            "experiment_id": 2,
-            "sample_id": 7,
-            "instrument_id": 2,
-            "observed_at": "2026-01-01T00:00:18.000Z",
-            "signal": "1024.75000000",
-            "background": "51.90000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00019",
-              "replicate": 2
-            }
-          },
-          {
-            "observation_id": "20",
-            "experiment_id": 2,
-            "sample_id": 8,
-            "instrument_id": 2,
-            "observed_at": "2026-01-01T00:00:19.000Z",
-            "signal": "1025.00000000",
-            "background": "52.00000000",
-            "quality_flags": [],
-            "metadata": {
-              "run_id": "JAN-00020",
-              "replicate": 3
-            }
-          }
-        ]
-      },
-      "tokenUsage": {
-        "promptTokens": 480,
-        "completionTokens": 96,
-        "totalTokens": 576
-      }
+      "activityCount": 6,
+      "toolActivityCount": 4
     }
   ]
 }

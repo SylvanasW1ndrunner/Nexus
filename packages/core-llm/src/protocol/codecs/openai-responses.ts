@@ -6,6 +6,7 @@ import type {
 } from '../content.js';
 import {
   asRecord,
+  assertRepresentableGenerationParameters,
   assertContextProtocol,
   createDecodedAttempt,
   createProtocolEncodeSession,
@@ -94,6 +95,7 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
 
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
+    assertRepresentableGenerationParameters(request, this.protocol, ['seed', 'stop']);
     const session = createProtocolEncodeSession(context, this.protocol, request);
     return session.finish({
       model: request.model,
@@ -113,6 +115,9 @@ export class OpenAIResponsesCodec implements ModelProtocolCodec {
       ...(request.maxOutputTokens === undefined
         ? {}
         : { max_output_tokens: request.maxOutputTokens }),
+      ...(request.reasoningEffort === undefined
+        ? {}
+        : { reasoning: { effort: request.reasoningEffort } }),
     });
   }
 

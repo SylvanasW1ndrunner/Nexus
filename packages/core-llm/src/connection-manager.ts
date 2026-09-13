@@ -1,6 +1,4 @@
-import { randomUUID } from 'node:crypto';
 import { createBuiltinLlmProviderPlugins } from './builtin-provider-plugins.js';
-import type { RoundContext } from '@dbagent/core-usage';
 import { LlmConnectionResolver } from './connection-resolver.js';
 import {
   appendLlmEndpointPath,
@@ -21,32 +19,17 @@ import {
   type ModelSessionBundle,
 } from './model-client.js';
 import { HttpJsonTransport } from './transport/http-json-transport.js';
+import { SseTransport } from './transport/sse-transport.js';
+import { NdjsonTransport } from './transport/ndjson-transport.js';
 import { openAIChatCodec } from './protocol/codecs/openai-chat.js';
 import { openAIResponsesCodec } from './protocol/codecs/openai-responses.js';
 import { anthropicMessagesCodec } from './protocol/codecs/anthropic-messages.js';
 import { ollamaChatCodec } from './protocol/codecs/ollama-chat.js';
 import type { ModelProtocolCodec } from './protocol/codec.js';
-import { ModelCodecRegistryError } from './protocol/codec-registry.js';
 import {
   bindTrustedModelSessionClient,
   type ModelClientBindingMetadata,
 } from './model-client-binding.js';
-import {
-  LlmGateway,
-  ModelExecutionGateway,
-  modelGatewayToLegacyError,
-  type LlmGatewayChatInput,
-  type LlmGatewayContext,
-  type LlmGatewayResult,
-} from './llm-gateway.js';
-import {
-  legacyAttemptToResponse,
-  legacyRequestToCanonical,
-  legacyProviderCodec,
-  LegacyProviderModelClient,
-} from './legacy-model-compatibility.js';
-import { assertNoTextualToolInvocation } from './tool-protocol.js';
-import { LlmTaskRouter } from './routing.js';
 import {
   LlmModelCatalogManager,
   type LlmCatalogSnapshot,
@@ -63,14 +46,10 @@ import type {
 import { LlmProviderPluginRegistry } from './provider-plugin-registry.js';
 import {
   LlmProviderError,
-  type LlmChatRequest,
-  type LlmChatResponse,
-  type LlmChatStreamEvent,
   type LlmEmbeddingResponse,
   type LlmGenerationConfig,
   type LlmGenerationParameterName,
   type LlmProvider,
-  type LlmProviderCapabilities,
   type LlmRerankResponse,
 } from './types.js';
 
@@ -89,7 +68,7 @@ export type LlmModelSelection = {
   routeRevision?: string;
 };
 
-export type LlmParameterSource = 'provider-default' | 'project' | 'session' | 'request';
+export type LlmParameterSource = 'provider-default' | 'global' | 'session' | 'request';
 
 export type LlmParameterDiagnostic = {
   parameter: LlmGenerationParameterName;
@@ -122,45 +101,16 @@ export type LlmPreparedSelection = {
   model: LlmCatalogModel;
 };
 
-type LlmManagedChatRequest = Omit<
-  LlmChatRequest,
-  'model' | 'temperature' | 'topP' | 'maxTokens' | 'seed' | 'stop' | 'reasoning'
->;
-
-export type LlmConnectionManagerChatInput = {
-  selection: LlmModelSelection;
-  request: LlmManagedChatRequest;
-  context: LlmGatewayContext;
-  sessionParameters?: LlmGenerationConfig;
-  parameters?: LlmGenerationConfig;
-  round?: RoundContext;
-  /** Agent runtimes validate tool calls at their own execution boundary. */
-  validateToolCalls?: boolean;
-  /** Explicitly freezes all resolved compatible protocol alternatives into this Run bundle. */
-  allowCompatibleProtocolFallbacks?: boolean;
-  gateway?: Pick<
-    LlmGatewayChatInput,
-    | 'task'
-    | 'policies'
-    | 'budget'
-    | 'cache'
-    | 'timeoutMs'
-    | 'maxRetries'
-    | 'maxStructuredCorrections'
-  >;
-};
-
-export type LlmConnectionManagerChatResult = {
-  response: LlmChatResponse;
-  route: LlmResolvedRoute;
-  effectiveParameters: LlmEffectiveParameters;
-  protocolAttempts: readonly string[];
-  gateway: LlmGatewayResult;
-};
+export type LlmCallContext = Readonly<{
+  tenantId: string;
+  taskType: string;
+  userId?: string;
+}>;
 
 export type LlmTrustedModelClientFactoryContext = Readonly<{
   connection: LlmConnection;
   resolution: LlmConnectionResolution;
+  streaming: boolean;
   fetch?: LlmFetch;
 }>;
 
@@ -179,8 +129,7 @@ export type LlmConnectionManagerOptions = {
   fetch?: LlmFetch;
   discoveryTimeoutMs?: number;
   providerTimeoutMs?: number;
-  projectParameters?: LlmGenerationConfig;
-  gateway?: LlmGateway;
+  globalParameters?: LlmGenerationConfig;
   catalogManager?: LlmModelCatalogManager;
   /** Host-owned factory; public per-call clients never receive persistence authority. */
   trustedModelClientFactory?: LlmTrustedModelClientFactory;
@@ -194,7 +143,6 @@ type ConnectionRuntime = {
 };
 
 export class LlmConnectionManager {
-  readonly gateway: LlmGateway;
   readonly catalog: LlmModelCatalogManager;
 
   private readonly registry: LlmProviderPluginRegistry;
@@ -204,7 +152,7 @@ export class LlmConnectionManager {
   private readonly connectionOperationTails = new Map<string, Promise<void>>();
   private readonly fetchImpl: LlmFetch | undefined;
   private readonly trustedModelClientFactory: LlmTrustedModelClientFactory;
-  private projectParameters: LlmGenerationConfig;
+  private globalParameters: LlmGenerationConfig;
 
   constructor(options: LlmConnectionManagerOptions) {
     this.fetchImpl = options.fetch;
@@ -223,31 +171,44 @@ export class LlmConnectionManager {
         ? {}
         : { providerTimeoutMs: options.providerTimeoutMs }),
     });
-    this.gateway = options.gateway ?? new LlmGateway();
     this.catalog =
       options.catalogManager ??
       new LlmModelCatalogManager({ store: new LlmModelCatalogStore(options.cacheDirectory) });
-    this.projectParameters = validateLlmGenerationConfig({
-      ...(options.projectParameters ?? {}),
+    this.globalParameters = validateLlmGenerationConfig({
+      ...(options.globalParameters ?? {}),
     });
   }
 
   replaceConnections(inputs: readonly (LlmConnectionInput | LlmConnection)[]): LlmConnection[] {
+    return this.replaceConfiguration({
+      connections: inputs,
+      globalParameters: this.globalParameters,
+    });
+  }
+
+  /** Validates the complete global model configuration before publishing any part of it. */
+  replaceConfiguration(input: Readonly<{
+    connections: readonly (LlmConnectionInput | LlmConnection)[];
+    globalParameters: LlmGenerationConfig;
+  }>): LlmConnection[] {
+    const globalParameters = validateLlmGenerationConfig({ ...input.globalParameters });
     const next = new Map<string, LlmConnection>();
-    for (const input of inputs) {
-      let candidate = isResolvedConnection(input) ? input : createLlmConnection(input);
-      if (!isResolvedConnection(input)) {
+    for (const connectionInput of input.connections) {
+      let candidate = isResolvedConnection(connectionInput)
+        ? connectionInput
+        : createLlmConnection(connectionInput);
+      if (!isResolvedConnection(connectionInput)) {
         const existing = this.configuredConnections.get(candidate.id);
         if (existing !== undefined) {
           candidate = createLlmConnection({
-            ...input,
+            ...connectionInput,
             connectionConfigurationRevision:
-              input.connectionConfigurationRevision ??
+              connectionInput.connectionConfigurationRevision ??
               (sameNonSecretConnection(existing, candidate)
                 ? existing.connectionConfigurationRevision
                 : candidate.connectionConfigurationRevision),
             credentialRevision:
-              input.credentialRevision ??
+              connectionInput.credentialRevision ??
               (sameCredentialValues(existing, candidate)
                 ? existing.credentialRevision
                 : candidate.credentialRevision),
@@ -269,6 +230,7 @@ export class LlmConnectionManager {
     }
     this.configuredConnections.clear();
     for (const [id, connection] of next) this.configuredConnections.set(id, connection);
+    this.globalParameters = globalParameters;
     return this.connections();
   }
 
@@ -279,8 +241,8 @@ export class LlmConnectionManager {
     }));
   }
 
-  setProjectParameters(parameters: LlmGenerationConfig): void {
-    this.projectParameters = validateLlmGenerationConfig({ ...parameters });
+  setGlobalParameters(parameters: LlmGenerationConfig): void {
+    this.globalParameters = validateLlmGenerationConfig({ ...parameters });
   }
 
   async discover(
@@ -333,8 +295,6 @@ export class LlmConnectionManager {
       this.catalog.removeConnection(connectionId);
       throw new Error(`LLM connection changed while discovery was running: ${connection.name}.`);
     }
-    const previous = this.runtimes.get(connectionId);
-    if (previous) this.unregisterRuntimeProviders(previous);
     const runtime: ConnectionRuntime = {
       connection,
       resolutions: Object.freeze(usableResolutions),
@@ -342,7 +302,6 @@ export class LlmConnectionManager {
       inspectedModels: new Set(options.inspectModelIds ?? []),
     };
     this.runtimes.set(connectionId, runtime);
-    this.registerRuntime(runtime, catalog.models);
     return {
       connection: { ...connection, headers: { ...connection.headers } },
       resolution: primary,
@@ -367,6 +326,16 @@ export class LlmConnectionManager {
       );
     }
     return this.resolver.resolveRoute(resolution, selection.modelId);
+  }
+
+  modelMode(selection: LlmModelSelection): LlmProvider['mode'] {
+    const runtime = this.requireRuntime(selection.connectionId);
+    const resolution = runtime.resolutions[0]!;
+    const provider = runtime.providers.get(resolution.pluginId);
+    if (provider === undefined) {
+      throw new LlmProviderError('LLM_NO_ROUTE', 'The selected connection adapter is unavailable.', false);
+    }
+    return provider.mode;
   }
 
   /** Resolves passive endpoint metadata and makes the selected route executable. */
@@ -408,8 +377,9 @@ export class LlmConnectionManager {
       generation?: LlmGenerationConfig;
       replay?: ModelReplayBinding;
       allowedFallbackRouteIds?: readonly string[];
+      streaming?: boolean;
       signal?: AbortSignal;
-    },
+    } = {},
   ): Promise<ModelSessionBundle> {
     const prepared = await this.prepare(
       selection,
@@ -441,12 +411,11 @@ export class LlmConnectionManager {
       candidate: LlmConnectionResolution,
       fallback: boolean,
     ): ModelSession => {
-      const candidateCodec = canonicalCodec(candidate.protocol) ??
-        (candidate.protocol === 'legacy-normalized'
-          ? legacyProviderCodec
-          : undefined);
+      const candidateCodec = canonicalCodec(candidate.protocol);
       if (candidateCodec === undefined) {
-        throw new ModelCodecRegistryError(candidate.protocol, `${candidate.protocol}@1`);
+        throw new ModelGatewayPreparationError(
+          `Resolved protocol ${candidate.protocol} has no canonical Model codec.`,
+        );
       }
       const candidateRouteId = modelSessionRouteId(candidate, selection.modelId);
       const provider = runtime.providers.get(candidate.pluginId);
@@ -455,27 +424,30 @@ export class LlmConnectionManager {
           `Resolved Provider Plugin ${candidate.pluginId} has no prepared Provider client.`,
         );
       }
-      const replay = fallback && candidateCodec.protocol !== 'legacy-normalized'
+      const replay = fallback
         ? {
             mode: 'compatible-protocol' as const,
             envelopes: options.replay?.mode !== undefined && options.replay.mode !== 'new'
               ? options.replay.envelopes
               : [],
           }
-        : candidateCodec.protocol === 'legacy-normalized'
-          ? { mode: 'new' as const }
-          : options.replay;
+        : options.replay;
       const injectedClient = options.clients?.[candidateRouteId] ??
         (!fallback ? options.client : undefined);
       const trustedBinding = injectedClient === undefined
         ? this.trustedModelClientFactory({
             connection: runtime.connection,
             resolution: candidate,
+            streaming: options.streaming ?? false,
             ...(this.fetchImpl === undefined ? {} : { fetch: this.fetchImpl }),
           })
         : undefined;
-      const client = injectedClient ?? trustedBinding?.client ??
-        new LegacyProviderModelClient(provider, false);
+      const client = injectedClient ?? trustedBinding?.client;
+      if (client === undefined) {
+        throw new ModelGatewayPreparationError(
+          `Resolved protocol ${candidate.protocol} has no canonical Model client binding.`,
+        );
+      }
       const session = createModelSession({
         route: {
           routeId: candidateRouteId,
@@ -499,6 +471,12 @@ export class LlmConnectionManager {
           contextTokens: prepared.model.contextTokens.value,
           maxInputTokens: prepared.model.maxInputTokens.value,
           maxOutputTokens: prepared.model.maxOutputTokens.value,
+          encoding: candidateCodec.protocol !== 'openai-chat'
+            ? {}
+            : {
+                openAIChatMaxOutputTokensWireKey:
+                  prepared.model.openAIChatMaxOutputTokensWireKey.value ?? 'max_tokens',
+              },
           metadata: {
             source: prepared.model.contextTokens.source,
             revision: candidate.revision,
@@ -540,7 +518,7 @@ export class LlmConnectionManager {
     const model = this.requireCatalogModel(selection);
     const layerValues: Array<[LlmParameterSource, LlmGenerationConfig | undefined]> = [
       ['provider-default', layers.providerDefaults],
-      ['project', this.projectParameters],
+      ['global', this.globalParameters],
       ['session', layers.session],
       ['request', layers.request],
     ];
@@ -592,176 +570,29 @@ export class LlmConnectionManager {
     };
   }
 
-  async executeChat(input: LlmConnectionManagerChatInput): Promise<LlmConnectionManagerChatResult> {
-    const runtime = await this.ensureReady(input.selection, input.request.signal);
-    const effective = this.effectiveParameters(input.selection, {
-      ...(input.sessionParameters === undefined ? {} : { session: input.sessionParameters }),
-      ...(input.parameters === undefined ? {} : { request: input.parameters }),
-    });
-    const allowedFallbackRouteIds = input.allowCompatibleProtocolFallbacks
-      ? runtime.resolutions.slice(1).map((resolution) =>
-          modelSessionRouteId(resolution, input.selection.modelId))
-      : [];
-    let bundle: ModelSessionBundle;
-    try {
-      bundle = await this.prepareModelSessionBundle(input.selection, {
-        generation: effective.values,
-        allowedFallbackRouteIds,
-        ...(input.request.signal === undefined ? {} : { signal: input.request.signal }),
-      });
-    } catch (error) {
-      if (error instanceof ModelCodecRegistryError) {
-        throw annotateRouteError(
-          new LlmProviderError(
-            'LLM_MODEL_BINDING_INVALID',
-            error.message,
-            false,
-            undefined,
-            { modelGatewayCode: error.code },
-          ),
-          input.selection,
-          runtime.resolutions[0]!,
-        );
-      }
-      throw annotateRouteError(
-        modelGatewayToLegacyError(this.classifyProviderError(runtime.resolutions[0]!, error)),
-        input.selection,
-        runtime.resolutions[0]!,
-      );
-    }
-    let execution;
-    try {
-      execution = await new ModelExecutionGateway().executeAttempt(
-        bundle,
-        legacyRequestToCanonical(input.request, input.selection.modelId),
-        {
-          maxRetries: input.gateway?.maxRetries ?? 0,
-          ...(input.request.signal === undefined ? {} : { signal: input.request.signal }),
-          ...(input.gateway?.timeoutMs === undefined
-            ? {}
-            : {
-                timeouts: {
-                  connectMs: input.gateway.timeoutMs,
-                  firstEventMs: input.gateway.timeoutMs,
-                  idleMs: input.gateway.timeoutMs,
-                  totalMs: input.gateway.timeoutMs,
-                },
-              }),
-        },
-      );
-    } catch (error) {
-      const primaryResolution = runtime.resolutions[0]!;
-      throw annotateRouteError(
-        modelGatewayToLegacyError(this.classifyProviderError(primaryResolution, error)),
-        input.selection,
-        primaryResolution,
-      );
-    }
-    const response = legacyAttemptToResponse(
-      execution.attempt.blocks,
-      execution.attempt.usage,
-      execution.attempt.providerResponseId,
-    );
-    if (execution.attempt.finishReason !== undefined) {
-      response.finishReason = execution.attempt.finishReason;
-    }
-    assertNoTextualToolInvocation({
-      text: response.text,
-      toolCalls: response.toolCalls,
-      toolsRequested: Boolean(input.request.tools?.length),
-      toolNames: input.request.tools?.map((tool) => tool.name) ?? [],
-      protocol: execution.session.route.protocol,
-    });
-    const selectedResolution = runtime.resolutions.find((resolution) =>
-      modelSessionRouteId(resolution, input.selection.modelId) === execution.session.route.routeId);
-    if (selectedResolution === undefined) {
-      throw new LlmProviderError('LLM_NO_ROUTE', 'Validated Session route left the prepared bundle.', false);
-    }
-    const registered = this.gateway.registry.find(
-      selectedResolution.providerId,
-      input.selection.modelId,
-    );
-    if (registered === undefined) {
-      throw new LlmProviderError('LLM_NO_ROUTE', 'Prepared model is missing from the Gateway registry.', false);
-    }
-    const routeDecision = new LlmTaskRouter(this.gateway.registry).route({
-      task: {
-        taskType: input.context.taskType,
-        requirements: { requiredModelIds: [registered.id] },
-      },
-    });
-    const usage = response.usage ?? {
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
-      estimated: true,
-    };
-    response.usage = usage;
-    const protocolAttempts = [
-      ...execution.discardedAttempts.map((discarded) =>
-        runtime.resolutions.find((resolution) =>
-          modelSessionRouteId(resolution, input.selection.modelId) === discarded.routeId)?.protocol ??
-          'unknown'),
-      selectedResolution.protocol,
-    ];
-    return {
-      response,
-      route: this.resolver.resolveRoute(selectedResolution, input.selection.modelId),
-      effectiveParameters: effective,
-      protocolAttempts,
-      gateway: {
-        requestId: input.context.requestId ?? randomUUID(),
-        traceId: input.context.traceId ?? input.context.requestId ?? randomUUID(),
-        response,
-        route: routeDecision,
-        providerId: selectedResolution.providerId,
-        modelId: registered.id,
-        attempts: execution.discardedAttempts.length + 1,
-        cacheHit: false,
-        usage,
-      },
-    };
-  }
-
-  async chat(input: LlmConnectionManagerChatInput): Promise<LlmChatResponse> {
-    return (await this.executeChat(input)).response;
-  }
-
-  async *stream(input: LlmConnectionManagerChatInput): AsyncIterable<LlmChatStreamEvent> {
-    const result = await this.executeChat(input);
-    if (result.response.text) yield { type: 'text-delta', text: result.response.text };
-    for (const toolCall of result.response.toolCalls) yield { type: 'tool-call', toolCall };
-    if (result.response.usage) yield { type: 'usage', usage: result.response.usage };
-    yield {
-      type: 'finish',
-      response: result.response,
-      ...(result.response.finishReason === undefined
-        ? {}
-        : { reason: result.response.finishReason }),
-    };
-  }
-
   async embed(input: {
     selection: LlmModelSelection;
     input: string[];
     dimensions?: number;
-    context: LlmGatewayContext;
+    context: LlmCallContext;
     signal?: AbortSignal;
   }): Promise<LlmEmbeddingResponse> {
     const runtime = await this.ensureReady(input.selection, input.signal);
     const resolution = runtime.resolutions[0]!;
     const provider = runtime.providers.get(resolution.pluginId)!;
-    this.registerProviderModel(provider, resolution, this.requireCatalogModel(input.selection));
     try {
-      return await this.gateway.embed({
-        providerId: provider.id,
-        request: {
-          model: input.selection.modelId,
-          input: [...input.input],
-          ...(input.dimensions === undefined ? {} : { dimensions: input.dimensions }),
-          ...(input.signal === undefined ? {} : { signal: input.signal }),
-        },
-        context: input.context,
+      if (provider.embed === undefined) {
+        throw new LlmProviderError(
+          'LLM_CAPABILITY_UNSUPPORTED',
+          `Model ${input.selection.modelId} does not support embeddings.`,
+          false,
+        );
+      }
+      return await provider.embed({
+        model: input.selection.modelId,
+        input: [...input.input],
+        ...(input.dimensions === undefined ? {} : { dimensions: input.dimensions }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
     } catch (error) {
       throw annotateRouteError(
@@ -777,24 +608,26 @@ export class LlmConnectionManager {
     query: string;
     documents: string[];
     topN?: number;
-    context: LlmGatewayContext;
+    context: LlmCallContext;
     signal?: AbortSignal;
   }): Promise<LlmRerankResponse> {
     const runtime = await this.ensureReady(input.selection, input.signal);
     const resolution = runtime.resolutions[0]!;
     const provider = runtime.providers.get(resolution.pluginId)!;
-    this.registerProviderModel(provider, resolution, this.requireCatalogModel(input.selection));
     try {
-      return await this.gateway.rerank({
-        providerId: provider.id,
-        request: {
-          model: input.selection.modelId,
-          query: input.query,
-          documents: [...input.documents],
-          ...(input.topN === undefined ? {} : { topN: input.topN }),
-          ...(input.signal === undefined ? {} : { signal: input.signal }),
-        },
-        context: input.context,
+      if (provider.rerank === undefined) {
+        throw new LlmProviderError(
+          'LLM_CAPABILITY_UNSUPPORTED',
+          `Model ${input.selection.modelId} does not support reranking.`,
+          false,
+        );
+      }
+      return await provider.rerank({
+        model: input.selection.modelId,
+        query: input.query,
+        documents: [...input.documents],
+        ...(input.topN === undefined ? {} : { topN: input.topN }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
     } catch (error) {
       throw annotateRouteError(
@@ -835,56 +668,15 @@ export class LlmConnectionManager {
           throw new Error(`LLM connection changed while model metadata was loading.`);
         }
         runtime.inspectedModels.add(selection.modelId);
-        this.registerRuntime(runtime, snapshot.models);
+        void snapshot;
       }
       this.requireCatalogModel(selection);
       return runtime;
     });
   }
 
-  private registerRuntime(runtime: ConnectionRuntime, models: readonly LlmCatalogModel[]): void {
-    for (const resolution of runtime.resolutions) {
-      const provider = runtime.providers.get(resolution.pluginId);
-      if (!provider) continue;
-      this.gateway.registry.removeProvider(provider.id);
-      this.gateway.registerProvider(provider);
-      for (const model of models) this.registerProviderModel(provider, resolution, model);
-    }
-  }
-
-  private registerProviderModel(
-    provider: LlmProvider,
-    resolution: LlmConnectionResolution,
-    model: LlmCatalogModel,
-  ): void {
-    this.gateway.registerModel({
-      providerId: provider.id,
-      model: model.modelId,
-      displayName: model.displayName.value ?? model.modelId,
-      protocol: resolution.protocol,
-      capabilities: gatewayCapabilities(model, provider),
-      generationParameters: Object.fromEntries(
-        Object.entries(model.generationParameters).map(([name, value]) => [
-          name,
-          value.value ?? 'unknown',
-        ]),
-      ),
-      limits: {
-        contextTokens: model.contextTokens.value,
-        maxInputTokens: model.maxInputTokens.value,
-        maxOutputTokens: model.maxOutputTokens.value,
-      },
-      ...(model.pricing.value === null ? {} : { pricing: model.pricing.value }),
-    });
-  }
-
   private removeRuntime(runtime: ConnectionRuntime): void {
-    this.unregisterRuntimeProviders(runtime);
     this.catalog.removeConnection(runtime.connection.id);
-  }
-
-  private unregisterRuntimeProviders(runtime: ConnectionRuntime): void {
-    for (const provider of runtime.providers.values()) this.gateway.registry.removeProvider(provider.id);
   }
 
   private normalizeParameters(
@@ -1011,8 +803,11 @@ function defaultTrustedModelClientFactory(
   if (path === undefined) {
     return undefined;
   }
+  const Transport = context.streaming
+    ? resolution.protocol === 'ollama-chat' ? NdjsonTransport : SseTransport
+    : HttpJsonTransport;
   return {
-    client: new HttpJsonTransport({
+    client: new Transport({
       url: appendLlmEndpointPath(resolution.providerBaseUrl, path),
       headers: canonicalModelHeaders(connection, resolution.protocol),
       ...(context.fetch === undefined ? {} : { fetch: context.fetch }),
@@ -1046,7 +841,6 @@ function sameConnection(left: LlmConnection, right: LlmConnection): boolean {
     !sameNonSecretConnection(left, right) ||
     left.connectionConfigurationRevision !== right.connectionConfigurationRevision ||
     left.credentialRevision !== right.credentialRevision ||
-    left.credentialScope !== right.credentialScope ||
     !sameCredentialValues(left, right)
   ) {
     return false;
@@ -1063,24 +857,6 @@ function sameCredentialValues(left: LlmConnection, right: LlmConnection): boolea
   const leftHeaders = Object.entries(left.headers).sort(([a], [b]) => a.localeCompare(b));
   const rightHeaders = Object.entries(right.headers).sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify(leftHeaders) === JSON.stringify(rightHeaders);
-}
-
-function gatewayCapabilities(
-  model: LlmCatalogModel,
-  provider: LlmProvider,
-): Partial<LlmProviderCapabilities> {
-  const result = Object.fromEntries(
-    Object.entries(model.capabilities).map(([name, value]) => [name, value.value ?? 'unknown']),
-  ) as Partial<LlmProviderCapabilities>;
-  result.chat = result.chat === 'unsupported' ? 'unsupported' : 'supported';
-  result.streaming = provider.stream ? 'supported' : 'unsupported';
-  if (model.roles.embedding.value === true) result.embeddings = 'supported';
-  if (model.roles.rerank.value === true) result.rerank = 'supported';
-  // A fixed user route is allowed to try protocol-level features whose model
-  // support is unknown. Known unsupported values remain blocked.
-  if (result.toolCalling === 'unknown') result.toolCalling = 'supported';
-  if (result.structuredOutput === 'unknown') result.structuredOutput = 'supported';
-  return result;
 }
 
 function parameterError(
@@ -1136,6 +912,5 @@ function isResolvedConnection(
 ): input is LlmConnection {
   return 'id' in input &&
     'connectionConfigurationRevision' in input &&
-    'credentialRevision' in input &&
-    'credentialScope' in input;
+    'credentialRevision' in input;
 }

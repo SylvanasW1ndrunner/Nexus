@@ -1,95 +1,50 @@
 import type {
-  AgentBehaviorEvaluationCase,
-  AgentBehaviorToolExpectation,
-  AgentMode,
-  AgentRunOptions,
-  AgentRunStatus,
-  AgentToolExecutionRecord,
-} from '@dbagent/core-agent';
-import type { UsageMode } from '@dbagent/shared';
-import type { AgentEvalSuite, AgentEvalSuiteCase } from './agent-eval-suite-runner.js';
+  AgentEvalEnvironment,
+  AgentEvalRunConfiguration,
+  AgentEvalRunResult,
+  AgentEvalSuite,
+  AgentEvalSuiteCase,
+  AgentEvalSuiteExpectation,
+  AgentEvalToolExpectation,
+  AgentEvalToolStatus,
+} from './agent-eval-suite-runner.js';
 
-export type AgentEvalSuiteManifest = {
+export type AgentEvalSuiteManifest = Readonly<{
   version: 1;
-  suite: {
+  suite: Readonly<{
     suiteId: string;
     suiteName: string;
-    cases: AgentEvalSuiteManifestCase[];
-    environment?: AgentEvalSuite['environment'];
-    notes?: string[];
-  };
+    cases: readonly AgentEvalSuiteManifestCase[];
+    environment?: AgentEvalEnvironment;
+    notes?: readonly string[];
+  }>;
+}>;
+
+export type AgentEvalSuiteManifestCase = AgentEvalSuiteExpectation & {
+  configuration?: AgentEvalRunConfiguration;
 };
 
-export type AgentEvalSuiteManifestCase = AgentBehaviorEvaluationCase & {
-  run?: SafeManifestRunOverride;
-};
+type UnknownManifestCase = Record<string, unknown>;
+type UnknownToolExpectation = Record<string, unknown>;
 
-type UnknownManifestCase = {
-  id?: unknown;
-  userTask?: unknown;
-  expectedStatus?: unknown;
-  requiredToolCalls?: unknown;
-  forbiddenToolCalls?: unknown;
-  requiredToolStatuses?: unknown;
-  toolExpectations?: unknown;
-  finalTextIncludes?: unknown;
-  finalTextExcludes?: unknown;
-  minIterations?: unknown;
-  maxIterations?: unknown;
-  run?: unknown;
-};
-
-type ManifestToolExpectation = {
-  toolName?: unknown;
-  status?: unknown;
-  minCalls?: unknown;
-  maxCalls?: unknown;
-  caseSensitive?: unknown;
-  argumentIncludes?: unknown;
-  argumentExcludes?: unknown;
-  resultIncludes?: unknown;
-  resultExcludes?: unknown;
-};
-
-export type SafeManifestRunOverride = Partial<
-  Pick<
-    AgentRunOptions,
-    | 'allowedTools'
-    | 'usageMode'
-    | 'mode'
-    | 'maxIterations'
-    | 'keepRecentMessages'
-    | 'maxToolResultChars'
-    | 'maxConsecutiveToolFailures'
-    | 'maxToolExecutionMs'
-  >
->;
-
-const EVALUATION_ENVIRONMENTS = new Set([
-  'unit',
-  'integration',
-  'postgres',
-  'llm-live',
-  'manual',
-] satisfies NonNullable<AgentEvalSuite['environment']>[]);
-
-const RUN_STATUSES = new Set([
-  'done',
-  'aborted',
-  'max_iterations_reached',
-] satisfies AgentRunStatus[]);
-
-const TOOL_STATUSES = new Set([
-  'success',
-  'denied',
-  'failed',
-] satisfies AgentToolExecutionRecord['status'][]);
-
-const AGENT_MODES = new Set(['read', 'edit', 'full'] satisfies AgentMode[]);
-
-const USAGE_MODES = new Set(['byok', 'managed'] satisfies UsageMode[]);
-
-const FORBIDDEN_RUN_KEYS = new Set(['providerId', 'model', 'userMessage', 'signal']);
+const EVALUATION_ENVIRONMENTS = new Set<AgentEvalEnvironment>([
+  'unit', 'integration', 'postgres', 'llm-live', 'manual',
+]);
+const RUN_STATUSES = new Set<AgentEvalRunResult['status']>([
+  'completed', 'failed', 'cancelled', 'limit_reached', 'interrupted',
+]);
+const TOOL_STATUSES = new Set<AgentEvalToolStatus>([
+  'success', 'denied', 'failed', 'cancelled', 'outcome_unknown',
+]);
+const AGENT_MODES = new Set<NonNullable<AgentEvalRunConfiguration['mode']>>([
+  'default', 'auto', 'full-access',
+]);
+const CASE_KEYS = new Set([
+  'id', 'userTask', 'expectedStatus', 'requiredToolCalls', 'forbiddenToolCalls',
+  'requiredToolStatuses', 'toolExpectations', 'finalTextIncludes', 'finalTextExcludes',
+  'minTurns', 'maxTurns', 'configuration',
+]);
+const CONFIGURATION_KEYS = new Set(['mode', 'allowedTools', 'maxTurns']);
 
 export function parseAgentEvalSuiteManifestJson(json: string): AgentEvalSuite {
   let parsed: unknown;
@@ -103,178 +58,150 @@ export function parseAgentEvalSuiteManifestJson(json: string): AgentEvalSuite {
 
 export function parseAgentEvalSuiteManifest(input: unknown): AgentEvalSuite {
   const root = objectRecord(input, 'Agent eval suite manifest');
-  const version = requiredNumber(root, 'version', 'Agent eval suite manifest');
-  if (version !== 1) {
-    throw new Error(`Agent eval suite manifest version is not supported: ${version}.`);
+  requireOnlyKeys(root, new Set(['version', 'suite']), 'Agent eval suite manifest');
+  if (requiredNumber(root, 'version', 'Agent eval suite manifest') !== 1) {
+    throw new Error(`Agent eval suite manifest version is not supported: ${String(root.version)}.`);
   }
-
   const suiteInput = objectRecord(root.suite, 'Agent eval suite manifest suite');
-  const suiteId = requiredNonEmptyString(suiteInput, 'suiteId', 'Agent eval suite manifest suite');
-  const suiteName = requiredNonEmptyString(
+  requireOnlyKeys(
     suiteInput,
-    'suiteName',
+    new Set(['suiteId', 'suiteName', 'cases', 'environment', 'notes']),
     'Agent eval suite manifest suite',
   );
   const casesInput = requiredArray(suiteInput, 'cases', 'Agent eval suite manifest suite');
   if (casesInput.length === 0) {
     throw new Error('Agent eval suite manifest suite must contain at least one case.');
   }
-
-  const environment = optionalEnum(
-    suiteInput,
-    'environment',
-    EVALUATION_ENVIRONMENTS,
-    'Agent eval suite manifest suite',
-  );
-  const notes = optionalStringArray(suiteInput, 'notes', 'Agent eval suite manifest suite');
-
   const cases = casesInput.map((item, index) => parseCase(item, index));
-  assertUnique(
-    cases.map((item) => item.case.id),
-    'Agent eval suite case id',
-  );
+  assertUnique(cases.map((item) => item.expectation.id), 'Agent eval suite case id');
 
-  return {
-    suiteId,
-    suiteName,
-    cases,
-    ...(environment === undefined ? {} : { environment }),
-    ...(notes === undefined ? {} : { notes }),
-  };
+  return Object.freeze({
+    suiteId: requiredNonEmptyString(suiteInput, 'suiteId', 'Agent eval suite manifest suite'),
+    suiteName: requiredNonEmptyString(suiteInput, 'suiteName', 'Agent eval suite manifest suite'),
+    cases: Object.freeze(cases),
+    ...(suiteInput.environment === undefined ? {} : {
+      environment: requiredEnum(
+        suiteInput, 'environment', EVALUATION_ENVIRONMENTS, 'Agent eval suite manifest suite',
+      ),
+    }),
+    ...(suiteInput.notes === undefined ? {} : {
+      notes: Object.freeze(optionalStringArray(suiteInput, 'notes', 'Agent eval suite manifest suite')!),
+    }),
+  });
 }
 
 function parseCase(input: unknown, index: number): AgentEvalSuiteCase {
   const label = `Agent eval suite case at index ${index}`;
   const record = objectRecord(input, label) as UnknownManifestCase;
-  const id = requiredNonEmptyString(record, 'id', label);
-  const userTask = requiredNonEmptyString(record, 'userTask', label);
-  const expectedStatus = optionalEnum(record, 'expectedStatus', RUN_STATUSES, label);
-  const requiredToolCalls = optionalStringArray(record, 'requiredToolCalls', label);
-  const forbiddenToolCalls = optionalStringArray(record, 'forbiddenToolCalls', label);
-  const requiredToolStatuses = optionalRequiredToolStatuses(record, label);
-  const toolExpectations = optionalToolExpectations(record, label);
-  const finalTextIncludes = optionalStringArray(record, 'finalTextIncludes', label);
-  const finalTextExcludes = optionalStringArray(record, 'finalTextExcludes', label);
-  const minIterations = optionalNonNegativeInteger(record, 'minIterations', label);
-  const maxIterations = optionalNonNegativeInteger(record, 'maxIterations', label);
-
-  if (minIterations !== undefined && maxIterations !== undefined && minIterations > maxIterations) {
-    throw new Error(`${label} minIterations cannot be greater than maxIterations.`);
+  requireOnlyKeys(record, CASE_KEYS, label);
+  const minTurns = optionalNonNegativeInteger(record, 'minTurns', label);
+  const maxTurns = optionalNonNegativeInteger(record, 'maxTurns', label);
+  if (minTurns !== undefined && maxTurns !== undefined && minTurns > maxTurns) {
+    throw new Error(`${label} minTurns cannot be greater than maxTurns.`);
   }
-
-  const evaluationCase: AgentBehaviorEvaluationCase = {
-    id,
-    userTask,
-    ...(expectedStatus === undefined ? {} : { expectedStatus }),
-    ...(requiredToolCalls === undefined ? {} : { requiredToolCalls }),
-    ...(forbiddenToolCalls === undefined ? {} : { forbiddenToolCalls }),
-    ...(requiredToolStatuses === undefined ? {} : { requiredToolStatuses }),
-    ...(toolExpectations === undefined ? {} : { toolExpectations }),
-    ...(finalTextIncludes === undefined ? {} : { finalTextIncludes }),
-    ...(finalTextExcludes === undefined ? {} : { finalTextExcludes }),
-    ...(minIterations === undefined ? {} : { minIterations }),
-    ...(maxIterations === undefined ? {} : { maxIterations }),
-  };
-  const run = optionalRunOverride(record, label);
-  return {
-    case: evaluationCase,
-    ...(run === undefined ? {} : { run }),
-  };
-}
-
-function optionalRequiredToolStatuses(
-  record: Record<string, unknown>,
-  label: string,
-): AgentBehaviorEvaluationCase['requiredToolStatuses'] | undefined {
-  if (record.requiredToolStatuses === undefined) return undefined;
-  const items = arrayValue(record.requiredToolStatuses, `${label} requiredToolStatuses`);
-  return items.map((item, index) => {
-    const statusLabel = `${label} requiredToolStatuses[${index}]`;
-    const statusRecord = objectRecord(item, statusLabel);
-    return {
-      toolName: requiredNonEmptyString(statusRecord, 'toolName', statusLabel),
-      status: requiredEnum(statusRecord, 'status', TOOL_STATUSES, statusLabel),
-    };
+  const expectation: AgentEvalSuiteExpectation = Object.freeze({
+    id: requiredNonEmptyString(record, 'id', label),
+    userTask: requiredNonEmptyString(record, 'userTask', label),
+    ...(record.expectedStatus === undefined ? {} : {
+      expectedStatus: requiredEnum(record, 'expectedStatus', RUN_STATUSES, label),
+    }),
+    ...(record.requiredToolCalls === undefined ? {} : {
+      requiredToolCalls: Object.freeze(optionalStringArray(record, 'requiredToolCalls', label)!),
+    }),
+    ...(record.forbiddenToolCalls === undefined ? {} : {
+      forbiddenToolCalls: Object.freeze(optionalStringArray(record, 'forbiddenToolCalls', label)!),
+    }),
+    ...(record.requiredToolStatuses === undefined ? {} : {
+      requiredToolStatuses: Object.freeze(parseRequiredToolStatuses(record, label)),
+    }),
+    ...(record.toolExpectations === undefined ? {} : {
+      toolExpectations: Object.freeze(parseToolExpectations(record, label)),
+    }),
+    ...(record.finalTextIncludes === undefined ? {} : {
+      finalTextIncludes: Object.freeze(optionalStringArray(record, 'finalTextIncludes', label)!),
+    }),
+    ...(record.finalTextExcludes === undefined ? {} : {
+      finalTextExcludes: Object.freeze(optionalStringArray(record, 'finalTextExcludes', label)!),
+    }),
+    ...(minTurns === undefined ? {} : { minTurns }),
+    ...(maxTurns === undefined ? {} : { maxTurns }),
+  });
+  return Object.freeze({
+    expectation,
+    ...(record.configuration === undefined ? {} : {
+      configuration: parseConfiguration(record.configuration, `${label} configuration`),
+    }),
   });
 }
 
-function optionalToolExpectations(
-  record: Record<string, unknown>,
+function parseRequiredToolStatuses(
+  record: UnknownManifestCase,
   label: string,
-): AgentBehaviorToolExpectation[] | undefined {
-  if (record.toolExpectations === undefined) return undefined;
-  const items = arrayValue(record.toolExpectations, `${label} toolExpectations`);
-  return items.map((item, index) => {
-    const expectationLabel = `${label} toolExpectations[${index}]`;
-    const expectation = objectRecord(item, expectationLabel) as ManifestToolExpectation;
-    const status = optionalEnum(expectation, 'status', TOOL_STATUSES, expectationLabel);
-    const minCalls = optionalNonNegativeInteger(expectation, 'minCalls', expectationLabel);
-    const maxCalls = optionalNonNegativeInteger(expectation, 'maxCalls', expectationLabel);
-    const argumentIncludes = optionalStringArray(expectation, 'argumentIncludes', expectationLabel);
-    const argumentExcludes = optionalStringArray(expectation, 'argumentExcludes', expectationLabel);
-    const resultIncludes = optionalStringArray(expectation, 'resultIncludes', expectationLabel);
-    const resultExcludes = optionalStringArray(expectation, 'resultExcludes', expectationLabel);
-    if (minCalls !== undefined && maxCalls !== undefined && minCalls > maxCalls) {
-      throw new Error(`${expectationLabel} minCalls cannot be greater than maxCalls.`);
-    }
+): ReadonlyArray<Readonly<{ toolName: string; status: AgentEvalToolStatus }>> {
+  return arrayValue(record.requiredToolStatuses, `${label} requiredToolStatuses`).map((item, index) => {
+    const itemLabel = `${label} requiredToolStatuses[${index}]`;
+    const value = objectRecord(item, itemLabel);
+    requireOnlyKeys(value, new Set(['toolName', 'status']), itemLabel);
+    return Object.freeze({
+      toolName: requiredNonEmptyString(value, 'toolName', itemLabel),
+      status: requiredEnum(value, 'status', TOOL_STATUSES, itemLabel),
+    });
+  });
+}
 
-    return {
-      toolName: requiredNonEmptyString(expectation, 'toolName', expectationLabel),
-      ...(status === undefined ? {} : { status }),
+function parseToolExpectations(
+  record: UnknownManifestCase,
+  label: string,
+): ReadonlyArray<AgentEvalToolExpectation> {
+  return arrayValue(record.toolExpectations, `${label} toolExpectations`).map((item, index) => {
+    const itemLabel = `${label} toolExpectations[${index}]`;
+    const value = objectRecord(item, itemLabel) as UnknownToolExpectation;
+    requireOnlyKeys(value, new Set([
+      'toolName', 'status', 'minCalls', 'maxCalls', 'caseSensitive', 'argumentIncludes',
+      'argumentExcludes', 'resultIncludes', 'resultExcludes',
+    ]), itemLabel);
+    const minCalls = optionalNonNegativeInteger(value, 'minCalls', itemLabel);
+    const maxCalls = optionalNonNegativeInteger(value, 'maxCalls', itemLabel);
+    if (minCalls !== undefined && maxCalls !== undefined && minCalls > maxCalls) {
+      throw new Error(`${itemLabel} minCalls cannot be greater than maxCalls.`);
+    }
+    return Object.freeze({
+      toolName: requiredNonEmptyString(value, 'toolName', itemLabel),
+      ...(value.status === undefined ? {} : {
+        status: requiredEnum(value, 'status', TOOL_STATUSES, itemLabel),
+      }),
       ...(minCalls === undefined ? {} : { minCalls }),
       ...(maxCalls === undefined ? {} : { maxCalls }),
-      ...(expectation.caseSensitive === undefined
-        ? {}
-        : {
-            caseSensitive: booleanValue(
-              expectation.caseSensitive,
-              `${expectationLabel} caseSensitive`,
-            ),
-          }),
-      ...(argumentIncludes === undefined ? {} : { argumentIncludes }),
-      ...(argumentExcludes === undefined ? {} : { argumentExcludes }),
-      ...(resultIncludes === undefined ? {} : { resultIncludes }),
-      ...(resultExcludes === undefined ? {} : { resultExcludes }),
-    };
+      ...(value.caseSensitive === undefined ? {} : {
+        caseSensitive: booleanValue(value.caseSensitive, `${itemLabel} caseSensitive`),
+      }),
+      ...(value.argumentIncludes === undefined ? {} : {
+        argumentIncludes: Object.freeze(optionalStringArray(value, 'argumentIncludes', itemLabel)!),
+      }),
+      ...(value.argumentExcludes === undefined ? {} : {
+        argumentExcludes: Object.freeze(optionalStringArray(value, 'argumentExcludes', itemLabel)!),
+      }),
+      ...(value.resultIncludes === undefined ? {} : {
+        resultIncludes: Object.freeze(optionalStringArray(value, 'resultIncludes', itemLabel)!),
+      }),
+      ...(value.resultExcludes === undefined ? {} : {
+        resultExcludes: Object.freeze(optionalStringArray(value, 'resultExcludes', itemLabel)!),
+      }),
+    });
   });
 }
 
-function optionalRunOverride(
-  record: Record<string, unknown>,
-  label: string,
-): SafeManifestRunOverride | undefined {
-  if (record.run === undefined) return undefined;
-  const run = objectRecord(record.run, `${label} run`);
-  for (const key of Object.keys(run)) {
-    if (FORBIDDEN_RUN_KEYS.has(key)) {
-      throw new Error(
-        `${label} run cannot override ${key}; provider, model and userMessage are controlled by the caller.`,
-      );
-    }
-  }
-  const allowedTools = optionalStringArray(run, 'allowedTools', `${label} run`);
-  const usageMode = optionalEnum(run, 'usageMode', USAGE_MODES, `${label} run`);
-  const mode = optionalEnum(run, 'mode', AGENT_MODES, `${label} run`);
-  const maxIterations = optionalPositiveInteger(run, 'maxIterations', `${label} run`);
-  const keepRecentMessages = optionalPositiveInteger(run, 'keepRecentMessages', `${label} run`);
-  const maxToolResultChars = optionalPositiveInteger(run, 'maxToolResultChars', `${label} run`);
-  const maxConsecutiveToolFailures = optionalPositiveInteger(
-    run,
-    'maxConsecutiveToolFailures',
-    `${label} run`,
-  );
-  const maxToolExecutionMs = optionalPositiveInteger(run, 'maxToolExecutionMs', `${label} run`);
-
-  return {
-    ...(allowedTools === undefined ? {} : { allowedTools }),
-    ...(usageMode === undefined ? {} : { usageMode }),
-    ...(mode === undefined ? {} : { mode }),
-    ...(maxIterations === undefined ? {} : { maxIterations }),
-    ...(keepRecentMessages === undefined ? {} : { keepRecentMessages }),
-    ...(maxToolResultChars === undefined ? {} : { maxToolResultChars }),
-    ...(maxConsecutiveToolFailures === undefined ? {} : { maxConsecutiveToolFailures }),
-    ...(maxToolExecutionMs === undefined ? {} : { maxToolExecutionMs }),
-  };
+function parseConfiguration(value: unknown, label: string): AgentEvalRunConfiguration {
+  const record = objectRecord(value, label);
+  requireOnlyKeys(record, CONFIGURATION_KEYS, label);
+  const maxTurns = optionalPositiveInteger(record, 'maxTurns', label);
+  return Object.freeze({
+    ...(record.mode === undefined ? {} : { mode: requiredEnum(record, 'mode', AGENT_MODES, label) }),
+    ...(record.allowedTools === undefined ? {} : {
+      allowedTools: Object.freeze(optionalStringArray(record, 'allowedTools', label)!),
+    }),
+    ...(maxTurns === undefined ? {} : { maxTurns }),
+  });
 }
 
 function objectRecord(value: unknown, label: string): Record<string, unknown> {
@@ -282,6 +209,12 @@ function objectRecord(value: unknown, label: string): Record<string, unknown> {
     throw new Error(`${label} must be an object.`);
   }
   return value as Record<string, unknown>;
+}
+
+function requireOnlyKeys(record: Record<string, unknown>, allowed: ReadonlySet<string>, label: string): void {
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) throw new Error(`${label} has unsupported key: ${key}.`);
+  }
 }
 
 function requiredArray(record: Record<string, unknown>, key: string, label: string): unknown[] {
@@ -294,11 +227,7 @@ function arrayValue(value: unknown, label: string): unknown[] {
   return value;
 }
 
-function requiredNonEmptyString(
-  record: Record<string, unknown>,
-  key: string,
-  label: string,
-): string {
+function requiredNonEmptyString(record: Record<string, unknown>, key: string, label: string): string {
   if (record[key] === undefined) throw new Error(`${label} ${key} is required.`);
   const value = stringValue(record[key], `${label} ${key}`);
   if (!value.trim()) throw new Error(`${label} ${key} cannot be empty.`);
@@ -312,11 +241,10 @@ function stringValue(value: unknown, label: string): string {
 
 function requiredNumber(record: Record<string, unknown>, key: string, label: string): number {
   if (record[key] === undefined) throw new Error(`${label} ${key} is required.`);
-  const value = record[key];
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
+  if (typeof record[key] !== 'number' || !Number.isFinite(record[key])) {
     throw new Error(`${label} ${key} must be a finite number.`);
   }
-  return value;
+  return record[key];
 }
 
 function optionalStringArray(
@@ -326,8 +254,7 @@ function optionalStringArray(
 ): string[] | undefined {
   if (record[key] === undefined) return undefined;
   return arrayValue(record[key], `${label} ${key}`).map((item, index) =>
-    stringValue(item, `${label} ${key}[${index}]`),
-  );
+    stringValue(item, `${label} ${key}[${index}]`));
 }
 
 function requiredEnum<T extends string>(
@@ -342,37 +269,16 @@ function requiredEnum<T extends string>(
   return value as T;
 }
 
-function optionalEnum<T extends string>(
-  record: Record<string, unknown>,
-  key: string,
-  values: ReadonlySet<T>,
-  label: string,
-): T | undefined {
-  if (record[key] === undefined) return undefined;
-  return requiredEnum(record, key, values, label);
-}
-
-function optionalNonNegativeInteger(
-  record: Record<string, unknown>,
-  key: string,
-  label: string,
-): number | undefined {
+function optionalNonNegativeInteger(record: Record<string, unknown>, key: string, label: string): number | undefined {
   return optionalInteger(record, key, label, 0);
 }
 
-function optionalPositiveInteger(
-  record: Record<string, unknown>,
-  key: string,
-  label: string,
-): number | undefined {
+function optionalPositiveInteger(record: Record<string, unknown>, key: string, label: string): number | undefined {
   return optionalInteger(record, key, label, 1);
 }
 
 function optionalInteger(
-  record: Record<string, unknown>,
-  key: string,
-  label: string,
-  min: number,
+  record: Record<string, unknown>, key: string, label: string, min: number,
 ): number | undefined {
   if (record[key] === undefined) return undefined;
   const value = record[key];
@@ -387,7 +293,7 @@ function booleanValue(value: unknown, label: string): boolean {
   return value;
 }
 
-function assertUnique(values: string[], label: string): void {
+function assertUnique(values: readonly string[], label: string): void {
   const seen = new Set<string>();
   for (const value of values) {
     if (seen.has(value)) throw new Error(`Duplicate ${label}: ${value}.`);

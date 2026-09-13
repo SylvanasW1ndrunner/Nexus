@@ -810,7 +810,8 @@ describe('PostgresDriver runtime errors', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toMatchObject({
-      code: 'QUERY_FAILED',
+      code: 'VALIDATION_ERROR',
+      message: 'PostgreSQL rejected invalid SQL.',
       detail: 'syntax error in metadata query',
       retryable: false,
     });

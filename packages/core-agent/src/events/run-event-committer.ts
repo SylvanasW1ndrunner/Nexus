@@ -1,4 +1,5 @@
 import type { ModelProtocolEnvelope, ValidatedModelAttempt } from '@dbagent/core-llm';
+import type { UsageMode } from '@dbagent/shared';
 import type { RunLeaseReference } from './agent-journal.js';
 import type { AgentInvocationProjection, AgentTurnProjection } from './event-projectors.js';
 import type { SqliteAgentJournal } from './sqlite-agent-journal.js';
@@ -12,6 +13,7 @@ export type CommitValidatedAttemptCommand = {
   lease: RunLeaseReference;
   expectedRunRevision: number;
   expectedTurnRevision: number;
+  billingMode: UsageMode;
   attempt: ValidatedModelAttempt;
 };
 

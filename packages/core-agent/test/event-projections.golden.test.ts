@@ -30,6 +30,210 @@ afterEach(async () => {
 });
 
 describe('Journal event projections', () => {
+  it('drains more than 1000 activities without losing the rejected boundary event', () => {
+    const base: AgentEvent[] = [
+      {
+        eventId: 'stream-input', sequence: 1, schemaVersion: 1,
+        projectId: 'project-stream', sessionId: 'session-stream', runId: 'run-stream',
+        type: 'input.received', occurredAt: '2026-09-03T00:00:00.000Z',
+        payload: { clientRequestId: 'stream-request', content: 'stream activities' },
+      },
+      {
+        eventId: 'stream-run', sequence: 3, schemaVersion: 2,
+        projectId: 'project-stream', sessionId: 'session-stream', runId: 'run-stream',
+        type: 'run.created', occurredAt: '2026-09-03T00:00:01.000Z',
+        payload: { clientRequestId: 'stream-request' },
+      },
+      {
+        eventId: 'stream-turn', sequence: 5, schemaVersion: 1,
+        projectId: 'project-stream', sessionId: 'session-stream', runId: 'run-stream',
+        turnId: 'turn-stream', type: 'turn.started', occurredAt: '2026-09-03T00:00:02.000Z',
+        payload: {},
+      },
+      {
+        eventId: 'stream-attempt', sequence: 7, schemaVersion: 1,
+        projectId: 'project-stream', sessionId: 'session-stream', runId: 'run-stream',
+        turnId: 'turn-stream', attemptId: 'attempt-stream', type: 'model_attempt_started',
+        occurredAt: '2026-09-03T00:00:03.000Z',
+        payload: { origin: { connectionId: 'connection', model: 'model', protocol: 'openai-chat' } },
+      },
+    ];
+    const activities: AgentEvent[] = Array.from({ length: 1_001 }, (_, index) => ({
+      eventId: `stream-delta-${index}`,
+      sequence: 9 + index * 2,
+      schemaVersion: 1 as const,
+      projectId: 'project-stream', sessionId: 'session-stream', runId: 'run-stream',
+      turnId: 'turn-stream', attemptId: 'attempt-stream', type: 'model_delta_batch' as const,
+      occurredAt: '2026-09-03T00:00:04.000Z',
+      payload: { blocks: [{ type: 'text', text: String(index) }] },
+    }));
+    const accumulator = new UserActivityProjectionAccumulator({
+      projectId: 'project-stream', sessionId: 'session-stream', afterSequence: 0, limit: 1_000,
+    });
+    const pages = [];
+    for (const event of [...base, ...activities]) {
+      if (!accumulator.accept(event)) {
+        pages.push(accumulator.drain());
+        expect(accumulator.accept(event)).toBe(true);
+      }
+    }
+    pages.push(accumulator.drain());
+
+    const projected = pages.flatMap(({ items }) => items);
+    expect(pages.map(({ items }) => items.length)).toEqual([1_000, 1]);
+    expect(projected.map(({ sourceSequence }) => sourceSequence)).toEqual(
+      activities.map(({ sequence }) => sequence),
+    );
+    expect(new Set(projected.map(({ activityId }) => activityId)).size).toBe(1_001);
+    expect(pages[0]?.nextSourceSequence).toBe(activities[999]?.sequence);
+    expect(pages[1]?.nextSourceSequence).toBe(activities[1_000]?.sequence);
+    expect(accumulator.finish().items).toEqual([]);
+  });
+
+  it('keeps provider reasoning and Tool-call draft deltas out of User Activity', () => {
+    const events: AgentEvent[] = [
+      {
+        eventId: 'private-input', sequence: 1, schemaVersion: 1,
+        projectId: 'project-private', sessionId: 'session-private', runId: 'run-private',
+        type: 'input.received', occurredAt: '2026-09-04T00:00:00.000Z',
+        payload: { clientRequestId: 'private-request', content: 'inspect the project' },
+      },
+      {
+        eventId: 'private-run', sequence: 2, schemaVersion: 2,
+        projectId: 'project-private', sessionId: 'session-private', runId: 'run-private',
+        type: 'run.created', occurredAt: '2026-09-04T00:00:01.000Z',
+        payload: { clientRequestId: 'private-request' },
+      },
+      {
+        eventId: 'private-turn', sequence: 3, schemaVersion: 1,
+        projectId: 'project-private', sessionId: 'session-private', runId: 'run-private',
+        turnId: 'turn-private', type: 'turn.started', occurredAt: '2026-09-04T00:00:02.000Z',
+        payload: {},
+      },
+      {
+        eventId: 'private-attempt', sequence: 4, schemaVersion: 1,
+        projectId: 'project-private', sessionId: 'session-private', runId: 'run-private',
+        turnId: 'turn-private', attemptId: 'attempt-private', type: 'model_attempt_started',
+        occurredAt: '2026-09-04T00:00:03.000Z',
+        payload: { origin: { connectionId: 'connection', model: 'model', protocol: 'openai-responses' } },
+      },
+      {
+        eventId: 'private-delta', sequence: 5, schemaVersion: 1,
+        projectId: 'project-private', sessionId: 'session-private', runId: 'run-private',
+        turnId: 'turn-private', attemptId: 'attempt-private', type: 'model_delta_batch',
+        occurredAt: '2026-09-04T00:00:04.000Z',
+        payload: {
+          blocks: [
+            { type: 'reasoning-summary', text: 'provider-internal reasoning summary' },
+            {
+              type: 'tool-call-delta', blockOrdinal: 1, draftCallKey: 'draft-private',
+              name: 'filesystem.read', argumentsDelta: '{"path":"secret"}',
+            },
+          ],
+        },
+      },
+      {
+        eventId: 'visible-delta', sequence: 6, schemaVersion: 1,
+        projectId: 'project-private', sessionId: 'session-private', runId: 'run-private',
+        turnId: 'turn-private', attemptId: 'attempt-private', type: 'model_delta_batch',
+        occurredAt: '2026-09-04T00:00:05.000Z',
+        payload: {
+          blocks: [
+            { type: 'reasoning-summary', text: 'still private' },
+            { type: 'text', text: 'Reading the requested project.' },
+          ],
+        },
+      },
+    ];
+
+    const projected = new UserActivityProjector().project(events, {
+      projectId: 'project-private', sessionId: 'session-private', afterSequence: 0, limit: 100,
+    });
+
+    expect(projected.items).toEqual([
+      expect.objectContaining({
+        sourceSequence: 6,
+        kind: 'model-preview',
+        summary: 'Reading the requested project.',
+      }),
+    ]);
+    expect(projected.nextSourceSequence).toBe(6);
+    expect(JSON.stringify(projected)).not.toMatch(/provider-internal|draft-private|secret/u);
+  });
+
+  it('projects a pending approval as an actionable, de-noised user activity', () => {
+    const events: AgentEvent[] = [
+      {
+        eventId: 'approval-input', sequence: 1, schemaVersion: 1,
+        projectId: 'project-approval', sessionId: 'session-approval', runId: 'run-approval',
+        type: 'input.received', occurredAt: '2026-09-03T00:00:00.000Z',
+        payload: { clientRequestId: 'approval-request', content: 'Make the requested change.' },
+      },
+      {
+        eventId: 'approval-run', sequence: 2, schemaVersion: 2,
+        projectId: 'project-approval', sessionId: 'session-approval', runId: 'run-approval',
+        type: 'run.created', occurredAt: '2026-09-03T00:00:01.000Z',
+        payload: { clientRequestId: 'approval-request' },
+      },
+      {
+        eventId: 'approval-turn', sequence: 3, schemaVersion: 1,
+        projectId: 'project-approval', sessionId: 'session-approval', runId: 'run-approval',
+        turnId: 'turn-approval', type: 'turn.started', occurredAt: '2026-09-03T00:00:02.000Z',
+        payload: {},
+      },
+      {
+        eventId: 'approval-attempt', sequence: 4, schemaVersion: 1,
+        projectId: 'project-approval', sessionId: 'session-approval', runId: 'run-approval',
+        turnId: 'turn-approval', attemptId: 'attempt-approval', type: 'model_attempt_started',
+        occurredAt: '2026-09-03T00:00:03.000Z',
+        payload: { origin: { connectionId: 'connection', model: 'model', protocol: 'openai-chat' } },
+      },
+      {
+        eventId: 'approval-proposed', sequence: 5, schemaVersion: 1,
+        projectId: 'project-approval', sessionId: 'session-approval', runId: 'run-approval',
+        turnId: 'turn-approval', attemptId: 'attempt-approval', invocationId: 'invocation-internal',
+        type: 'tool.proposed', occurredAt: '2026-09-03T00:00:04.000Z',
+        payload: {
+          invocationId: 'invocation-internal', callId: 'call-internal', actionOrdinal: 0,
+          name: 'database.execute', arguments: { sql: 'update accounts set status = \'active\'' },
+        },
+      },
+      {
+        eventId: 'approval-requested', sequence: 6, schemaVersion: 1,
+        projectId: 'project-approval', sessionId: 'session-approval', runId: 'run-approval',
+        turnId: 'turn-approval', attemptId: 'attempt-approval', invocationId: 'invocation-internal',
+        type: 'tool.approval_requested', occurredAt: '2026-09-03T00:00:05.000Z',
+        payload: {
+          summary: 'Apply the requested account-status change.',
+          approval: {
+            approvalId: 'approval-user-action', projectId: 'project-approval',
+            sessionId: 'session-approval', runId: 'run-approval', turnId: 'turn-approval',
+            invocationId: 'invocation-internal', canonicalToolId: { namespace: 'database', name: 'execute' },
+            toolRevision: 'database.execute@7', recoveryClass: 'non_idempotent',
+            intentDigest: 'd'.repeat(64), proposedRevision: 4, status: 'pending',
+          },
+        },
+      },
+    ];
+
+    const projected = new UserActivityProjector().project(events, {
+      projectId: 'project-approval', sessionId: 'session-approval', afterSequence: 0, limit: 100,
+    });
+    const approval = projected.items.find(({ kind }) => kind === 'approval');
+
+    expect(approval).toMatchObject({
+      kind: 'approval', phase: 'waiting',
+      summary: 'Apply the requested account-status change.',
+    });
+    expect(approval?.detail).toEqual({
+      approvalId: 'approval-user-action',
+      actionSummary: 'Apply the requested account-status change.',
+    });
+    expect(JSON.stringify(approval)).not.toMatch(
+      /normalizedArgumentsDigest|invocationId|toolRevision|canonicalToolId|namespace|decision/u,
+    );
+  });
+
   it('keeps an ordinary user Run visible when its request id uses the legacy-import prefix', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dbagent-projection-prefix-'));
     temporaryDirectories.push(directory);
@@ -211,6 +415,47 @@ describe('Journal event projections', () => {
     expect(user.finish().items).toEqual([]);
   });
 
+  it('retains a terminal Run until its last asynchronous subagent outcome arrives', () => {
+    const base = {
+      projectId: 'project-retention', sessionId: 'session-retention', runId: 'run-with-child',
+      occurredAt: '2026-08-10T00:00:00.000Z',
+    };
+    const events: AgentEvent[] = [
+      {
+        ...base, eventId: 'event-child-1', sequence: 1, schemaVersion: 1,
+        type: 'input.received', payload: { clientRequestId: 'request-with-child', content: 'delegate' },
+      },
+      {
+        ...base, eventId: 'event-child-2', sequence: 2, schemaVersion: 2,
+        type: 'run.created', payload: { clientRequestId: 'request-with-child' },
+      },
+      {
+        ...base, eventId: 'event-child-3', sequence: 3, schemaVersion: 1,
+        type: 'subagent.started', payload: { subagentId: 'child-1', summary: 'started' },
+      },
+      {
+        ...base, eventId: 'event-child-4', sequence: 4, schemaVersion: 1,
+        type: 'run.failed', payload: { code: 'PARENT_TERMINAL' },
+      },
+      {
+        ...base, eventId: 'event-child-5', sequence: 5, schemaVersion: 1,
+        type: 'subagent.completed', payload: { subagentId: 'child-1', summary: 'done', refs: [] },
+      },
+    ];
+    const projection = new SessionProjectionAccumulator({
+      projectId: base.projectId, sessionId: base.sessionId, afterSequence: 0, limit: 10,
+    }, true);
+
+    for (const event of events) expect(projection.accept(event)).toBe(true);
+
+    expect(projection.finish().runs).toEqual([
+      expect.objectContaining({ runId: base.runId, state: 'Failed' }),
+    ]);
+    expect(projection.retainedScopes()).toEqual({
+      events: 0, runs: 0, turns: 0, attempts: 0, invocations: 0, finalText: 0,
+    });
+  });
+
   it('pages thousands of Runs and messages under one exact visible-item limit', () => {
     const events = terminalRunEvents(2_000);
     const seenMessages = new Set<number>();
@@ -308,27 +553,26 @@ function terminalRunEvents(count: number): AgentEvent[] {
       projectId: 'project-retention',
       sessionId: 'session-retention',
       runId,
-      schemaVersion: 1,
       occurredAt: '2026-08-10T00:00:00.000Z',
     };
     events.push({
       ...base,
       eventId: `event-retention-${++sequence}`,
-      sequence,
+      sequence, schemaVersion: 1,
       type: 'input.received',
       payload: { clientRequestId: `request-${index}`, content: `input-${index}` },
     });
     events.push({
       ...base,
       eventId: `event-retention-${++sequence}`,
-      sequence,
+      sequence, schemaVersion: 2,
       type: 'run.created',
       payload: { clientRequestId: `request-${index}` },
     });
     events.push({
       ...base,
       eventId: `event-retention-${++sequence}`,
-      sequence,
+      sequence, schemaVersion: 1,
       type: 'run.failed',
       payload: { code: 'LEGACY_TERMINAL' },
     });
@@ -366,7 +610,7 @@ async function createGoldenJournal() {
   await new RunEventCommitter(journal).commitValidatedAttempt({
     projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
     turnId: 'turn-golden', commandId: 'projection-model-commit', lease: leaseRef,
-    expectedRunRevision: 3, expectedTurnRevision: 1,
+    expectedRunRevision: 3, expectedTurnRevision: 1, billingMode: 'byok',
     attempt: await validatedAttemptFixture('attempt-golden'),
   });
   const projection = await journal.getRunProjection(created.runId);
@@ -412,9 +656,9 @@ async function createLargeJournal() {
     projectId: 'project-a', sessionId: 'session-large', runId: created.runId,
     commandId: 'large-start', lease: leaseRef, expectedRunRevision: 1,
   });
-  const filler = Array.from({ length: 10_005 }, () => ({
-    type: 'usage.recorded' as const,
-    payload: { scope: 'run' as const, inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+  const filler = Array.from({ length: 10_005 }, (_, index) => ({
+    type: 'artifact.expired' as const,
+    payload: { artifactId: `artifact_${index.toString(16).padStart(64, '0')}` },
   }));
   const committed = await journal.commit({
     projectId: 'project-a', sessionId: 'session-large', runId: created.runId,
@@ -462,7 +706,9 @@ function withDiscardedPreview(events: AgentEvent[]): AgentEvent[] {
       payload: {
         finalContentRef: 'turn:turn-golden:text:0',
         deliveryStatus: 'not-required',
-        evidenceRefs: [GOLDEN_ARTIFACT_ID],
+        // This ordinary final answer adopts no Tool evidence. Artifact identity
+        // is projected by artifact.created and is not a Delivery Evidence Ref.
+        evidenceRefs: [],
       },
     },
     {

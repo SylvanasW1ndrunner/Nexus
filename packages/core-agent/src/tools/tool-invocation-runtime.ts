@@ -90,7 +90,6 @@ import {
   type ToolInvocationScheduleState,
 } from './tool-scheduler.js';
 import { createToolActionSummary } from './tool-action-summary.js';
-import { redactPersistedAgentString } from '../redaction.js';
 
 const sharedResourceLeases = new RunToolResourceLeases();
 const DEFAULT_MAX_CONCURRENCY = 4;
@@ -2575,7 +2574,7 @@ function authorizationAudit(
 
 function normalizeToolProgressSummary(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const summary = redactPersistedAgentString(value).trim();
+  const summary = value.trim();
   if (summary.length === 0) return undefined;
   if (Buffer.byteLength(summary, 'utf8') > TOOL_PROGRESS_MAX_ITEM_BYTES) return undefined;
   return summary;

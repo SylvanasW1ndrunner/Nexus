@@ -12,6 +12,7 @@ export { createWorkspaceToolGeneration, assertWorkspaceToolGeneration } from './
 export type { WorkspaceBaseToolName, WorkspaceToolGeneration, WorkspaceToolOptions } from './workspace-tools.js';
 export { createNoReplaceWorkspaceMutationAdapter } from './workspace-mutation-adapter.js';
 export type { WorkspaceMutationAdapter, WorkspaceMutationPrimitive, WorkspaceParentMutationFence, WorkspaceMutationSnapshot, WorkspaceMutationJournal } from './workspace-mutation-adapter.js';
+export { createNodeWorkspaceMutationPrimitive } from './node-workspace-mutation-primitive.js';
 export * from './process-runtime.js';
 export * from './sandbox-executor.js';
 export * from './executable-discovery.js';
@@ -24,4 +25,6 @@ export * from './subagent-tools.js';
 export * from './skill-tools.js';
 export * from './tool-search-tools.js';
 export * from './result-tools.js';
+export * from './result-materialization-store.js';
+export * from './result-file-tools.js';
 export { createAskUserToolContribution } from './interaction-tools.js';

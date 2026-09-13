@@ -43,7 +43,7 @@ export class InMemoryLlmTelemetrySink implements LlmTelemetrySink {
   constructor(private readonly maxEvents = 10_000) {}
 
   emit(event: LlmTelemetryEvent): void {
-    this.events.push(sanitizeTelemetryEvent(event));
+    this.events.push(cloneEvent(event));
     if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
   }
 
@@ -151,34 +151,10 @@ export class CompositeLlmTelemetrySink implements LlmTelemetrySink {
   constructor(private readonly sinks: LlmTelemetrySink[]) {}
 
   async emit(event: LlmTelemetryEvent): Promise<void> {
-    const sanitized = sanitizeTelemetryEvent(event);
-    await Promise.all(this.sinks.map(async (sink) => sink.emit(sanitized)));
+    await Promise.all(this.sinks.map(async (sink) => sink.emit(cloneEvent(event))));
   }
 }
 
-export function sanitizeTelemetryEvent(event: LlmTelemetryEvent): LlmTelemetryEvent {
-  const attributes = event.attributes
-    ? Object.fromEntries(
-        Object.entries(event.attributes)
-          .filter(([key]) => !isSecretKey(key))
-          .map(([key, value]) => [key, typeof value === 'string' ? redactSecretPatterns(value) : value]),
-      )
-    : undefined;
-  return {
-    ...event,
-    ...(attributes === undefined ? {} : { attributes }),
-  };
-}
-
-function isSecretKey(key: string): boolean {
-  return /(?:api[_-]?key|authorization|password|credential|client[_-]?secret|access[_-]?token)/i.test(key);
-}
-
-function redactSecretPatterns(value: string): string {
-  return value
-    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]')
-    .replace(/\b(?:sk|ak)-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]');
-}
 
 function cloneEvent(event: LlmTelemetryEvent): LlmTelemetryEvent {
   return {

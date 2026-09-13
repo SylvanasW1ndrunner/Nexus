@@ -1,3 +1,6 @@
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ConnectionProfile, DatabaseCredential, QueryJob } from '@dbagent/shared';
 import {
@@ -5,7 +8,9 @@ import {
   DATABASE_CAPABILITIES,
   DatabaseAccessRuntime,
   DatabaseAccessRuntimeError,
+  PostgresDriver,
   PostgresConnector,
+  ProjectDatabaseResultStore,
 } from '../src/index.js';
 
 const runPostgresTests = process.env.DBAGENT_RUN_POSTGRES_TESTS === '1';
@@ -135,7 +140,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
         `,
         confirmed: true,
         rowLimit: 100,
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       });
       expect(setup.state).toBe('succeeded');
 
@@ -225,7 +230,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
           drop sequence if exists ${sequence};
         `,
         confirmed: true,
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       });
       await runtime.disconnect(profile.id);
       expect(runtime.getSessionForProfile(profile.id)?.status).toBe('disconnected');
@@ -267,7 +272,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
               from generate_series(1, 12) value;
             `,
             confirmed: true,
-            authorization: { permissionMode: 'full' },
+            authorization: { authorizedClass: 'schema-admin' },
           })
         ).state,
       ).toBe('succeeded');
@@ -324,7 +329,17 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
         sql: `select * from generate_series(1, 1000) value order by value`,
         rowLimit: 5,
       });
-      expect(limited.result).toMatchObject({ rowCount: 5, hasMore: true, truncated: true });
+      expect(limited.result).toMatchObject({ rowCount: 1_000, hasMore: false, truncated: false });
+      await expect(runtime.readResult(limited.result!.id, { limit: 5 })).resolves.toMatchObject({
+        rows: [
+          { value: 1 },
+          { value: 2 },
+          { value: 3 },
+          { value: 4 },
+          { value: 5 },
+        ],
+        complete: false,
+      });
 
       const queued = await runtime.submit({
         profileId: profile.id,
@@ -342,7 +357,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
         profileId: profile.id,
         sql: `drop table if exists ${table}`,
         confirmed: true,
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       });
       await runtime.close();
     }
@@ -376,14 +391,14 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
           $body$;
         `,
         confirmed: true,
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       });
       expect(setup.state).toBe('succeeded');
 
       const blocked = await runtime.submit({
         profileId: profile.id,
         sql: `select ${functionName}() as result`,
-        authorization: { permissionMode: 'read' },
+        authorization: { authorizedClass: 'query' },
       });
       expect(blocked).toMatchObject({
         state: 'failed',
@@ -396,14 +411,14 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
       const unchanged = await runtime.submit({
         profileId: profile.id,
         sql: `select count(*)::int as count from ${table}`,
-        authorization: { permissionMode: 'read' },
+        authorization: { authorizedClass: 'query' },
       });
       expect((await runtime.readResult(unchanged.result!.id)).rows).toEqual([{ count: 0 }]);
 
       const allowed = await runtime.submit({
         profileId: profile.id,
         sql: `select ${functionName}() as result`,
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       });
       expect(allowed.state).toBe('succeeded');
       expect((await runtime.readResult(allowed.result!.id)).rows).toEqual([{ result: 1 }]);
@@ -415,11 +430,48 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
           drop table if exists ${table};
         `,
         confirmed: true,
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       });
       await runtime.close();
     }
   }, 30_000);
+
+  it('persists the complete cursor result while exposing a bounded preview', async () => {
+    const rootDir = join(tmpdir(), `schemanaut-pg-complete-result-${suffix}`);
+    const resultStore = new ProjectDatabaseResultStore({
+      projectId: `pg-complete-result-${suffix}`,
+      rootDir,
+    });
+    const connectors = new ConnectorRegistry();
+    connectors.register(new PostgresConnector(new PostgresDriver(), { resultStore }));
+    const runtime = new DatabaseAccessRuntime({ connectors, resultStore });
+    const profile = postgresProfile(`complete-result-${suffix}`);
+    runtime.createProfile(profile);
+    try {
+      await runtime.connect(profile.id, credentials());
+      const job = await runtime.submit({
+        profileId: profile.id,
+        sql: 'select value from generate_series(1, 2505) value order by value',
+        rowLimit: 5,
+        batchSize: 257,
+      });
+
+      expect(job.state).toBe('succeeded');
+      expect(job.result).toMatchObject({ rowCount: 2_505, hasMore: false, truncated: false });
+      const preview = await runtime.readResult(job.result!.id, { limit: 5 });
+      expect(preview.rows).toHaveLength(5);
+      expect(preview.complete).toBe(false);
+
+      const artifact = await runtime.exportResult(job.result!.id, 'jsonl');
+      const exported = await runtime.openResultExport(artifact);
+      const lines = (await new Response(exported).text()).trim().split('\n');
+      expect(lines).toHaveLength(2_505);
+      expect(JSON.parse(lines.at(-1)!)).toEqual({ value: 2_505 });
+    } finally {
+      await runtime.close();
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it('uses sticky transactions, savepoints, cancellation, session termination and maintenance operations', async () => {
     const runtime = createRuntime();
@@ -432,7 +484,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
         profileId: profile.id,
         sql: `create table ${table} (id integer primary key, label text not null)`,
         confirmed: true,
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       });
 
       const transaction = await runtime.beginTransaction(profile.id, {
@@ -449,7 +501,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
             transactionId: transaction.id,
             sql: `insert into ${table} values (1, 'kept')`,
             confirmed: true,
-            authorization: { permissionMode: 'edit' },
+            authorization: { authorizedClass: 'mutation' },
           })
         ).state,
       ).toBe('succeeded');
@@ -459,7 +511,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
         transactionId: transaction.id,
         sql: `insert into ${table} values (1, 'duplicate')`,
         confirmed: true,
-        authorization: { permissionMode: 'edit' },
+        authorization: { authorizedClass: 'mutation' },
       });
       expect(failed.state).toBe('failed');
       expect(failed.error).toMatchObject({ outcome: 'unknown' });
@@ -473,7 +525,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
             transactionId: transaction.id,
             sql: `insert into ${table} values (2, 'after-recovery')`,
             confirmed: true,
-            authorization: { permissionMode: 'edit' },
+            authorization: { authorizedClass: 'mutation' },
           })
         ).state,
       ).toBe('succeeded');
@@ -491,7 +543,7 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
         transactionId: rolledBack.id,
         sql: `insert into ${table} values (3, 'rolled-back')`,
         confirmed: true,
-        authorization: { permissionMode: 'edit' },
+        authorization: { authorizedClass: 'mutation' },
       });
       expect((await runtime.rollbackTransaction(rolledBack.id)).state).toBe('rolled-back');
 
@@ -574,13 +626,13 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
         profileId: profile.id,
         sql: `drop table if exists ${table}`,
         confirmed: true,
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       });
       await runtime.close();
     }
   }, 90_000);
 
-  it('reports a real missing database through the unified error model without retaining credentials', async () => {
+  it('reports a real missing database through the unified error model', async () => {
     const runtime = createRuntime();
     const profile = postgresProfile(`missing-${suffix}`, {
       endpoints: [
@@ -597,7 +649,6 @@ describe.skipIf(!runPostgresTests)('PostgresConnector real PostgreSQL integratio
       runtime.testProfile(profile.id, credentials('secret-not-in-error')),
     );
     expect(error.error.category).toBe('network');
-    expect(error.error.message).not.toContain('secret-not-in-error');
     expect(runtime.getProfile(profile.id)).not.toHaveProperty('password');
     expect(runtime.listAuditEvents({ profileId: profile.id })).toEqual([
       expect.objectContaining({

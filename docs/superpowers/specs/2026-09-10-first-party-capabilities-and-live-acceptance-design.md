@@ -55,7 +55,7 @@ Capability 是由 Host 注册、由 Agent 按任务发现并激活的增强 Tool
 
 每个内置 Capability 必须满足：
 
-1. **静态注册、延迟激活**：默认产品组合注册模块 manifest，但首轮不把其完整 Tool schema 全部发送给模型；Agent 通过 `tool_search` 发现并激活。
+1. **静态注册、延迟激活**：默认产品组合注册模块 manifest，但首轮不把其完整 Tool schema 全部发送给模型；Agent 通过 `tool_search` 发现并激活。激活成功后整个 Tool generation 在下一 Turn 直接加载，不再逐个 select Tool。
 2. **外部状态即事实**：probe 只观察当前环境，不读取 SchemaNaut 专属 Capability 配置；外部状态改变后再次 probe，暂时失败不永久缓存。
 3. **可行动失败**：不可用结果至少说明缺失依赖、受影响能力、外部修复方式和重试动作；原因遵守通用大小和生命周期约束。用户负责外部诊断与输出的敏感性。
 4. **帮助不是配置面**：Agent 可以使用基础 Tool 执行用户要求的外部配置步骤；Capability 可提供帮助 Tool，但不得保存一份 SchemaNaut 所有的“已配置”状态。
@@ -77,8 +77,8 @@ Capability 是由 Host 注册、由 Agent 按任务发现并激活的增强 Tool
 - 不进行任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是 BrowserSession Host Port/
   浏览器连接器复用现有浏览器登录态时，产品合同中 Agent 只获得不透明的 browser session/page 引用；Agent-facing
   schema 不接受 Cookie、API Header 或 Authorization，且
-  Cookie/Set-Cookie 不进入 prepared intent、结果或 Journal；它不扫描网页正文、外部命令输出或用户 browser_test
-  代码输出。基础 web_fetch 无状态，web_search API 凭据 HTTPS-only。
+  浏览器协议和会话中的 Cookie/Set-Cookie 字段和值不进入 prepared intent、结果或 Journal；它不扫描网页正文、外部命令输出或用户 browser_test
+  代码输出。
 - 外部文件或登录状态改变后可重新 probe；父进程 PATH 或环境改变时必须重启 Host 才能继承新状态。
 - 原生 Windows 无强 OS 隔离时，批准后的自然 root exit 可以报告命令退出，但 containment 和完整 process-tree proof 必须标为 unverified；取消或终止时，无法证明停止的 descendant 仍为 unknown。本轮不引入 Job Object。
 - 默认 `NativeSandboxExecutor` 明确表示“无 OS 隔离”。当策略要求强沙盒而 Host 无法提供时返回 `unavailable`；其他情况按策略产生 `ask-unsandboxed`，不得称为已沙盒化。
@@ -148,7 +148,7 @@ Tool：
 CDP 会话以复用登录态；后续可以替换为 extension 或 native bridge。其产品合同只将不透明的 browser session/page
 引用交给 Agent，并提供 `browser_navigate`、`browser_read`、`browser_click`、`browser_type_or_interact`、
 `browser_screenshot` 和 `browser_test`；为完成这些操作可以进行必要的页面交互。Cookie、API Header 和
-Authorization 不是 Agent 参数，Cookie/Set-Cookie 不进入 Agent schema、prepared intent、结果或 Journal。
+Authorization 不是 Agent 参数，浏览器协议和会话中的 Cookie/Set-Cookie 字段和值不进入 Agent schema、prepared intent、结果或 Journal。
 
 CLI 不内嵌 Chromium。外部 `playwright` CLI 仅作无登录截图/测试回退或用户自行维护的测试配置，不承担登录态共享；
 `browser_pdf` 可作为可选导出，不是核心登录会话接口。

@@ -1,15 +1,26 @@
+import type { ToolQuestionBundle } from '../tools/tool-question.js';
 import type {
   DecodedModelContentBlock, ModelFinishReason, ModelTokenUsage,
 } from '@dbagent/core-llm';
-import type { PortableValue } from '@dbagent/shared';
+import type { PortableValue, UsageMode } from '@dbagent/shared';
+import type { ToolRecoveryClass, ToolAccess, PreparedToolIntent } from '../tools/tool-protocol.js';
+import type { ToolScheduleDecision } from '../tools/tool-scheduler.js';
 import type {
-  AgentContextCheckpoint,
-  AgentMessage,
-  AgentRunRecord,
-  AgentSession,
-  AgentSubagentRecord,
-  AgentUserPreference,
+  AgentMode,
+  AgentToolAuditEvidence,
+  AgentToolCompletionEvidence,
+  ToolDangerLevel,
+  ToolPermissionAction,
+  ToolPermissionDecision,
 } from '../types.js';
+import type {
+  LegacyAgentContextCheckpoint as AgentContextCheckpoint,
+  LegacyAgentMessage as AgentMessage,
+  LegacyAgentRunRecord as AgentRunRecord,
+  LegacyAgentSession as AgentSession,
+  LegacyAgentSubagentRecord as AgentSubagentRecord,
+  LegacyAgentUserPreference as AgentUserPreference,
+} from '../session/legacy-import-types.js';
 
 export const AGENT_EVENT_TYPES = [
   'input.received',
@@ -38,21 +49,30 @@ export const AGENT_EVENT_TYPES = [
   'delivery.decided',
   'plan.created',
   'plan.updated',
+  'tool.activated',
   'tool.proposed',
-  'tool.validated',
+  'tool.prepared',
+  'tool.permission_evaluated',
+  'tool.waiting_for_user',
+  'tool.timed_out',
+  'tool.unsupported_revision',
   'tool.approval_requested',
   'tool.authorized',
   'tool.denied',
   'tool.started',
   'tool.progress',
+  'tool.hook_rejected',
+  'tool.hook_warning',
   'tool.succeeded',
   'tool.failed',
   'tool.cancelled',
-  'tool.outcome_unknown',
+  'tool.unknown',
   'tool.outcome_resolution_requested',
   'tool.outcome_resolved',
   'tool.retry_authorized',
   'tool.observed',
+  'tool.transition_committed',
+  'context.compaction_requested',
   'context.compaction_started',
   'context.compacted',
   'context.compaction_failed',
@@ -61,14 +81,42 @@ export const AGENT_EVENT_TYPES = [
   'artifact.deleted',
   'legacy.imported',
   'skill.activated',
+  'capability.discovered',
   'capability.snapshot_captured',
   'subagent.started',
   'subagent.steered',
   'subagent.completed',
   'subagent.failed',
   'subagent.cancelled',
+  'runtime.command_applied',
   'usage.recorded',
 ] as const;
+
+export type ToolPermissionAuditFact = {
+  mode: AgentMode;
+  decision: ToolPermissionDecision;
+  /** Exact global enterprise policy used for this decision. */
+  policyRevision: string;
+  matchedRuleIds: string[];
+  facts: {
+    toolName: string;
+    dangerLevel: ToolDangerLevel;
+    readonly: boolean;
+    recoveryClass: ToolRecoveryClass;
+    access: ToolAccess;
+    unknownRisk: boolean;
+    resolvedAddresses: string[];
+    targets: PortableValue[];
+    actions: ToolPermissionAction[];
+    paths: string[];
+    hosts: string[];
+    network: boolean;
+    externalWrite: boolean;
+    destructive: boolean;
+    credentials: boolean;
+    admin: boolean;
+  };
+};
 
 export type AgentEventType = (typeof AGENT_EVENT_TYPES)[number];
 
@@ -90,19 +138,36 @@ export type AgentRunState =
   | 'Failed'
   | 'Cancelled';
 
+export type AgentResumableState =
+  | 'created'
+  | 'Preparing'
+  | 'Compacting'
+  | 'CallingModel'
+  | 'ReceivingModel'
+  | 'ResolvingActions'
+  | 'ExecutingTools'
+  | 'ApplyingObservations'
+  | 'Finalizing';
+
 type EmptyPayload = Record<string, never>;
 type ToolTerminalPayload = {
+  intentDigest?: string;
   summary: string;
+  /** Agent Artifact handles only. */
   resultRefs: string[];
+  /** Provider-neutral durable evidence; ResultHandle references are not Agent Artifacts. */
+  evidenceRefs: string[];
   durableSummary?: PortableValue;
   /** Bounded semantic result used to recreate the exact Observation after restart. */
   modelProjection?: PortableValue;
   /** Bounded user-facing view; full content is referenced through resultRefs. */
   userProjection?: PortableValue;
+  auditEvidence?: AgentToolAuditEvidence;
+  completionEvidence?: AgentToolCompletionEvidence;
   error?: ToolExecutionErrorFact;
 };
 
-export type ToolEffectFact = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
+export type ToolRecoveryClassFact = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
 
 export type CanonicalToolIdFact = { namespace?: string; name: string };
 
@@ -115,6 +180,15 @@ export type ToolExecutionErrorFact = {
     | 'TOOL_NOT_FOUND'
     | 'TOOL_REVISION_MISMATCH'
     | 'TOOL_INPUT_INVALID'
+    | 'invalid_cursor'
+    | 'TOOL_RESOURCE_NOT_FOUND'
+    | 'TOOL_CONFLICT'
+    | 'target_changed'
+    | 'conflict'
+    | 'TOOL_PRECONDITION_FAILED'
+    | 'TOOL_EXTERNAL_FAILED'
+    | 'TOOL_LIMIT_EXCEEDED'
+    | 'TOOL_PERMISSION_DENIED'
     | 'OUTCOME_RESOLVED_FAILED';
   category:
     | 'internal'
@@ -124,6 +198,10 @@ export type ToolExecutionErrorFact = {
     | 'unavailable'
     | 'conflict'
     | 'validation'
+    | 'authorization'
+    | 'external'
+    | 'precondition'
+    | 'limit'
     | 'resolution';
   retryable: boolean;
   outcome: 'not_applied' | 'unknown';
@@ -138,8 +216,8 @@ export type ToolApprovalFact = {
   invocationId: string;
   canonicalToolId: CanonicalToolIdFact;
   toolRevision: string;
-  effect: ToolEffectFact;
-  normalizedArgumentsDigest: string;
+  recoveryClass: ToolRecoveryClassFact;
+  intentDigest: string;
   proposedRevision: number;
   status: 'pending' | 'approved' | 'denied';
   decidedAt?: string;
@@ -152,8 +230,10 @@ export type ToolObservationFact = {
   invocationId: string;
   summary: string;
   evidenceRefs: string[];
-  outcome: 'succeeded' | 'failed' | 'cancelled' | 'outcome_unknown' | 'denied';
+  outcome: 'succeeded' | 'failed' | 'cancelled' | 'unknown' | 'denied' | 'timed_out' | 'unsupported_revision';
   modelProjection?: PortableValue;
+  auditEvidence?: AgentToolAuditEvidence;
+  completionEvidence?: AgentToolCompletionEvidence;
   errorCode?: ToolExecutionErrorFact['code'];
 };
 
@@ -170,6 +250,25 @@ export type LegacyImportedSessionRecord = {
   updatedAt: string;
   lastMessageAt: string | null;
 };
+
+export type RunIngressConfigurationSnapshot = Readonly<{
+  schemaVersion: 1;
+  /** Digest of the normalized public start request; excludes runtime-generated identities. */
+  clientRequestDigest?: string;
+  mode: AgentMode;
+  /**
+   * Exact, durable role-prompt layers.  This keeps the public append/replace
+   * contract available when a Run is reopened or replayed instead of
+   * persisting only a precompiled instruction string.
+   */
+  rolePrompt?: Readonly<{
+    default?: Readonly<{ mode: 'append' | 'replace'; content: string }>;
+    run?: Readonly<{ mode: 'append' | 'replace'; content: string }>;
+  }>;
+  capabilityInstructions: readonly string[];
+  allowedTools?: readonly string[];
+  sessionSkillRevision: number;
+}>;
 
 export type PersistedValidatedAttempt = {
   attemptId: string;
@@ -191,7 +290,14 @@ export interface AgentEventPayloadMap {
   };
   'run.created': {
     clientRequestId: string;
+    /** Internal exact Run configuration, excluded from user/model input projections. */
+    configuration?: RunIngressConfigurationSnapshot;
     visibility?: 'legacy-import-carrier';
+    parent?: {
+      runId: string;
+      turnId: string;
+      invocationId: string;
+    };
   };
   'run.environment_bound': {
     environmentBindingId: string;
@@ -200,11 +306,20 @@ export interface AgentEventPayloadMap {
     binding?: PortableValue;
   };
   'run.started': EmptyPayload;
-  'run.resumed': { reason?: string };
+  'run.resumed': {
+    resumeState: AgentResumableState;
+    reason?: string;
+    /** True only when a previously blocked, already-closed Turn is retired. */
+    clearTurn?: boolean;
+  };
   'run.steered': { clientRequestId: string; content: PortableValue };
   'run.input_requested': { reason: string; connectionId?: string };
   'run.cancel_requested': { reason?: string };
-  'run.limit_reached': { limit: string; value?: number };
+  'run.limit_reached': {
+    limit: string;
+    value?: number;
+    resumeState: AgentResumableState;
+  };
   'run.completed': {
     finalContentRef: string;
     deliveryStatus: 'not-required' | 'verified' | 'unverified';
@@ -212,7 +327,11 @@ export interface AgentEventPayloadMap {
   };
   'run.failed': { code: string; detail?: PortableValue };
   'run.cancelled': { reason?: string };
-  'run.interrupted': { code: string; detail?: PortableValue };
+  'run.interrupted': {
+    code: string;
+    detail?: PortableValue;
+    resumeState: AgentResumableState;
+  };
   'turn.started': {
     turnSnapshotId?: string;
     environmentBindingId?: string;
@@ -249,9 +368,14 @@ export interface AgentEventPayloadMap {
     verifierRevision?: string;
     evidenceRefs: string[];
     reason?: string;
+    /** Bounded Model-visible semantic feedback, present only for revision-requested. */
+    observation?: PortableValue;
   };
   'plan.created': { planId: string; revision: number; plan: PortableValue };
   'plan.updated': { planId: string; revision: number; plan: PortableValue };
+  'tool.activated': {
+    tools: Array<{ name: string; toolRevision: string; handlerRevision: string }>;
+  };
   'tool.proposed': {
     invocationId: string;
     callId: string;
@@ -259,35 +383,88 @@ export interface AgentEventPayloadMap {
     name: string;
     arguments: PortableValue;
   };
-  'tool.validated':
+  'tool.prepared':
     | {
         invocationId: string;
+        actionSummary: string;
+        intent: PreparedToolIntent;
+        deadline: string;
+        catalogRevision: string;
         canonicalToolId: CanonicalToolIdFact;
         toolRevision: string;
-        effect: ToolEffectFact;
-        normalizedArgumentsDigest: string;
+        recoveryClass: ToolRecoveryClassFact;
+        intentDigest: string;
         proposedRevision: number;
+        permissionAudit?: ToolPermissionAuditFact;
         retryOf?: string;
         retryPermitId?: string;
       }
     | {
         invocationId: string;
+        actionSummary: string;
         validationError: ToolExecutionErrorFact;
       };
   'tool.approval_requested': { approval: ToolApprovalFact; summary: string };
-  'tool.authorized': { approvalId: string; invocationId: string };
-  'tool.denied': { approvalId: string; invocationId: string; reason: string };
+  'tool.permission_evaluated': { invocationId: string; intentDigest: string; permissionAudit: ToolPermissionAuditFact; retryOf?: string; retryPermitId?: string };
+  'tool.waiting_for_user': { invocationId: string; intentDigest: string; questionId: string; questionRevision: number; bundle: ToolQuestionBundle };
+  'tool.timed_out': ToolTerminalPayload;
+  'tool.unsupported_revision': ToolTerminalPayload;
+  'tool.authorized': {
+    intentDigest: string;
+    approvalId: string;
+    invocationId: string;
+    actionSummary?: string;
+    decision?: {
+      status: 'approved';
+      decidedAt: string;
+      decidedBy?: string;
+      reason?: string;
+    };
+  };
+  'tool.denied': {
+    intentDigest: string;
+    approvalId: string;
+    invocationId: string;
+    actionSummary?: string;
+    reason: string;
+    decision?: {
+      status: 'denied';
+      decidedAt: string;
+      decidedBy?: string;
+      reason?: string;
+    };
+  };
   'tool.started': {
+    intentDigest: string;
+    access: ToolAccess;
+    concurrency: 'read' | 'write' | 'exclusive';
+    resourceKeys: string[];
     invocationId: string;
     idempotencyKey: string;
     fencingToken: number;
     attempt: number;
+    /** Run revision after the atomic Tool start transition committed. */
+    runRevision: number;
+    /** Fresh authorization evaluated immediately before the execution fence. */
+    permissionAudit: ToolPermissionAuditFact;
   };
   'tool.progress': { invocationId: string; summary: string };
+  'tool.hook_rejected': {
+    invocationId: string;
+    hookId: string;
+    hookRevision: string;
+    summary: string;
+  };
+  'tool.hook_warning': {
+    invocationId: string;
+    hookId: string;
+    hookRevision: string;
+    summary: string;
+  };
   'tool.succeeded': ToolTerminalPayload;
   'tool.failed': ToolTerminalPayload;
   'tool.cancelled': ToolTerminalPayload;
-  'tool.outcome_unknown': ToolTerminalPayload;
+  'tool.unknown': ToolTerminalPayload;
   'tool.outcome_resolution_requested': { invocationId: string; summary: string };
   'tool.outcome_resolved': ToolTerminalPayload & {
     resolutionId: string;
@@ -296,22 +473,51 @@ export interface AgentEventPayloadMap {
     outcome: 'succeeded' | 'failed';
     canonicalToolId: CanonicalToolIdFact;
     toolRevision: string;
-    effect: ToolEffectFact;
-    normalizedArgumentsDigest: string;
+    recoveryClass: ToolRecoveryClassFact;
+    intentDigest: string;
     proposedRevision: number;
   };
   'tool.retry_authorized': {
     invocationId: string;
     permitId: string;
     toolRevision: string;
-    effect: ToolEffectFact;
-    normalizedArgumentsDigest: string;
+    recoveryClass: ToolRecoveryClassFact;
+    intentDigest: string;
     reason: string;
   };
   'tool.observed': ToolObservationFact;
-  'context.compaction_started': { checkpointId: string };
-  'context.compacted': { checkpointId: string; summaryRef: string; coveredSequence: number };
-  'context.compaction_failed': { checkpointId: string; code: string };
+  'tool.transition_committed': {
+    action:
+      | 'prepare'
+      | 'wait-for-user'
+      | 'settle-question'
+      | 'validate'
+      | 'reject-validation'
+      | 'decide-approval'
+      | 'start'
+      | 'finish'
+      | 'observe'
+      | 'authorize-retry'
+      | 'resolve-outcome';
+    schedule: ToolScheduleDecision;
+  };
+  'context.compaction_requested': { decisionId: string };
+  'context.compaction_started': {
+    checkpointId: string;
+    decisionId: string;
+    reason: 'automatic' | 'manual';
+    coveredSequence: number;
+  };
+  'context.compacted': {
+    checkpointId: string;
+    decisionId: string;
+    summaryRef: string;
+    summary: string;
+    coveredSequence: number;
+    attemptId: string;
+    usage?: ModelTokenUsage;
+  };
+  'context.compaction_failed': { checkpointId: string; decisionId: string; code: string };
   'artifact.created':
     | {
         artifactId: string;
@@ -366,14 +572,40 @@ export interface AgentEventPayloadMap {
         archiveHandle: string; checksum: string; byteSize: number;
       };
   'skill.activated': { skillId: string; revision: string };
+  'capability.discovered': { targets: Array<{ moduleId: string; instanceId: string }> };
   'capability.snapshot_captured': { snapshotId: string; revision: string };
   'subagent.started': { subagentId: string; summary: string };
   'subagent.steered': { subagentId: string; summary: string };
   'subagent.completed': { subagentId: string; summary: string; refs: string[] };
   'subagent.failed': { subagentId: string; code: string; summary: string };
   'subagent.cancelled': { subagentId: string; reason: string };
+  'runtime.command_applied': {
+    commandId: string;
+    kind:
+      | 'plan.create'
+      | 'plan.update'
+      | 'discovery.activate'
+      | 'skill.activate'
+      | 'child.start'
+      | 'child.list'
+      | 'child.wait'
+      | 'child.steer'
+      | 'child.cancel';
+    origin: { runId: string; turnId: string; invocationId: string };
+    expectedRunRevision: number;
+    fencingToken: number;
+    projectionRevision: number;
+    effect: PortableValue;
+  };
   'usage.recorded': {
     scope: 'run' | 'turn' | 'attempt' | 'tool';
+    usageId: string;
+    purpose: 'agent-turn' | 'context-compaction' | 'tool';
+    /** Immutable provider billing classification; v1/v2 facts are upcast as byok. */
+    billingMode: UsageMode;
+    turnId?: string;
+    attemptId?: string;
+    invocationId?: string;
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;

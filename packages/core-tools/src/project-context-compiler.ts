@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, relative, resolve } from 'node:path';
-import type { SkillCatalogEntry } from '@dbagent/core-skills';
 
 const MAX_SCANNED_FILES = 20_000;
 const MAX_SCAN_DEPTH = 8;
@@ -19,18 +18,6 @@ const SKIPPED_DIRECTORIES = new Set([
 const INSTRUCTION_NAMES = new Set(['AGENTS.md', 'CLAUDE.md']);
 const SCHEMANAUT_RUNTIME_DIRECTORIES = new Set(['runtime', 'cache', 'state']);
 
-export type ProjectDatabaseCapability = {
-  kind: string;
-  label?: string;
-  version?: string;
-};
-
-export type ProjectMcpServerCapability = {
-  id: string;
-  status?: 'ready' | 'connecting' | 'unavailable' | 'disabled';
-  transport?: string;
-};
-
 export type ProjectInstruction = {
   path: string;
   appliesTo: string;
@@ -45,9 +32,6 @@ export type CompiledProjectModelContext = {
     packageManagers: string[];
     manifests: string[];
   };
-  databases: ProjectDatabaseCapability[];
-  mcpServers: ProjectMcpServerCapability[];
-  skills: SkillCatalogEntry[];
 };
 
 export type ProjectContextCompilation = {
@@ -61,9 +45,6 @@ export type ProjectContextCompilation = {
 
 export async function compileProjectContext(input: {
   rootPath: string;
-  databases?: readonly ProjectDatabaseCapability[];
-  mcpServers?: readonly ProjectMcpServerCapability[];
-  skills?: readonly SkillCatalogEntry[];
   maxFiles?: number;
   maxDepth?: number;
 }): Promise<ProjectContextCompilation> {
@@ -80,9 +61,6 @@ export async function compileProjectContext(input: {
     rootName: basename(rootPath),
     instructions,
     technologies,
-    databases: normalizeDatabases(input.databases ?? []),
-    mcpServers: normalizeMcpServers(input.mcpServers ?? []),
-    skills: normalizeSkills(input.skills ?? []),
   };
   return {
     fingerprint: createHash('sha256')
@@ -129,9 +107,7 @@ async function collectProjectFiles(
 async function loadInstructions(rootPath: string, files: readonly string[]) {
   const candidates = files.filter((path) => {
     const relativePath = displayPath(rootPath, path);
-    return (
-      relativePath === '.schemanaut/AGENT.md' || INSTRUCTION_NAMES.has(basename(relativePath))
-    );
+    return relativePath === '.schemanaut/AGENT.md' || INSTRUCTION_NAMES.has(basename(relativePath));
   });
   const instructions: ProjectInstruction[] = [];
   for (const path of candidates) {
@@ -201,36 +177,6 @@ function detectTechnologies(rootPath: string, files: readonly string[]) {
   };
 }
 
-function normalizeDatabases(input: readonly ProjectDatabaseCapability[]) {
-  return input
-    .map((database) => ({
-      kind: requiredValue(database.kind, 'database kind'),
-      ...(database.label?.trim() ? { label: database.label.trim() } : {}),
-      ...(database.version?.trim() ? { version: database.version.trim() } : {}),
-    }))
-    .sort((left, right) => compareText(`${left.kind}:${left.label ?? ''}`, `${right.kind}:${right.label ?? ''}`));
-}
-
-function normalizeMcpServers(input: readonly ProjectMcpServerCapability[]) {
-  return input
-    .map((server) => ({
-      id: requiredValue(server.id, 'MCP server id'),
-      ...(server.status === undefined ? {} : { status: server.status }),
-      ...(server.transport?.trim() ? { transport: server.transport.trim() } : {}),
-    }))
-    .sort((left, right) => compareText(left.id, right.id));
-}
-
-function normalizeSkills(input: readonly SkillCatalogEntry[]) {
-  return input
-    .map((skill) => ({
-      name: skill.name,
-      description: skill.description,
-      scope: skill.scope,
-    }))
-    .sort((left, right) => compareText(`${left.scope}:${left.name}`, `${right.scope}:${right.name}`));
-}
-
 function renderProjectContext(context: CompiledProjectModelContext): string {
   const sections = [
     '<project_context>',
@@ -244,22 +190,14 @@ function renderProjectContext(context: CompiledProjectModelContext): string {
       '  </project_instruction>',
     );
   }
-  if (context.databases.length > 0) {
-    sections.push(`  <database_capabilities>${JSON.stringify(context.databases)}</database_capabilities>`);
-  }
-  if (context.mcpServers.length > 0) {
-    sections.push(`  <mcp_servers>${JSON.stringify(context.mcpServers)}</mcp_servers>`);
-  }
-  if (context.skills.length > 0) {
-    sections.push(`  <project_skills>${JSON.stringify(context.skills)}</project_skills>`);
-  }
   sections.push('</project_context>');
   return sections.join('\n');
 }
 
 async function canonicalDirectory(path: string): Promise<string> {
   const absolute = resolve(path);
-  if (!(await stat(absolute)).isDirectory()) throw new Error(`Project root is not a directory: ${absolute}.`);
+  if (!(await stat(absolute)).isDirectory())
+    throw new Error(`Project root is not a directory: ${absolute}.`);
   return await realpath(absolute);
 }
 
@@ -269,12 +207,6 @@ function displayPath(rootPath: string, path: string): string {
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function requiredValue(value: string, name: string): string {
-  const normalized = value.trim();
-  if (!normalized) throw new Error(`${name} is required.`);
-  return normalized;
 }
 
 function clampPositive(value: number | undefined, fallback: number, maximum: number): number {

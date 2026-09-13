@@ -85,7 +85,6 @@ describe('Task 2 round-four trusted persisted bindings', () => {
 
     expect(connection!.connectionConfigurationRevision).toBe(connectionConfigurationRevision);
     expect(connection!.credentialRevision).toBe(credentialRevision);
-    expect(connection!.credentialScope).toBe(credentialRevision);
     expect(descriptorText).toContain(connectionConfigurationRevision);
     expect(descriptorText).toContain(credentialRevision);
     expect(descriptorText).not.toContain(apiKey);
@@ -93,7 +92,7 @@ describe('Task 2 round-four trusted persisted bindings', () => {
     expect(descriptorText).not.toContain(oldVerifier);
   });
 
-  it('generates opaque defaults without deriving credentialScope from secret values', () => {
+  it('generates opaque credential revisions without deriving them from secret values', () => {
     const first = core.createLlmConnection({
       endpoint: 'https://relay.example/v1',
       apiKey: 'same-secret',
@@ -107,7 +106,6 @@ describe('Task 2 round-four trusted persisted bindings', () => {
 
     expect(first.connectionConfigurationRevision).toMatch(/^[0-9a-f-]{36}$/i);
     expect(first.credentialRevision).toMatch(/^[0-9a-f-]{36}$/i);
-    expect(first.credentialScope).toBe(first.credentialRevision);
     expect(second.connectionConfigurationRevision).not.toBe(first.connectionConfigurationRevision);
     expect(second.credentialRevision).not.toBe(first.credentialRevision);
   });

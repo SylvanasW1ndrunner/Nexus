@@ -5,7 +5,6 @@ import type {
   DbColumnValue,
   QueryResultRow,
   QueryRiskLevel,
-  UsageMode,
 } from './database-sdk.js';
 
 export type SavedConnection = {
@@ -78,6 +77,8 @@ export type QueryExecutionResult = {
   queryId: string;
   columns: Array<{ name: string; dataType?: string }>;
   rows: QueryResultRow[];
+  /** Database session timezone used to interpret timezone-sensitive result values. */
+  sessionTimeZone?: string;
   rowCount: number;
   returnedRowCount?: number;
   rowLimit?: number;
@@ -162,14 +163,4 @@ export type QueryHistoryRequest = {
   statementKind?: string | string[];
   createdFrom?: string;
   createdTo?: string;
-};
-
-export type UsageSnapshot = {
-  mode: UsageMode;
-  windowStartedAt: string;
-  windowEndsAt?: string;
-  completedRounds: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
 };

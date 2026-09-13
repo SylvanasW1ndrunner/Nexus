@@ -20,7 +20,7 @@ import {
   type LlmUsage,
 } from './types.js';
 import { resolveLlmProviderProtocolProfile } from './provider-protocol-profile.js';
-import { redactKnownSecrets, sanitizeKnownSecretError } from './known-secret-sanitizer.js';
+import { collectKnownCookieValues, redactKnownCookies, sanitizeKnownCookieError } from './cookie-redaction.js';
 import {
   RETRYABLE_LLM_HTTP_STATUSES,
   retryAfterMilliseconds,
@@ -35,7 +35,7 @@ import {
   type LlmStreamLimitOptions,
   type LlmStreamLimits,
 } from './stream-safety.js';
-import { assertNoTextualToolInvocation, coalesceSystemMessages } from './tool-protocol.js';
+import { coalesceSystemMessages } from './protocol/system-message-coalescing.js';
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -194,7 +194,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private readonly modelsPath: string;
   private readonly metadataSource: 'openai-compatible' | 'ollama';
   private readonly defaultHeaders: Record<string, string>;
-  private readonly knownSecrets: readonly string[];
+  private readonly knownCookies: readonly string[];
   private readonly maxResponseBytes: number;
   private readonly streamLimits: LlmStreamLimits;
   private readonly fetchImpl: FetchLike;
@@ -237,7 +237,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       },
     );
     this.defaultHeaders = { ...(config.defaultHeaders ?? {}) };
-    this.knownSecrets = collectKnownHeaderSecrets(this.apiKey, this.defaultHeaders);
+    this.knownCookies = collectKnownCookieValues(this.defaultHeaders);
     this.maxResponseBytes = resolveLlmMaxResponseBytes(config.maxResponseBytes);
     this.streamLimits = resolveLlmStreamLimits(config.streamLimits);
     this.fetchImpl = config.fetch ?? fetch;
@@ -247,15 +247,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     const payload = buildChatPayload(request);
 
     const response = await this.requestJson('/chat/completions', payload, request.signal);
-    const parsed = parseChatResponse(response);
-    assertNoTextualToolInvocation({
-      text: parsed.text,
-      toolCalls: parsed.toolCalls,
-      toolsRequested: Boolean(request.tools?.length),
-      toolNames: request.tools?.map((tool) => tool.name) ?? [],
-      protocol: 'OpenAI-compatible',
-    });
-    return parsed;
+    return parseChatResponse(response);
   }
 
   async embed(request: LlmEmbeddingRequest): Promise<LlmEmbeddingResponse> {
@@ -403,13 +395,6 @@ export class OpenAICompatibleProvider implements LlmProvider {
         receivedEvent = true;
         if (event === '[DONE]') {
           const response = streamStateToResponse(state);
-          assertNoTextualToolInvocation({
-            text: response.text,
-            toolCalls: response.toolCalls,
-            toolsRequested: Boolean(request.tools?.length),
-            toolNames: request.tools?.map((tool) => tool.name) ?? [],
-            protocol: 'OpenAI-compatible',
-          });
           yield finishEvent(response, state.finishReason);
           return;
         }
@@ -473,8 +458,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         }
       }
     } catch (error) {
-      if (error instanceof LlmProviderError)
-        throw sanitizeKnownSecretError(error, this.knownSecrets);
+      if (error instanceof LlmProviderError) throw sanitizeKnownCookieError(error, this.knownCookies);
       if (isAbortError(error) && request.signal?.aborted) {
         throw new LlmProviderError(
           'LLM_ABORTED',
@@ -484,10 +468,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       }
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        redactKnownSecrets(
-          error instanceof Error ? error.message : 'LLM stream failed.',
-          this.knownSecrets,
-        ),
+        redactKnownCookies(error instanceof Error ? error.message : 'LLM stream failed.', this.knownCookies),
         true,
       );
     } finally {
@@ -495,13 +476,6 @@ export class OpenAICompatibleProvider implements LlmProvider {
     }
 
     const response = streamStateToResponse(state);
-    assertNoTextualToolInvocation({
-      text: response.text,
-      toolCalls: response.toolCalls,
-      toolsRequested: Boolean(request.tools?.length),
-      toolNames: request.tools?.map((tool) => tool.name) ?? [],
-      protocol: 'OpenAI-compatible',
-    });
     yield finishEvent(response, state.finishReason);
   }
 
@@ -518,10 +492,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
           : { detail: `Model is not advertised by the Provider: ${model}` }),
       };
     } catch (error) {
-      const detail = redactKnownSecrets(
-        error instanceof Error ? error.message : String(error),
-        this.knownSecrets,
-      );
+      const detail = redactKnownCookies(error instanceof Error ? error.message : String(error), this.knownCookies);
       return { available: false, latencyMs: performance.now() - startedAt, detail };
     }
   }
@@ -582,14 +553,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
           true,
         );
       }
-      if (error instanceof LlmProviderError)
-        throw sanitizeKnownSecretError(error, this.knownSecrets);
+      if (error instanceof LlmProviderError) throw sanitizeKnownCookieError(error, this.knownCookies);
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        redactKnownSecrets(
-          error instanceof Error ? error.message : 'LLM network request failed.',
-          this.knownSecrets,
-        ),
+        redactKnownCookies(error instanceof Error ? error.message : 'LLM network request failed.', this.knownCookies),
         true,
       );
     } finally {
@@ -640,14 +607,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
           true,
         );
       }
-      if (error instanceof LlmProviderError)
-        throw sanitizeKnownSecretError(error, this.knownSecrets);
+      if (error instanceof LlmProviderError) throw sanitizeKnownCookieError(error, this.knownCookies);
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        redactKnownSecrets(
-          error instanceof Error ? error.message : 'LLM network request failed.',
-          this.knownSecrets,
-        ),
+        redactKnownCookies(error instanceof Error ? error.message : 'LLM network request failed.', this.knownCookies),
         true,
       );
     } finally {
@@ -732,14 +695,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
           true,
         );
       }
-      if (error instanceof LlmProviderError)
-        throw sanitizeKnownSecretError(error, this.knownSecrets);
+      if (error instanceof LlmProviderError) throw sanitizeKnownCookieError(error, this.knownCookies);
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        redactKnownSecrets(
-          error instanceof Error ? error.message : 'LLM stream request failed.',
-          this.knownSecrets,
-        ),
+        redactKnownCookies(error instanceof Error ? error.message : 'LLM stream request failed.', this.knownCookies),
         true,
       );
     }
@@ -1023,6 +982,7 @@ function parseOpenAiCatalogMetadata(
     'maxnewtokens',
   ]);
   const generationParameters = catalogGenerationParameters(entry);
+  const openAIChatMaxOutputTokensWireKey = catalogOpenAIChatMaxOutputTokensWireKey(entry);
   return {
     model,
     source: 'provider-api',
@@ -1033,7 +993,30 @@ function parseOpenAiCatalogMetadata(
     ...(contextTokens === undefined ? {} : { contextTokens }),
     ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
     ...(generationParameters === undefined ? {} : { generationParameters }),
+    ...(openAIChatMaxOutputTokensWireKey === undefined
+      ? {}
+      : { openAIChatMaxOutputTokensWireKey }),
   };
+}
+
+const OPENAI_CHAT_MAX_OUTPUT_TOKENS_WIRE_KEYS = [
+  'max_tokens',
+  'max_completion_tokens',
+  'max_output_tokens',
+  'max_new_tokens',
+] as const;
+
+function catalogOpenAIChatMaxOutputTokensWireKey(
+  entry: OpenAIModelCatalogEntry,
+): LlmModelMetadata['openAIChatMaxOutputTokensWireKey'] | undefined {
+  const raw = entry.supported_parameters ?? entry.supportedParameters;
+  if (!Array.isArray(raw)) return undefined;
+  const advertised = new Set(
+    raw.filter((value): value is string => typeof value === 'string').map(normalizedCatalogKey),
+  );
+  return OPENAI_CHAT_MAX_OUTPUT_TOKENS_WIRE_KEYS.find((key) =>
+    advertised.has(normalizedCatalogKey(key)),
+  );
 }
 
 function catalogGenerationParameters(
@@ -1233,30 +1216,6 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-function collectKnownHeaderSecrets(
-  apiKey: string,
-  headers: Readonly<Record<string, string>>,
-): readonly string[] {
-  const secrets = new Set<string>();
-  if (apiKey) secrets.add(apiKey);
-  for (const [name, rawValue] of Object.entries(headers)) {
-    if (!/(?:authorization|api[-_]?key|token|secret|credential|cookie)/i.test(name)) continue;
-    const value = rawValue.trim();
-    if (!value) continue;
-    secrets.add(value);
-    if (/authorization/i.test(name)) {
-      const credential = /^\S+\s+(.+)$/.exec(value)?.[1]?.trim();
-      if (credential) secrets.add(credential);
-    }
-    if (/cookie/i.test(name)) {
-      for (const part of value.split(';')) {
-        const cookieValue = /^[^=]+=(.*)$/.exec(part.trim())?.[1]?.trim();
-        if (cookieValue) secrets.add(cookieValue);
-      }
-    }
-  }
-  return [...secrets].sort((left, right) => right.length - left.length);
-}
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';

@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseSql,
-  permissionAllows,
-  permissionRank,
+  operationClassAllows,
+  operationClassRank,
 } from '../src/index.js';
 
-describe('PostgreSQL SQL parser and three-level permissions', () => {
+describe('PostgreSQL SQL parser and database operation classes', () => {
   it('parses complex analytical SQL with English and Chinese identifiers', () => {
     const sql = `
       WITH order_lines AS (
@@ -32,7 +32,7 @@ describe('PostgreSQL SQL parser and three-level permissions', () => {
     expect(parsed).toMatchObject({
       dialect: 'postgresql',
       statementCount: 1,
-      requiredPermission: 'read',
+      requiredOperationClass: 'query',
       hasWhere: true,
     });
     // PostgreSQL extensions not implemented by the generic AST grammar fall
@@ -49,40 +49,40 @@ describe('PostgreSQL SQL parser and three-level permissions', () => {
   it.each([
     [
       'INSERT INTO audit.events(id, payload) VALUES (1, \'{"ok":true}\') ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload RETURNING id',
-      'edit',
+      'mutation',
     ],
     [
       'UPDATE commerce.orders o SET status = s.status FROM staging.order_status s WHERE s.id = o.id RETURNING o.id',
-      'edit',
+      'mutation',
     ],
     [
       'DELETE FROM commerce.orders o USING archive.deleted_orders d WHERE d.id = o.id',
-      'edit',
+      'mutation',
     ],
     [
       'MERGE INTO inventory i USING updates u ON i.sku = u.sku WHEN MATCHED THEN UPDATE SET qty = u.qty WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (u.sku, u.qty)',
-      'edit',
+      'mutation',
     ],
     [
       'CREATE TABLE "数据仓库"."日汇总" ("日期" date PRIMARY KEY, revenue numeric(18,2)) PARTITION BY RANGE ("日期")',
-      'full',
+      'schema-admin',
     ],
     [
       'ALTER TABLE commerce.orders ADD COLUMN risk_score numeric GENERATED ALWAYS AS ((payload->>\'risk\')::numeric) STORED',
-      'full',
+      'schema-admin',
     ],
-    ['DROP TABLE IF EXISTS staging.expired_orders CASCADE', 'full'],
-    ['TRUNCATE TABLE staging.import_buffer RESTART IDENTITY', 'full'],
-    ['GRANT SELECT ON ALL TABLES IN SCHEMA commerce TO analyst', 'full'],
-    ['VACUUM (ANALYZE, VERBOSE) commerce.orders', 'full'],
+    ['DROP TABLE IF EXISTS staging.expired_orders CASCADE', 'schema-admin'],
+    ['TRUNCATE TABLE staging.import_buffer RESTART IDENTITY', 'schema-admin'],
+    ['GRANT SELECT ON ALL TABLES IN SCHEMA commerce TO analyst', 'schema-admin'],
+    ['VACUUM (ANALYZE, VERBOSE) commerce.orders', 'schema-admin'],
   ] as const)(
-    'classifies %s at the required permission level',
-    (sql, permission) => {
-      expect(parseSql(sql).requiredPermission).toBe(permission);
+    'classifies %s at the required database operation class',
+    (sql, operationClass) => {
+      expect(parseSql(sql).requiredOperationClass).toBe(operationClass);
     },
   );
 
-  it('takes the highest permission across multiple statements and ignores keywords in literals', () => {
+  it('takes the highest operation class across multiple statements and ignores keywords in literals', () => {
     const mixed = parseSql(`
       SELECT 'DROP TABLE users' AS harmless_text;
       UPDATE commerce.orders SET status = 'paid' WHERE id = 42;
@@ -90,9 +90,9 @@ describe('PostgreSQL SQL parser and three-level permissions', () => {
     `);
 
     expect(mixed.statementCount).toBe(3);
-    expect(mixed.requiredPermission).toBe('edit');
+    expect(mixed.requiredOperationClass).toBe('mutation');
     expect(mixed.statementKinds).toEqual(['SELECT', 'UPDATE', 'SELECT']);
-    expect(parseSql(`SELECT 'ALTER TABLE x' AS note`).requiredPermission).toBe('read');
+    expect(parseSql(`SELECT 'ALTER TABLE x' AS note`).requiredOperationClass).toBe('query');
   });
 
   it('fails closed on unsupported dialects and malformed unknown statements', () => {
@@ -100,31 +100,31 @@ describe('PostgreSQL SQL parser and three-level permissions', () => {
     expect(unsupported).toMatchObject({
       valid: false,
       parser: 'statement-scanner',
-      requiredPermission: 'read',
+      requiredOperationClass: 'query',
     });
     expect(unsupported.parseError).toContain('mysql AST adapter');
 
     const unknown = parseSql('SELEC * FORM users');
     expect(unknown).toMatchObject({
       valid: false,
-      requiredPermission: 'full',
+      requiredOperationClass: 'schema-admin',
       statementKinds: ['SELEC'],
     });
     expect(parseSql('  -- no executable SQL  ')).toMatchObject({
       valid: false,
       statementCount: 0,
-      requiredPermission: 'full',
+      requiredOperationClass: 'schema-admin',
     });
   });
 
-  it('implements strictly increasing read/edit/full permission semantics', () => {
-    expect(permissionRank('read')).toBeLessThan(permissionRank('edit'));
-    expect(permissionRank('edit')).toBeLessThan(permissionRank('full'));
-    expect(permissionAllows('read', 'read')).toBe(true);
-    expect(permissionAllows('read', 'edit')).toBe(false);
-    expect(permissionAllows('edit', 'read')).toBe(true);
-    expect(permissionAllows('edit', 'full')).toBe(false);
-    expect(permissionAllows('full', 'full')).toBe(true);
+  it('implements strictly increasing query/mutation/schema-admin operation semantics', () => {
+    expect(operationClassRank('query')).toBeLessThan(operationClassRank('mutation'));
+    expect(operationClassRank('mutation')).toBeLessThan(operationClassRank('schema-admin'));
+    expect(operationClassAllows('query', 'query')).toBe(true);
+    expect(operationClassAllows('query', 'mutation')).toBe(false);
+    expect(operationClassAllows('mutation', 'query')).toBe(true);
+    expect(operationClassAllows('mutation', 'schema-admin')).toBe(false);
+    expect(operationClassAllows('schema-admin', 'schema-admin')).toBe(true);
   });
 
   it('parses a sustained mixed workload within the engineering latency budget', () => {

@@ -25,7 +25,7 @@ const SMALL_TOOL_LIMITS = {
 };
 
 describe('LLM provider stream safety limits', () => {
-  it('redacts a known Anthropic API key echoed by an SSE error event', async () => {
+  it('preserves an upstream SSE error within the typed provider-error contract', async () => {
     const secret = 'sk-ant-test-stream-secret';
     const provider = anthropicProvider(
       [
@@ -41,8 +41,7 @@ describe('LLM provider stream safety limits', () => {
 
     expect(error).toBeInstanceOf(LlmProviderError);
     expect(error).toMatchObject({ code: 'LLM_PROVIDER_ERROR' });
-    expect(error?.message).toContain('[REDACTED]');
-    expect(error?.message).not.toContain(secret);
+    expect(error?.message).toContain(secret);
   });
 
   it('rejects an oversized OpenAI-compatible SSE frame', async () => {

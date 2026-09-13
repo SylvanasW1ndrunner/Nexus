@@ -323,6 +323,8 @@ function normalizeEnv(
   serverId: string,
   options: McpServerNormalizationOptions,
 ): Record<string, McpEnvValue> {
+  void serverId;
+  void options;
   const output: Record<string, McpEnvValue> = {};
   for (const [rawName, rawValue] of Object.entries(env)) {
     const name = normalizeEnvName(rawName);
@@ -385,6 +387,8 @@ function normalizeHeaders(
   serverId: string,
   options: McpServerNormalizationOptions,
 ): Record<string, McpHeaderValue> {
+  void serverId;
+  void options;
   const output: Record<string, McpHeaderValue> = {};
   for (const [rawName, rawValue] of Object.entries(headers)) {
     const name = normalizeHeaderName(rawName);
@@ -414,6 +418,8 @@ function normalizeCommand(
   _serverId: string,
   _options: McpServerNormalizationOptions,
 ): string {
+  void _serverId;
+  void _options;
   return value.trim();
 }
 
@@ -422,6 +428,8 @@ function normalizeArgs(
   _serverId: string,
   _options: McpServerNormalizationOptions,
 ): string[] {
+  void _serverId;
+  void _options;
   return values.filter((value): value is string => typeof value === 'string');
 }
 

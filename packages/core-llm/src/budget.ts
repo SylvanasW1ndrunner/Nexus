@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { RegisteredLlmModel } from './model-registry.js';
-import { estimateModelCost } from './routing.js';
+import type { LlmModelPricing } from './model-catalog.js';
 import { LlmProviderError, type LlmUsage } from './types.js';
+
+export type LlmBudgetPricedModel = { pricing?: LlmModelPricing };
 
 export type LlmBudgetScope = {
   tenantId: string;
@@ -40,7 +41,7 @@ export class LlmBudgetController {
   reserve(input: {
     scope: LlmBudgetScope;
     limits?: LlmBudgetLimits;
-    model: RegisteredLlmModel;
+    model: LlmBudgetPricedModel;
     estimatedInputTokens: number;
     maxOutputTokens: number;
   }): LlmBudgetReservation {
@@ -86,7 +87,7 @@ export class LlmBudgetController {
     return { ...reservation };
   }
 
-  commit(reservationId: string, model: RegisteredLlmModel, usage: LlmUsage): LlmBudgetSnapshot {
+  commit(reservationId: string, model: LlmBudgetPricedModel, usage: LlmUsage): LlmBudgetSnapshot {
     return this.commitActual(
       reservationId,
       usage.totalTokens,
@@ -149,4 +150,17 @@ function normalizeCount(value: number): number {
 
 function budgetError(message: string, detail?: Record<string, unknown>): LlmProviderError {
   return new LlmProviderError('LLM_BUDGET_EXCEEDED', message, false, undefined, detail);
+}
+
+function estimateModelCost(
+  model: LlmBudgetPricedModel,
+  inputTokens: number,
+  outputTokens: number,
+): number | undefined {
+  if (!model.pricing) return undefined;
+  return (
+    (Math.max(0, inputTokens) * model.pricing.inputPerMillionTokens +
+      Math.max(0, outputTokens) * model.pricing.outputPerMillionTokens) /
+    1_000_000
+  );
 }

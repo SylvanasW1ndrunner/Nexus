@@ -1,7 +1,8 @@
 import type { SkillCatalogEntry, SkillSearchResult } from './types.js';
+import { compareUnicodeCodePoints } from './canonical-text-order.js';
 
 /**
- * Lightweight catalog search for `/skills` and SDK callers.
+ * Lightweight catalog search for `/skills` and internal host callers.
  *
  * This is not an automatic workflow planner. Agent-side activation should use
  * the model-visible name/description catalog; no proprietary keyword or signal
@@ -25,7 +26,7 @@ export function searchSkillCatalog(
     .map((skill) => ({ skill, score: scoreSkill(skill, normalizedQuery, terms) }))
     .filter(({ score }) => score > 0)
     .sort(
-      (left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name),
+      (left, right) => right.score - left.score || compareUnicodeCodePoints(left.skill.name, right.skill.name),
     )
     .slice(0, limit)
     .map(({ skill, score }) => ({ skill: { ...skill }, score }));

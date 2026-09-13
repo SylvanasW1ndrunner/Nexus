@@ -3,7 +3,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LlmConnectionManager, type LlmTool } from '../src/index.js';
+import {
+  LlmConnectionManager,
+  ModelExecutionGateway,
+  modelGatewayToProviderError,
+  type CanonicalModelRequest,
+  type CanonicalModelTool,
+  type ModelSessionBundle,
+} from '../src/index.js';
 
 const directories: string[] = [];
 const servers: Server[] = [];
@@ -16,30 +23,20 @@ afterEach(async () => {
 describe('protocol fallback', () => {
   it('tries the next protocol once after a deterministic 404 before any response event', async () => {
     const fixture = await endpointFixture({ chatStatus: 404 });
-    const { manager, selection } = await configuredManager(fixture.url);
+    const configured = await configuredManager(fixture.url);
+    const { result, bundle } = await executeCanonical(configured, request('hello'), true);
 
-    const result = await manager.executeChat({
-      selection,
-      request: { messages: [{ role: 'user', content: 'hello' }] },
-      context: { tenantId: 'tenant', taskType: 'agent' },
-      allowCompatibleProtocolFallbacks: true,
-    });
-
-    expect(result.response.text).toBe('responses fallback');
-    expect(result.protocolAttempts).toEqual(['openai-chat', 'openai-responses']);
+    expect(result.attempt.blocks).toContainEqual({ type: 'text', text: 'responses fallback' });
+    expect(protocolAttempts(bundle, result)).toEqual(['openai-chat', 'openai-responses']);
     expect(fixture.requests.chat).toBe(1);
     expect(fixture.requests.responses).toBe(1);
   });
 
   it.each([401, 429])('does not change protocol after HTTP %s', async (status) => {
     const fixture = await endpointFixture({ chatStatus: status });
-    const { manager, selection } = await configuredManager(fixture.url);
+    const configured = await configuredManager(fixture.url);
 
-    await expect(manager.executeChat({
-      selection,
-      request: { messages: [{ role: 'user', content: 'hello' }] },
-      context: { tenantId: 'tenant', taskType: 'agent' },
-    })).rejects.toBeDefined();
+    await expect(executeCanonical(configured, request('hello'))).rejects.toBeDefined();
 
     expect(fixture.requests.chat).toBeGreaterThanOrEqual(1);
     expect(fixture.requests.responses).toBe(0);
@@ -47,52 +44,47 @@ describe('protocol fallback', () => {
 
   it('does not switch protocol for a rejected generation parameter', async () => {
     const fixture = await endpointFixture({ chatStatus: 400, error: 'temperature is not supported' });
-    const { manager, selection } = await configuredManager(fixture.url);
+    const configured = await configuredManager(fixture.url);
 
-    await expect(manager.executeChat({
-      selection,
-      request: { messages: [{ role: 'user', content: 'hello' }] },
-      parameters: { temperature: 0.5 },
-      context: { tenantId: 'tenant', taskType: 'agent' },
-    })).rejects.toMatchObject({ code: 'LLM_PARAMETER_UNSUPPORTED' });
+    await expect(executeCanonical(configured, request('hello'), false, {
+      temperature: 0.5,
+    })).rejects.toSatisfy((error: unknown) =>
+      modelGatewayToProviderError(error).code === 'LLM_PARAMETER_UNSUPPORTED');
     expect(fixture.requests.responses).toBe(0);
   });
 
-  it('does not switch protocol when a valid response contains textual tool markup', async () => {
+  it('preserves textual tool-like markup as ordinary model text without changing protocol', async () => {
     const fixture = await endpointFixture({
       chatStatus: 200,
       chatText: '<tool_calls>[{"name":"lookup","arguments":{}}]</tool_calls>',
     });
-    const { manager, selection } = await configuredManager(fixture.url);
-    const tools: LlmTool[] = [{
+    const configured = await configuredManager(fixture.url);
+    const tools: CanonicalModelTool[] = [{
       name: 'lookup',
       description: 'lookup',
       inputSchema: { type: 'object', additionalProperties: false },
     }];
 
-    await expect(manager.executeChat({
-      selection,
-      request: { messages: [{ role: 'user', content: 'use lookup' }], tools },
-      context: { tenantId: 'tenant', taskType: 'agent' },
-    })).rejects.toMatchObject({ code: 'TOOL_PROTOCOL_MISMATCH' });
+    const { result, bundle } = await executeCanonical(configured, {
+      ...request('use lookup'),
+      tools,
+    });
+    expect(result.attempt.blocks).toEqual([{
+      type: 'text',
+      text: '<tool_calls>[{"name":"lookup","arguments":{}}]</tool_calls>',
+    }]);
+    expect(protocolAttempts(bundle, result)).toEqual(['openai-chat']);
     expect(fixture.requests.responses).toBe(0);
   });
 
   it('locks the protocol after the first stream event even when the stream later fails', async () => {
     const fixture = await endpointFixture({ chatStatus: 200, brokenStream: true });
-    const { manager, selection } = await configuredManager(fixture.url);
-    const events: unknown[] = [];
+    const configured = await configuredManager(fixture.url);
 
-    await expect((async () => {
-      for await (const event of manager.stream({
-        selection,
-        request: { messages: [{ role: 'user', content: 'stream' }] },
-        context: { tenantId: 'tenant', taskType: 'agent' },
-      })) events.push(event);
-    })()).rejects.toBeDefined();
+    await expect(executeCanonical(configured, request('stream'), false, {}, true))
+      .rejects.toBeDefined();
 
     // The canonical Gateway keeps stream events tentative until terminal validation.
-    expect(events).toEqual([]);
     expect(fixture.requests.responses).toBe(0);
   });
 });
@@ -171,11 +163,53 @@ async function configuredManager(endpoint: string) {
     providerTimeoutMs: 200,
   });
   const [connection] = manager.replaceConnections([{ endpoint, apiKey: 'fixture-key' }]);
-  await manager.discover(connection!.id);
+  const discovery = await manager.discover(connection!.id);
   return {
     manager,
+    discovery,
     selection: { connectionId: connection!.id, modelId: 'test-model' },
   };
+}
+
+async function executeCanonical(
+  configured: Awaited<ReturnType<typeof configuredManager>>,
+  canonicalRequest: CanonicalModelRequest,
+  allowFallback = false,
+  generation: { temperature?: number } = {},
+  streaming = false,
+) {
+  const allowedFallbackRouteIds = allowFallback
+    ? configured.discovery.alternatives.map((resolution) =>
+        `${resolution.connectionId}:${canonicalRequest.model}:${resolution.pluginId}:${resolution.revision}`)
+    : [];
+  const bundle = await configured.manager.prepareModelSessionBundle(configured.selection, {
+    allowedFallbackRouteIds,
+    generation,
+    streaming,
+  });
+  const result = await new ModelExecutionGateway().executeAttempt(bundle, canonicalRequest, {
+    maxRetries: 0,
+  });
+  return { result, bundle };
+}
+
+function request(text: string): CanonicalModelRequest {
+  return {
+    model: 'test-model',
+    messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+  };
+}
+
+function protocolAttempts(
+  bundle: ModelSessionBundle,
+  result: Awaited<ReturnType<ModelExecutionGateway['executeAttempt']>>,
+): string[] {
+  const sessions = [bundle.primary, ...bundle.fallbacks];
+  return [
+    ...result.discardedAttempts.map((attempt) =>
+      sessions.find((session) => session.route.routeId === attempt.routeId)!.route.protocol),
+    result.session.route.protocol,
+  ];
 }
 
 function closeServer(server: Server): Promise<void> {

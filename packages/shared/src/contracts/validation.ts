@@ -21,19 +21,6 @@ import type {
   ResourceSource,
 } from './resource.js';
 
-const SECRET_KEYS = new Set([
-  'apikey',
-  'accesstoken',
-  'refreshtoken',
-  'clientsecret',
-  'password',
-  'privatekey',
-  'secret',
-]);
-const DATABASE_CREDENTIAL_URL =
-  /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?):\/\/[^:/\s]+:[^@\s]+@/iu;
-const BEARER_CREDENTIAL = /\bbearer\s+[a-z0-9._~+/=-]{12,}/iu;
-const SECRET_TOKEN = /\b(?:sk|key|token)-[a-z0-9_-]{16,}/iu;
 const DATABASE_ERROR_CATEGORIES = new Set([
   'validation',
   'authentication',
@@ -155,10 +142,6 @@ export function assertPortableValue(value: unknown, path = '$'): asserts value i
   encodePortable(value, path, new WeakSet<object>());
 }
 
-export function assertNoSecretMaterial(value: unknown): void {
-  inspectSecrets(value, '$', new WeakSet<object>());
-}
-
 export function assertResourceDescriptor(
   value: unknown,
 ): asserts value is ResourceDescriptor {
@@ -223,7 +206,6 @@ export function assertResourceDescriptor(
       });
     }
   }
-  assertNoSecretMaterial(resource);
 }
 
 export function assertResourceRelation(
@@ -255,7 +237,6 @@ export function assertResourceRelation(
   }
   sources.forEach((source, index) => assertResourceSource(source, `$.sources[${index}]`));
   validateOptionalPortableRecord(relation.attributes, '$.attributes');
-  assertNoSecretMaterial(relation);
 }
 
 export function assertResourceObservation(
@@ -286,7 +267,6 @@ export function assertResourceObservation(
     requireNonEmptyString(collectionError.code, '$.collectionError.code');
     requireNonEmptyString(collectionError.message, '$.collectionError.message');
   }
-  assertNoSecretMaterial(observation);
 }
 
 export function assertResourceChangeSet(
@@ -310,7 +290,6 @@ export function assertResourceChangeSet(
   assertUniqueStrings(changeSet.deleteResourceIds, '$.deleteResourceIds');
   assertUniqueStrings(changeSet.restoreResourceIds, '$.restoreResourceIds');
   assertUniqueStrings(changeSet.deleteRelationIds, '$.deleteRelationIds');
-  assertNoSecretMaterial(changeSet);
 }
 
 export function assertConnectionProfile(
@@ -335,9 +314,6 @@ export function assertConnectionProfile(
   }
   requireIsoTime(profile.createdAt, '$.createdAt');
   requireIsoTime(profile.updatedAt, '$.updatedAt');
-  if (Object.hasOwn(profile, 'password') || Object.hasOwn(profile, 'token')) {
-    fail('SECRET_MATERIAL', '$', 'Connection profile cannot contain credential material');
-  }
   if (profile.credentialRef !== undefined) {
     const credentialRef = requireRecord(profile.credentialRef, '$.credentialRef');
     requireNonEmptyString(credentialRef.provider, '$.credentialRef.provider');
@@ -349,9 +325,6 @@ export function assertConnectionProfile(
       requireIsoTime(credentialRef.expiresAt, '$.credentialRef.expiresAt');
     }
   }
-  const profileWithoutCredentialReference = { ...profile };
-  delete profileWithoutCredentialReference.credentialRef;
-  assertNoSecretMaterial(profileWithoutCredentialReference);
 }
 
 function assertResourceScope(value: unknown, path: string): void {
@@ -400,6 +373,22 @@ export function assertQuerySubmission(
       requireString(item, `$.labels.${key}`);
     }
   }
+  if (submission.authorization !== undefined) {
+    const authorization = requireRecord(submission.authorization, '$.authorization');
+    if (authorization.authorizedClass !== undefined) {
+      const authorizedClass = requireString(
+        authorization.authorizedClass,
+        '$.authorization.authorizedClass',
+      );
+      if (!['query', 'mutation', 'schema-admin'].includes(authorizedClass)) {
+        fail(
+          'INVALID_VALUE',
+          '$.authorization.authorizedClass',
+          'authorizedClass must be a database SQL operation class',
+        );
+      }
+    }
+  }
 }
 
 export function assertDatabaseAccessError(
@@ -418,7 +407,6 @@ export function assertDatabaseAccessError(
   if (!['unchanged', 'changed', 'unknown'].includes(String(error.outcome))) {
     fail('INVALID_VALUE', '$.outcome', 'Invalid operation outcome');
   }
-  assertNoSecretMaterial(error);
 }
 
 export function assertResourceRegistrySnapshot(
@@ -470,11 +458,6 @@ export function assertResourceRegistrySnapshot(
       requireNonNegativeInteger(version.sequence, `$.sourceVersions.${sourceId}.sequence`);
     }
   }
-  const snapshotMetadata = { ...snapshot };
-  delete snapshotMetadata.resources;
-  delete snapshotMetadata.relations;
-  delete snapshotMetadata.observations;
-  assertNoSecretMaterial(snapshotMetadata);
 }
 
 function assertResourceEvent(value: unknown, path: string): asserts value is ResourceEvent {
@@ -533,17 +516,6 @@ function validateEndpoint(value: unknown, path: string): void {
         const headers = requireRecord(endpoint.headers, `${path}.headers`);
         for (const [key, headerValue] of Object.entries(headers)) {
           requireString(headerValue, `${path}.headers.${key}`);
-          if (
-            ['authorization', 'proxy-authorization', 'x-api-key'].includes(
-              key.toLocaleLowerCase(),
-            )
-          ) {
-            fail(
-              'SECRET_MATERIAL',
-              `${path}.headers.${key}`,
-              'Authentication headers must be supplied through a credential reference',
-            );
-          }
         }
       }
       break;
@@ -556,9 +528,6 @@ function validateEndpoint(value: unknown, path: string): void {
       break;
     default:
       fail('INVALID_VALUE', `${path}.transport`, `Unsupported endpoint transport ${transport}`);
-  }
-  if (Object.hasOwn(endpoint, 'password') || Object.hasOwn(endpoint, 'token')) {
-    fail('SECRET_MATERIAL', path, 'Endpoint cannot contain credential material');
   }
 }
 
@@ -617,37 +586,6 @@ function encodePortable(
     return output;
   } finally {
     ancestors.delete(object);
-  }
-}
-
-function inspectSecrets(value: unknown, path: string, ancestors: WeakSet<object>): void {
-  if (typeof value === 'string') {
-    if (
-      DATABASE_CREDENTIAL_URL.test(value) ||
-      BEARER_CREDENTIAL.test(value) ||
-      SECRET_TOKEN.test(value)
-    ) {
-      fail('SECRET_MATERIAL', path, 'Possible credential material is not allowed');
-    }
-    return;
-  }
-  if (value === null || typeof value !== 'object') return;
-  if (ancestors.has(value)) return;
-  ancestors.add(value);
-  try {
-    if (Array.isArray(value)) {
-      value.forEach((item, index) => inspectSecrets(item, `${path}[${index}]`, ancestors));
-      return;
-    }
-    for (const [key, item] of Object.entries(value)) {
-      const normalized = key.replaceAll(/[-_]/gu, '').toLocaleLowerCase();
-      if (SECRET_KEYS.has(normalized)) {
-        fail('SECRET_MATERIAL', `${path}.${key}`, `Secret field ${key} is not allowed`);
-      }
-      inspectSecrets(item, `${path}.${key}`, ancestors);
-    }
-  } finally {
-    ancestors.delete(value);
   }
 }
 

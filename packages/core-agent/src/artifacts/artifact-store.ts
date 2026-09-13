@@ -1,4 +1,16 @@
 import type { RunLeaseReference } from '../events/agent-journal.js';
+import type {
+  ContentAccessScope,
+  ContentOpenRequest,
+  ContentOwnerScope,
+  ContentReadRequest,
+  ContentReadResult,
+  OpenedContent,
+} from './content-reference.js';
+import type {
+  EvidenceReferenceResolver,
+  RuntimeEvidenceReferenceRecord,
+} from '../evidence-reference.js';
 
 export type ArtifactAvailability =
   | 'staged'
@@ -20,7 +32,17 @@ export type StagedArtifact = {
   availability: 'staged';
   stagedAt: string;
   expiresAt?: string;
+  contentRef?: string;
+  owner?: ContentOwnerScope;
+  evidence?: RuntimeEvidenceReferenceRecord;
+  pinnedUntil?: string;
 };
+
+export type ArtifactIoContext = Readonly<{
+  signal?: AbortSignal;
+  deadline?: string;
+  startOffset?: number;
+}>;
 
 export type ArtifactRef = Omit<StagedArtifact, 'availability' | 'stagedAt'> & {
   availability: 'available';
@@ -44,6 +66,12 @@ export type StageArtifactInput = {
   expectedChecksum?: ArtifactChecksum;
   expectedByteSize?: number;
   expiresAt?: string;
+  /** Required for Runtime-readable content; legacy/manual artifacts may omit it. */
+  owner?: ContentOwnerScope;
+  /** Pins content through this instant, independently from its ordinary expiry. */
+  pinnedUntil?: string;
+  signal?: AbortSignal;
+  deadline?: string;
 };
 
 export type ArtifactJournalContext = {
@@ -83,6 +111,7 @@ export type ArtifactStoreErrorCode =
   | 'LEGACY_UNAVAILABLE'
   | 'STATE_MIGRATION_ACTIVE'
   | 'STORE_BUSY'
+  | 'LIMIT_EXCEEDED'
   | 'INJECTED_CRASH';
 
 export class ArtifactStoreError extends Error {
@@ -95,9 +124,34 @@ export class ArtifactStoreError extends Error {
   }
 }
 
-export interface AgentArtifactStore {
+/** The bounded call ended; its physical operations are still owned by cleanup. */
+export class ArtifactIoInterruption extends ArtifactStoreError {
+  readonly cleanup: Promise<void>;
+  constructor(error: Error, cleanup: Promise<void>) {
+    super('STAGE_FAILED', error.message);
+    this.name = error.name;
+    // A cleanup may itself cross the foreground deadline. Follow its physical
+    // cleanup authority instead of treating that bounded return as completion.
+    this.cleanup = cleanup.catch((failure: unknown) => {
+      if (failure instanceof ArtifactIoInterruption) return failure.cleanup;
+      throw failure;
+    });
+    void this.cleanup.catch(() => undefined); // Observe without changing rejection.
+  }
+}
+
+export interface AgentArtifactStore extends EvidenceReferenceResolver {
+  /** Wait for physical late I/O; reject if any cleanup could not be confirmed. */
+  drain?(): Promise<void>;
   stage(input: StageArtifactInput): Promise<StagedArtifact>;
   commit(input: CommitArtifactInput): Promise<ArtifactRef>;
-  open(ref: ReadableArtifactRef): Promise<ReadableStream<Uint8Array>>;
+  open(ref: ReadableArtifactRef, context?: ArtifactIoContext): Promise<ReadableStream<Uint8Array>>;
+  openContent(input: ContentOpenRequest): Promise<OpenedContent>;
+  readContent(input: ContentReadRequest): Promise<ContentReadResult>;
+  pinContent(input: Readonly<{
+    contentRef: string;
+    access: ContentAccessScope;
+    pinnedUntil: string;
+  }>): Promise<void>;
   collectGarbage(now: Date): Promise<ArtifactGcReport>;
 }

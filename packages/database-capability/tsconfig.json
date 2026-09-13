@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true
+  },
+  "references": [
+    { "path": "../shared" },
+    { "path": "../core-agent" },
+    { "path": "../core-db" },
+    { "path": "../core-llm" },
+    { "path": "../core-rag" },
+    { "path": "../core-resource" },
+    { "path": "../core-skills" },
+    { "path": "../core-tools" }
+  ],
+  "include": ["src/**/*.ts"]
+}

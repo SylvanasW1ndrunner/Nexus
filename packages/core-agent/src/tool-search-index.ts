@@ -1,4 +1,5 @@
 import type { AgentToolDescriptor } from './types.js';
+import { compareUnicodeCodePoints } from './canonical-text-order.js';
 
 export type ToolSearchOptions = {
   limit?: number;
@@ -11,8 +12,15 @@ export type ToolSearchMatch = {
   matchedTerms: string[];
 };
 
+export type ToolSearchPage = Readonly<{
+  matches: readonly ToolSearchMatch[];
+  /** Count before the requested page limit is applied. */
+  totalMatches: number;
+}>;
+
 export interface ToolSearchIndex {
   search(query: string, options?: ToolSearchOptions): ToolSearchMatch[];
+  searchPage(query: string, options?: ToolSearchOptions): ToolSearchPage;
 }
 
 type IndexedTool = {
@@ -49,21 +57,30 @@ export class LexicalToolSearchIndex implements ToolSearchIndex {
   }
 
   search(query: string, options: ToolSearchOptions = {}): ToolSearchMatch[] {
+    return [...this.searchPage(query, options).matches];
+  }
+
+  searchPage(query: string, options: ToolSearchOptions = {}): ToolSearchPage {
     const queryTerms = [...new Set(tokenize(query))];
-    if (queryTerms.length === 0 || this.documents.length === 0) return [];
+    if (queryTerms.length === 0 || this.documents.length === 0) {
+      return Object.freeze({ matches: Object.freeze([]), totalMatches: 0 });
+    }
     const allowed =
       options.allowedTools === undefined ? undefined : new Set(options.allowedTools);
     const limit = Math.max(1, Math.min(options.limit ?? 8, 100));
 
-    return this.documents
+    const matches = this.documents
       .filter((document) => allowed === undefined || allowed.has(document.tool.flatName))
       .map((document) => scoreDocument(document, queryTerms, this))
       .filter((match) => match.score > 0)
       .sort(
         (left, right) =>
-          right.score - left.score || left.tool.flatName.localeCompare(right.tool.flatName),
-      )
-      .slice(0, limit);
+          right.score - left.score || compareUnicodeCodePoints(left.tool.flatName, right.tool.flatName),
+      );
+    return Object.freeze({
+      matches: Object.freeze(matches.slice(0, limit)),
+      totalMatches: matches.length,
+    });
   }
 
   idf(term: string): number {

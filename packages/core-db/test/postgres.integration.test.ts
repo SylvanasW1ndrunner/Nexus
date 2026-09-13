@@ -38,6 +38,17 @@ describe.skipIf(!runPostgresTests)('PostgresDriver real PostgreSQL integration',
       expect.objectContaining({ transaction_read_only: 'on' }),
     ]);
 
+    const sessionTimeZone = await driver.execute(
+      {
+        connectionId: config.id,
+        sql: "select current_setting('TimeZone') as time_zone",
+      },
+      connectResult.data,
+    );
+    expect(sessionTimeZone.ok).toBe(true);
+    if (!sessionTimeZone.ok) return;
+    expect(sessionTimeZone.data.sessionTimeZone).toBe(sessionTimeZone.data.rows[0]?.time_zone);
+
     const tablesResult = await driver.listTables(config.id);
     expect(tablesResult.ok).toBe(true);
     if (!tablesResult.ok) return;

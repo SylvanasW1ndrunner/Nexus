@@ -1,125 +1,128 @@
 {
   "kind": "llm-platform-performance",
   "status": "passed",
-  "generatedAt": "2026-08-06T13:17:27.045Z",
+  "generatedAt": "2026-09-03T23:38:01.419Z",
   "samples": 1000,
   "concurrency": 50,
   "environment": {
-    "node": "v24.14.0",
+    "node": "v24.19.0",
     "platform": "win32",
     "release": "10.0.26200",
     "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
     "cpuCount": 32,
     "memory": {
-      "rssMiB": 139.63,
-      "heapUsedMiB": 34.85
+      "rssMiB": 237.93,
+      "heapUsedMiB": 114.71
     }
   },
-  "measurement": "Platform path with an in-process deterministic provider; external model and network latency excluded.",
+  "measurement": "Canonical Direct LLM path with a frozen ModelSessionBundle and deterministic in-process ModelClient; network latency excluded.",
   "thresholds": {
-    "routeDecisionP95Ms": 20,
     "tokenEstimationP95Ms": 5,
     "structuredValidationP95Ms": 5,
-    "gatewayP95Ms": 50,
-    "streamForwardP95Ms": 50,
-    "asyncSubmissionP95Ms": 50,
-    "cancellationPropagationP95Ms": 100
+    "metadataMergeP95Ms": 1,
+    "settingsLoadP95Ms": 25,
+    "sessionBindingP95Ms": 10,
+    "parameterMergeP95Ms": 2,
+    "canonicalExecutionP95Ms": 50,
+    "asyncSubmissionP95Ms": 50
   },
   "checks": {
-    "routeDecision": true,
     "tokenEstimation": true,
     "structuredValidation": true,
-    "gateway": true,
-    "streamForward": true,
-    "asyncSubmission": true,
-    "cancellationPropagation": true
+    "metadataMerge": true,
+    "settingsLoad": true,
+    "sessionBinding": true,
+    "parameterMerge": true,
+    "canonicalExecution": true,
+    "asyncSubmission": true
   },
   "metrics": {
-    "routeDecisionMs": {
-      "samples": 1000,
-      "min": 0.014899999999983038,
-      "p50": 0.02240000000000464,
-      "p95": 0.04580000000001405,
-      "p99": 0.10360000000000014,
-      "max": 0.6853999999999871,
-      "mean": 0.02749020000000016
-    },
     "tokenEstimationMs": {
       "samples": 1000,
-      "min": 0.14939999999995734,
-      "p50": 0.17200000000002547,
-      "p95": 0.3377999999999588,
-      "p99": 0.5124999999999886,
-      "max": 0.797300000000007,
-      "mean": 0.2073739000000001
+      "mean": 0.14527140000000055,
+      "p50": 0.1288000000000693,
+      "p95": 0.2258999999999105,
+      "p99": 0.34559999999999036,
+      "max": 0.7528000000000361
     },
     "structuredValidationMs": {
       "samples": 1000,
-      "min": 0.008199999999987995,
-      "p50": 0.009999999999990905,
-      "p95": 0.02569999999997208,
-      "p99": 0.080600000000004,
-      "max": 1.1317000000000235,
-      "mean": 0.015678599999998995
+      "mean": 0.004707299999999236,
+      "p50": 0.004199999999968895,
+      "p95": 0.007400000000075124,
+      "p99": 0.016899999999964166,
+      "max": 0.04109999999991487
     },
-    "gatewayTotalMs": {
-      "samples": 1000,
-      "min": 0.5886999999999034,
-      "p50": 1.306699999999978,
-      "p95": 3.957899999999995,
-      "p99": 6.509899999999959,
-      "max": 8.915599999999984,
-      "mean": 1.7470886000000003
+    "metadataMergeMs": {
+      "samples": 10000,
+      "mean": 0.0021242800000000218,
+      "p50": 0.0016000000000531145,
+      "p95": 0.0027000000000043656,
+      "p99": 0.0060000000000854925,
+      "max": 0.9595999999999094
     },
-    "streamForwardMs": {
+    "settingsLoadMs": {
+      "samples": 500,
+      "mean": 0.19373239999999692,
+      "p50": 0.1773999999999205,
+      "p95": 0.31910000000004857,
+      "p99": 0.4613000000000511,
+      "max": 1.422800000000052
+    },
+    "sessionBindingMs": {
+      "samples": 500,
+      "mean": 0.12462439999999787,
+      "p50": 0.10460000000000491,
+      "p95": 0.15579999999999927,
+      "p99": 0.21860000000003765,
+      "max": 7.920600000000036
+    },
+    "parameterMergeMs": {
+      "samples": 500,
+      "mean": 0.019107399999999417,
+      "p50": 0.017699999999990723,
+      "p95": 0.025700000000028922,
+      "p99": 0.04200000000003001,
+      "max": 0.16160000000002128
+    },
+    "canonicalExecutionMs": {
       "samples": 1000,
-      "min": 0.0004999999999881766,
-      "p50": 0.0005999999999630745,
-      "p95": 0.001100000000064938,
-      "p99": 0.0018000000000029104,
-      "max": 0.008199999999987995,
-      "mean": 0.0006943000000006805
+      "mean": 17.507724399999983,
+      "p50": 17.506700000000023,
+      "p95": 19.71519999999998,
+      "p99": 20.32289999999989,
+      "max": 20.539999999999964
     },
     "asyncSubmissionMs": {
       "samples": 1000,
-      "min": 0.005700000000047112,
-      "p50": 0.006799999999998363,
-      "p95": 0.014999999999986358,
-      "p99": 0.05520000000001346,
-      "max": 2.5897999999999683,
-      "mean": 0.011671800000001894
-    },
-    "cancellationPropagationMs": {
-      "samples": 1000,
-      "min": 0.00909999999998945,
-      "p50": 0.020800000000008367,
-      "p95": 0.042799999999942884,
-      "p99": 0.12400000000002365,
-      "max": 0.31769999999994525,
-      "mean": 0.02317600000000357
+      "mean": 0.011039900000001126,
+      "p50": 0.008700000000089858,
+      "p95": 0.015100000000074942,
+      "p99": 0.036100000000033106,
+      "max": 0.9082000000000789
     }
   },
   "gatewayMetrics": {
-    "requests": 2001,
-    "completed": 2001,
+    "requests": 2000,
+    "completed": 2000,
     "failed": 0,
     "cancelled": 0,
     "cacheHits": 0,
     "retries": 0,
     "fallbacks": 0,
-    "totalPromptTokens": 8004,
-    "totalCompletionTokens": 5000,
-    "totalCost": 0.018003999999999964,
+    "totalPromptTokens": 8000,
+    "totalCompletionTokens": 4000,
+    "totalCost": 0,
     "latencyMs": {
-      "p50": 6.529600000000016,
-      "p95": 75.69140000000004,
-      "p99": 76.36850000000004,
-      "max": 76.94139999999993
+      "p50": 21,
+      "p95": 343,
+      "p99": 369,
+      "max": 374
     },
     "byModel": {
-      "benchmark-provider:benchmark-model": {
-        "attempts": 2001,
-        "completed": 2001,
+      "llm_cff5305719739c0ab5de:benchmark-openai-chat:benchmark-model": {
+        "attempts": 2000,
+        "completed": 2000,
         "failed": 0
       }
     }

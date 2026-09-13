@@ -9,7 +9,6 @@ import {
 import { dirname, resolve } from 'node:path';
 import {
   ContractValidationError,
-  assertNoSecretMaterial,
   assertResourceRegistrySnapshot,
   type ResourceRegistrySnapshot,
 } from '@dbagent/shared';
@@ -89,7 +88,6 @@ export class JsonFileResourceSnapshotStore implements ResourceSnapshotStore {
     try {
       parsed = JSON.parse(text) as unknown;
       assertResourceRegistrySnapshot(parsed);
-      assertNoSecretMaterial(parsed);
     } catch (error) {
       throw new ResourceSnapshotStoreError(
         'Resource snapshot is invalid or uses an unsupported contract version',
@@ -130,7 +128,6 @@ export class JsonFileResourceSnapshotStore implements ResourceSnapshotStore {
 function validateSnapshot(snapshot: ResourceRegistrySnapshot): void {
   try {
     assertResourceRegistrySnapshot(snapshot);
-    assertNoSecretMaterial(snapshot);
   } catch (error) {
     if (error instanceof ResourceSnapshotStoreError) throw error;
     const detail =

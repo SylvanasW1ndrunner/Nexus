@@ -161,6 +161,7 @@ describe('RunEventCommitter', () => {
       turnId: 'turn-not-started', commandId: 'causal-commit',
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
       expectedRunRevision: 1, expectedTurnRevision: 1,
+      billingMode: 'byok' as const,
       attempt: await modelAttempt(),
     };
     await expect(new RunEventCommitter(journal).commitValidatedAttempt(base))
@@ -274,6 +275,7 @@ async function commitCommand(journal: SqliteAgentJournal) {
     lease: leaseRef,
     expectedRunRevision: 3,
     expectedTurnRevision: 1,
+    billingMode: 'byok' as const,
     attempt: await modelAttempt(),
   };
 }

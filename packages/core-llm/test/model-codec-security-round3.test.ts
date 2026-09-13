@@ -4,11 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as core from '../src/index.js';
-import * as legacyModule from '../src/legacy-model-compatibility.js';
 import { OpenAIChatCodec } from '../src/protocol/codecs/openai-chat.js';
 import type {
   ModelClient,
-  ModelProtocolCodec,
   ModelRouteSnapshotInput,
 } from '../src/index.js';
 
@@ -53,31 +51,6 @@ describe('Task 2 round-three codec and package security', () => {
       codec: new OpenAIChatCodec(),
       client: staticClient(),
     })).toThrow(/exact.*singleton|registered.*singleton/i);
-  });
-
-  it('does not export the legacy codec constructor and rejects subclass-created instances', () => {
-    type LegacyConstructor = new () => ModelProtocolCodec;
-    const constructor = Reflect.get(legacyModule, 'LegacyProviderCodec') as
-      | LegacyConstructor
-      | undefined;
-    let subclassAccepted = false;
-    if (constructor !== undefined) {
-      class ForgedLegacyCodec extends constructor {}
-      try {
-        core.createModelSession({
-          route: route({ protocol: 'legacy-normalized', codecRevision: 'legacy-normalized@1' }),
-          generation: {},
-          codec: new ForgedLegacyCodec(),
-          client: staticClient(),
-        });
-        subclassAccepted = true;
-      } catch {
-        // Expected after the exact-singleton boundary is implemented.
-      }
-    }
-
-    expect(constructor).toBeUndefined();
-    expect(subclassAccepted).toBe(false);
   });
 
   it('publishes only the package root and blocks codec-authenticity deep imports', async () => {

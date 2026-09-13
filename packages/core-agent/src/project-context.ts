@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { homedir, platform } from 'node:os';
+import { homedir } from 'node:os';
+import { platform } from 'node:process';
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import type { AgentProjectContext, AgentProjectReference } from './types.js';
@@ -35,32 +36,25 @@ export async function initializeAgentProject(
   const context = projectContext(rootPath);
   await mkdir(context.configDirectory, { recursive: true });
   await mkdir(context.skillsDirectory, { recursive: true });
-  await mkdir(context.sqlDirectory, { recursive: true });
   await mkdir(context.artifactsDirectory, { recursive: true });
   await writeIfMissing(
     context.instructionsPath,
     [
       '# SchemaNaut Project Guidance',
       '',
-      'Add concise project conventions and recurring database guidance here.',
-      'Keep database facts in the knowledge catalog and credentials outside this file.',
+      'Add concise project conventions and recurring operational guidance here.',
+      'Keep generated indexes and credentials outside this file.',
       '',
     ].join('\n'),
   );
-  await writeIfMissing(context.settingsPath, `${JSON.stringify({ version: 1 }, null, 2)}\n`);
   await writeIfMissing(
-    context.mcpConfigPath,
-    `${JSON.stringify({ version: 1, servers: [] }, null, 2)}\n`,
+    context.settingsPath,
+    `${JSON.stringify({
+      version: 1,
+      mcp: { servers: {} },
+    }, null, 2)}\n`,
   );
   return await loadAgentProject(context);
-}
-
-export function defaultAgentStateDatabasePath(env: NodeJS.ProcessEnv = process.env): string {
-  const base =
-    platform() === 'win32'
-      ? env.LOCALAPPDATA?.trim() || join(homedir(), 'AppData', 'Local')
-      : env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(base, 'SchemaNaut', 'schemanaut.db');
 }
 
 export function defaultAgentUserSkillsDirectory(): string {
@@ -93,7 +87,7 @@ export function assertSameAgentProject(
 
 export function agentProjectStorageIdentity(
   reference: AgentProjectReference,
-  operatingSystem: NodeJS.Platform = platform(),
+  operatingSystem: NodeJS.Platform = platform,
 ): { projectKey: string; projectRoot: string } {
   const projectRoot = normalizeAgentProjectRoot(reference.rootPath, operatingSystem);
   return {
@@ -104,7 +98,7 @@ export function agentProjectStorageIdentity(
 
 export function normalizeAgentProjectRoot(
   rootPath: string,
-  operatingSystem: NodeJS.Platform = platform(),
+  operatingSystem: NodeJS.Platform = platform,
 ): string {
   const normalized = resolve(rootPath);
   return operatingSystem === 'win32' ? normalized.toLowerCase() : normalized;
@@ -113,7 +107,7 @@ export function normalizeAgentProjectRoot(
 export function agentProjectPathsEqual(
   left: string,
   right: string,
-  operatingSystem: NodeJS.Platform = platform(),
+  operatingSystem: NodeJS.Platform = platform,
 ): boolean {
   return (
     normalizeAgentProjectRoot(left, operatingSystem) ===
@@ -152,10 +146,7 @@ function projectContext(rootPath: string): AgentProjectContext {
     configDirectory,
     instructionsPath: join(configDirectory, 'AGENT.md'),
     settingsPath: join(configDirectory, 'settings.json'),
-    localSettingsPath: join(configDirectory, 'settings.local.json'),
-    mcpConfigPath: join(configDirectory, 'mcp.json'),
     skillsDirectory: join(configDirectory, 'skills'),
-    sqlDirectory: join(rootPath, 'sql'),
     artifactsDirectory: join(rootPath, 'artifacts'),
   };
 }

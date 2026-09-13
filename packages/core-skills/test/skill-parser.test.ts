@@ -47,7 +47,7 @@ describe('Agent Skills document parsing', () => {
         version: '1.2.0',
         schemanaut: 'auto-and-explicit',
       },
-      preapprovedTools: ['Read', 'Bash(git status)', 'sql_execute'],
+      allowedTools: ['Read', 'Bash(git status)', 'sql_execute'],
       extensions: { 'user-invocable': true },
     });
     expect(document.instructions).toContain('让数据库执行统计');
@@ -67,6 +67,71 @@ describe('Agent Skills document parsing', () => {
 
     expect('instructions' in descriptor).toBe(false);
     expect(JSON.stringify(descriptor)).not.toContain('只应在激活后读取');
+  });
+
+  it('binds parser-created single-file revisions to their complete provenance', () => {
+    const content = [
+      '---',
+      'name: order-analysis',
+      'description: Analyze orders.',
+      '---',
+      'Inspect orders.',
+    ].join('\n');
+    const first = parseSkillDocument(content, context);
+    const second = parseSkillDocument(content, {
+      ...context,
+      sourceId: 'another-source',
+      sourcePath: 'C:/another/order-analysis/SKILL.md',
+      bundleRoot: 'C:/another/order-analysis',
+      sourceOrder: 1,
+    });
+
+    expect(first.revisionRef.revisionId).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.revisionRef.bundleDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.revisionRef.revisionId).not.toBe(first.contentDigest);
+    expect(second.revisionRef.revisionId).not.toBe(first.revisionRef.revisionId);
+  });
+
+  it('rejects a caller-supplied metadata digest that does not identify the document', () => {
+    const content = [
+      '---',
+      'name: order-analysis',
+      'description: Analyze orders.',
+      '---',
+      'Inspect orders.',
+    ].join('\n');
+
+    expect(() =>
+      parseSkillMetadata(content, {
+        ...context,
+        contentDigest: '0'.repeat(64),
+      }),
+    ).toThrow(/content digest/i);
+  });
+
+  it('rejects an injected revision reference that conflicts with parser provenance', () => {
+    const content = [
+      '---',
+      'name: order-analysis',
+      'description: Analyze orders.',
+      '---',
+      'Inspect orders.',
+    ].join('\n');
+    const parsed = parseSkillDocument(content, context);
+
+    expect(() =>
+      parseSkillDocument(content, {
+        ...context,
+        revisionRef: { ...parsed.revisionRef, sourceId: 'forged-source' },
+      }),
+    ).toThrow(/revision.*provenance/i);
+
+    expect(() =>
+      parseSkillDocument(content, {
+        ...context,
+        revisionRef: { ...parsed.revisionRef, revisionId: '0'.repeat(64) },
+      }),
+    ).toThrow(/revision.*identity/i);
   });
 
   it('rejects flat YAML, JSON manifests and invalid standard fields', () => {

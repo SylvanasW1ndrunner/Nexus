@@ -12,10 +12,9 @@ import {
   type LlmToolCall,
   type LlmUsage,
 } from './types.js';
-import { redactKnownSecrets, sanitizeKnownSecretError } from './known-secret-sanitizer.js';
 import { resolveLlmProviderProtocolProfile } from './provider-protocol-profile.js';
 import { readLimitedResponseText, resolveLlmMaxResponseBytes } from './stream-safety.js';
-import { assertNoTextualToolInvocation, coalesceSystemMessages } from './tool-protocol.js';
+import { coalesceSystemMessages } from './protocol/system-message-coalescing.js';
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -129,15 +128,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
       buildResponsesPayload(request),
       request.signal,
     );
-    const response = parseResponsesResponse(raw);
-    assertNoTextualToolInvocation({
-      text: response.text,
-      toolCalls: response.toolCalls,
-      toolsRequested: Boolean(request.tools?.length),
-      toolNames: request.tools?.map((tool) => tool.name) ?? [],
-      protocol: 'OpenAI Responses',
-    });
-    return response;
+    return parseResponsesResponse(raw);
   }
 
   async listModels(signal?: AbortSignal): Promise<string[]> {
@@ -172,9 +163,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
       return {
         available: false,
         latencyMs: performance.now() - startedAt,
-        detail: redactKnownSecrets(error instanceof Error ? error.message : String(error), [
-          this.apiKey,
-        ]),
+        detail: error instanceof Error ? error.message : String(error),
       };
     }
   }
@@ -218,17 +207,12 @@ export class OpenAIResponsesProvider implements LlmProvider {
       const text = await readLimitedResponseText(response, this.maxResponseBytes);
       const parsed = safeJson(text) as T & { error?: { message?: string } };
       if (!response.ok) {
-        const message = redactKnownSecrets(
-          parsed?.error?.message ?? `Responses endpoint returned HTTP ${response.status}.`,
-          [this.apiKey],
-        );
+        const message = parsed?.error?.message ?? `Responses endpoint returned HTTP ${response.status}.`;
         throw httpError(response.status, message);
       }
       return parsed;
     } catch (error) {
-      if (error instanceof LlmProviderError) {
-        throw sanitizeKnownSecretError(error, [this.apiKey]);
-      }
+      if (error instanceof LlmProviderError) throw error;
       if (isAbortError(error)) {
         if (!timedOut && signal?.aborted) {
           throw new LlmProviderError('LLM_ABORTED', 'LLM request was aborted by the user.', false);
@@ -241,9 +225,7 @@ export class OpenAIResponsesProvider implements LlmProvider {
       }
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        redactKnownSecrets(error instanceof Error ? error.message : 'LLM request failed.', [
-          this.apiKey,
-        ]),
+        error instanceof Error ? error.message : 'LLM request failed.',
         true,
       );
     } finally {

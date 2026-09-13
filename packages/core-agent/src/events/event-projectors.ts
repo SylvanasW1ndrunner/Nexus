@@ -1,14 +1,17 @@
+import type { PreparedToolIntent } from '../tools/tool-protocol.js';
+import type { ToolQuestionBundle } from '../tools/tool-question.js';
 import type {
   ModelContentBlock, ModelFinishReason, ModelProtocolEnvelope, ModelTokenUsage,
 } from '@dbagent/core-llm';
 import type { PortableValue } from '@dbagent/shared';
+import type { AgentToolAuditEvidence, AgentToolCompletionEvidence } from '../types.js';
 import type {
   AgentEvent,
   AgentRunState,
   CanonicalToolIdFact,
   PersistedValidatedAttempt,
   ToolApprovalFact,
-  ToolEffectFact,
+  ToolRecoveryClassFact,
   ToolExecutionErrorFact,
   ToolObservationFact,
 } from './agent-event.js';
@@ -24,6 +27,7 @@ export type AgentRunProjection = {
   runId: string;
   clientRequestId: string;
   visibility?: 'legacy-import-carrier';
+  parent?: Readonly<{ runId: string; turnId: string; invocationId: string }>;
   state: AgentRunState;
   revision: number;
   input?: PortableValue;
@@ -66,7 +70,10 @@ export type AgentInvocationProjection = {
   arguments: PortableValue;
   state:
     | 'proposed'
-    | 'validated'
+    | 'prepared'
+    | 'waiting_for_user'
+    | 'timed_out'
+    | 'unsupported_revision'
     | 'awaiting_approval'
     | 'authorized'
     | 'denied'
@@ -74,13 +81,17 @@ export type AgentInvocationProjection = {
     | 'succeeded'
     | 'failed'
     | 'cancelled'
-    | 'outcome_unknown'
+    | 'unknown'
     | 'observed';
   revision: number;
   canonicalToolId?: CanonicalToolIdFact;
   toolRevision?: string;
-  effect?: ToolEffectFact;
-  normalizedArgumentsDigest?: string;
+  catalogRevision?: string;
+  intent?: PreparedToolIntent;
+  deadline?: string;
+  question?: ToolQuestionBundle;
+  recoveryClass?: ToolRecoveryClassFact;
+  intentDigest?: string;
   proposedRevision?: number;
   approvalId?: string;
   retryOf?: string;
@@ -88,8 +99,8 @@ export type AgentInvocationProjection = {
   retryPermit?: {
     permitId: string;
     toolRevision: string;
-    effect: ToolEffectFact;
-    normalizedArgumentsDigest: string;
+    recoveryClass: ToolRecoveryClassFact;
+    intentDigest: string;
     reason: string;
   };
   outcomeResolution?: {
@@ -99,18 +110,23 @@ export type AgentInvocationProjection = {
     resolvedAt: string;
   };
   started?: {
+    intentDigest: string;
     idempotencyKey: string;
     fencingToken: number;
     attempt: number;
+    runRevision: number;
     startedAt: string;
   };
   terminal?: {
-    kind: 'succeeded' | 'failed' | 'cancelled' | 'outcome_unknown' | 'denied';
+    kind: 'succeeded' | 'failed' | 'cancelled' | 'unknown' | 'denied' | 'timed_out' | 'unsupported_revision';
     summary: string;
     resultRefs: string[];
+    evidenceRefs: string[];
     durableSummary?: PortableValue;
     modelProjection?: PortableValue;
     userProjection?: PortableValue;
+    auditEvidence?: AgentToolAuditEvidence;
+    completionEvidence?: AgentToolCompletionEvidence;
     error?: ToolExecutionErrorFact;
     occurredAt: string;
   };
@@ -135,7 +151,7 @@ export type AgentReplayProjection = {
 
 const RUN_STATES: Partial<Record<AgentEvent['type'], AgentRunState>> = {
   'run.started': 'Preparing',
-  'run.resumed': 'Preparing',
+  'run.steered': 'Preparing',
   'run.input_requested': 'AwaitingUser',
   'run.cancel_requested': 'Cancelling',
   'run.limit_reached': 'LimitReached',
@@ -176,6 +192,9 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         runId: event.runId,
         clientRequestId: event.payload.clientRequestId,
         ...(event.payload.visibility === undefined ? {} : { visibility: event.payload.visibility }),
+        ...(event.payload.parent === undefined
+          ? {}
+          : { parent: structuredClone(event.payload.parent) }),
         state: 'created',
         revision: 1,
         ...(input === undefined ? {} : { input: structuredClone(input) }),
@@ -193,9 +212,28 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         run.updatedAt = event.occurredAt;
       }
     }
+    if (event.type === 'run.resumed') {
+      const run = runs.get(event.runId);
+      if (run !== undefined) {
+        run.state = event.payload.resumeState;
+        run.revision += 1;
+        run.updatedAt = event.occurredAt;
+      }
+    }
     if (event.type === 'turn.started' || event.type === 'model_attempt_committed') {
       const run = runs.get(event.runId);
       if (run !== undefined) {
+        run.revision += 1;
+        run.updatedAt = event.occurredAt;
+      }
+    }
+    if (
+      event.type === 'turn.closed' &&
+      (event.payload.reason === 'observed' || event.payload.reason === 'revision-requested')
+    ) {
+      const run = runs.get(event.runId);
+      if (run !== undefined) {
+        run.state = 'Preparing';
         run.revision += 1;
         run.updatedAt = event.occurredAt;
       }
@@ -244,6 +282,12 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         status: 'committed',
         committedAt: event.occurredAt,
       });
+      const run = runs.get(event.runId);
+      if (run !== undefined) {
+        run.state = validatedAttempt.blocks.some((block) => block.type === 'tool-call-draft')
+          ? 'ResolvingActions'
+          : 'Finalizing';
+      }
     }
     if (
       event.type === 'tool.proposed' &&
@@ -266,30 +310,55 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         createdAt: event.occurredAt,
         updatedAt: event.occurredAt,
       });
-      projectScheduledRunState(
-        runs, invocations, event.runId, event.turnId, event.occurredAt,
-        event.type,
-      );
+      continue;
+    }
+    if (event.type === 'tool.transition_committed') {
+      const facts = [...invocations.values()]
+        .filter((invocation) => invocation.runId === event.runId && invocation.turnId === event.turnId)
+        .map(scheduledInvocationFact);
+      const derived = decideSchedule({
+        invocations: facts,
+        maxConcurrency: Number.MAX_SAFE_INTEGER,
+      });
+      if (canonicalJson(derived) !== canonicalJson(event.payload.schedule)) {
+        throw new TypeError('Persisted Tool transition schedule disagrees with Tool facts.');
+      }
+      const run = runs.get(event.runId);
+      if (run !== undefined) {
+        if (!isProtectedReplayToolTransition(run.state, event.payload.action)) {
+          run.state = runStateForSchedule(derived);
+        }
+        run.revision += 1;
+        run.updatedAt = event.occurredAt;
+      }
       continue;
     }
     const invocationId = event.invocationId;
     if (invocationId === undefined) continue;
     const invocation = invocations.get(invocationId);
     if (invocation === undefined) continue;
-    const priorInvocationState = invocation.state;
-    if (event.type === 'tool.validated') {
-      invocation.state = 'validated';
+    if (event.type === 'tool.prepared') {
+      invocation.state = 'prepared';
       if (!('validationError' in event.payload)) {
+        invocation.intent = structuredClone(event.payload.intent);
+        invocation.deadline = event.payload.deadline;
+        invocation.catalogRevision = event.payload.catalogRevision;
         invocation.canonicalToolId = structuredClone(event.payload.canonicalToolId);
         invocation.toolRevision = event.payload.toolRevision;
-        invocation.effect = event.payload.effect;
-        invocation.normalizedArgumentsDigest = event.payload.normalizedArgumentsDigest;
+        invocation.recoveryClass = event.payload.recoveryClass;
+        invocation.intentDigest = event.payload.intentDigest;
         invocation.proposedRevision = event.payload.proposedRevision;
         if (event.payload.retryOf !== undefined) invocation.retryOf = event.payload.retryOf;
         if (event.payload.retryPermitId !== undefined) {
           invocation.retryPermitId = event.payload.retryPermitId;
         }
       }
+    } else if (event.type === 'tool.permission_evaluated') {
+      if (event.payload.retryOf !== undefined) invocation.retryOf = event.payload.retryOf;
+      if (event.payload.retryPermitId !== undefined) invocation.retryPermitId = event.payload.retryPermitId;
+    } else if (event.type === 'tool.waiting_for_user') {
+      invocation.state = 'waiting_for_user';
+      invocation.question = structuredClone(event.payload.bundle);
     } else if (event.type === 'tool.approval_requested') {
       invocation.state = 'awaiting_approval';
       invocation.approvalId = event.payload.approval.approvalId;
@@ -300,39 +369,53 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
       const approval = approvals.get(event.payload.approvalId);
       if (approval !== undefined) {
         approval.status = 'approved';
-        approval.decidedAt = event.occurredAt;
+        approval.decidedAt = event.payload.decision?.decidedAt ?? event.occurredAt;
+        if (event.payload.decision?.decidedBy !== undefined) {
+          approval.decidedBy = event.payload.decision.decidedBy;
+        }
+        if (event.payload.decision?.reason !== undefined) {
+          approval.reason = event.payload.decision.reason;
+        }
       }
     } else if (event.type === 'tool.denied') {
       invocation.state = 'denied';
       invocation.approvalId = event.payload.approvalId;
       invocation.terminal = {
-        kind: 'denied', summary: event.payload.reason, resultRefs: [], occurredAt: event.occurredAt,
+        kind: 'denied', summary: event.payload.reason, resultRefs: [], evidenceRefs: [],
+        occurredAt: event.occurredAt,
       };
       const approval = approvals.get(event.payload.approvalId);
       if (approval !== undefined) {
         approval.status = 'denied';
-        approval.decidedAt = event.occurredAt;
-        approval.reason = event.payload.reason;
+        approval.decidedAt = event.payload.decision?.decidedAt ?? event.occurredAt;
+        approval.reason = event.payload.decision?.reason ?? event.payload.reason;
+        if (event.payload.decision?.decidedBy !== undefined) {
+          approval.decidedBy = event.payload.decision.decidedBy;
+        }
       }
     } else if (event.type === 'tool.started') {
       invocation.state = 'started';
       invocation.started = {
+        intentDigest: event.payload.intentDigest,
         idempotencyKey: event.payload.idempotencyKey,
         fencingToken: event.payload.fencingToken,
         attempt: event.payload.attempt,
+        runRevision: event.payload.runRevision,
         startedAt: event.occurredAt,
       };
     } else if (
       event.type === 'tool.succeeded' || event.type === 'tool.failed' ||
-      event.type === 'tool.cancelled' || event.type === 'tool.outcome_unknown'
+      event.type === 'tool.cancelled' || event.type === 'tool.unknown' ||
+      event.type === 'tool.timed_out' || event.type === 'tool.unsupported_revision'
     ) {
       const kind = event.type.slice('tool.'.length) as
-        'succeeded' | 'failed' | 'cancelled' | 'outcome_unknown';
+        'succeeded' | 'failed' | 'cancelled' | 'unknown' | 'timed_out' | 'unsupported_revision';
       invocation.state = kind;
       invocation.terminal = {
         kind,
         summary: event.payload.summary,
         resultRefs: [...event.payload.resultRefs],
+        evidenceRefs: [...event.payload.evidenceRefs],
         ...(event.payload.durableSummary === undefined
           ? {}
           : { durableSummary: structuredClone(event.payload.durableSummary) }),
@@ -342,6 +425,12 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         ...(event.payload.userProjection === undefined
           ? {}
           : { userProjection: structuredClone(event.payload.userProjection) }),
+        ...(event.payload.auditEvidence === undefined
+          ? {}
+          : { auditEvidence: structuredClone(event.payload.auditEvidence) }),
+        ...(event.payload.completionEvidence === undefined
+          ? {}
+          : { completionEvidence: structuredClone(event.payload.completionEvidence) }),
         ...(event.payload.error === undefined
           ? {}
           : { error: structuredClone(event.payload.error) }),
@@ -357,6 +446,7 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         kind: event.payload.outcome,
         summary: event.payload.summary,
         resultRefs: [...event.payload.resultRefs],
+        evidenceRefs: [...event.payload.evidenceRefs],
         ...(event.payload.durableSummary === undefined
           ? {}
           : { durableSummary: structuredClone(event.payload.durableSummary) }),
@@ -366,6 +456,12 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         ...(event.payload.userProjection === undefined
           ? {}
           : { userProjection: structuredClone(event.payload.userProjection) }),
+        ...(event.payload.auditEvidence === undefined
+          ? {}
+          : { auditEvidence: structuredClone(event.payload.auditEvidence) }),
+        ...(event.payload.completionEvidence === undefined
+          ? {}
+          : { completionEvidence: structuredClone(event.payload.completionEvidence) }),
         ...(event.payload.error === undefined
           ? {}
           : { error: structuredClone(event.payload.error) }),
@@ -375,11 +471,20 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
         observationId: previousObservation.observationId,
         invocationId: previousObservation.invocationId,
         summary: event.payload.summary,
-        evidenceRefs: [...event.payload.resultRefs],
+        evidenceRefs: [...new Set([
+          ...event.payload.resultRefs,
+          ...event.payload.evidenceRefs,
+        ])],
         outcome: event.payload.outcome,
         ...(event.payload.modelProjection === undefined
           ? {}
           : { modelProjection: structuredClone(event.payload.modelProjection) }),
+        ...(event.payload.auditEvidence === undefined
+          ? {}
+          : { auditEvidence: structuredClone(event.payload.auditEvidence) }),
+        ...(event.payload.completionEvidence === undefined
+          ? {}
+          : { completionEvidence: structuredClone(event.payload.completionEvidence) }),
         ...(event.payload.error === undefined ? {} : { errorCode: event.payload.error.code }),
         occurredAt: event.occurredAt,
       };
@@ -406,8 +511,8 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
       invocation.retryPermit = {
         permitId: event.payload.permitId,
         toolRevision: event.payload.toolRevision,
-        effect: event.payload.effect,
-        normalizedArgumentsDigest: event.payload.normalizedArgumentsDigest,
+        recoveryClass: event.payload.recoveryClass,
+        intentDigest: event.payload.intentDigest,
         reason: event.payload.reason,
       };
     } else {
@@ -415,12 +520,6 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
     }
     invocation.revision += 1;
     invocation.updatedAt = event.occurredAt;
-    if (event.type !== 'tool.validated') {
-      projectScheduledRunState(
-        runs, invocations, event.runId, invocation.turnId, event.occurredAt,
-        event.type, priorInvocationState,
-      );
-    }
   }
 
   return {
@@ -440,38 +539,12 @@ export function replayAgentEvents(events: readonly AgentEvent[]): AgentReplayPro
   };
 }
 
-function projectScheduledRunState(
-  runs: ReadonlyMap<string, AgentRunProjection>,
-  invocations: ReadonlyMap<string, AgentInvocationProjection>,
-  runId: string,
-  turnId: string,
-  occurredAt: string,
-  trigger: AgentEvent['type'],
-  priorInvocationState?: AgentInvocationProjection['state'],
-): void {
-  const run = runs.get(runId);
-  if (run === undefined) return;
-  if (isProtectedReplayToolState(run.state, trigger, priorInvocationState)) return;
-  const facts = [...invocations.values()]
-    .filter((invocation) => invocation.runId === runId && invocation.turnId === turnId)
-    .map(scheduledInvocationFact);
-  run.state = runStateForSchedule(decideSchedule({
-    invocations: facts,
-    maxConcurrency: Number.MAX_SAFE_INTEGER,
-  }));
-  run.updatedAt = occurredAt;
-}
-
-function isProtectedReplayToolState(
+function isProtectedReplayToolTransition(
   state: AgentRunState,
-  trigger: AgentEvent['type'],
-  priorInvocationState: AgentInvocationProjection['state'] | undefined,
+  action: Extract<AgentEvent, { type: 'tool.transition_committed' }>['payload']['action'],
 ): boolean {
   if (state === 'AwaitingUser') {
-    const exactApprovalDecision =
-      (trigger === 'tool.authorized' || trigger === 'tool.denied') &&
-      priorInvocationState === 'awaiting_approval';
-    return !exactApprovalDecision && trigger !== 'tool.outcome_resolved';
+    return action !== 'decide-approval' && action !== 'resolve-outcome' && action !== 'settle-question';
   }
   return state === 'Finalizing' || state === 'Cancelling' || state === 'LimitReached' ||
     state === 'Interrupted' || state === 'Completed' || state === 'Failed' ||
@@ -481,15 +554,29 @@ function isProtectedReplayToolState(
 function scheduledInvocationFact(
   invocation: AgentInvocationProjection,
 ): ScheduledToolInvocation {
-  if (invocation.state === 'validated') {
-    throw new TypeError('A transient validated Tool state cannot be projected independently.');
-  }
+
   return {
     invocationId: invocation.invocationId,
     actionOrdinal: invocation.actionOrdinal,
-    effect: invocation.effect ?? 'unresolved',
+    recoveryClass: invocation.recoveryClass ?? 'unresolved',
+    access: invocation.intent?.access ?? 'external',
+    concurrency: invocation.intent?.concurrency ?? 'exclusive',
+    resourceKeys: invocation.intent?.resourceKeys ?? [],
     state: invocation.state,
   };
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new TypeError('Tool schedule contains a non-JSON value.');
+    return encoded;
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Readonly<Record<string, unknown>>;
+  return `{${Object.keys(record).sort().map(
+    (key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`,
+  ).join(',')}}`;
 }
 
 function publicObservationProjection(
@@ -504,6 +591,12 @@ function publicObservationProjection(
     ...(observation.modelProjection === undefined
       ? {}
       : { modelProjection: structuredClone(observation.modelProjection) }),
+    ...(observation.auditEvidence === undefined
+      ? {}
+      : { auditEvidence: structuredClone(observation.auditEvidence) }),
+    ...(observation.completionEvidence === undefined
+      ? {}
+      : { completionEvidence: structuredClone(observation.completionEvidence) }),
     ...(observation.errorCode === undefined ? {} : { errorCode: observation.errorCode }),
   };
 }

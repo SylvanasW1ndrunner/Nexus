@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true
+  },
+  "references": [
+    { "path": "../../packages/agent-host" },
+    { "path": "../../packages/core-agent" },
+    { "path": "../../packages/core-llm" },
+    { "path": "../../packages/shared" }
+  ],
+  "include": ["src/**/*.ts"]
+}

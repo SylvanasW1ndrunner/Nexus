@@ -4,8 +4,10 @@
 
 ## 统一动作边界
 
-Tool 是唯一可执行动作合同。Skill、MCP Tool、子 Agent 和 Capability Tool 都经过 prepare、authorize、
-schedule、execute、observe 主干，使用同一份全局权限模式、组织规则、取消、恢复和结果生命周期。
+Tool 是唯一可执行动作合同。Capability 与 MCP 把动作注册为 Tool；Skill 文档通过基础 `skill` Tool 激活后进入
+模型上下文，再由模型调用可用 Tool；子 Agent 通过委派 Tool 启动。基础 Tool、Capability Tool、MCP Tool 与
+Skill 激活后调用的 Tool 都经过 prepare、authorize、schedule、execute、observe 主干，使用同一份全局权限
+模式、组织规则、取消、恢复和结果生命周期。
 
 Capability 是由 Host 注册、按任务发现和激活的专业 Tool 集，不是第二个 Agent 循环，也不是项目或程序内
 配置对象。Capability 只静态声明操作事实，例如工作区写入、联网、外部写入、破坏性和高风险。它不扫描

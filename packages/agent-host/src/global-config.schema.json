@@ -72,7 +72,10 @@
     "agent": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "permission_mode": { "enum": ["default", "auto", "full-access"] } }
+      "properties": {
+        "permission_mode": { "enum": ["default", "auto", "full-access"] },
+        "require_sandbox": { "type": "boolean", "default": false }
+      }
     },
     "permissions": {
       "type": "object",

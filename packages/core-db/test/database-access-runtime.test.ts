@@ -51,6 +51,7 @@ function createMockConnector(options: {
   nativeStream?: boolean;
   disconnectFails?: boolean;
   asyncTerminalState?: 'succeeded' | 'failed';
+  transports?: DatabaseConnector['manifest']['transports'];
 } = {}) {
   const calls: string[] = [];
   const jobs = new Map<string, QueryJob>();
@@ -123,7 +124,7 @@ function createMockConnector(options: {
       displayName: 'Mock',
       version: '1',
       engine: 'mock',
-      transports: ['tcp'],
+      transports: options.transports ?? ['tcp'],
       execution: 'hybrid',
       capabilities,
       operations: [
@@ -414,7 +415,7 @@ function runtimeWith(connector: DatabaseConnector, options: ConstructorParameter
 }
 
 describe('DatabaseAccessRuntime', () => {
-  it('validates profile transports, URLs, secrets, read-only consistency and lifecycle conflicts', async () => {
+  it('validates profile transports, URLs, read-only consistency and lifecycle conflicts', async () => {
     const mock = createMockConnector();
     const runtime = runtimeWith(mock.connector);
     expect(() => runtime.createProfile(profile())).not.toThrow();
@@ -435,10 +436,27 @@ describe('DatabaseAccessRuntime', () => {
       runtime.createProfile(
         profile({
           id: 'bad-http',
-          endpoints: [{ transport: 'http', baseUrl: 'https://user:secret@example.com' }],
+          endpoints: [{
+            transport: 'http',
+            baseUrl: 'https://user:secret@example.com',
+            headers: { Authorization: 'Bearer provider-value' },
+          }],
         }),
       ),
     ).toThrow(/does not support http/);
+    const cookieRuntime = runtimeWith(createMockConnector({ transports: ['http'] }).connector);
+    expect(() =>
+      cookieRuntime.createProfile(
+        profile({
+          id: 'cookie-http',
+          endpoints: [{
+            transport: 'http',
+            baseUrl: 'https://example.com',
+            headers: { Cookie: 'session=browser-owned' },
+          }],
+        }),
+      ),
+    ).toThrow(/Cookie headers must stay in an execute-only/);
 
     await runtime.connect('profile-1', { username: 'tester', password: 'secret' });
     expect(() => runtime.updateProfile('profile-1', { name: 'changed' })).toThrow(/Disconnect/);
@@ -479,16 +497,17 @@ describe('DatabaseAccessRuntime', () => {
     );
     await runtime.close();
     expect(runtime.getSessionForProfile('profile-1')?.status).toBe('disconnected');
+    await expect(runtime.close()).resolves.toBeUndefined();
   });
 
-  it('redacts direct credentials from connector errors', async () => {
+  it('preserves connector error details without content-aware redaction', async () => {
     const mock = createMockConnector({ failSecret: true });
     const runtime = runtimeWith(mock.connector);
     runtime.createProfile(profile());
     const error = await captureRuntimeError(
       runtime.testProfile('profile-1', { password: 'top-secret-value' }),
     );
-    expect(error.error.message).not.toContain('top-secret-value');
+    expect(error.error.message).toContain('top-secret-value');
   });
 
   it('discovers paged resources, detects cursor loops and exposes graph queries', async () => {
@@ -583,13 +602,13 @@ describe('DatabaseAccessRuntime', () => {
       authorization: undefined,
     },
     {
-      name: 'approval metadata and confirmation without a permission mode',
+      name: 'approval metadata and confirmation without an authorized operation class',
       authorization: {
         approvalId: 'approval-1',
         policyId: 'policy-1',
       } satisfies QueryAuthorization,
     },
-  ])('does not let $name elevate a write above the default read boundary', async ({ authorization }) => {
+  ])('does not let $name elevate a write above the default query boundary', async ({ authorization }) => {
     const mock = createMockConnector();
     const runtime = runtimeWith(mock.connector);
     runtime.createProfile(profile());
@@ -612,7 +631,7 @@ describe('DatabaseAccessRuntime', () => {
     expect(mock.submissions).toHaveLength(0);
   });
 
-  it('passes an explicit effective read mode to the connector when authorization is omitted', async () => {
+  it('passes an explicit effective query class to the connector when authorization is omitted', async () => {
     const mock = createMockConnector();
     const runtime = runtimeWith(mock.connector);
     runtime.createProfile(profile());
@@ -625,10 +644,10 @@ describe('DatabaseAccessRuntime', () => {
 
     expect(job.state).toBe('succeeded');
     expect(mock.submissions).toHaveLength(1);
-    expect(mock.submissions[0]?.authorization).toEqual({ permissionMode: 'read' });
+    expect(mock.submissions[0]?.authorization).toEqual({ authorizedClass: 'query' });
   });
 
-  it('allows edit SQL only in edit/full mode and reserves DDL for full mode', async () => {
+  it('allows mutations only with mutation/schema-admin authorization and reserves DDL for schema-admin', async () => {
     const mock = createMockConnector();
     const runtime = runtimeWith(mock.connector);
     runtime.createProfile(profile());
@@ -638,14 +657,14 @@ describe('DatabaseAccessRuntime', () => {
       runtime.submit({
         profileId: 'profile-1',
         sql: 'update orders set status = 1 where id = 1',
-        authorization: { permissionMode: 'edit' },
+        authorization: { authorizedClass: 'mutation' },
       }),
     ).resolves.toMatchObject({ state: 'succeeded' });
     await expect(
       runtime.submit({
         profileId: 'profile-1',
         sql: 'alter table orders add column status integer',
-        authorization: { permissionMode: 'edit' },
+        authorization: { authorizedClass: 'mutation' },
       }),
     ).rejects.toMatchObject({
       error: {
@@ -657,12 +676,12 @@ describe('DatabaseAccessRuntime', () => {
       runtime.submit({
         profileId: 'profile-1',
         sql: 'alter table orders add column status integer',
-        authorization: { permissionMode: 'full' },
+        authorization: { authorizedClass: 'schema-admin' },
       }),
     ).resolves.toMatchObject({ state: 'succeeded' });
-    expect(mock.submissions.map((submission) => submission.authorization?.permissionMode)).toEqual([
-      'edit',
-      'full',
+    expect(mock.submissions.map((submission) => submission.authorization?.authorizedClass)).toEqual([
+      'mutation',
+      'schema-admin',
     ]);
   });
 
@@ -680,7 +699,7 @@ describe('DatabaseAccessRuntime', () => {
         profileId: 'profile-1',
         sql: 'select async_value',
         executionMode: 'async',
-        authorization: { actorId: 'audit-user', permissionMode: 'read' },
+        authorization: { actorId: 'audit-user', authorizedClass: 'query' },
       });
 
       expect(
@@ -716,7 +735,7 @@ describe('DatabaseAccessRuntime', () => {
         expect.objectContaining({
           action: 'database.query.complete',
           status: expectedStatus,
-          authorization: { actorId: 'audit-user', permissionMode: 'read' },
+          authorization: { actorId: 'audit-user', authorizedClass: 'query' },
         }),
       ]);
     },

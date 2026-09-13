@@ -98,31 +98,33 @@ export class McpResultTooLargeError extends Error {
 export function createMcpRuntimeLauncher(
   options: McpClientLauncherOptions = {},
 ): McpRuntimeLauncher {
-  return async (server) => launchMcpServer(server, options);
+  return async (server, signal) => launchMcpServer(server, options, signal);
 }
 
 export function createStdioMcpRuntimeLauncher(
   options: StdioMcpLauncherOptions = {},
 ): McpRuntimeLauncher {
-  return async (server) => launchStdioMcpServer(server, options);
+  return async (server, signal) => launchStdioMcpServer(server, options, signal);
 }
 
 export async function launchMcpServer(
   server: McpServerConfig,
   options: McpClientLauncherOptions = {},
+  signal?: AbortSignal,
 ): Promise<McpRuntimeClient> {
   switch (server.transport) {
     case 'stdio':
-      return launchStdioMcpServer(server, options);
+      return launchStdioMcpServer(server, options, signal);
     case 'sse':
-      return launchRemoteMcpServer(server, 'sse', options);
+      return launchRemoteMcpServer(server, 'sse', options, signal);
     case 'streamable-http':
       try {
-        return await launchRemoteMcpServer(server, 'streamable-http', options);
+        return await launchRemoteMcpServer(server, 'streamable-http', options, signal);
       } catch (streamableError) {
+        if (signal?.aborted) throw startupAbortError(signal);
         if (options.legacySseFallback === false) throw streamableError;
         try {
-          return await launchRemoteMcpServer(server, 'sse', options);
+          return await launchRemoteMcpServer(server, 'sse', options, signal);
         } catch (sseError) {
           throw new AggregateError(
             [streamableError, sseError],
@@ -136,6 +138,7 @@ export async function launchMcpServer(
 export async function launchStdioMcpServer(
   server: McpServerConfig,
   options: StdioMcpLauncherOptions = {},
+  signal?: AbortSignal,
 ): Promise<McpRuntimeClient> {
   if (server.transport !== 'stdio') {
     throw new Error(`MCP server ${server.id} is not a stdio server.`);
@@ -147,21 +150,24 @@ export async function launchStdioMcpServer(
     limitBytes: positiveInteger(options.stderrLimitBytes, DEFAULT_STDERR_LIMIT_BYTES),
   };
   const cwd = server.cwd ?? options.cwd;
+  const env = await resolveProcessEnv(server.env, options);
+  throwIfAborted(signal);
   const transport = new StdioClientTransport({
     command: server.command,
     args: server.args ?? [],
     ...(cwd === undefined ? {} : { cwd }),
-    env: await resolveProcessEnv(server.env, options),
+    env,
     stderr: 'pipe',
   });
   captureStderr(transport.stderr as Readable | null, stderrState);
-  return connectClient(server, 'stdio', transport, stderrState, options);
+  return connectClient(server, 'stdio', transport, stderrState, options, signal);
 }
 
 export async function launchRemoteMcpServer(
   server: McpServerConfig,
   transportKind: 'streamable-http' | 'sse',
   options: McpClientLauncherOptions = {},
+  signal?: AbortSignal,
 ): Promise<McpRuntimeClient> {
   if (!server.url) throw new Error(`MCP remote server ${server.id} requires a URL.`);
   const url = new URL(server.url);
@@ -171,6 +177,7 @@ export async function launchRemoteMcpServer(
 
   const headers = await resolveRemoteHeaders(server.headers, options);
   const authProvider = await options.createAuthProvider?.(server);
+  throwIfAborted(signal);
   const requestInit = Object.keys(headers).length === 0 ? undefined : { headers };
   const fetchWithHeaders = createFetchWithHeaders(headers, options.fetch);
 
@@ -180,7 +187,7 @@ export async function launchRemoteMcpServer(
       ...(requestInit === undefined ? {} : { requestInit }),
       ...(fetchWithHeaders === undefined ? {} : { fetch: fetchWithHeaders }),
     });
-    return connectClient(server, transportKind, transport, undefined, options);
+    return connectClient(server, transportKind, transport, undefined, options, signal);
   }
 
   const transport = new SSEClientTransport(url, {
@@ -193,7 +200,7 @@ export async function launchRemoteMcpServer(
           eventSourceInit: { fetch: fetchWithHeaders },
         }),
   });
-  return connectClient(server, transportKind, transport, undefined, options);
+  return connectClient(server, transportKind, transport, undefined, options, signal);
 }
 
 async function connectClient(
@@ -202,6 +209,7 @@ async function connectClient(
   transport: TransportDelegate,
   stderrState: StderrState | undefined,
   options: McpClientLauncherOptions,
+  signal?: AbortSignal,
 ): Promise<McpRuntimeClient> {
   const holder: { runtime?: SdkMcpRuntimeClient } = {};
   const notify = (kind: PrimitiveKind) => holder.runtime?.queueListChanged(kind);
@@ -251,6 +259,7 @@ async function connectClient(
           options.connectTimeoutMs,
           positiveInteger(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS),
         ),
+        ...(signal === undefined ? {} : { signal }),
       },
     );
     runtime.markConnected();
@@ -734,6 +743,14 @@ function limitTail(value: string, maxBytes: number): string {
 function positiveInteger(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw startupAbortError(signal);
+}
+
+function startupAbortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error('MCP startup was aborted.');
 }
 
 function errorMessage(error: unknown): string {

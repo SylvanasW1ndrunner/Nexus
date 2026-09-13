@@ -1,6 +1,7 @@
 import type { ModelMessage } from '../content.js';
 import {
   asRecord,
+  assertRepresentableGenerationParameters,
   assertContextProtocol,
   createDecodedAttempt,
   createProtocolEncodeSession,
@@ -42,6 +43,7 @@ export class OllamaChatCodec implements ModelProtocolCodec {
 
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
+    assertRepresentableGenerationParameters(request, this.protocol, ['reasoningEffort']);
     const session = createProtocolEncodeSession(context, this.protocol, request);
     return session.finish({
       model: request.model,
@@ -346,6 +348,7 @@ function encodeOptions(request: CanonicalModelRequest): Record<string, unknown> 
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
     ...(request.topP === undefined ? {} : { top_p: request.topP }),
     ...(request.maxOutputTokens === undefined ? {} : { num_predict: request.maxOutputTokens }),
+    ...(request.seed === undefined ? {} : { seed: request.seed }),
     ...(request.stop === undefined ? {} : { stop: request.stop }),
   };
   return Object.keys(options).length === 0 ? {} : { options };

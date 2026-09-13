@@ -1,21 +1,25 @@
 # SchemaNaut 用户文档
 
-SchemaNaut 借助 schemanaut 帮助你在一个项目中持续完成任务。模型连接、模型默认值和组织权限
-只来自全局 ~/.schemanaut/config.toml；项目设置只保存项目 MCP 声明。
+SchemaNaut 是一个以终端为入口、模型中立、Capability 驱动的通用 Agent。它通过 14 个始终加载的基础 Tool
+和 8 类按任务激活的第一方 Capability，组合代码、Git、数据库、浏览器、文档与本地数据分析工作。
+
+模型连接、模型默认值、默认权限模式和组织规则只来自全局 `~/.schemanaut/config.toml`；项目设置只保存
+项目 MCP 声明。Capability 复用用户在产品外管理的 CLI、文件、环境变量、服务和登录态，不增加自己的配置层。
 
 ## 开始使用
 
-- [产品概览](product/overview.md)：产品定位、数据边界和适用场景。
-- [路线图](product/roadmap.md)：面向用户的后续方向与承诺。
-- [Terminal guide (English)](guides/terminal.md)：命令、模型、Session、Skills 和 MCP。
-- [终端指南（中文）](guides/terminal.zh-CN.md)：与英文指南语义一致的参考。
-- [Capabilities guide (English)](guides/capabilities.md)：可选能力、外部依赖和重试方式。
-- [Capability 指南（中文）](guides/capabilities.zh-CN.md)：与英文指南语义一致的参考。
-- [Diagnostics and sandbox guide (English)](guides/diagnostics-and-sandbox.md)：权限、隔离和安全诊断。
-- [诊断与沙盒指南（中文）](guides/diagnostics-and-sandbox.zh-CN.md)：与英文指南语义一致的参考。
-- [安全策略](../SECURITY.md)：凭据、MCP、工作区、进程和本地状态的安全边界。
+- [产品概览](product/overview.md)：适用场景、核心优势和产品边界。
+- [终端指南（中文）](guides/terminal.zh-CN.md)：命令、模型、Session、Skills 和 MCP。
+- [Terminal guide (English)](guides/terminal.md)：英文操作参考。
+- [Capability 指南（中文）](guides/capabilities.zh-CN.md)：能力目录、外部条件和重试方式。
+- [Capabilities guide (English)](guides/capabilities.md)：英文能力参考。
+- [诊断与沙盒指南（中文）](guides/diagnostics-and-sandbox.zh-CN.md)：权限、隔离和诊断。
+- [Diagnostics and sandbox guide (English)](guides/diagnostics-and-sandbox.md)：英文边界参考。
+- [路线图](product/roadmap.md)：已经交付和后续方向。
+- [Benchmark 合同](benchmarks/README.md)：未来横向比较的任务、指标和报告规则。
+- [安全策略](../SECURITY.md)：凭据、外部工具、工作区与本地状态的责任边界。
 
-## 给开发者
+## 贡献与内部资料
 
-内部架构、代码地图、验证策略和实现计划都从唯一的
-[开发者文档入口](engineering/README.md)进入。这些材料不是用户操作手册，也不构成公共 SDK 或 API。
+准备修改代码时，从[开发者文档入口](engineering/README.md)进入。架构合同、代码地图、验证记录和实施计划
+属于内部工程资料，不是用户操作手册，也不构成公共 SDK 或 API。

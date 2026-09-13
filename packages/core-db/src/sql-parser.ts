@@ -1,10 +1,11 @@
 import sqlParserPackage from 'node-sql-parser/build/postgresql.js';
+import type { SqlOperationClass } from '@dbagent/shared';
 import { analyzeSqlSafety } from './sql-safety.js';
 import { splitSqlStatements } from './sql-statements.js';
 
 const { Parser } = sqlParserPackage;
 
-export type SqlPermissionLevel = 'read' | 'edit' | 'full';
+export type { SqlOperationClass } from '@dbagent/shared';
 
 export type SqlParserDialect =
   | 'postgresql'
@@ -22,7 +23,7 @@ export type SqlParseResult = {
   parser: 'node-sql-parser' | 'statement-scanner';
   statementCount: number;
   statementKinds: string[];
-  requiredPermission: SqlPermissionLevel;
+  requiredOperationClass: SqlOperationClass;
   tables: string[];
   columns: string[];
   hasWhere: boolean;
@@ -45,7 +46,7 @@ export function parseSql(
       parser: 'statement-scanner',
       statementCount: 0,
       statementKinds: [],
-      requiredPermission: 'full',
+      requiredOperationClass: 'schema-admin',
       tables: [],
       columns: [],
       hasWhere: false,
@@ -63,9 +64,9 @@ export function parseSql(
     const parsed = parser.parse(sql);
     const astItems = Array.isArray(parsed.ast) ? parsed.ast : [parsed.ast];
     const statementKinds = astItems.map(astStatementKind);
-    const permission = maxPermission([
+    const operationClass = maxOperationClass([
       ...statementKinds.map((kind, index) =>
-        permissionForSqlStatement(
+        operationClassForSqlStatement(
           segments[index]?.statementKind ?? kind,
           segments[index]?.text ?? sql,
           analyzeSqlSafety(segments[index]?.text ?? sql, {
@@ -80,16 +81,16 @@ export function parseSql(
       parser: 'node-sql-parser',
       statementCount: astItems.length,
       statementKinds,
-      requiredPermission: permission,
+      requiredOperationClass: operationClass,
       tables: normalizeParserReferences(parsed.tableList),
       columns: normalizeParserReferences(parsed.columnList),
       hasWhere: astItems.some(astHasWhere),
     };
   } catch (error) {
     const statementKinds = segments.map((segment) => segment.statementKind);
-    const permission = maxPermission([
+    const operationClass = maxOperationClass([
       ...segments.map((segment) =>
-        permissionForSqlStatement(
+        operationClassForSqlStatement(
           segment.statementKind,
           segment.text,
           analyzeSqlSafety(segment.text, { readOnly: true }).blocked,
@@ -102,7 +103,7 @@ export function parseSql(
       parser: 'statement-scanner',
       statementCount: segments.length,
       statementKinds,
-      requiredPermission: permission,
+      requiredOperationClass: operationClass,
       tables: extractFallbackTables(sql),
       columns: [],
       hasWhere: segments.some((segment) => /\bWHERE\b/i.test(segment.text)),
@@ -111,16 +112,16 @@ export function parseSql(
   }
 }
 
-export function permissionAllows(
-  current: SqlPermissionLevel,
-  required: SqlPermissionLevel,
+export function operationClassAllows(
+  authorized: SqlOperationClass,
+  required: SqlOperationClass,
 ): boolean {
-  return permissionRank(current) >= permissionRank(required);
+  return operationClassRank(authorized) >= operationClassRank(required);
 }
 
-export function permissionRank(permission: SqlPermissionLevel): number {
-  if (permission === 'read') return 0;
-  if (permission === 'edit') return 1;
+export function operationClassRank(operationClass: SqlOperationClass): number {
+  if (operationClass === 'query') return 0;
+  if (operationClass === 'mutation') return 1;
   return 2;
 }
 
@@ -141,49 +142,49 @@ function astHasWhere(ast: unknown): boolean {
   return false;
 }
 
-function permissionForKind(kind: string): SqlPermissionLevel {
-  if (READ_KINDS.has(kind)) return 'read';
-  if (EDIT_KINDS.has(kind)) return 'edit';
-  return 'full';
+function operationClassForKind(kind: string): SqlOperationClass {
+  if (READ_KINDS.has(kind)) return 'query';
+  if (EDIT_KINDS.has(kind)) return 'mutation';
+  return 'schema-admin';
 }
 
-function permissionForSqlStatement(
+function operationClassForSqlStatement(
   kind: string,
   sql: string,
   safetyBlocked: boolean,
-): SqlPermissionLevel {
+): SqlOperationClass {
   const normalizedKind = kind.toUpperCase();
   const code = maskNonCode(sql);
   if (normalizedKind === 'WITH') {
-    if (containsFullPermissionOperation(code)) return 'full';
-    if (containsEditOperation(code)) return 'edit';
-    return safetyBlocked ? 'full' : 'read';
+    if (containsSchemaAdminOperation(code)) return 'schema-admin';
+    if (containsEditOperation(code)) return 'mutation';
+    return safetyBlocked ? 'schema-admin' : 'query';
   }
   if (normalizedKind === 'EXPLAIN') {
-    if (!/\bANALYZE\b/i.test(code)) return 'read';
-    if (containsFullPermissionOperation(code)) return 'full';
-    if (containsEditOperation(code)) return 'edit';
-    return safetyBlocked ? 'full' : 'read';
+    if (!/\bANALYZE\b/i.test(code)) return 'query';
+    if (containsSchemaAdminOperation(code)) return 'schema-admin';
+    if (containsEditOperation(code)) return 'mutation';
+    return safetyBlocked ? 'schema-admin' : 'query';
   }
-  if (READ_KINDS.has(normalizedKind) && safetyBlocked) return 'full';
-  return permissionForKind(normalizedKind);
+  if (READ_KINDS.has(normalizedKind) && safetyBlocked) return 'schema-admin';
+  return operationClassForKind(normalizedKind);
 }
 
 function containsEditOperation(sql: string): boolean {
   return /\b(?:INSERT|REPLACE|UPDATE|DELETE|MERGE)\b/i.test(sql);
 }
 
-function containsFullPermissionOperation(sql: string): boolean {
+function containsSchemaAdminOperation(sql: string): boolean {
   return /\b(?:CREATE|ALTER|DROP|TRUNCATE|CALL|GRANT|REVOKE|COMMENT|COPY|DO|LOCK|REFRESH|REINDEX|RESET|SET|VACUUM|CLUSTER)\b/i.test(
     sql,
   );
 }
 
-function maxPermission(permissions: SqlPermissionLevel[]): SqlPermissionLevel {
-  return permissions.reduce<SqlPermissionLevel>(
+function maxOperationClass(operationClasses: SqlOperationClass[]): SqlOperationClass {
+  return operationClasses.reduce<SqlOperationClass>(
     (current, next) =>
-      permissionRank(next) > permissionRank(current) ? next : current,
-    'read',
+      operationClassRank(next) > operationClassRank(current) ? next : current,
+    'query',
   );
 }
 

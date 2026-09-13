@@ -1,110 +1,87 @@
 #!/usr/bin/env node
 
-import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  OpenAICompatibleProvider,
+  estimateTextTokens,
+  LlmConnectionManager,
+  ModelExecutionGateway,
 } from '../packages/core-llm/dist/index.js';
-import {
-  appendMessage,
-  agentProjectReference,
-  createAgentProjectContext,
-  createAgentSession,
-  createMessage,
-} from '../packages/core-agent/dist/index.js';
-import { DatabaseAgentRuntime } from '../packages/sdk/dist/index.js';
-import { loadEnvFile } from './load-env.mjs';
+import { ContextLifecycle } from '../packages/core-agent/dist/context/context-lifecycle.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-await loadEnvFile(join(root, '.env'));
-const apiKey =
-  process.env.TEST_SILICONFLOW_API_KEY ??
-  process.env.DBAGENT_LLM_API_KEY;
-assert.ok(
-  apiKey,
-  '需要在环境变量或 .env 中配置 TEST_SILICONFLOW_API_KEY。',
-);
-const model =
-  process.env.TEST_SILICONFLOW_MODEL ??
-  process.env.DBAGENT_LLM_MODEL ??
-  'Qwen/Qwen3-32B';
-const baseUrl =
-  process.env.DBAGENT_LLM_BASE_URL ??
-  'https://api.siliconflow.cn/v1';
-const temporaryDirectory = await mkdtemp(
-  join(tmpdir(), 'dbagent-context-live-'),
-);
+const apiKey = process.env.TEST_SILICONFLOW_API_KEY;
+const model = process.env.TEST_SILICONFLOW_MODEL ?? 'deepseek-ai/DeepSeek-V4-Pro';
+const endpoint = process.env.TEST_SILICONFLOW_BASE_URL ?? 'https://api.siliconflow.cn/v1';
+const reportPath = join(root, 'reports', 'agent-runtime', 'context-compaction-live.json');
+const temporaryDirectory = await mkdtemp(join(tmpdir(), 'schemanaut-context-live-'));
+const report = {
+  schemaVersion: 2,
+  kind: 'context-compaction-live',
+  status: 'failed',
+  generatedAt: new Date().toISOString(),
+  endpoint: publicEndpoint(endpoint),
+  model,
+  scope:
+    'Live summary quality only. Durable manual-command, safe-boundary, checkpoint and replay behavior is covered by deterministic Agent Journal tests.',
+};
+let failure;
 
-class RecordingProvider {
-  constructor(inner) {
-    this.inner = inner;
-    this.id = inner.id;
-    this.name = inner.name;
-    this.mode = inner.mode;
-    this.protocol = inner.protocol;
-    this.capabilities = inner.capabilities;
+class RecordingGateway {
+  constructor() {
+    this.inner = new ModelExecutionGateway();
     this.requests = [];
-    this.errors = [];
   }
 
-  async chat(request) {
+  executeAttempt(session, request, options) {
     this.requests.push(structuredClone(request));
-    try {
-      return await this.inner.chat(request);
-    } catch (error) {
-      this.errors.push(
-        error instanceof Error ? error.message : String(error),
-      );
-      throw error;
-    }
-  }
-
-  isAvailable(model, signal) {
-    return this.inner.isAvailable(model, signal);
+    return this.inner.executeAttempt(session, request, options);
   }
 }
 
-const innerProvider = new OpenAICompatibleProvider({
-  id: 'siliconflow-context-live',
-  name: 'SiliconFlow context compaction live test',
-  apiKey,
-  baseUrl,
-  timeoutMs: 120_000,
-  maxRetries: 1,
-});
-const provider = new RecordingProvider(innerProvider);
-const runtime = new DatabaseAgentRuntime({
-  provider,
-  model,
-  projectDirectory: temporaryDirectory,
-  sessionDatabasePath: join(temporaryDirectory, 'agent.db'),
-});
-const session = createLiveSession(
-  agentProjectReference(createAgentProjectContext(temporaryDirectory)),
-);
-const originalMessages = structuredClone(session.messages);
-const startedAt = performance.now();
-
 try {
-  const result = await runtime.compactAgentSession({
-    session,
-    focus:
-      '重点保留精确 SQL、数据库标识符、数值、权限决定、已完成结果和未完成事项；不要保留工具调用 ID 或内部索引。',
+  if (!apiKey) throw new Error('TEST_SILICONFLOW_API_KEY is required.');
+
+  const manager = new LlmConnectionManager({
+    cacheDirectory: join(temporaryDirectory, 'llm-catalog'),
+  });
+  const [connection] = manager.replaceConnections([
+    {
+      name: 'context-live',
+      endpoint,
+      apiKey,
+      connectionConfigurationRevision: 'context-live-config-v1',
+      credentialRevision: 'context-live-credential-v1',
+    },
+  ]);
+  if (!connection) throw new Error('The context-compaction LLM connection was not created.');
+  await manager.discover(connection.id, { inspectModelIds: [model] });
+
+  const selection = { connectionId: connection.id, modelId: model };
+  const prepared = await manager.prepare(selection);
+  const session = await manager.prepareModelSessionBundle(selection, {
+    generation: { temperature: 0 },
+  });
+  const gateway = new RecordingGateway();
+  const lifecycle = new ContextLifecycle({ gateway, session });
+  const messages = createCommittedSemanticHistory();
+  const sourceText = messages
+    .flatMap((message) => message.content)
+    .filter((block) => block.type === 'text' || block.type === 'reasoning-summary')
+    .map((block) => block.text)
+    .join('\n');
+  const sourceTokenEstimate = estimateTextTokens(sourceText);
+
+  const startedAt = performance.now();
+  const result = await lifecycle.compact({
+    decisionId: 'context-live-manual-v2',
+    committedThroughSequence: messages.length,
+    messages,
   });
   const latencyMs = performance.now() - startedAt;
-  assert.equal(result.status, 'compacted');
-  assert.equal(
-    result.checkpoint?.method,
-    'model',
-    `真实模型压缩降级：${provider.errors.join(' | ') || '模型返回空摘要'}`,
-  );
-  assert.equal(result.checkpoint?.trigger, 'manual');
-  assert.deepEqual(result.session.messages, originalMessages);
-  assert.ok(result.checkpoint);
-
+  const summaryTokenEstimate = estimateTextTokens(result.summary);
   const requiredFacts = [
     'public.events',
     'value.customer.province',
@@ -114,226 +91,129 @@ try {
     '56000.00',
     'read',
   ];
-  const preservation = Object.fromEntries(
-    requiredFacts.map((fact) => [
-      fact,
-      result.checkpoint.summary.includes(fact),
-    ]),
+  const exactFactsPreserved = Object.fromEntries(
+    requiredFacts.map((fact) => [fact, result.summary.includes(fact)]),
   );
-  for (const [fact, preserved] of Object.entries(preservation)) {
-    assert.equal(preserved, true, `真实模型摘要丢失关键事实：${fact}`);
-  }
-  assert.doesNotMatch(result.checkpoint.summary, /internal-call-/);
-  assert.ok(
-    result.checkpoint.sourceTokenEstimate >
-      result.checkpoint.summaryTokenEstimate * 2,
-    '真实模型摘要没有产生有效压缩。',
-  );
-  assert.ok(
-    result.report.finalTokenEstimate <=
-      result.report.availablePromptTokens,
-    '压缩后模型工作上下文仍超过物理窗口。',
-  );
-
-  const serializedRequests = JSON.stringify(
-    provider.requests.map((request) => request.messages),
-  );
-  for (const forbidden of [
+  const serializedRequests = JSON.stringify(gateway.requests);
+  const forbiddenMetadata = [
     'internal-call-',
     'coveredConversationMessageCount',
     'activeCheckpointSequence',
     'catalogRootHash',
     'localHash',
     'treeIndex',
-  ]) {
-    assert.doesNotMatch(
-      serializedRequests,
-      new RegExp(escapeRegExp(forbidden)),
-      `压缩请求泄露内部字段：${forbidden}`,
-    );
-  }
-  const persisted = await runtime.sessions.load(session.id);
-  assert.deepEqual(persisted?.messages, originalMessages);
-  const checkpoints = await runtime.agentContextCheckpoints(session.id);
-  assert.deepEqual(
-    checkpoints.map((checkpoint) => ({
-      sequence: checkpoint.sequence,
-      trigger: checkpoint.trigger,
-      method: checkpoint.method,
-    })),
-    [{ sequence: 1, trigger: 'manual', method: 'model' }],
-  );
-
-  const report = {
-    kind: 'context-compaction-live',
-    status: 'passed',
-    generatedAt: new Date().toISOString(),
-    provider: 'siliconflow',
-    model,
-    latencyMs: round(latencyMs),
-    input: {
-      fullSessionMessages: originalMessages.length,
-      coveredMessages:
-        result.checkpoint.coveredConversationMessageCount,
-      retainedRecentMessages:
-        originalMessages.length -
-        result.checkpoint.coveredConversationMessageCount,
-      compactionRequests: provider.requests.length,
-    },
-    tokens: {
-      sourceEstimate: result.checkpoint.sourceTokenEstimate,
-      summaryEstimate: result.checkpoint.summaryTokenEstimate,
-      estimatedCompressionRatio: round(
-        result.checkpoint.sourceTokenEstimate /
-          result.checkpoint.summaryTokenEstimate,
-      ),
-      providerReportedSessionUsage: result.session.tokenUsage,
-    },
-    checks: {
-      modelSummaryUsed: result.checkpoint.method === 'model',
-      exactFactsPreserved: preservation,
-      fullSessionUnchanged: true,
-      checkpointPersisted: checkpoints.length === 1,
-      internalMetadataExcluded: true,
-      postCompactionContextFitsModel:
-        result.report.finalTokenEstimate <=
-        result.report.availablePromptTokens,
-    },
-    summary: result.checkpoint.summary,
-    note:
-      '真实 Endpoint 单场景质量验证，不代表供应商 SLA；报告不包含 API Key。',
+    'protocolEnvelopeRef',
+  ];
+  const checks = {
+    compacted: result.status === 'compacted',
+    exactDecisionBoundary:
+      result.decisionId === 'context-live-manual-v2' &&
+      result.committedThroughSequence === messages.length,
+    exactlyOneModelAttempt: gateway.requests.length === 1,
+    allExactFactsPreserved: Object.values(exactFactsPreserved).every(Boolean),
+    internalMetadataExcluded: forbiddenMetadata.every(
+      (marker) => !serializedRequests.includes(marker) && !result.summary.includes(marker),
+    ),
+    effectiveCompression: sourceTokenEstimate > summaryTokenEstimate * 2,
   };
-  const reportPath = join(
-    root,
-    'reports',
-    'ai-sql',
-    'context-compaction-live.json',
-  );
-  await mkdir(dirname(reportPath), { recursive: true });
-  await writeFile(
-    reportPath,
-    `${JSON.stringify(report, null, 2)}\n`,
-    'utf8',
-  );
-  process.stdout.write(
-    `${JSON.stringify(report, null, 2)}\nReport: ${reportPath}\n`,
-  );
+  const passed = Object.values(checks).every(Boolean);
+  Object.assign(report, {
+    status: passed ? 'passed' : 'failed',
+    latencyMs: round(latencyMs),
+    route: {
+      protocol: prepared.route.protocol,
+      codecRevision: session.primary.route.codecRevision,
+    },
+    modelMetadata: {
+      contextTokens: prepared.model.contextTokens.value,
+      maxInputTokens: prepared.model.maxInputTokens.value,
+      maxOutputTokens: prepared.model.maxOutputTokens.value,
+    },
+    input: {
+      committedMessages: messages.length,
+      sourceTokenEstimate,
+      modelAttempts: gateway.requests.length,
+    },
+    output: {
+      summaryTokenEstimate,
+      estimatedCompressionRatio: round(sourceTokenEstimate / summaryTokenEstimate),
+      usage: result.usage ?? null,
+    },
+    exactFactsPreserved,
+    checks,
+    summary: result.summary,
+    note:
+      'This gated command measures one real provider summary. It is not a provider SLA and never loads product .env files or writes credentials.',
+  });
+  if (!passed) failure = new Error('Context-compaction live acceptance checks did not all pass.');
+} catch (error) {
+  failure = error;
+  Object.assign(report, { error: publicError(error, apiKey) });
 } finally {
-  await runtime.close();
   await rm(temporaryDirectory, { recursive: true, force: true });
+  await mkdir(dirname(reportPath), { recursive: true });
+  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\nReport: ${reportPath}\n`);
 }
 
-function createLiveSession(project) {
-  const now = () => '2026-07-24T00:00:00.000Z';
-  const output = createAgentSession({
-    id: 'context-live-session',
-    title: '真实模型上下文压缩',
-    mode: 'read',
-    userId: 'live-context-user',
-    project,
-    now,
-  });
-  appendMessage(
-    output,
-    createMessage(
-      {
-        role: 'system',
-        content:
-          '你是数据库分析 Agent。当前权限为 read，只能执行只读查询。',
-      },
-      now,
+if (failure) throw failure;
+
+function createCommittedSemanticHistory() {
+  const messages = [
+    textMessage(
+      'user',
+      [
+        '压缩时必须逐字保留以下数据库标识符、数值和权限模式。',
+        '目标：分析 public.events 的 JSONB 数据。',
+        'JSON 路径是 value.customer.province 和 value.amount。',
+        "已确认 SQL：SELECT value #>> '{customer,province}' AS province, sum((value #>> '{amount}')::numeric) AS total_amount FROM public.events GROUP BY 1。",
+        '上海的精确结果是 1726.50。',
+        '中文对象是 "供应链"."采购订单"，江苏采购总额是 56000.00。',
+        '当前权限模式是 read。',
+        '未完成事项：核对退款事件是否应从金额中扣除。',
+      ].join('\n'),
     ),
-  );
-  appendMessage(
-    output,
-    createMessage(
-      {
-        role: 'user',
-        content: [
-          '目标：分析 public.events 的 JSONB 数据。',
-          'JSON 路径必须精确保留为 value.customer.province 和 value.amount。',
-          '已确认 SQL：SELECT value #>> \'{customer,province}\' AS province, sum((value #>> \'{amount}\')::numeric) AS total_amount FROM public.events GROUP BY 1。',
-          '上海的精确结果是 1726.50。',
-          '同时记录中文对象 "供应链"."采购订单"，江苏采购总额为 56000.00。',
-          '当前权限决定是 read，禁止写入。',
-          '未完成事项：核对退款事件是否应从金额中扣除。',
-        ].join('\n'),
-      },
-      now,
-    ),
-  );
-  for (let index = 1; index <= 20; index += 1) {
-    appendMessage(
-      output,
-      createMessage(
-        {
-          role: 'assistant',
-          content: `第 ${index} 轮继续核对事件数据和订单事实。`,
-          toolCalls: [
-            {
-              id: `internal-call-${index}`,
-              name: 'query_database',
-              arguments: {
-                sql:
-                  index % 2 === 0
-                    ? 'SELECT value #>> \'{customer,province}\' AS province, sum((value #>> \'{amount}\')::numeric) AS total_amount FROM public.events GROUP BY 1'
-                    : 'SELECT "供应商ID", sum("含税金额") FROM "供应链"."采购订单" GROUP BY 1',
-              },
-            },
-          ],
-        },
-        now,
+  ];
+  for (let index = 1; index <= 24; index += 1) {
+    messages.push(
+      textMessage(
+        'assistant',
+        `第 ${index} 轮已核对已提交事实；没有改变 SQL、标识符、精确金额或 read 权限，退款扣减仍待确认。`,
       ),
-    );
-    appendMessage(
-      output,
-      createMessage(
-        {
-          role: 'tool',
-          toolCallId: `internal-call-${index}`,
-          toolName: 'query_database',
-          content: JSON.stringify({
-            round: index,
-            status: 'succeeded',
-            permission: 'read',
-            observed:
-              index % 2 === 0
-                ? {
-                    table: 'public.events',
-                    provincePath: 'value.customer.province',
-                    amountPath: 'value.amount',
-                    province: 'Shanghai',
-                    totalAmount: '1726.50',
-                  }
-                : {
-                    table: '"供应链"."采购订单"',
-                    province: '江苏',
-                    totalAmount: '56000.00',
-                  },
-            pending: '核对退款事件是否应从金额中扣除',
-          }),
-        },
-        now,
-      ),
-    );
-    appendMessage(
-      output,
-      createMessage(
-        {
-          role: 'user',
-          content: `第 ${index} 轮确认：保留原始标识符和精确数值，继续只读分析，不要把假设写成事实。`,
-        },
-        now,
+      textMessage(
+        'user',
+        `第 ${index} 轮确认：public.events 的 value.customer.province、value.amount、1726.50 与 "供应链"."采购订单" 的 56000.00 都必须保持原样。`,
       ),
     );
   }
-  return output;
+  return messages;
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function textMessage(role, text) {
+  return { role, content: [{ type: 'text', text }] };
 }
 
 function round(value) {
   return Math.round(value * 1_000) / 1_000;
+}
+
+function publicEndpoint(value) {
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return 'invalid-endpoint';
+  }
+}
+
+function publicError(error, secret) {
+  const raw = error instanceof Error ? error.message : String(error);
+  return {
+    name: error instanceof Error ? error.name : 'Error',
+    code:
+      typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : null,
+    message: secret ? raw.replaceAll(secret, '[REDACTED]') : raw,
+  };
 }

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-01T04:45:30.435Z",
+  "generatedAt": "2026-09-03T23:38:37.129Z",
   "dataset": {
     "resources": 100000,
     "relations": 100000,
@@ -8,15 +8,15 @@
     "streamedRows": 1000000
   },
   "metrics": {
-    "resourceIdLookupP95Ms": 0.005599999998594285,
-    "singleHopRelationP95Ms": 0.007499999999708962,
+    "resourceIdLookupP95Ms": 0.006799999999202555,
+    "singleHopRelationP95Ms": 0.009200000000419095,
     "capabilityResolutionP95Ms": 0.002300000000104774,
-    "querySubmissionP95Ms": 0.20790000000124564,
-    "cancellationPropagationP95Ms": 0.016400000000430737,
-    "millionRowStreamMemoryDeltaMiB": 17.346237182617188,
-    "millionRowStreamElapsedMs": 467.676300000001,
+    "querySubmissionP95Ms": 0.21049999999922875,
+    "cancellationPropagationP95Ms": 0.01749999999992724,
+    "millionRowStreamMemoryDeltaMiB": 17.347373962402344,
+    "millionRowStreamElapsedMs": 489.85030000000006,
     "millionRowStreamBatches": 1000,
-    "incrementalSingleResourceUpdateMs": 79.40230000000156,
+    "incrementalSingleResourceUpdateMs": 74.98120000000017,
     "connectorCapabilityCoverage": 1
   },
   "thresholds": {
@@ -31,12 +31,12 @@
   "assertions": {
     "resourceIdLookupP95Ms": {
       "passed": true,
-      "actual": 0.005599999998594285,
+      "actual": 0.006799999999202555,
       "maximum": 10
     },
     "singleHopRelationP95Ms": {
       "passed": true,
-      "actual": 0.007499999999708962,
+      "actual": 0.009200000000419095,
       "maximum": 50
     },
     "capabilityResolutionP95Ms": {
@@ -46,17 +46,17 @@
     },
     "querySubmissionP95Ms": {
       "passed": true,
-      "actual": 0.20790000000124564,
+      "actual": 0.21049999999922875,
       "maximum": 20
     },
     "cancellationPropagationP95Ms": {
       "passed": true,
-      "actual": 0.016400000000430737,
+      "actual": 0.01749999999992724,
       "maximum": 100
     },
     "millionRowStreamMemoryDeltaMiB": {
       "passed": true,
-      "actual": 17.346237182617188,
+      "actual": 17.347373962402344,
       "maximum": 64
     },
     "connectorCapabilityCoverage": {

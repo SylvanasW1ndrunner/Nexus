@@ -143,7 +143,7 @@ describe('provider adapters beyond basic connectivity', () => {
     });
   });
 
-  it('rejects textual pseudo tool calls once instead of accepting them as a final answer', async () => {
+  it('preserves textual pseudo tool markup as ordinary content', async () => {
     let fetchCount = 0;
     const provider = new OpenAICompatibleProvider({
       id: 'relay',
@@ -166,8 +166,7 @@ describe('provider adapters beyond basic connectivity', () => {
       },
     });
 
-    await expect(
-      provider.chat({
+    const response = await provider.chat({
         model: 'vendor/model',
         messages: [{ role: 'user', content: 'run select 1' }],
         tools: [
@@ -177,12 +176,15 @@ describe('provider adapters beyond basic connectivity', () => {
             inputSchema: { type: 'object' },
           },
         ],
-      }),
-    ).rejects.toMatchObject({ code: 'TOOL_PROTOCOL_MISMATCH', retryable: false });
+      });
+    expect(response).toMatchObject({
+      text: '<tool_calls>[{"name":"query_database","arguments":{"sql":"select 1"}}]</tool_calls>',
+      toolCalls: [],
+    });
     expect(fetchCount).toBe(1);
   });
 
-  it('rejects a known requested tool serialized as plain JSON text', async () => {
+  it('preserves a requested tool name serialized as plain JSON text', async () => {
     const provider = new OpenAICompatibleProvider({
       id: 'relay',
       name: 'Compatible relay',
@@ -201,8 +203,7 @@ describe('provider adapters beyond basic connectivity', () => {
         }),
     });
 
-    await expect(
-      provider.chat({
+    const response = await provider.chat({
         model: 'vendor/model',
         messages: [{ role: 'user', content: 'read the orders metric' }],
         tools: [
@@ -212,8 +213,11 @@ describe('provider adapters beyond basic connectivity', () => {
             inputSchema: { type: 'object' },
           },
         ],
-      }),
-    ).rejects.toMatchObject({ code: 'TOOL_PROTOCOL_MISMATCH', retryable: false });
+      });
+    expect(response).toMatchObject({
+      text: '{"name":"lookup_metric","arguments":{"name":"orders"}}',
+      toolCalls: [],
+    });
   });
 
   it('preserves ordinary JSON that does not name a requested tool', async () => {

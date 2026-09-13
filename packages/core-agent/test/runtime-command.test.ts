@@ -4,9 +4,10 @@ import {
   createRuntimeCommandIssuer,
   isAuthenticRuntimeCommand,
 } from '../src/internal/runtime-command-authority.js';
+import { RuntimeCommandError } from '../src/kernel/runtime-command.js';
 
 const base = {
-  schemaVersion: 1 as const,
+  schemaVersion: 2 as const,
   commandId: 'command-1',
   origin: { runId: 'run-1', turnId: 'turn-1', invocationId: 'invocation-1' },
   expectedRunRevision: 3,
@@ -25,29 +26,75 @@ describe('sealed Runtime Commands', () => {
 
   it('rejects plain-object and structured-clone forgeries', () => {
     const command = createRuntimeCommandIssuer().issue({
-      ...base, kind: 'tool.activate', payload: { names: ['workspace_read'] },
+      ...base,
+      kind: 'discovery.activate',
+      payload: {
+        tools: [{ name: 'workspace_read', toolRevision: 'workspace_read@1', handlerRevision: 'workspace_read-handler@1' }],
+        targets: [],
+        bindings: [],
+      },
     });
-    expect(() => assertAuthenticRuntimeCommand({ ...command })).toThrowError(
-      expect.objectContaining({ code: 'RUNTIME_COMMAND_UNAUTHENTIC' }),
+    expectRuntimeCommandError(
+      () => assertAuthenticRuntimeCommand({ ...command }), 'RUNTIME_COMMAND_UNAUTHENTIC',
     );
-    expect(() => assertAuthenticRuntimeCommand(structuredClone(command))).toThrowError(
-      expect.objectContaining({ code: 'RUNTIME_COMMAND_UNAUTHENTIC' }),
+    expectRuntimeCommandError(
+      () => assertAuthenticRuntimeCommand(structuredClone(command)),
+      'RUNTIME_COMMAND_UNAUTHENTIC',
     );
   });
 
-  it('rejects functions, secrets, open keys and unbounded lists', () => {
+  it('rejects non-portable values, open keys and unbounded lists', () => {
     const issuer = createRuntimeCommandIssuer();
-    expect(() => issuer.issue({
+    expectRuntimeCommandError(() => issuer.issue({
       ...base, kind: 'child.start', payload: { task: 'work', context: (() => 1) as never },
-    })).toThrowError(expect.objectContaining({ code: 'RUNTIME_COMMAND_INVALID' }));
-    expect(() => issuer.issue({
+    }), 'RUNTIME_COMMAND_INVALID');
+    const command = issuer.issue({
       ...base, kind: 'child.start', payload: { task: 'work', context: { apiKey: 'secret' } },
-    })).toThrowError(expect.objectContaining({ code: 'RUNTIME_COMMAND_INVALID' }));
-    expect(() => issuer.issue({
-      ...base, kind: 'tool.activate', payload: { names: ['ok'], extra: true } as never,
-    })).toThrowError(expect.objectContaining({ code: 'RUNTIME_COMMAND_INVALID' }));
-    expect(() => issuer.issue({
-      ...base, kind: 'skill.activate', payload: { ids: Array.from({ length: 257 }, (_, i) => `s-${i}`) },
-    })).toThrowError(expect.objectContaining({ code: 'RUNTIME_COMMAND_INVALID' }));
+    });
+    expect(command.payload).toEqual({ task: 'work', context: { apiKey: 'secret' } });
+    expectRuntimeCommandError(() => issuer.issue({
+      ...base,
+      kind: 'discovery.activate',
+      payload: { tools: [], targets: [], bindings: [], extra: true } as never,
+    }), 'RUNTIME_COMMAND_INVALID');
+    expectRuntimeCommandError(() => issuer.issue({
+      ...base,
+      kind: 'skill.activate',
+      payload: { activations: Array.from({ length: 257 }, (_, i) => skillActivation(`s-${i}`)) },
+    }), 'RUNTIME_COMMAND_INVALID');
   });
 });
+
+function skillActivation(id: string) {
+  return {
+    id,
+    revision: {
+      schemaVersion: 1 as const,
+      revisionId: `${id}@1`,
+      scope: 'project' as const,
+      sourceId: `${id}-source`,
+      sourcePath: `C:/project/.schemanaut/skills/${id}`,
+      bundleRoot: 'C:/project/.schemanaut/skills',
+      sourceOrder: 0,
+      name: id,
+      contentDigest: `${id}-content`,
+      bundleDigest: `${id}-bundle`,
+    },
+  };
+}
+
+function expectRuntimeCommandError(
+  action: () => unknown,
+  code: RuntimeCommandError['code'],
+): void {
+  let caught: unknown;
+  try {
+    action();
+  } catch (error) {
+    caught = error;
+  }
+  if (!(caught instanceof RuntimeCommandError)) {
+    throw new Error('Expected RuntimeCommandError.');
+  }
+  expect(caught.code).toBe(code);
+}

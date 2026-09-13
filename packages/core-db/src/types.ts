@@ -1,6 +1,7 @@
 import type {
   ConnectionId,
   DatabaseEngine,
+  QueryResultRow,
   QueryCancelResponse,
   QueryExecutionResult,
   QueryRequest,
@@ -41,6 +42,17 @@ export type TableSummary = {
 
 export type QueryExecutionObserver = {
   onBackendPid?(input: { queryId: string; connectionId: ConnectionId; backendPid: number }): void;
+  /**
+   * Receives complete read results in ordinal batches. The Driver awaits each
+   * callback before fetching the next cursor page, providing storage backpressure.
+   */
+  onResultBatch?(input: {
+    columns: QueryExecutionResult['columns'];
+    rows: QueryResultRow[];
+    ordinal: number;
+  }): Promise<void> | void;
+  /** Storage batch size; independent from the caller-visible preview limit. */
+  resultBatchSize?: number;
   /**
    * Cancels the in-flight database operation when the caller abandons it.
    * Drivers that can address a running backend should propagate this signal

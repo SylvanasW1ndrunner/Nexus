@@ -1,4 +1,0 @@
-interface:
-  display_name: "SchemaNaut Runtime and API"
-  short_description: "Build the SchemaNaut runtime and APIs"
-  default_prompt: "Use $schemanaut-runtime-api-development to implement a SchemaNaut SDK or REST runtime slice."

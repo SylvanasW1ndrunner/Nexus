@@ -5,24 +5,22 @@ import { Worker } from 'node:worker_threads';
 import { createRequire } from 'node:module';
 import type { DatabaseSync } from 'node:sqlite';
 import { execFileSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { ValidatedModelAttempt } from '@dbagent/core-llm';
 import { RunEventCommitter, SqliteAgentJournal } from '../src/index.js';
 import { validatedAttemptFixture } from './validated-attempt-fixture.js';
 
 const tempDirs: string[] = [];
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const repositoryRoot = dirname(dirname(packageRoot));
+const typescriptEntry = createRequire(import.meta.url).resolve('typescript/bin/tsc');
 
 beforeAll(() => {
   execFileSync(process.execPath, [
-    'node_modules/typescript/bin/tsc', '-b', 'packages/core-agent/tsconfig.json', '--force',
-  ], { cwd: resolve('.'), stdio: 'pipe' });
-});
-
-afterAll(() => {
-  execFileSync(process.execPath, [
-    'scripts/clean-path.mjs', 'packages/core-agent/dist', 'packages/core-agent/tsconfig.tsbuildinfo',
-  ], { cwd: resolve('.'), stdio: 'pipe' });
+    typescriptEntry, '-b', `${packageRoot}/tsconfig.json`, '--force',
+  ], { cwd: repositoryRoot, stdio: 'pipe' });
 });
 
 afterEach(async () => {
@@ -49,6 +47,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
       expectedRunRevision: 3,
       expectedTurnRevision: 1,
+      billingMode: 'byok' as const,
       attempt: await modelAttempt(),
     };
     journal.failAt(cut);
@@ -177,7 +176,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a',
       commandId: 'corruption-seed',
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
-      expectedRunRevision: 3, expectedTurnRevision: 1, attempt: await modelAttempt(),
+      expectedRunRevision: 3, expectedTurnRevision: 1, billingMode: 'byok', attempt: await modelAttempt(),
     });
     const database = openDatabase(filePath);
     database.prepare(
@@ -198,7 +197,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a',
       commandId: 'outer-payload-seed',
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
-      expectedRunRevision: 3, expectedTurnRevision: 1, attempt: await modelAttempt(),
+      expectedRunRevision: 3, expectedTurnRevision: 1, billingMode: 'byok', attempt: await modelAttempt(),
     });
     const database = openDatabase(filePath);
     database.prepare(
@@ -249,7 +248,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a',
       commandId: 'projection-corruption-seed',
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
-      expectedRunRevision: 3, expectedTurnRevision: 1, attempt: await modelAttempt(),
+      expectedRunRevision: 3, expectedTurnRevision: 1, billingMode: 'byok', attempt: await modelAttempt(),
     });
     const database = openDatabase(filePath);
     database.prepare("UPDATE agent_turns SET payload_json = '{}' WHERE turn_id = 'turn-a'").run();
@@ -267,7 +266,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a',
       commandId: 'projection-identity-seed',
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
-      expectedRunRevision: 3, expectedTurnRevision: 1, attempt: await modelAttempt(),
+      expectedRunRevision: 3, expectedTurnRevision: 1, billingMode: 'byok', attempt: await modelAttempt(),
     });
     const database = openDatabase(filePath);
     database.prepare("UPDATE agent_turns SET payload_json = json_set(payload_json, '$.projectId', 'project-b')")
@@ -299,7 +298,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a',
       commandId: 'projection-union-seed',
       lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
-      expectedRunRevision: 3, expectedTurnRevision: 1, attempt: await modelAttempt(),
+      expectedRunRevision: 3, expectedTurnRevision: 1, billingMode: 'byok', attempt: await modelAttempt(),
     });
     const database = openDatabase(filePath);
     const badTurn = { ...committed.turn, blocks: [{ type: 'invented', data: 'unsafe' }] };
@@ -386,6 +385,165 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
     ).resolves.toMatchObject({ events: [{ type: 'run.started' }] });
   });
 
+  it('releases only the exact Run lease and preserves monotonic fencing across reopen and rebuild', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a',
+      clientRequestId: 'lease-release', input: 'go',
+    });
+    const first = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 60_000,
+    });
+
+    await expect(journal.releaseRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: 'worker-b', fencingToken: first.fencingToken,
+    })).resolves.toBe(false);
+    await expect(journal.releaseRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: first.ownerId, fencingToken: first.fencingToken + 1,
+    })).resolves.toBe(false);
+    expect(await journal.getRunLease('project-a', created.runId)).toMatchObject(first);
+    await expect(journal.releaseRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: first.ownerId, fencingToken: first.fencingToken,
+    })).resolves.toBe(true);
+    await expect(journal.releaseRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: first.ownerId, fencingToken: first.fencingToken,
+    })).resolves.toBe(false);
+
+    const reopened = new SqliteAgentJournal({ filePath });
+    const second = await reopened.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 60_000,
+    });
+    expect(second.fencingToken).toBe(first.fencingToken + 1);
+    await expect(reopened.releaseRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: second.ownerId, fencingToken: second.fencingToken,
+    })).resolves.toBe(true);
+    await reopened.rebuildProjectProjections('project-a');
+    const third = await reopened.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-c', ttlMs: 60_000,
+    });
+    expect(third.fencingToken).toBe(second.fencingToken + 1);
+    await expect(reopened.renewRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: first.ownerId, fencingToken: first.fencingToken, ttlMs: 60_000,
+    })).rejects.toMatchObject({ code: 'STALE_LEASE' });
+  });
+
+  it('serializes concurrent acquisition after release and advances the persistent fence once', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a',
+      clientRequestId: 'lease-concurrent-release', input: 'go',
+    });
+    const first = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 60_000,
+    });
+    await expect(journal.releaseRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: first.ownerId, fencingToken: first.fencingToken,
+    })).resolves.toBe(true);
+
+    const contenders = await Promise.allSettled([
+      journal.acquireRunLease({
+        projectId: 'project-a', runId: created.runId, ownerId: 'worker-b', ttlMs: 60_000,
+      }),
+      journal.acquireRunLease({
+        projectId: 'project-a', runId: created.runId, ownerId: 'worker-c', ttlMs: 60_000,
+      }),
+    ]);
+    const winner = contenders.find((item) => item.status === 'fulfilled');
+    const loser = contenders.find((item) => item.status === 'rejected');
+    expect(winner?.status).toBe('fulfilled');
+    expect(loser?.status).toBe('rejected');
+    if (winner?.status !== 'fulfilled' || loser?.status !== 'rejected') {
+      throw new Error('Expected exactly one serialized lease winner.');
+    }
+    expect(winner.value.fencingToken).toBe(first.fencingToken + 1);
+    expect(loser.reason).toMatchObject({ code: 'LEASE_HELD' });
+  });
+
+  it('rejects non-exact lease release and Turn lifecycle inputs before reading storage', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const { runId, lease } = await createLeasedRun(journal);
+    await expect(journal.releaseRunLease({
+      projectId: 'project-a', runId, ownerId: lease.ownerId,
+      fencingToken: lease.fencingToken, unexpected: true,
+    } as never)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(journal.releaseRunLease({
+      projectId: 'project-a', runId, ownerId: lease.ownerId, fencingToken: 0,
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(journal.getTurnLifecycle({
+      projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a', unexpected: true,
+    } as never)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(journal.getTurnLifecycle({
+      projectId: 'project-a', sessionId: 'session-a', runId, turnId: '',
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(await journal.getRunLease('project-a', runId)).toMatchObject(lease);
+  });
+
+  it('backfills the persistent fence counter from an existing active lease', async () => {
+    const filePath = await journalPath();
+    const journal = new SqliteAgentJournal({ filePath });
+    const created = await journal.createRun({
+      projectId: 'project-a', sessionId: 'session-a',
+      clientRequestId: 'lease-fence-backfill', input: 'go',
+    });
+    const first = await journal.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-a', ttlMs: 60_000,
+    });
+    const database = openDatabase(filePath);
+    database.exec('DROP TABLE agent_run_lease_fences');
+    database.close();
+
+    const migrated = new SqliteAgentJournal({ filePath });
+    await expect(migrated.releaseRunLease({
+      projectId: 'project-a', runId: created.runId,
+      ownerId: first.ownerId, fencingToken: first.fencingToken,
+    })).resolves.toBe(true);
+    const next = await migrated.acquireRunLease({
+      projectId: 'project-a', runId: created.runId, ownerId: 'worker-b', ttlMs: 60_000,
+    });
+    expect(next.fencingToken).toBe(first.fencingToken + 1);
+  });
+
+  it('reads one exact scoped Turn lifecycle through started, committed and closed states', async () => {
+    const journal = new SqliteAgentJournal({ filePath: await journalPath() });
+    const first = await createLeasedRun(journal);
+    const scope = {
+      projectId: 'project-a', sessionId: 'session-a', runId: first.runId, turnId: 'turn-a',
+    };
+    await expect(journal.getTurnLifecycle(scope))
+      .resolves.toEqual({ revision: 1, status: 'started' });
+    await new RunEventCommitter(journal).commitValidatedAttempt({
+      ...scope, commandId: 'turn-lifecycle-commit',
+      lease: { ownerId: first.lease.ownerId, fencingToken: first.lease.fencingToken },
+      expectedRunRevision: 3, expectedTurnRevision: 1, billingMode: 'byok', attempt: await modelAttempt(),
+    });
+    await expect(journal.getTurnLifecycle(scope))
+      .resolves.toEqual({ revision: 2, status: 'committed' });
+    await expect(journal.getTurnLifecycle({ ...scope, turnId: 'missing-turn' }))
+      .resolves.toBeNull();
+    await expect(journal.getTurnLifecycle({ ...scope, sessionId: 'session-b' }))
+      .rejects.toMatchObject({ code: 'RUN_IDENTITY_CONFLICT' });
+
+    const database = openDatabase(journal.filePath);
+    try {
+      database.prepare(
+        `UPDATE agent_turn_lifecycles SET revision = revision + 1, status = 'closed'
+         WHERE project_id = ? AND session_id = ? AND run_id = ? AND turn_id = ?`,
+      ).run(scope.projectId, scope.sessionId, scope.runId, scope.turnId);
+    } finally {
+      database.close();
+    }
+    await expect(journal.getTurnLifecycle(scope))
+      .resolves.toEqual({ revision: 3, status: 'closed' });
+  });
+
   it('replays a semantic command after lease takeover despite new fencing and revision inputs', async () => {
     let now = Date.parse('2026-08-09T00:00:00.000Z');
     const journal = new SqliteAgentJournal({
@@ -448,7 +606,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
     await expect(journal.countEvents(undefined, 'project-a')).resolves.toBe(2);
   });
 
-  it('maps initialization PRAGMA and DDL lock failures to JOURNAL_BUSY', async () => {
+  it('rejects a pre-initialization external SQLite file as incompatible state', async () => {
     const filePath = await journalPath();
     const worker = new Worker(`
       const { parentPort, workerData } = require('node:worker_threads');
@@ -485,7 +643,7 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
     }
     expect(errors).toHaveLength(10);
     expect(errors.every((error) =>
-      (error as { code?: string }).code === 'JOURNAL_BUSY')).toBe(true);
+      (error as { code?: string }).code === 'incompatible_state_store')).toBe(true);
     await expect(rm(dirname(filePath), { recursive: true, force: true })).resolves.toBeUndefined();
   });
 
@@ -542,8 +700,30 @@ describe('SqliteAgentJournal transaction and lease faults', () => {
       });
       expect(retry.turn.turnId).toBe('turn-a');
       await expect(reopened.countEvents('model_attempt_committed', 'project-a')).resolves.toBe(1);
-      expect((await reopened.readProject('project-a', 0, 100)).map(({ sequence }) => sequence))
-        .toEqual([1, 2, 3, 4, 5, 6, 7]);
+      const events = await reopened.readProject('project-a', 0, 100);
+      expect(events.map(({ sequence, type }) => ({ sequence, type }))).toEqual([
+        { sequence: 1, type: 'input.received' },
+        { sequence: 2, type: 'run.created' },
+        { sequence: 3, type: 'run.started' },
+        { sequence: 4, type: 'turn.started' },
+        { sequence: 5, type: 'model_attempt_committed' },
+        { sequence: 6, type: 'usage.recorded' },
+        { sequence: 7, type: 'tool.proposed' },
+        { sequence: 8, type: 'tool.proposed' },
+      ]);
+      const modelEvent = events[4];
+      expect(modelEvent?.type).toBe('model_attempt_committed');
+      expect(events.slice(5).map(({ parentEventId }) => parentEventId))
+        .toEqual([modelEvent?.eventId, modelEvent?.eventId, modelEvent?.eventId]);
+      const database = openDatabase(filePath);
+      try {
+        expect(database.prepare(
+          `SELECT command_kind FROM agent_commands
+           WHERE project_id = ? AND command_id = ?`,
+        ).all('project-a', command.commandId)).toEqual([{ command_kind: 'model.commit' }]);
+      } finally {
+        database.close();
+      }
     },
   );
 });
@@ -601,7 +781,7 @@ function workerCommand(
   return {
     projectId: 'project-a', sessionId: 'session-a', runId, turnId: 'turn-a', commandId,
     lease: { ownerId: lease.ownerId, fencingToken: lease.fencingToken },
-    expectedRunRevision: 3, expectedTurnRevision: 1,
+    expectedRunRevision: 3, expectedTurnRevision: 1, billingMode: 'byok' as const,
   };
 }
 

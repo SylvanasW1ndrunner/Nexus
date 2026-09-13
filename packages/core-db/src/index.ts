@@ -18,3 +18,7 @@ export * from './connector-registry.js';
 export * from './database-access-runtime.js';
 export * from './postgres-connector.js';
 export * from './connector-contract-verifier.js';
+export * from './result-store.js';
+export * from './project-result-store.js';
+export * from './result-store-migrations.js';
+export * from './result-gc.js';

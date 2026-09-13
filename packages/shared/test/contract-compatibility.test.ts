@@ -6,7 +6,6 @@ import {
   assertConnectionProfile,
   assertContractEnvelope,
   assertDatabaseAccessError,
-  assertNoSecretMaterial,
   assertQuerySubmission,
   assertResourceRegistrySnapshot,
   stringifyPublicJson,
@@ -47,7 +46,6 @@ describe('public contract v1 compatibility fixtures', () => {
 
       assertContractEnvelope(envelope, fixture.contract);
       fixture.validate(envelope.payload);
-      assertNoSecretMaterial(envelope);
       expect(envelope.version).toBe(CURRENT_CONTRACT_VERSION);
       expect(JSON.parse(stringifyPublicJson(envelope, 2))).toEqual(
         JSON.parse(originalText),

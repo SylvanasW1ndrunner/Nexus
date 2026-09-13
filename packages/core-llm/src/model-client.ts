@@ -3,9 +3,15 @@ import type {
   LlmCapabilityStatus,
   LlmGenerationConfig,
   LlmGenerationParameterName,
+  OpenAIChatMaxOutputTokensWireKey,
 } from './types.js';
+import { LlmProviderError } from './types.js';
 import { validateLlmGenerationConfig } from './generation-config.js';
-import type { ModelEncodeContext, ModelProtocolCodec } from './protocol/codec.js';
+import type {
+  ModelEncodeContext,
+  ModelProtocolCodec,
+  ModelRouteEncoding,
+} from './protocol/codec.js';
 import type { ModelProtocol } from './protocol/content.js';
 import type { ModelProtocolEnvelope } from './protocol/envelope.js';
 import {
@@ -57,6 +63,8 @@ export type ModelRouteSnapshotInput = {
   contextTokens: number | null;
   maxInputTokens: number | null;
   maxOutputTokens: number | null;
+  /** Route-selected, endpoint-advertised protocol encoding; never user input. */
+  encoding?: ModelRouteEncoding;
   metadata: ModelRouteMetadata;
   allowedFallbackRouteIds?: readonly string[];
   compatibility?: ModelRouteCompatibility;
@@ -76,6 +84,8 @@ export type ModelRouteSnapshot = Readonly<{
   contextTokens: number | null;
   maxInputTokens: number | null;
   maxOutputTokens: number | null;
+  /** Absent means a descriptor written before route encoding was introduced. */
+  encoding?: ModelRouteEncoding;
   metadata: Readonly<ModelRouteMetadata>;
   allowedFallbackRouteIds: readonly string[];
   compatibility?: Readonly<ModelRouteCompatibility>;
@@ -188,9 +198,6 @@ export function createModelSession(input: {
       `ModelSession codec revision ${input.route.codecRevision} does not match registered codec revision ${codec.revision}.`,
     );
   }
-  if (codec.protocol === 'legacy-normalized' && input.replay?.mode !== undefined && input.replay.mode !== 'new') {
-    throw new Error('The legacy-normalized edge does not support replay.');
-  }
   assertRoute(input.route);
   const validated = validateSessionGeneration(input.generation, input.route);
   const route = freezeRoute(input.route);
@@ -289,12 +296,6 @@ export type PersistedModelSessionDescriptor = Readonly<{
 export function describeModelSession(session: ModelSession): PersistedModelSessionDescriptor {
   if (!isAuthenticModelSession(session)) {
     throw new Error('Only an authentic Model Session can be persisted.');
-  }
-  if (session.route.protocol === 'legacy-normalized') {
-    throw new ModelClientBindingError(
-      'MODEL_SESSION_NOT_PERSISTABLE',
-      'legacy-normalized Sessions cannot be persisted or rehydrated.',
-    );
   }
   const capability = requireModelClientBindingCapability(session);
   const payload = requireModelClientBindingPayload(capability);
@@ -449,9 +450,7 @@ function assertBundleFallback(
     primaryCompatibility?.mode === 'compatible-protocol' &&
     fallbackCompatibility?.mode === 'compatible-protocol' &&
     primaryCompatibility.family === fallbackCompatibility.family &&
-    (primary.route.protocol === 'legacy-normalized'
-      ? fallback.route.protocol === 'legacy-normalized' && fallback.replay.mode === 'new'
-      : fallback.replay.mode === 'compatible-protocol');
+    fallback.replay.mode === 'compatible-protocol';
   if (!declared || !compatible) {
     throw new Error(
       `Fallback route ${fallback.route.routeId} is not an explicit digest-bound compatible candidate of ${primary.route.routeId}.`,
@@ -466,6 +465,7 @@ function freezeRoute(input: ModelRouteSnapshotInput): ModelRouteSnapshot {
   const compatibility = input.compatibility === undefined
     ? undefined
     : Object.freeze({ ...input.compatibility });
+  const encoding = freezeRouteEncoding(input);
   const digestValue = digest({
     routeId: input.routeId,
     connectionId: input.connectionId,
@@ -478,6 +478,7 @@ function freezeRoute(input: ModelRouteSnapshotInput): ModelRouteSnapshot {
     contextTokens: input.contextTokens,
     maxInputTokens: input.maxInputTokens,
     maxOutputTokens: input.maxOutputTokens,
+    ...(encoding === undefined ? {} : { encoding }),
     metadata: {
       source: input.metadata.source,
       revision: input.metadata.revision,
@@ -506,6 +507,7 @@ function freezeRoute(input: ModelRouteSnapshotInput): ModelRouteSnapshot {
     contextTokens: input.contextTokens,
     maxInputTokens: input.maxInputTokens,
     maxOutputTokens: input.maxOutputTokens,
+    ...(encoding === undefined ? {} : { encoding }),
     metadata: Object.freeze({
       source: input.metadata.source,
       revision: input.metadata.revision,
@@ -561,6 +563,7 @@ function routeDescriptor(route: ModelRouteSnapshot): ModelRouteSnapshotInput {
     contextTokens: route.contextTokens,
     maxInputTokens: route.maxInputTokens,
     maxOutputTokens: route.maxOutputTokens,
+    ...(route.encoding === undefined ? {} : { encoding: route.encoding }),
     metadata: Object.freeze({ ...route.metadata }),
     allowedFallbackRouteIds: Object.freeze([...route.allowedFallbackRouteIds]),
     ...(route.compatibility === undefined
@@ -629,14 +632,19 @@ function validateSessionGeneration(
   }
   for (const parameter of Object.keys(validated) as LlmGenerationParameterName[]) {
     if (validated[parameter] !== undefined && route.generationParameters?.[parameter] === 'unsupported') {
-      throw new Error(`Frozen route does not support generation parameter ${parameter}.`);
+      throw new LlmProviderError(
+        'LLM_PARAMETER_UNSUPPORTED',
+        `Frozen model route ${route.modelId} does not support generation parameter ${parameter}.`,
+        false,
+        undefined,
+        {
+          connectionId: route.connectionId,
+          modelId: route.modelId,
+          parameter,
+          metadataSource: route.metadata.source,
+        },
+      );
     }
-  }
-  if (validated.seed !== undefined) {
-    throw new Error('seed is not projected by the canonical Model Protocol codecs.');
-  }
-  if (validated.reasoningEffort !== undefined) {
-    throw new Error('reasoningEffort is not projected by the canonical Model Protocol codecs.');
   }
   return validated;
 }
@@ -670,6 +678,44 @@ function assertRoute(route: ModelRouteSnapshotInput): void {
       throw new Error(`Model route ${name} must be a positive safe integer or null.`);
     }
   }
+  freezeRouteEncoding(route);
+}
+
+const OPENAI_CHAT_MAX_OUTPUT_TOKENS_WIRE_KEYS: readonly OpenAIChatMaxOutputTokensWireKey[] = [
+  'max_tokens',
+  'max_completion_tokens',
+  'max_output_tokens',
+  'max_new_tokens',
+];
+
+function freezeRouteEncoding(input: ModelRouteSnapshotInput): ModelRouteEncoding | undefined {
+  const raw = input.encoding;
+  if (raw === undefined) return undefined;
+  if (raw !== undefined && (typeof raw !== 'object' || raw === null || Array.isArray(raw))) {
+    throw invalidRouteEncoding('Route encoding metadata must be an object when supplied.');
+  }
+  const unexpected = Object.keys(raw).find((key) => key !== 'openAIChatMaxOutputTokensWireKey');
+  if (unexpected !== undefined) {
+    throw invalidRouteEncoding(`Unsupported route encoding member ${unexpected}.`);
+  }
+  const key = raw?.openAIChatMaxOutputTokensWireKey;
+  if (input.protocol !== 'openai-chat') {
+    if (key !== undefined) {
+      throw invalidRouteEncoding(
+        `OpenAI Chat output-token key cannot be used with ${input.protocol}.`,
+      );
+    }
+    return Object.freeze({});
+  }
+  const selected = key ?? 'max_tokens';
+  if (!OPENAI_CHAT_MAX_OUTPUT_TOKENS_WIRE_KEYS.includes(selected)) {
+    throw invalidRouteEncoding(`Unsupported OpenAI Chat output-token key ${String(selected)}.`);
+  }
+  return Object.freeze({ openAIChatMaxOutputTokensWireKey: selected });
+}
+
+function invalidRouteEncoding(message: string): ModelClientBindingError {
+  return new ModelClientBindingError('MODEL_ROUTE_ENCODING_INVALID', message);
 }
 
 function sortedRecord<T>(record: Record<string, T>): Record<string, T> {

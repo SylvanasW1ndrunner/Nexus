@@ -179,29 +179,58 @@ describe('version 1 provider replay corpus', () => {
     );
   });
 
-  it('rejects provider-opaque replay across connections instead of dropping it', () => {
+  it('drops incompatible opaque state on compatible fallback while preserving public projection and tool correlation', () => {
     const request: CanonicalModelRequest = {
       model: 'm1',
-      messages: [{
-        role: 'assistant',
-        content: [{
-          type: 'provider-opaque',
-          opaqueRef: 'opaque-source:opaque:0',
-          protocol: 'anthropic-messages',
-          origin: { connectionId: 'conn-source', model: 'claude' },
-          replay: 'same-connection-only',
-          value: { type: 'thinking', thinking: 'private', signature: 'sig' },
-        }],
-      }],
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Public projection' },
+            {
+              type: 'provider-opaque',
+              opaqueRef: 'opaque-source:opaque:0',
+              protocol: 'openai-responses',
+              origin: { connectionId: 'conn-source', model: 'reasoning-model' },
+              replay: 'same-connection-only',
+              value: { encrypted: 'private-native-state' },
+            },
+            { type: 'tool-call', callId: 'internal-call', name: 'inspect', arguments: { table: 'users' } },
+          ],
+        },
+        {
+          role: 'tool',
+          content: [{ type: 'tool-result', callId: 'internal-call', output: { rows: 1 }, isError: false }],
+        },
+      ],
     };
-    expectProtocolError(
-      () => anthropicMessagesCodec.encode(request, {
-        requestId: 'opaque-cross',
-        target: { connectionId: 'conn-other', model: 'claude', protocol: 'anthropic-messages' },
-        replay: { mode: 'new' },
-      }),
-      'OPAQUE_REPLAY_FORBIDDEN',
-    );
+    const encoded = anthropicMessagesCodec.encode(request, {
+      requestId: 'opaque-cross',
+      target: { connectionId: 'conn-other', model: 'claude', protocol: 'anthropic-messages' },
+      replay: {
+        mode: 'compatible-protocol',
+        envelopes: [{
+          schemaVersion: 1,
+          attemptId: 'opaque-source',
+          origin: { connectionId: 'conn-source', model: 'reasoning-model', protocol: 'openai-responses' },
+          correlations: [{
+            callId: 'internal-call',
+            draftCallKey: 'opaque-source:call:0',
+            wireIdentity: { callId: 'source-call', providerItemId: 'source-item' },
+            replay: 'same-connection-only',
+          }],
+          opaqueBlockRefs: ['opaque-source:opaque:0'],
+        }],
+      },
+    });
+    const wire = JSON.stringify(encoded.wireRequest);
+
+    expect(wire).toContain('Public projection');
+    expect(wire).toContain('opaque-cross:call:0');
+    expect(wire).not.toContain('private-native-state');
+    expect(encoded.correlations).toEqual([
+      expect.objectContaining({ callId: 'internal-call', wireIdentity: { callId: 'opaque-cross:call:0' } }),
+    ]);
   });
 });
 

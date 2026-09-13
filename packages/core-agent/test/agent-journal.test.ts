@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { PortableValue } from '@dbagent/shared';
 import {
   AGENT_EVENT_SCHEMA_REGISTRY,
-  AgentJournalError,
   SqliteAgentJournal,
   replayAgentEvents,
   upcastAgentEvent,
@@ -48,7 +47,9 @@ describe('SqliteAgentJournal', () => {
       [2, 'run.created'],
       [3, 'run.started'],
     ]);
-    expect(firstRead.every((event) => event.schemaVersion === 1)).toBe(true);
+    expect(firstRead.every((event) => (
+      event.schemaVersion === AGENT_EVENT_SCHEMA_REGISTRY[event.type].schemaVersion
+    ))).toBe(true);
     expect(new Set(firstRead.map((event) => event.eventId)).size).toBe(3);
     expect(await journal.readProject('project-a', 1, 1)).toMatchObject([
       { sequence: 2, type: 'run.created' },
@@ -107,7 +108,7 @@ describe('SqliteAgentJournal', () => {
     const payloads: PortableValue[] = [
       {
         entityType: 'session', legacyId: 'session-a', projectKey: 'project-a', projectRoot: '/project-a',
-        title: 'Historical', userId: 'user-a', mode: 'read',
+        title: 'Historical', userId: 'user-a', mode: 'default',
       },
       {
         entityType: 'message', legacyId: 'session-a:2', messageIndex: 2,
@@ -148,7 +149,7 @@ describe('SqliteAgentJournal', () => {
         entityType: 'session', legacyId: 'session-a', projectKey: 'project-a', projectRoot: '/project-a',
         record: {
           session: {
-            id: 'session-a', title: 'Historical', userId: 'user-a', mode: 'read', messages: [],
+            id: 'session-a', title: 'Historical', userId: 'user-a', mode: 'default', messages: [],
             tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, aborted: false,
           },
           archived: false, createdAt: '1970-01-01T00:00:00.000Z',
@@ -281,7 +282,7 @@ describe('SqliteAgentJournal', () => {
     })).toThrow(/CORRUPT_EVENT/u);
   });
 
-  it('rejects producer-controlled metadata, unknown schemas, secrets, and non-portable payloads', async () => {
+  it('rejects producer-controlled metadata, unknown schemas, and non-portable payloads', async () => {
     const journal = new SqliteAgentJournal({ filePath: await journalPath() });
     const created = await journal.createRun({
       projectId: 'project-a',
@@ -330,7 +331,7 @@ describe('SqliteAgentJournal', () => {
         commandId: 'secret-payload',
         events: [{ type: 'run.failed', payload: { code: 'AUTH', detail: { apiKey: 'sk-secret' } } }],
       }),
-    ).rejects.toBeInstanceOf(AgentJournalError);
+    ).rejects.toMatchObject({ code: 'COMMITTER_REQUIRED' });
     await expect(
       journal.commit({
         ...base,

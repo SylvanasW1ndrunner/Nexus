@@ -147,6 +147,13 @@ describe('GlobalConfigStore', () => {
 
   });
 
+  it('accepts the global enterprise sandbox requirement and defaults it off', async () => {
+    const path = await temporaryConfig();
+    expect((await new GlobalConfigStore({ path }).load()).settings.agent.require_sandbox).toBe(false);
+    await writeFile(path, 'version = 1\n\n[agent]\npermission_mode = "auto"\nrequire_sandbox = true\n', 'utf8');
+    expect((await new GlobalConfigStore({ path }).load()).settings.agent).toEqual({ permission_mode: 'auto', require_sandbox: true });
+  });
+
   it('rejects duplicate enterprise rule identities', async () => {
     const path = await temporaryConfig();
     await writeFile(

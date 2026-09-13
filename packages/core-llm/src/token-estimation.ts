@@ -1,5 +1,6 @@
 import type { CanonicalModelRequest } from './protocol/codec.js';
 import type { ModelContentBlock } from './protocol/content.js';
+import type { LlmMessage } from './types.js';
 
 /** A deterministic planning estimate; endpoint usage remains authoritative. */
 export function estimateCanonicalRequestTokens(request: CanonicalModelRequest): number {
@@ -15,6 +16,29 @@ export function estimateCanonicalRequestTokens(request: CanonicalModelRequest): 
     tokens += textTokens(JSON.stringify(tool.inputSchema));
   }
   return tokens;
+}
+
+/** Planning-only estimate for the normalized direct-LLM compatibility edge. */
+export function estimateLegacyMessagesTokens(messages: readonly LlmMessage[]): number {
+  return messages.reduce((total, message) => {
+    const structuredToolTokens = message.toolCalls?.length
+      ? estimateTextTokens(JSON.stringify(message.toolCalls))
+      : 0;
+    return total + 4 + estimateTextTokens(message.content) + structuredToolTokens;
+  }, 2);
+}
+
+/** Deterministic fallback used only when a provider/tokenizer supplies no count. */
+export function estimateTextTokens(value: string): number {
+  if (value.length === 0) return 0;
+  let units = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint >= 0x2e80) units += 2.4;
+    else if (/\s/u.test(character)) units += 0.25;
+    else units += 0.65;
+  }
+  return Math.max(1, Math.ceil(units));
 }
 
 function estimateBlockTokens(block: ModelContentBlock): number {

@@ -19,8 +19,6 @@ export type LlmConnection = {
   headers: Readonly<Record<string, string>>;
   connectionConfigurationRevision: string;
   credentialRevision: string;
-  /** Compatibility alias. This is an opaque revision, never a secret-derived hash. */
-  credentialScope: string;
 };
 
 export function createLlmConnection(input: LlmConnectionInput): LlmConnection {
@@ -45,7 +43,6 @@ export function createLlmConnection(input: LlmConnectionInput): LlmConnection {
     headers: Object.freeze(headers),
     connectionConfigurationRevision,
     credentialRevision,
-    credentialScope: credentialRevision,
   });
 }
 

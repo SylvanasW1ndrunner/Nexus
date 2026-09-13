@@ -127,7 +127,7 @@ export {
 export {
   AGENT_EVENT_SCHEMA_REGISTRY,
   isAgentEventType,
-  validateAndRedactEventPayload,
+  validateAndSnapshotEventPayload,
   validatePersistedAttempt,
   type AgentEventAudience,
   type AgentEventPersistence,
@@ -326,11 +326,13 @@ export {
   parseContentReference,
   resolveContentOffset,
   type ContentAccessScope,
+  type ContentOpenRequest,
   type ContentOwnerScope,
   type ContentReadMode,
   type ContentReadRequest,
   type ContentReadResult,
   type ContentReferenceRecord,
+  type OpenedContent,
 } from './artifacts/content-reference.js';
 export {
   JournalAgentSubagentRuntime,

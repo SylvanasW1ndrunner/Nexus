@@ -12,7 +12,6 @@ import {
   type ModelProtocolCodec,
   type ModelRouteSnapshotInput,
 } from '../src/index.js';
-import { legacyProviderCodec } from '../src/legacy-model-compatibility.js';
 import {
   OpenAIChatCodec,
   openAIChatCodec,
@@ -103,62 +102,6 @@ describe('Task 2 round-two binding and replay invariants', () => {
       caught = error;
     }
     expect(caught).toMatchObject({ code: 'MODEL_CODEC_UNAVAILABLE' });
-  });
-
-  it('keeps the normalized legacy edge protocol out of replay and canonical fallback', () => {
-    expect(() => createModelSession({
-      route: route({ protocol: 'legacy-normalized', codecRevision: 'legacy-normalized@1' }),
-      generation: {},
-      codec: legacyProviderCodec,
-      client: new StaticClient(chatResponse('unused')),
-      replay: { mode: 'compatible-protocol', envelopes: [] },
-    })).toThrow(/legacy-normalized|replay/i);
-  });
-
-  it('rejects canonical blocks the normalized legacy edge cannot preserve', async () => {
-    const session = createModelSession({
-      route: route({
-        protocol: 'legacy-normalized',
-        codecRevision: 'legacy-normalized@1',
-      }),
-      generation: {},
-      codec: legacyProviderCodec,
-      client: new StaticClient(chatResponse('should not execute')),
-    });
-    await expect(new ModelExecutionGateway().executeAttempt(session, {
-      model: 'model-1',
-      messages: [{
-        role: 'user',
-        content: [{ type: 'resource-ref', artifactId: 'artifact-1', mediaType: 'text/plain', purpose: 'input' }],
-      }],
-    })).rejects.toMatchObject({ code: 'MODEL_PROTOCOL_FAILED' });
-  });
-
-  it('does not cross provider or model boundaries unless the caller explicitly opts in', async () => {
-    let fallbackCalls = 0;
-    const gateway = new core.LlmGateway();
-    gateway.registerProvider({
-      id: 'primary', name: 'primary', mode: 'byok',
-      chat: () => Promise.reject(new core.LlmProviderError('LLM_TIMEOUT', 'timeout', true)),
-      isAvailable: () => Promise.resolve({ available: true }),
-    }, [{ model: 'primary-model', quality: 'advanced' }]);
-    gateway.registerProvider({
-      id: 'fallback', name: 'fallback', mode: 'byok',
-      chat: () => {
-        fallbackCalls += 1;
-        return Promise.resolve({ text: 'fallback', toolCalls: [] });
-      },
-      isAvailable: () => Promise.resolve({ available: true }),
-    }, [{ model: 'fallback-model', quality: 'balanced' }]);
-
-    await expect(gateway.execute({
-      request: { messages: [{ role: 'user', content: 'hello' }] },
-      context: { tenantId: 'tenant', taskType: 'review' },
-      task: { preferences: { optimizeFor: 'quality' } },
-      maxRetries: 0,
-      maxFallbacks: 1,
-    })).rejects.toBeDefined();
-    expect(fallbackCalls).toBe(0);
   });
 
   it('does not persist a Session whose client was not bound by trusted connection preparation', () => {

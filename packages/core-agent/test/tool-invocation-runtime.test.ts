@@ -131,7 +131,7 @@ describe('ToolInvocationRuntime', () => {
       Buffer.byteLength(event.payload.summary, 'utf8') <= 4_096)).toBe(true);
     expect(progress.map((event) => event.payload.summary).join('\n')).toContain('phase 0:');
     expect(progress.map((event) => event.payload.summary).join('\n')).toContain('phase 199:');
-    expect(JSON.stringify(progress)).not.toContain(secret);
+    expect(JSON.stringify(progress)).toContain(secret);
     const terminal = events.find((event) => event.type === 'tool.succeeded');
     expect(terminal).toBeDefined();
     expect(progress.every((event) => event.sequence < terminal!.sequence)).toBe(true);
@@ -140,7 +140,7 @@ describe('ToolInvocationRuntime', () => {
       projectId: 'project-a', sessionId: 'session-a', afterSequence: 0, limit: 1_000,
     }).items;
     expect(activities.filter(({ phase }) => phase === 'progress')).toHaveLength(progress.length);
-    expect(JSON.stringify(activities)).not.toContain(secret);
+    expect(JSON.stringify(activities)).toContain(secret);
   });
 
   it('flushes semantic Handler progress after the time threshold', async () => {
@@ -221,8 +221,8 @@ describe('ToolInvocationRuntime', () => {
     expect(await fixture.journal.countEvents('tool.succeeded', 'project-a')).toBe(1);
   });
 
-  it('drops invalid diagnostic progress without changing a completed external effect outcome', async () => {
-    const invalidSecret = 'must-never-reach-the-journal';
+  it('drops malformed progress but persists bounded diagnostic progress', async () => {
+    const diagnostic = 'durable-progress-detail';
     let externalEffectCount = 0;
     const fixture = await createFixture({
       mode: 'full-access',
@@ -230,8 +230,8 @@ describe('ToolInvocationRuntime', () => {
         externalEffectCount += 1;
         context.reportProgress('');
         context.reportProgress('   ');
-        context.reportProgress(`${invalidSecret}:${'x'.repeat(2_048)}`);
-        (context.reportProgress as (summary: unknown) => void)({ raw: invalidSecret });
+        context.reportProgress(`${diagnostic}:${'x'.repeat(256)}`);
+        (context.reportProgress as (summary: unknown) => void)({ raw: diagnostic });
         context.reportProgress('External effect completed.');
         return { changed: true };
       },
@@ -244,10 +244,11 @@ describe('ToolInvocationRuntime', () => {
     expect(externalEffectCount).toBe(1);
     expect(observation.outcome).toBe('succeeded');
     const events = await fixture.journal.readProject('project-a', 0, 10_000);
-    expect(events.flatMap((event) => event.type === 'tool.progress'
+    const summaries = events.flatMap((event) => event.type === 'tool.progress'
       ? [event.payload.summary]
-      : [])).toEqual(['External effect completed.']);
-    expect(JSON.stringify(events)).not.toContain(invalidSecret);
+      : []);
+    expect(summaries.join('\n')).toContain(diagnostic);
+    expect(summaries.join('\n')).toContain('External effect completed.');
     expect(await fixture.journal.countEvents('tool.succeeded', 'project-a')).toBe(1);
   });
 
@@ -1559,7 +1560,7 @@ describe('ToolInvocationRuntime', () => {
     expect(await fixture.journal.countEvents('tool.observed', 'project-a')).toBe(1);
   });
 
-  it('maps unknown Handler errors to a closed safe error without scanning or leaking their text', async () => {
+  it('maps unknown Handler errors to a bounded raw diagnostic', async () => {
     const secret = 'synthetic-api-key-never-persist';
     const fixture = await createFixture({
       mode: 'full-access',
@@ -1581,13 +1582,13 @@ describe('ToolInvocationRuntime', () => {
         },
       },
     });
-    expect(observation.summary).toBe('The tool could not complete.');
-    expect(persisted).not.toContain(secret);
-    expect(persisted).not.toContain('C:\\Users\\private');
-    expect(persisted).not.toContain('ECONNRESET');
+    expect(observation.summary).toContain(secret);
+    expect(persisted).toContain(secret);
+    expect(persisted).toContain('C:\\\\Users\\\\private');
+    expect(persisted).toContain('ECONNRESET');
   });
 
-  it('persists a bounded explicitly trusted failure summary after removing credential material', async () => {
+  it('persists a bounded external failure summary without content rewriting', async () => {
     const databasePassword = 'journal-password-never-persist';
     const apiKey = 'sk-journal-api-key-never-persist';
     const fixture = await createFixture({
@@ -1611,13 +1612,13 @@ describe('ToolInvocationRuntime', () => {
     const persisted = JSON.stringify(await reopened.readProject('project-a', 0, 100));
 
     expect(observation).toMatchObject({ outcome: 'failed', errorCode: 'HANDLER_FAILED' });
-    expect(observation.summary).toContain('PostgreSQL rejected postgresql://app@db.example.com/app.');
+    expect(observation.summary).toContain(`PostgreSQL rejected postgresql://app:${databasePassword}@db.example.com/app.`);
+    expect(observation.summary).toContain(`apiKey=${apiKey}`);
     expect(observation.summary).toContain('Useful provider detail.');
-    expect(observation.summary).toContain('[REDACTED]');
     expect(observation.summary).toContain('[truncated]');
     expect(observation.summary.length).toBeLessThanOrEqual(4_096);
-    expect(persisted).not.toContain(databasePassword);
-    expect(persisted).not.toContain(apiKey);
+    expect(persisted).toContain(databasePassword);
+    expect(persisted).toContain(apiKey);
     expect(persisted).not.toContain('x'.repeat(4_097));
   });
 
@@ -2031,7 +2032,7 @@ describe('ToolInvocationRuntime', () => {
     expect(JSON.stringify(invocation?.terminal)).not.toContain('bounded-projection');
   });
 
-  it('redacts secret-like diagnostics before terminal commit and preserves the full bounded result artifact', async () => {
+  it('preserves raw diagnostics in the retained result artifact', async () => {
     const apiKey = 'fake-api-key-result-value';
     const password = 'never-persist-password';
     const localPath = 'C:\\Users\\private\\result.json';
@@ -2039,7 +2040,7 @@ describe('ToolInvocationRuntime', () => {
     const fixture = await createFixture({
       mode: 'full-access', artifactStore: true, readEffect: 'non_idempotent',
       readHandler: () => ({ businessPath: '/orders/42', ok: true }),
-      retainedResult: '/orders/42 [REDACTED]',
+      retainedResult: `/orders/42 apiKey=${apiKey} password=${password} path=${localPath} ${stack}`,
     });
     await fixture.runtime.resolve();
     const observation = await fixture.runtime.execute(fixture.readInvocationId);
@@ -2052,7 +2053,7 @@ describe('ToolInvocationRuntime', () => {
       outcome: 'succeeded',
       modelProjection: {
         status: 'partial', contentType: 'text/plain; charset=utf-8',
-        totalBytes: '/orders/42 [REDACTED]'.length, truncated: true,
+        totalBytes: `/orders/42 apiKey=${apiKey} password=${password} path=${localPath} ${stack}`.length, truncated: true,
       },
     });
     expect(invocation?.terminal).toMatchObject({
@@ -2063,16 +2064,15 @@ describe('ToolInvocationRuntime', () => {
     expect(fixture.readCalls()).toBe(1);
     expect(await fixture.journal.countEvents('tool.succeeded', 'project-a')).toBe(1);
     expect(await fixture.journal.countEvents('tool.unknown', 'project-a')).toBe(0);
-    for (const secret of [apiKey, password, localPath, stack]) expect(persisted).not.toContain(secret);
+    for (const detail of [apiKey, password, localPath, stack]) expect(persisted).not.toContain(detail);
 
     const contentRef = contentReference(observation.modelProjection);
     expect(contentRef).toEqual(expect.any(String));
     const artifactText = await readRetainedArtifact(fixture.artifactStore, contentRef, fixture.runId);
-    for (const secret of [apiKey, password, localPath, stack]) {
-      expect(artifactText).not.toContain(secret);
+    for (const detail of [apiKey, password, localPath, stack]) {
+      expect(artifactText).toContain(detail);
     }
     expect(artifactText).toContain('/orders/42');
-    expect(artifactText).toContain('[REDACTED]');
   });
 
   it('bounds dispatch, stops undispatched work on cancellation, and propagates AbortSignal to started Handlers', async () => {

@@ -39,6 +39,8 @@ export class ProgressiveSchemaRagIndexer {
   private readonly engine: SchemaRagEngine;
   private readonly snapshotStore: SchemaRagSnapshotStore | undefined;
   private readonly statuses = new Map<string, SchemaRagIndexStatus>();
+  /** Serializes publish, durable save, and restore for each connection. */
+  private readonly lanes = new Map<string, Promise<void>>();
 
   constructor(options: ProgressiveSchemaRagIndexerOptions) {
     this.engine = options.engine;
@@ -49,14 +51,18 @@ export class ProgressiveSchemaRagIndexer {
     input: SchemaRagIndexInput,
     options: SchemaRagProgressiveIndexOptions = {},
   ): Promise<ProgressiveSchemaRagIndexResult> {
-    return await this.runIndex(input, options, () => Promise.resolve(this.engine.index(input)));
+    return await this.inLane(input.connectionId, () =>
+      this.runIndex(input, options, () => Promise.resolve(this.engine.index(input))),
+    );
   }
 
   async indexAsync(
     input: SchemaRagIndexInput,
     options: SchemaRagProgressiveIndexOptions = {},
   ): Promise<ProgressiveSchemaRagIndexResult> {
-    return await this.runIndex(input, options, () => this.engine.indexAsync(input));
+    return await this.inLane(input.connectionId, () =>
+      this.runIndex(input, options, () => this.engine.indexAsync(input)),
+    );
   }
 
   private async runIndex(
@@ -64,7 +70,6 @@ export class ProgressiveSchemaRagIndexer {
     options: SchemaRagProgressiveIndexOptions,
     buildIndex: () => Promise<SchemaRagIndex>,
   ): Promise<ProgressiveSchemaRagIndexResult> {
-    const checkpoint = this.engine.createCheckpoint(input.connectionId);
     const startedAt = new Date().toISOString();
     const tableCount = input.tables?.length ?? 0;
     const stages = buildInitialStages(tableCount, options.hotTableLimit, startedAt);
@@ -94,7 +99,6 @@ export class ProgressiveSchemaRagIndexer {
       this.statuses.set(input.connectionId, status);
       return { index, status };
     } catch (error) {
-      this.engine.restoreCheckpoint(checkpoint);
       const failedAt = new Date().toISOString();
       const message = error instanceof Error ? error.message : String(error);
       const failedStages = stages.map((stage) =>
@@ -108,73 +112,76 @@ export class ProgressiveSchemaRagIndexer {
   }
 
   async upsertTables(input: SchemaRagIndexInput): Promise<ProgressiveSchemaRagIndexResult> {
-    const checkpoint = this.engine.createCheckpoint(input.connectionId);
-    try {
-      const index = await this.engine.upsertTablesAsync(input);
-      if (this.snapshotStore) {
-        await this.snapshotStore.save(index);
+    return await this.inLane(input.connectionId, async () => {
+      try {
+        const index = await this.engine.upsertTablesAsync(input);
+        if (this.snapshotStore) {
+          await this.snapshotStore.save(index);
+        }
+        const status = buildStatus(
+          index,
+          'ready',
+          true,
+          buildUpsertStages(input.tables?.length ?? 0),
+          new Date().toISOString(),
+        );
+        this.statuses.set(input.connectionId, status);
+        return { index, status };
+      } catch (error) {
+        const failedAt = new Date().toISOString();
+        const message = error instanceof Error ? error.message : String(error);
+        this.setStatus(
+          input.connectionId,
+          'failed',
+          false,
+          [
+            {
+              stage: 'failed',
+              state: 'failed',
+              done: 0,
+              total: 1,
+              completedAt: failedAt,
+              error: message,
+            },
+          ],
+          failedAt,
+        );
+        throw error;
       }
-      const status = buildStatus(
-        index,
-        'ready',
-        true,
-        buildUpsertStages(input.tables?.length ?? 0),
-        new Date().toISOString(),
-      );
-      this.statuses.set(input.connectionId, status);
-      return { index, status };
-    } catch (error) {
-      this.engine.restoreCheckpoint(checkpoint);
-      const failedAt = new Date().toISOString();
-      const message = error instanceof Error ? error.message : String(error);
-      this.setStatus(
-        input.connectionId,
-        'failed',
-        false,
-        [
-          {
-            stage: 'failed',
-            state: 'failed',
-            done: 0,
-            total: 1,
-            completedAt: failedAt,
-            error: message,
-          },
-        ],
-        failedAt,
-      );
-      throw error;
-    }
+    });
   }
 
   async restore(connectionId: string): Promise<SchemaRagIndexStatus | undefined> {
-    if (!this.snapshotStore) return undefined;
-    const restoredAt = new Date().toISOString();
-    const result = await this.snapshotStore.loadDetailed(connectionId);
-    if (result.status === 'missing') return undefined;
-    if (result.status === 'invalid') {
-      const status = buildFailedRestoreStatus(connectionId, restoredAt, result.reason);
-      this.statuses.set(connectionId, status);
-      return status;
-    }
-    if (result.status === 'error') {
-      const message = result.error instanceof Error ? result.error.message : String(result.error);
-      const status = buildFailedRestoreStatus(connectionId, restoredAt, message);
-      this.statuses.set(connectionId, status);
-      return status;
-    }
+    const snapshotStore = this.snapshotStore;
+    if (!snapshotStore) return undefined;
+    return await this.inLane(connectionId, async () => {
+      const restoredAt = new Date().toISOString();
+      const result = await snapshotStore.loadDetailed(connectionId);
+      if (result.status === 'missing') return undefined;
+      if (result.status === 'invalid') {
+        const status = buildFailedRestoreStatus(connectionId, restoredAt, result.reason);
+        this.statuses.set(connectionId, status);
+        return status;
+      }
+      if (result.status === 'error') {
+        const message = result.error instanceof Error ? result.error.message : String(result.error);
+        const status = buildFailedRestoreStatus(connectionId, restoredAt, message);
+        this.statuses.set(connectionId, status);
+        return status;
+      }
 
-    try {
-      this.engine.loadIndex(result.index);
-      const status = this.engine.getIndexStatus(connectionId);
-      this.statuses.set(connectionId, status);
-      return status;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const status = buildFailedRestoreStatus(connectionId, restoredAt, message);
-      this.statuses.set(connectionId, status);
-      return status;
-    }
+      try {
+        this.engine.loadIndex(result.index);
+        const status = this.engine.getIndexStatus(connectionId);
+        this.statuses.set(connectionId, status);
+        return status;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = buildFailedRestoreStatus(connectionId, restoredAt, message);
+        this.statuses.set(connectionId, status);
+        return status;
+      }
+    });
   }
 
   async restoreAll(
@@ -247,6 +254,23 @@ export class ProgressiveSchemaRagIndexer {
       updatedAt,
       stages,
     });
+  }
+
+  private async inLane<T>(connectionId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.lanes.get(connectionId) ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lane = previous.catch(() => undefined).then(() => next);
+    this.lanes.set(connectionId, lane);
+    await previous.catch(() => undefined);
+    try {
+      return await work();
+    } finally {
+      release?.();
+      if (this.lanes.get(connectionId) === lane) this.lanes.delete(connectionId);
+    }
   }
 }
 

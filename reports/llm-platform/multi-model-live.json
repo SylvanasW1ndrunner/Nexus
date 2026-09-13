@@ -1,0 +1,8 @@
+{
+  "kind": "multi-model-user-acceptance",
+  "generatedAt": "2026-09-03T23:53:16.817Z",
+  "status": "not-run",
+  "passed": false,
+  "reason": "TEST_LLM_API_KEY or TEST_SILICONFLOW_API_KEY is required.",
+  "endpointOrigin": "https://api.siliconflow.cn"
+}

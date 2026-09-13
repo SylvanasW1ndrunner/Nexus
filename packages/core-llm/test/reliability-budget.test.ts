@@ -2,12 +2,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   LlmBudgetController,
-  LlmModelRegistry,
   LlmReliabilityController,
-  type LlmProvider,
 } from '../src/index.js';
 
-describe('reliability and budget controls', () => {
+describe('reliability controls', () => {
   it('enforces concurrency, queue bounds and releases queued work in order', async () => {
     const controller = new LlmReliabilityController();
     controller.configure('p', {
@@ -69,24 +67,18 @@ describe('reliability and budget controls', () => {
     expect(calls).toBe(1);
   });
 
-  it('rejects known budget overruns before a provider call and commits exact configured cost', () => {
-    const registry = new LlmModelRegistry();
-    registry.registerProvider(provider());
-    const model = registry.registerModel({
-      providerId: 'p',
-      model: 'm',
-      pricing: { currency: 'CNY', inputPerMillionTokens: 2, outputPerMillionTokens: 10 },
-    });
+  it('retains standalone budget enforcement without a model registry or router', () => {
+    const model = {
+      pricing: { currency: 'CNY' as const, inputPerMillionTokens: 2, outputPerMillionTokens: 10 },
+    };
     const budget = new LlmBudgetController();
-    expect(() =>
-      budget.reserve({
-        scope: { tenantId: 't' },
-        limits: { maxRequestTokens: 100 },
-        model,
-        estimatedInputTokens: 80,
-        maxOutputTokens: 30,
-      }),
-    ).toThrowError(expect.objectContaining({ code: 'LLM_BUDGET_EXCEEDED' }));
+    expect(() => budget.reserve({
+      scope: { tenantId: 't' },
+      limits: { maxRequestTokens: 100 },
+      model,
+      estimatedInputTokens: 80,
+      maxOutputTokens: 30,
+    })).toThrowError(expect.objectContaining({ code: 'LLM_BUDGET_EXCEEDED' }));
     const reservation = budget.reserve({
       scope: { tenantId: 't' },
       limits: { maxRequestCost: 1 },
@@ -103,17 +95,3 @@ describe('reliability and budget controls', () => {
     expect(snapshot.reservedCost).toBe(0);
   });
 });
-
-function provider(): LlmProvider {
-  return {
-    id: 'p',
-    name: 'p',
-    mode: 'managed',
-    async chat() {
-      return { text: 'ok', toolCalls: [] };
-    },
-    async isAvailable() {
-      return { available: true };
-    },
-  };
-}

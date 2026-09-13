@@ -2,6 +2,16 @@ import type { LlmTool } from '@dbagent/core-llm';
 import { assertPortableValue, type PortableValue } from '@dbagent/shared';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { Ajv2020 } from 'ajv/dist/2020.js';
+import { BASE_TOOL_MANIFEST, isBaseToolName } from './base-tool-manifest.js';
+import {
+  assertInvocationLimits,
+  PREPARED_TOOL_INTENT_REVISION,
+  TOOL_PROTOCOL_BOUNDS,
+  type PreparedToolIntent,
+  type ToolExecuteContext,
+  type ToolPrepareContext,
+} from './tools/tool-protocol.js';
 import {
   bindInvocationHandlerSnapshot,
   cloneInvocationHandlers,
@@ -12,99 +22,90 @@ import {
 } from './internal/tool-invocation-authority.js';
 import type {
   AgentToolCatalogChange,
-  AgentToolContribution,
   AgentToolDefinition,
   AgentToolDescriptor,
-  AgentToolHandler,
   AgentToolId,
-  AgentToolRuntime,
-  RegisteredAgentTool,
-  ToolEffect,
 } from './types.js';
+import type { AgentMode, AgentToolPermissionFacts, ToolPermissionDecision } from './types.js';
+import type { AgentCapabilityDiscoveryManifestEntry } from './capability-types.js';
+import type { RuntimeCommandProjection } from './kernel/runtime-command.js';
+import { sameInvocationHandler } from './internal/tool-invocation-handler-identity.js';
 
-const TOOL_HANDLER_CONTRACT_IDENTITY = Symbol.for(
-  '@dbagent/core-agent/tool-handler-contract-identity',
-);
 const MAX_DESCRIPTOR_CONTAINER_ENTRIES = 10_000;
+const MAX_VALIDATED_SCHEMA_CACHE_ENTRIES = 1_024;
+const validatedSchemaCache = new Set<string>();
+const BASELINE_OWNER = 'runtime:baseline';
+
+type CatalogAgentTool = Readonly<{
+  name: string;
+  /** Registry-minted owner identity; never accepted from a Tool contribution. */
+  ownerId: string;
+  namespace?: string;
+  description: string;
+  inputSchema: Readonly<Record<string, unknown>>;
+  outputSchema?: Readonly<Record<string, unknown>>;
+  descriptor: AgentToolDescriptor;
+}>;
 
 export class ToolRegistry {
-  private readonly tools = new Map<string, RegisteredAgentTool>();
-  private readonly runtimes = new Map<string, AgentToolRuntime>();
+  private readonly tools = new Map<string, CatalogAgentTool>();
   private readonly invocationRevisions = new Map<string, string>();
+  /** Retained after removal so a schema revision cannot be rebound within this Host. */
+  private readonly schemaDigests = new Map<string, string>();
   private readonly ownerByTool = new Map<string, string>();
   private readonly toolsByOwner = new Map<string, Set<string>>();
-  private readonly activeToolRevisions = new Map<string, number>();
+  private readonly activeToolGenerations = new Map<string, number>();
   private readonly toolGenerations = new Map<string, number>();
   private readonly snapshotLifecycles = new Map<string, AgentToolSnapshotLifecycle>();
+  /** Names reserved by the Runtime for trusted Turn-local overlays. */
+  private readonly reservedNames = new Set<string>();
   private readonly listeners = new Set<(event: AgentToolCatalogChange) => void>();
+  private readonly notificationDeferrals: Array<{ events: AgentToolCatalogChange[] }> = [];
   private revision = 0;
+
+  constructor(private readonly options: { revisionResolver?: ToolRevisionResolver } = {}) {}
 
   get catalogRevision(): number {
     return this.revision;
   }
 
-  register(definition: AgentToolDefinition, handler: AgentToolHandler): void {
-    validateToolContract(definition, handler);
-    if (this.tools.has(definition.name)) {
-      throw new Error(`Tool already registered: ${definition.name}`);
+  reserveName(name: string): void {
+    const normalized = name.trim();
+    if (!normalized) throw new Error('Reserved Tool name is required.');
+    assertNotBaseTool(normalized);
+    if (this.tools.has(normalized)) {
+      throw new Error(`Cannot reserve an already registered Tool: ${normalized}`);
     }
-    const registered = registeredTool(definition, handler);
-    const descriptor = registered.descriptor;
-    this.tools.set(definition.name, registered);
-    this.runtimes.set(toolIdKey(descriptor.id), {
-      id: descriptor.id,
-      flatName: descriptor.flatName,
-      handler,
-    });
-    const ownerId = `direct:${definition.name}`;
-    this.ownerByTool.set(definition.name, ownerId);
-    this.toolsByOwner.set(ownerId, new Set([definition.name]));
-    const toolRevision = (this.toolGenerations.get(definition.name) ?? 0) + 1;
-    this.toolGenerations.set(definition.name, toolRevision);
-    this.activeToolRevisions.set(definition.name, toolRevision);
-    this.emit({
-      revision: ++this.revision,
-      kind: 'registered',
-      toolName: definition.name,
-      descriptor,
-    });
+    this.reservedNames.add(normalized);
   }
 
-  /** Register a Handler that can only be called by ToolInvocationRuntime. */
   registerInvocation(
     definition: ToolInvocationDefinition,
     runtime: ToolInvocationHandlerRuntime,
   ): void {
+    assertNotBaseTool(definition.name);
     validateInvocationToolContract(definition, runtime);
-    const guardedLegacyHandler: AgentToolHandler = () => {
-      throw new Error('Invocation-only Tools must be executed by ToolInvocationRuntime.');
-    };
-    validateToolContract(definition, guardedLegacyHandler);
+    this.assertUnreserved(definition.name);
     if (this.tools.has(definition.name)) {
       throw new Error(`Tool already registered: ${definition.name}`);
     }
-    const registered = registeredTool(definition, guardedLegacyHandler);
-    const descriptor = registered.descriptor;
-    const key = toolIdKey(descriptor.id);
-    const invocationRuntime = Object.freeze({
-      execute: runtime.execute,
-      ...(runtime.recover === undefined ? {} : { recover: runtime.recover }),
-    });
     const ownerId = `direct:${definition.name}`;
-    const toolRevision = (this.toolGenerations.get(definition.name) ?? 0) + 1;
+    const registered = catalogTool(definition, ownerId);
+    const descriptor = registered.descriptor;
+    this.assertSchemaRevision(descriptor);
+    const invocationRuntime = freezeInvocationRuntime(runtime);
+    const toolGeneration = (this.toolGenerations.get(definition.name) ?? 0) + 1;
     const invocationRevision = stableInvocationRevision(descriptor, definition.handlerRevision);
 
     // Commit the complete catalog fact before observers can capture a snapshot.
     this.tools.set(definition.name, registered);
-    this.runtimes.set(key, {
-      id: descriptor.id, flatName: descriptor.flatName, handler: guardedLegacyHandler,
-    });
+    this.rememberSchemaRevision(descriptor);
     setInvocationHandler(this, definition.name, invocationRuntime);
     this.invocationRevisions.set(definition.name, invocationRevision);
     this.ownerByTool.set(definition.name, ownerId);
     this.toolsByOwner.set(ownerId, new Set([definition.name]));
-    this.toolGenerations.set(definition.name, toolRevision);
-    this.activeToolRevisions.set(definition.name, toolRevision);
+    this.toolGenerations.set(definition.name, toolGeneration);
+    this.activeToolGenerations.set(definition.name, toolGeneration);
     this.emit({
       revision: ++this.revision,
       kind: 'registered',
@@ -114,15 +115,15 @@ export class ToolRegistry {
   }
 
   unregister(name: string): boolean {
+    assertNotBaseTool(name);
     const tool = this.tools.get(name);
     if (!tool) return false;
     this.tools.delete(name);
-    this.runtimes.delete(toolIdKey(tool.descriptor.id));
     deleteInvocationHandler(this, name);
     this.invocationRevisions.delete(name);
     const ownerId = this.ownerByTool.get(name);
     this.ownerByTool.delete(name);
-    this.activeToolRevisions.delete(name);
+    this.activeToolGenerations.delete(name);
     this.snapshotLifecycles.delete(name);
     if (ownerId) {
       const names = this.toolsByOwner.get(ownerId);
@@ -138,24 +139,75 @@ export class ToolRegistry {
     return true;
   }
 
-  replaceOwnerTools(
+  replaceOwnerInvocations(
     ownerId: string,
-    contributions: readonly AgentToolContribution[],
+    contributions: readonly ToolInvocationContribution[],
     options: { snapshotLifecycle?: AgentToolSnapshotLifecycle } = {},
+  ): void {
+    if (ownerId.trim() === BASELINE_OWNER) throw new TypeError('Use publishBaselineInvocations for the Runtime baseline.');
+    for (const contribution of contributions) assertNotBaseTool(contribution.definition.name);
+    this.#publishOwnerInvocations(ownerId, contributions, options);
+  }
+
+  /** Host-only composition seam: initial publication and backend generation refresh are both atomic. */
+  publishBaselineInvocations(
+    contributions: readonly ToolInvocationContribution[],
+    options: { snapshotLifecycle?: AgentToolSnapshotLifecycle } = {},
+  ): void {
+    if (contributions.length !== BASE_TOOL_MANIFEST.length) {
+      throw new TypeError(`Baseline publication requires all ${BASE_TOOL_MANIFEST.length} Tool contributions.`);
+    }
+    for (const [index, expected] of BASE_TOOL_MANIFEST.entries()) {
+      const contribution = contributions[index];
+      if (contribution?.definition.name !== expected.name) {
+        throw new TypeError(`Baseline entry ${index} must be ${expected.name}.`);
+      }
+      const previous = this.tools.get(expected.name)?.descriptor;
+      if (previous !== undefined) {
+        const next = descriptorFromDefinition(contribution.definition);
+        if (!isDeepStrictEqual({ ...previous, handlerRevision: next.handlerRevision }, next)) {
+          throw new TypeError(`Baseline refresh may only change the handler revision: ${expected.name}`);
+        }
+      }
+    }
+    this.#publishOwnerInvocations(BASELINE_OWNER, contributions, options);
+  }
+
+  #publishOwnerInvocations(
+    ownerId: string,
+    contributions: readonly ToolInvocationContribution[],
+    options: { snapshotLifecycle?: AgentToolSnapshotLifecycle },
   ): void {
     const normalizedOwner = ownerId.trim();
     if (!normalizedOwner) throw new Error('Tool owner id is required.');
     const nextNames = new Set<string>();
-    const prepared: RegisteredAgentTool[] = [];
+    const prepared: Array<{
+      tool: CatalogAgentTool;
+      runtime: ToolInvocationHandlerRuntime;
+      invocationRevision: string;
+    }> = [];
     for (const contribution of contributions) {
-      if (!isRecord(contribution) || !isRecord(contribution.definition)) {
-        throw new Error('Tool contribution must provide a definition object.');
+      if (
+        !isRecord(contribution) || !isRecord(contribution.definition) ||
+        !isRecord(contribution.runtime)
+      ) {
+        throw new Error('Invocation Tool contribution must provide definition and runtime objects.');
       }
-      validateToolContract(contribution.definition, contribution.handler);
+      validateInvocationToolContract(contribution.definition, contribution.runtime);
       const name = contribution.definition.name;
+      this.assertUnreserved(name);
       if (nextNames.has(name)) throw new Error(`Tool already registered: ${name}`);
       nextNames.add(name);
-      prepared.push(registeredTool(contribution.definition, contribution.handler));
+      const tool = catalogTool(contribution.definition, normalizedOwner);
+      this.assertSchemaRevision(tool.descriptor);
+      prepared.push({
+        tool,
+        runtime: freezeInvocationRuntime(contribution.runtime),
+        invocationRevision: stableInvocationRevision(
+          tool.descriptor,
+          contribution.definition.handlerRevision,
+        ),
+      });
     }
 
     const previousNames = new Set(this.toolsByOwner.get(normalizedOwner) ?? []);
@@ -165,76 +217,60 @@ export class ToolRegistry {
         throw new Error(`Tool already registered: ${name}`);
       }
     }
-    const unchangedNames = new Set(
-      prepared
-        .filter((tool) => {
-          const previous = this.tools.get(tool.name);
-          return previous !== undefined && sameToolContract(previous, tool);
-        })
-        .map((tool) => tool.name),
-    );
+    const currentInvocationHandlers = cloneInvocationHandlers(this);
+    for (const { tool, runtime } of prepared) {
+      const current = currentInvocationHandlers.get(tool.name);
+      if (current !== undefined && sameRevision(current.revision, runtime.revision) &&
+        (!sameInvocationHandler(current.prepare, runtime.prepare) ||
+          !sameInvocationHandler(current.execute, runtime.execute) ||
+          !sameInvocationHandler(current.recover, runtime.recover) ||
+          !sameInvocationHandler(current.retainResult, runtime.retainResult))) {
+        throw new TypeError(`Changed Tool handlers require a new handlerRevision: ${tool.name}`);
+      }
+    }
+    const unchangedNames = new Set(prepared.filter(({ tool, invocationRevision }) => {
+      const previous = this.tools.get(tool.name);
+      return previous !== undefined && currentInvocationHandlers.has(tool.name) &&
+        isDeepStrictEqual(previous.descriptor, tool.descriptor) &&
+        this.invocationRevisions.get(tool.name) === invocationRevision;
+    }).map(({ tool }) => tool.name));
 
     const nextTools = new Map(this.tools);
-    const nextRuntimes = new Map(this.runtimes);
-    const nextInvocationRuntimes = cloneInvocationHandlers(this);
+    const nextInvocationRuntimes = new Map(currentInvocationHandlers);
     const nextInvocationRevisions = new Map(this.invocationRevisions);
     const nextOwnerByTool = new Map(this.ownerByTool);
-    const nextActiveToolRevisions = new Map(this.activeToolRevisions);
+    const nextActiveToolGenerations = new Map(this.activeToolGenerations);
     const nextToolGenerations = new Map(this.toolGenerations);
     const nextSnapshotLifecycles = new Map(this.snapshotLifecycles);
     for (const name of previousNames) {
       if (unchangedNames.has(name)) continue;
-      const previous = nextTools.get(name);
       nextTools.delete(name);
-      if (previous) {
-        const key = toolIdKey(previous.descriptor.id);
-        nextRuntimes.delete(key);
-        nextInvocationRuntimes.delete(name);
-        nextInvocationRevisions.delete(name);
-      }
+      nextInvocationRuntimes.delete(name);
+      nextInvocationRevisions.delete(name);
       nextOwnerByTool.delete(name);
-      nextActiveToolRevisions.delete(name);
+      nextActiveToolGenerations.delete(name);
       nextSnapshotLifecycles.delete(name);
     }
-    for (const tool of prepared) {
-      nextInvocationRuntimes.delete(tool.name);
-      nextInvocationRevisions.delete(tool.name);
-      if (unchangedNames.has(tool.name)) {
-        nextTools.set(tool.name, tool);
-        nextRuntimes.set(toolIdKey(tool.descriptor.id), {
-          id: tool.descriptor.id,
-          flatName: tool.descriptor.flatName,
-          handler: tool.handler,
-        });
-        nextOwnerByTool.set(tool.name, normalizedOwner);
-        if (options.snapshotLifecycle) {
-          nextSnapshotLifecycles.set(tool.name, options.snapshotLifecycle);
-        } else {
-          nextSnapshotLifecycles.delete(tool.name);
-        }
-        continue;
-      }
+    for (const { tool, runtime, invocationRevision } of prepared) {
       nextTools.set(tool.name, tool);
-      nextRuntimes.set(toolIdKey(tool.descriptor.id), {
-        id: tool.descriptor.id,
-        flatName: tool.descriptor.flatName,
-        handler: tool.handler,
-      });
+      nextInvocationRuntimes.set(tool.name, runtime);
+      nextInvocationRevisions.set(tool.name, invocationRevision);
       nextOwnerByTool.set(tool.name, normalizedOwner);
-      const toolRevision = (nextToolGenerations.get(tool.name) ?? 0) + 1;
-      nextToolGenerations.set(tool.name, toolRevision);
-      nextActiveToolRevisions.set(tool.name, toolRevision);
-      if (options.snapshotLifecycle) {
-        nextSnapshotLifecycles.set(tool.name, options.snapshotLifecycle);
+      if (!unchangedNames.has(tool.name)) {
+        const toolGeneration = (nextToolGenerations.get(tool.name) ?? 0) + 1;
+        nextToolGenerations.set(tool.name, toolGeneration);
+        nextActiveToolGenerations.set(tool.name, toolGeneration);
       }
+      if (options.snapshotLifecycle === undefined) nextSnapshotLifecycles.delete(tool.name);
+      else nextSnapshotLifecycles.set(tool.name, options.snapshotLifecycle);
     }
 
     replaceMap(this.tools, nextTools);
-    replaceMap(this.runtimes, nextRuntimes);
+    for (const { tool } of prepared) this.rememberSchemaRevision(tool.descriptor);
     replaceInvocationHandlers(this, nextInvocationRuntimes);
     replaceMap(this.invocationRevisions, nextInvocationRevisions);
     replaceMap(this.ownerByTool, nextOwnerByTool);
-    replaceMap(this.activeToolRevisions, nextActiveToolRevisions);
+    replaceMap(this.activeToolGenerations, nextActiveToolGenerations);
     replaceMap(this.toolGenerations, nextToolGenerations);
     replaceMap(this.snapshotLifecycles, nextSnapshotLifecycles);
     if (nextNames.size === 0) this.toolsByOwner.delete(normalizedOwner);
@@ -256,8 +292,38 @@ export class ToolRegistry {
     }
   }
 
-  toolRevision(name: string): number | undefined {
-    return this.activeToolRevisions.get(name);
+  toolGeneration(name: string): number | undefined {
+    return this.activeToolGenerations.get(name);
+  }
+
+  /** Never substitutes a newer handler. The returned catalog owns its generation lease. */
+  resolveRevision(reference: ToolRevisionReference): ToolRevisionResolution {
+    validateRevisionReference(reference);
+    if (reference.intentRevision !== PREPARED_TOOL_INTENT_REVISION) {
+      return { status: 'unsupported_revision', revision: Object.freeze({ ...reference }) };
+    }
+    const current = this.tools.get(reference.toolName);
+    const handler = cloneInvocationHandlers(this).get(reference.toolName);
+    if (current !== undefined && handler !== undefined && sameRevision(handler.revision, reference)) {
+      return { status: 'supported', catalog: this.captureSnapshot() };
+    }
+    const resolved = this.options.revisionResolver?.resolve(Object.freeze({ ...reference }));
+    if (resolved === undefined) return { status: 'unsupported_revision', revision: Object.freeze({ ...reference }) };
+    const { contribution } = resolved;
+    validateInvocationToolContract(contribution.definition, contribution.runtime, 'recovery');
+    if (!sameRevision(contribution.runtime.revision, reference)) {
+      throw new TypeError('Host revision resolver returned a different Tool revision.');
+    }
+    const tool = catalogTool(contribution.definition, resolved.ownerId);
+    this.assertSchemaRevision(tool.descriptor);
+    return { status: 'supported', catalog: createToolCatalogSnapshot({
+      catalogRevision: this.revision,
+      tools: new Map([[tool.name, tool]]),
+      invocationHandlers: new Map([[tool.name, freezeInvocationRuntime(contribution.runtime)]]),
+      invocationRevisions: new Map([[tool.name, stableInvocationRevision(tool.descriptor, reference.handlerRevision)]]),
+      generations: new Map(),
+      lifecycles: resolved.snapshotLifecycle === undefined ? new Map() : new Map([[tool.name, resolved.snapshotLifecycle]]),
+    }) };
   }
 
   captureSnapshot(): ToolCatalogSnapshot {
@@ -267,20 +333,19 @@ export class ToolRegistry {
     const captured: ToolCatalogSnapshotCapture = {
       catalogRevision: this.revision,
       tools: new Map(this.tools),
-      runtimes: new Map(this.runtimes),
       invocationHandlers: cloneInvocationHandlers(this),
       invocationRevisions: new Map(this.invocationRevisions),
-      revisions: new Map(this.activeToolRevisions),
+      generations: new Map(this.activeToolGenerations),
       lifecycles: new Map(this.snapshotLifecycles),
     };
     return createToolCatalogSnapshot(captured);
   }
 
-  get(name: string): RegisteredAgentTool | undefined {
+  get(name: string): CatalogAgentTool | undefined {
     return this.tools.get(name);
   }
 
-  list(): RegisteredAgentTool[] {
+  list(): CatalogAgentTool[] {
     return [...this.tools.values()];
   }
 
@@ -288,17 +353,36 @@ export class ToolRegistry {
     return this.list().map((tool) => structuredClone(tool.descriptor));
   }
 
-  getRuntime(id: AgentToolId | string): AgentToolRuntime | undefined {
-    if (typeof id === 'string') {
-      const registered = this.tools.get(id);
-      return registered ? this.runtimes.get(toolIdKey(registered.descriptor.id)) : undefined;
-    }
-    return this.runtimes.get(toolIdKey(id));
-  }
-
   subscribe(listener: (event: AgentToolCatalogChange) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Host publication primitive. Mutations remain immediately readable, but
+   * observers are notified only after the enclosing composite generation has
+   * finished updating its companion control-plane state.
+   */
+  deferCatalogNotifications(): { commitNotifications(): void; discardNotifications(): void } {
+    const frame = { events: [] as AgentToolCatalogChange[] };
+    this.notificationDeferrals.push(frame);
+    let settled = false;
+    const settle = (publish: boolean) => {
+      if (settled) return;
+      settled = true;
+      const current = this.notificationDeferrals.pop();
+      if (current !== frame) {
+        throw new Error('Tool catalog notification deferrals must settle in stack order.');
+      }
+      if (!publish) return;
+      const parent = this.notificationDeferrals.at(-1);
+      if (parent) parent.events.push(...frame.events);
+      else for (const event of frame.events) this.notify(event);
+    };
+    return {
+      commitNotifications: () => settle(true),
+      discardNotifications: () => settle(false),
+    };
   }
 
   has(name: string): boolean {
@@ -308,7 +392,7 @@ export class ToolRegistry {
   llmTools(allowedTools?: string[]): LlmTool[] {
     const allowed = allowedTools === undefined ? undefined : new Set(allowedTools);
     return this.list()
-      .filter((tool) => allowed === undefined || allowed.has(tool.name))
+      .filter((tool) => isBaseToolName(tool.name) || allowed === undefined || allowed.has(tool.name))
       .map((tool) => ({
         name: tool.name,
         ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
@@ -319,6 +403,33 @@ export class ToolRegistry {
   }
 
   private emit(event: AgentToolCatalogChange): void {
+    const frame = this.notificationDeferrals.at(-1);
+    if (frame) {
+      frame.events.push(event);
+      return;
+    }
+    this.notify(event);
+  }
+
+  private assertUnreserved(name: string): void {
+    if (this.reservedNames.has(name)) {
+      throw new Error(`Tool name is reserved by the Agent Runtime: ${name}`);
+    }
+  }
+
+  private assertSchemaRevision(descriptor: AgentToolDescriptor): void {
+    const key = `${descriptor.flatName}:${descriptor.toolRevision}`;
+    const previous = this.schemaDigests.get(key);
+    if (previous !== undefined && previous !== schemaDigest(descriptor)) {
+      throw new TypeError(`Tool schema changed without a new toolRevision: ${descriptor.flatName}`);
+    }
+  }
+
+  private rememberSchemaRevision(descriptor: AgentToolDescriptor): void {
+    this.schemaDigests.set(`${descriptor.flatName}:${descriptor.toolRevision}`, schemaDigest(descriptor));
+  }
+
+  private notify(event: AgentToolCatalogChange): void {
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -346,6 +457,7 @@ export class ToolCatalogSnapshot {
     const state = requireToolCatalogSnapshotState(this);
     if (state.released) return;
     state.released = true;
+    if (state.executionPins > 0) return;
     const failures = releaseSnapshotLifecycles(state.releases);
     if (failures.length > 0) {
       throw new AggregateError(
@@ -356,15 +468,36 @@ export class ToolCatalogSnapshot {
     }
   }
 
-  get(name: string): RegisteredAgentTool | undefined {
+  /** Keep the captured backend generations alive until actual invocation work has drained. */
+  retainExecution(): () => void {
+    const state = requireToolCatalogSnapshotState(this);
+    if (state.released) throw new TypeError('Cannot retain a released Tool snapshot.');
+    state.executionPins += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      state.executionPins -= 1;
+      if (state.released && state.executionPins === 0) {
+        const failures = releaseSnapshotLifecycles(state.releases);
+        if (failures.length) throw new AggregateError(failures, 'Tool generation drain cleanup failed.');
+      }
+    };
+  }
+
+  get(name: string): CatalogAgentTool | undefined {
     return requireToolCatalogSnapshotState(this).tools.get(name);
+  }
+
+  ownerId(name: string): string | undefined {
+    return requireToolCatalogSnapshotState(this).tools.get(name)?.ownerId;
   }
 
   has(name: string): boolean {
     return requireToolCatalogSnapshotState(this).tools.has(name);
   }
 
-  list(): RegisteredAgentTool[] {
+  list(): CatalogAgentTool[] {
     return [...requireToolCatalogSnapshotState(this).tools.values()];
   }
 
@@ -372,49 +505,149 @@ export class ToolCatalogSnapshot {
     return this.list().map((tool) => structuredClone(tool.descriptor));
   }
 
-  getRuntime(id: AgentToolId | string): AgentToolRuntime | undefined {
-    const state = requireToolCatalogSnapshotState(this);
-    if (typeof id === 'string') {
-      const registered = state.tools.get(id);
-      return registered ? state.runtimes.get(toolIdKey(registered.descriptor.id)) : undefined;
-    }
-    return state.runtimes.get(toolIdKey(id));
-  }
-
   invocationRevision(name: string): string | undefined {
     return requireToolCatalogSnapshotState(this).invocationRevisions.get(name);
   }
 
-  toolRevision(name: string): number | undefined {
-    return requireToolCatalogSnapshotState(this).revisions.get(name);
+  toolGeneration(name: string): number | undefined {
+    return requireToolCatalogSnapshotState(this).generations.get(name);
+  }
+
+  supportsRevision(reference: ToolRevisionReference): boolean {
+    validateRevisionReference(reference);
+    const handler = cloneInvocationHandlers(this).get(reference.toolName);
+    return handler !== undefined && sameRevision(handler.revision, reference);
   }
 
   llmTools(allowedTools?: string[]): LlmTool[] {
     const allowed = allowedTools === undefined ? undefined : new Set(allowedTools);
     return this.list()
-      .filter((tool) => allowed === undefined || allowed.has(tool.name))
+      .filter((tool) => isBaseToolName(tool.name) || allowed === undefined || allowed.has(tool.name))
       .map(toLlmTool);
   }
 }
 
+/**
+ * Builds one immutable per-Turn catalog overlay without mutating a shared
+ * Registry. This is for Run-private handlers (for example Session Skills)
+ * whose captured data must never bleed into another Run's snapshot.
+ */
+export function overlayToolCatalogSnapshot(
+  base: ToolCatalogSnapshot,
+  contribution: ToolInvocationContribution,
+): ToolCatalogSnapshot {
+  const state = requireToolCatalogSnapshotState(base);
+  const definition = contribution.definition;
+  assertNotBaseTool(definition.name);
+  validateInvocationToolContract(definition, contribution.runtime);
+  if (state.tools.has(definition.name)) {
+    throw new Error(`Turn-local Tool already exists in the captured catalog: ${definition.name}`);
+  }
+  const tool = catalogTool(definition, `runtime:overlay:${definition.name}`);
+  const tools = new Map(state.tools);
+  tools.set(tool.name, tool);
+  const handlers = cloneInvocationHandlers(base);
+  handlers.set(tool.name, freezeInvocationRuntime(contribution.runtime));
+  const invocationRevisions = new Map(state.invocationRevisions);
+  invocationRevisions.set(
+    tool.name,
+    stableInvocationRevision(tool.descriptor, definition.handlerRevision),
+  );
+  const generations = new Map(state.generations);
+  generations.set(tool.name, 1);
+  const overlay = createToolCatalogSnapshot({
+    catalogRevision: state.catalogRevision,
+    tools,
+    invocationHandlers: handlers,
+    invocationRevisions,
+    generations,
+    lifecycles: parentSnapshotLifecycle(base),
+  });
+  // The derived snapshot owns the parent's execution pin from this point.  A
+  // caller may still release the original snapshot again; release is
+  // intentionally idempotent.
+  base.release();
+  return overlay;
+}
+
+/**
+ * Rebinds one fixed baseline Tool to data captured for this exact Turn.
+ *
+ * Only the handler revision may differ.  Schema, classification, exposure and
+ * every other descriptor field remain build-owned by the baseline manifest.
+ * The returned snapshot consumes the supplied snapshot on success and keeps
+ * all of its backend generations alive until the derived snapshot is released.
+ */
+export function replaceCapturedBaseToolInvocation(
+  base: ToolCatalogSnapshot,
+  contribution: ToolInvocationContribution,
+): ToolCatalogSnapshot {
+  const state = requireToolCatalogSnapshotState(base);
+  const definition = contribution.definition;
+  if (!isBaseToolName(definition.name)) {
+    throw new TypeError(`Turn-local baseline replacement requires a fixed Tool: ${definition.name}`);
+  }
+  validateInvocationToolContract(definition, contribution.runtime);
+  const current = state.tools.get(definition.name);
+  if (current === undefined) {
+    throw new Error(`Runtime baseline Tool is missing from the captured catalog: ${definition.name}`);
+  }
+  const replacement = catalogTool(definition, current.ownerId);
+  if (!isDeepStrictEqual(
+    { ...current.descriptor, handlerRevision: replacement.descriptor.handlerRevision },
+    replacement.descriptor,
+  )) {
+    throw new TypeError(
+      `Turn-local baseline replacement may only change handlerRevision: ${definition.name}`,
+    );
+  }
+
+  const tools = new Map(state.tools);
+  tools.set(replacement.name, replacement);
+  const handlers = cloneInvocationHandlers(base);
+  handlers.set(replacement.name, freezeInvocationRuntime(contribution.runtime));
+  const invocationRevisions = new Map(state.invocationRevisions);
+  invocationRevisions.set(
+    replacement.name,
+    stableInvocationRevision(replacement.descriptor, definition.handlerRevision),
+  );
+  const rebound = createToolCatalogSnapshot({
+    catalogRevision: state.catalogRevision,
+    tools,
+    invocationHandlers: handlers,
+    invocationRevisions,
+    generations: new Map(state.generations),
+    lifecycles: parentSnapshotLifecycle(base),
+  });
+  base.release();
+  return rebound;
+}
+
+function parentSnapshotLifecycle(
+  base: ToolCatalogSnapshot,
+): ReadonlyMap<string, AgentToolSnapshotLifecycle> {
+  return new Map([[
+    '__captured_parent__',
+    Object.freeze({ retain: () => base.retainExecution() }),
+  ]]);
+}
+
 type ToolCatalogSnapshotCapture = Readonly<{
   catalogRevision: number;
-  tools: ReadonlyMap<string, RegisteredAgentTool>;
-  runtimes: ReadonlyMap<string, AgentToolRuntime>;
+  tools: ReadonlyMap<string, CatalogAgentTool>;
   invocationHandlers: ReadonlyMap<string, ToolInvocationHandlerRuntime>;
   invocationRevisions: ReadonlyMap<string, string>;
-  revisions: ReadonlyMap<string, number>;
+  generations: ReadonlyMap<string, number>;
   lifecycles: ReadonlyMap<string, AgentToolSnapshotLifecycle>;
 }>;
 
 type ToolCatalogSnapshotState = Readonly<{
   catalogRevision: number;
-  tools: ReadonlyMap<string, RegisteredAgentTool>;
-  runtimes: ReadonlyMap<string, AgentToolRuntime>;
+  tools: ReadonlyMap<string, CatalogAgentTool>;
   invocationRevisions: ReadonlyMap<string, string>;
-  revisions: ReadonlyMap<string, number>;
+  generations: ReadonlyMap<string, number>;
   releases: Array<() => void>;
-}> & { released: boolean };
+}> & { released: boolean; executionPins: number };
 
 const toolCatalogSnapshotStates = new WeakMap<ToolCatalogSnapshot, ToolCatalogSnapshotState>();
 
@@ -423,11 +656,11 @@ function createToolCatalogSnapshot(captured: ToolCatalogSnapshotCapture): ToolCa
   const state: ToolCatalogSnapshotState = {
     catalogRevision: captured.catalogRevision,
     tools: captured.tools,
-    runtimes: captured.runtimes,
     invocationRevisions: captured.invocationRevisions,
-    revisions: captured.revisions,
+    generations: captured.generations,
     releases: [],
     released: false,
+    executionPins: 0,
   };
   toolCatalogSnapshotStates.set(snapshot, state);
   bindInvocationHandlerSnapshot(snapshot, captured.invocationHandlers);
@@ -488,26 +721,105 @@ export type ToolInvocationExecutionContext = Readonly<{
   invocationId: string;
   idempotencyKey: string;
   fencingToken: number;
+  /** Stable timestamp of this execution attempt, suitable for deterministic replay output. */
+  startedAt?: string;
+  /** Immutable control-plane state captured immediately before this Handler starts. */
+  runtimeState?: RuntimeCommandProjection;
+  /** Run-lifetime cancellation for detached work; never includes per-Invocation timeout. */
+  runSignal?: AbortSignal;
+  /** Effective authority already decided by the Journal-backed Invocation runtime. */
+  authorization: ToolInvocationAuthorization;
+  /** Immutable catalog captured with this Turn; never a live Registry view. */
+  discoverableTools: readonly Readonly<AgentToolDescriptor>[];
+  /** Static semantic Capability manifest captured with this Turn. */
+  discoverableCapabilities: readonly AgentCapabilityDiscoveryManifestEntry[];
+  /**
+   * Publishes a short user-facing execution status through the authoritative
+   * Tool lifecycle. The Runtime batches and persists it; Handlers
+   * never receive Journal write authority. Calls after cancellation or a
+   * terminal fact are intentionally ignored.
+   */
+  reportProgress(summary: string): void;
   signal: AbortSignal;
 }>;
 
+export type ToolInvocationAuthorization = Readonly<{
+  policyMode: AgentMode;
+  policyDecision: ToolPermissionDecision;
+  policyRevision: string;
+  permission: AgentToolPermissionFacts;
+  matchedRuleIds: readonly string[];
+  /** Present only for an exact, persisted, approved one-time request. */
+  approvalId?: string;
+}>;
+
 export type ToolInvocationHandler<Result = unknown> = (
-  args: Readonly<Record<string, unknown>>,
-  context: ToolInvocationExecutionContext,
+  prepared: Readonly<Record<string, PortableValue>>,
+  context: ToolExecuteContext,
 ) => Result | Promise<Result>;
 
 export type ToolInvocationRecoveryHandler<Result = unknown> = (
-  args: Readonly<Record<string, unknown>>,
-  context: ToolInvocationExecutionContext,
+  prepared: Readonly<Record<string, PortableValue>>,
+  context: ToolExecuteContext,
 ) => Result | Promise<Result>;
 
-export type ToolInvocationHandlerRuntime = Readonly<{
-  execute: ToolInvocationHandler;
-  recover?: ToolInvocationRecoveryHandler;
+/**
+ * Domain-owned result content exposed after the ordinary Tool payload passes
+ * validation. Only the Runtime may stage it and issue content/evidence refs.
+ */
+export type ToolRetainedResultContent = Readonly<{
+  mediaType: string;
+  source: AsyncIterable<Uint8Array>;
+  expectedByteSize?: number;
+  expectedChecksum?: string;
+  /** Stable identity revalidated by the Handler's own result store. */
+  identity?: string;
 }>;
 
+export type ToolResultRetentionHandler = (
+  payload: PortableValue,
+  context: ToolExecuteContext,
+) => ToolRetainedResultContent | undefined | Promise<ToolRetainedResultContent | undefined>;
+
+export type ToolInvocationHandlerRuntime = Readonly<{
+  /** Explicit binding checked before publication; not inferred from a tool name. */
+  revision: ToolRevisionReference;
+  prepare(
+    input: Readonly<Record<string, PortableValue>>,
+    context: ToolPrepareContext,
+  ): PreparedToolIntent | Promise<PreparedToolIntent>;
+  execute: ToolInvocationHandler;
+  recover?: ToolInvocationRecoveryHandler;
+  retainResult?: ToolResultRetentionHandler;
+}>;
+
+export type ToolInvocationContribution = Readonly<{
+  definition: ToolInvocationDefinition;
+  runtime: ToolInvocationHandlerRuntime;
+}>;
+
+export type ToolRevisionReference = Readonly<{
+  toolName: string;
+  toolRevision: string;
+  handlerRevision: string;
+  intentRevision: string;
+}>;
+
+/** Host supplies supported historical code and its backend lease after restart, or returns undefined. */
+export type ToolRevisionResolver = Readonly<{
+  resolve(reference: ToolRevisionReference): Readonly<{
+    contribution: ToolInvocationContribution;
+    /** Stable owner identity originally used to publish this revision. */
+    ownerId: string;
+    snapshotLifecycle?: AgentToolSnapshotLifecycle;
+  }> | undefined;
+}>;
+
+export type ToolRevisionResolution =
+  | Readonly<{ status: 'supported'; catalog: ToolCatalogSnapshot }>
+  | Readonly<{ status: 'unsupported_revision'; revision: ToolRevisionReference }>;
+
 export type ToolInvocationDefinition = AgentToolDefinition & {
-  effect: ToolEffect;
   /** Stable semantic revision supplied by the Handler owner, independent of process order. */
   handlerRevision: string;
 };
@@ -527,27 +839,26 @@ function descriptorFromDefinition(definition: AgentToolDefinition): AgentToolDes
     aliases: uniqueStrings(definition.aliases),
     tags: uniqueStrings(definition.tags),
     inputSchema: structuredClone(definition.inputSchema),
-    ...(definition.outputSchema === undefined
-      ? {}
-      : { outputSchema: structuredClone(definition.outputSchema) }),
+    outputSchema: structuredClone(definition.outputSchema),
     dangerLevel: definition.dangerLevel,
     readonly,
     source: definition.source ?? 'unknown',
     ...(definition.sourceId === undefined ? {} : { sourceId: definition.sourceId }),
     exposure: definition.exposure ?? 'deferred',
-    ...(definition.requiredPermission === undefined
+    ...(definition.permission === undefined
       ? {}
-      : { requiredPermission: definition.requiredPermission }),
-    effect: definition.effect ?? 'legacy-undeclared',
+      : { permission: structuredClone(definition.permission) }),
+    access: definition.access,
+    recoveryClass: definition.recoveryClass,
+    limits: structuredClone(definition.limits),
+    toolRevision: definition.toolRevision,
+    handlerRevision: definition.handlerRevision,
+    intentRevision: definition.intentRevision,
     execution: {
       concurrency,
-      ...(definition.execution?.timeoutMs === undefined
-        ? {}
-        : { timeoutMs: definition.execution.timeoutMs }),
+      timeoutMs: definition.execution.timeoutMs,
     },
-    ...(definition.failurePolicy === undefined
-      ? {}
-      : { failurePolicy: structuredClone(definition.failurePolicy) }),
+    failurePolicy: structuredClone(definition.failurePolicy),
     ...(definition.completion === undefined
       ? {}
       : { completion: structuredClone(definition.completion) }),
@@ -560,106 +871,95 @@ function descriptorFromDefinition(definition: AgentToolDefinition): AgentToolDes
   };
 }
 
-function registeredTool(
-  definition: AgentToolDefinition,
-  handler: AgentToolHandler,
-): RegisteredAgentTool {
+function catalogTool(definition: AgentToolDefinition, ownerId: string): CatalogAgentTool {
+  const normalizedOwner = ownerId.trim();
+  if (!normalizedOwner || normalizedOwner.length > 512) {
+    throw new TypeError('Tool owner id is invalid.');
+  }
   const descriptor = deepFreeze(descriptorFromDefinition(definition));
   return deepFreeze({
     name: descriptor.flatName,
+    ownerId: normalizedOwner,
     ...(descriptor.id.namespace === undefined ? {} : { namespace: descriptor.id.namespace }),
-    ...(definition.originalName?.trim() ? { originalName: descriptor.id.name } : {}),
-    ...(descriptor.title === undefined ? {} : { title: descriptor.title }),
     description: descriptor.description,
     inputSchema: descriptor.inputSchema,
     ...(descriptor.outputSchema === undefined ? {} : { outputSchema: descriptor.outputSchema }),
-    aliases: [...descriptor.aliases],
-    tags: [...descriptor.tags],
-    dangerLevel: descriptor.dangerLevel,
-    readonly: descriptor.readonly,
-    source: descriptor.source,
-    ...(descriptor.sourceId === undefined ? {} : { sourceId: descriptor.sourceId }),
-    ...(descriptor.requiredPermission === undefined
-      ? {}
-      : { requiredPermission: descriptor.requiredPermission }),
-    ...(definition.resolveRequiredPermission === undefined
-      ? {}
-      : { resolveRequiredPermission: definition.resolveRequiredPermission }),
-    exposure: descriptor.exposure,
-    execution: descriptor.execution,
-    ...(descriptor.failurePolicy === undefined ? {} : { failurePolicy: descriptor.failurePolicy }),
-    ...(descriptor.completion === undefined ? {} : { completion: descriptor.completion }),
-    ...(descriptor.presentation === undefined ? {} : { presentation: descriptor.presentation }),
-    ...(descriptor.protocolMetadata === undefined
-      ? {}
-      : { protocolMetadata: descriptor.protocolMetadata }),
     descriptor,
-    handler,
   });
-}
-
-function sameToolContract(left: RegisteredAgentTool, right: RegisteredAgentTool): boolean {
-  return (
-    toolHandlerContractIdentity(left.handler) === toolHandlerContractIdentity(right.handler) &&
-    left.resolveRequiredPermission === right.resolveRequiredPermission &&
-    isDeepStrictEqual(left.descriptor, right.descriptor)
-  );
-}
-
-function toolHandlerContractIdentity(handler: AgentToolHandler): AgentToolHandler {
-  const identity = Reflect.get(handler, TOOL_HANDLER_CONTRACT_IDENTITY) as unknown;
-  return typeof identity === 'function' ? (identity as AgentToolHandler) : handler;
-}
-
-function validateToolContract(definition: AgentToolDefinition, handler: AgentToolHandler): void {
-  if (!isRecord(definition)) throw new Error('Tool definition must be an object.');
-  if (typeof definition.name !== 'string' || !definition.name.trim()) {
-    throw new Error('Tool name is required.');
-  }
-  if (typeof definition.description !== 'string' || !definition.description.trim()) {
-    throw new Error(`Tool description is required: ${definition.name}`);
-  }
-  if (!isRecord(definition.inputSchema)) {
-    throw new Error(`Tool inputSchema must be an object: ${definition.name}`);
-  }
-  if (definition.outputSchema !== undefined && !isRecord(definition.outputSchema)) {
-    throw new Error(`Tool outputSchema must be an object: ${definition.name}`);
-  }
-  if (!['safe', 'medium', 'high', 'critical'].includes(definition.dangerLevel)) {
-    throw new Error(`Invalid Tool dangerLevel: ${definition.name}`);
-  }
-  if (typeof handler !== 'function') {
-    throw new Error(`Tool handler must be a function: ${definition.name}`);
-  }
 }
 
 function validateInvocationToolContract(
   definition: ToolInvocationDefinition,
   runtime: ToolInvocationHandlerRuntime,
+  purpose: 'publication' | 'recovery' = 'publication',
 ): void {
   assertPlainDataObject(definition, 'Invocation Tool definition');
-  if (!['read', 'idempotent', 'transactional', 'non_idempotent'].includes(definition.effect)) {
-    throw new Error(`Invocation Tool effect is required: ${definition.name}`);
+  boundedText(definition.name, 'name', TOOL_PROTOCOL_BOUNDS.nameChars);
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/u.test(definition.name)) {
+    throw new TypeError(`Invalid Tool name: ${definition.name}`);
   }
-  if (
-    typeof definition.handlerRevision !== 'string' ||
-    definition.handlerRevision.trim() !== definition.handlerRevision ||
-    definition.handlerRevision.length < 1 || definition.handlerRevision.length > 128
-  ) {
-    throw new Error(`Invocation Tool handlerRevision is required: ${definition.name}`);
+  boundedText(definition.description, 'description', TOOL_PROTOCOL_BOUNDS.descriptionChars);
+  for (const key of ['handlerRevision', 'toolRevision', 'intentRevision'] as const) {
+    boundedText(definition[key], key, TOOL_PROTOCOL_BOUNDS.revisionChars);
   }
-  if (!isRecord(runtime) || typeof runtime.execute !== 'function') {
-    throw new Error(`Invocation Tool execute Handler is required: ${definition.name}`);
+  if (definition.intentRevision !== PREPARED_TOOL_INTENT_REVISION) {
+    throw new TypeError(`Unsupported Tool intent revision: ${definition.intentRevision}`);
   }
+  for (const key of ['effect', 'resolveEffect', 'resolvePermission']) {
+    if (Object.hasOwn(definition, key)) throw new TypeError(`Removed Tool contract field: ${key}`);
+  }
+  for (const key of ['aliases', 'tags'] as const) {
+    const labels = definition[key] ?? [];
+    if (!Array.isArray(labels) || labels.length > TOOL_PROTOCOL_BOUNDS.labels ||
+      new Set(labels).size !== labels.length) throw new TypeError(`Invalid Tool ${key}.`);
+    for (const label of labels) boundedText(label, key, TOOL_PROTOCOL_BOUNDS.labelChars);
+  }
+  for (const key of ['title', 'sourceId', 'namespace', 'originalName'] as const) {
+    if (definition[key] !== undefined) boundedText(definition[key], key, TOOL_PROTOCOL_BOUNDS.labelChars);
+  }
+  boundedText(definition.source, 'source', TOOL_PROTOCOL_BOUNDS.labelChars);
+  if (!['safe', 'medium', 'high', 'critical'].includes(definition.dangerLevel) ||
+    !['direct', 'deferred', 'hidden', 'disabled'].includes(definition.exposure ?? 'deferred') ||
+    typeof definition.readonly !== 'boolean') throw new TypeError('Invalid Tool descriptor classification.');
+  assertInvocationLimits(definition.limits);
+  if (!isRecord(definition.execution) || definition.execution.timeoutMs !== definition.limits.timeoutMs) {
+    throw new TypeError('Tool execution timeout must equal its invocation limit.');
+  }
+  validateClassifications(definition);
+  validatePermissionDeclaration(definition);
+  const failure = definition.failurePolicy?.onUnknown;
+  if (failure === undefined || typeof failure.retryable !== 'boolean' ||
+    !['repairable', 'timeout', 'transient_dependency', 'permission', 'tool_unavailable',
+      'validation', 'unknown'].includes(failure.failureKind)) {
+    throw new TypeError('Tool failure/retry policy must be complete.');
+  }
+  if (failure.retryable && ['transactional', 'non_idempotent'].includes(definition.recoveryClass)) {
+    throw new TypeError('A Tool with uncertain side effects cannot automatically retry unknown outcomes.');
+  }
+  if (!isRecord(runtime) || typeof runtime.prepare !== 'function' || typeof runtime.execute !== 'function') {
+    throw new Error(`Invocation Tool prepare and execute Handlers are required: ${definition.name}`);
+  }
+  assertPlainDataObject(runtime, 'Invocation Tool runtime');
+  validateRevisionReference(runtime.revision);
+  if (!sameRevision(runtime.revision, {
+    toolName: definition.name,
+    toolRevision: definition.toolRevision,
+    handlerRevision: definition.handlerRevision,
+    intentRevision: definition.intentRevision,
+  })) throw new TypeError('Tool handler binding does not match its declared revisions.');
   if (runtime.recover !== undefined && typeof runtime.recover !== 'function') {
     throw new Error(`Invocation Tool recover Handler must be a function: ${definition.name}`);
   }
-  strictPortableSnapshot({
+  if (runtime.retainResult !== undefined && typeof runtime.retainResult !== 'function') {
+    throw new Error(`Invocation Tool retainResult Handler must be a function: ${definition.name}`);
+  }
+  const metadata = strictPortableSnapshot({
     inputSchema: definition.inputSchema,
     ...(definition.outputSchema === undefined ? {} : { outputSchema: definition.outputSchema }),
     aliases: definition.aliases ?? [],
     tags: definition.tags ?? [],
     execution: definition.execution ?? {},
+    ...(definition.permission === undefined ? {} : { permission: definition.permission }),
     ...(definition.failurePolicy === undefined ? {} : { failurePolicy: definition.failurePolicy }),
     ...(definition.completion === undefined ? {} : { completion: definition.completion }),
     ...(definition.presentation === undefined ? {} : { presentation: definition.presentation }),
@@ -667,14 +967,147 @@ function validateInvocationToolContract(
       ? {}
       : { protocolMetadata: definition.protocolMetadata }),
   }, `Invocation Tool ${definition.name} descriptor`);
+  assertByteLimit(metadata, TOOL_PROTOCOL_BOUNDS.descriptorBytes, 'Tool metadata');
+  validateSchema(definition.inputSchema, 'input');
+  validateSchema(definition.outputSchema, 'output');
+  if (purpose === 'publication' && isBaseToolName(definition.name)) {
+    const baseline = BASE_TOOL_MANIFEST.find(({ name }) => name === definition.name);
+    if (definition.exposure !== 'direct' || definition.toolRevision !== baseline?.schemaRevision ||
+      definition.namespace !== undefined || definition.source !== 'runtime' ||
+      (definition.aliases?.length ?? 0) !== 0) {
+      throw new TypeError(`Tool does not match the Runtime baseline: ${definition.name}`);
+    }
+  }
+  const descriptor = descriptorFromDefinition(definition);
+  assertByteLimit(strictPortableSnapshot(descriptor, 'Tool descriptor'),
+    TOOL_PROTOCOL_BOUNDS.descriptorBytes, 'Tool descriptor');
+}
+
+function freezeInvocationRuntime(
+  runtime: ToolInvocationHandlerRuntime,
+): ToolInvocationHandlerRuntime {
+  return Object.freeze({
+    revision: Object.freeze({ ...runtime.revision }),
+    prepare: runtime.prepare,
+    execute: runtime.execute,
+    ...(runtime.recover === undefined ? {} : { recover: runtime.recover }),
+    ...(runtime.retainResult === undefined ? {} : { retainResult: runtime.retainResult }),
+  });
+}
+
+function assertNotBaseTool(name: string): void {
+  if (isBaseToolName(name)) {
+    throw new TypeError(`Baseline Tool ${name} can only be published through publishBaselineInvocations.`);
+  }
+}
+
+function validateRevisionReference(reference: ToolRevisionReference): void {
+  if (!isRecord(reference)) throw new TypeError('An exact Tool handler revision binding is required.');
+  assertPlainDataObject(reference, 'Tool handler revision');
+  for (const key of ['toolName', 'toolRevision', 'handlerRevision', 'intentRevision'] as const) {
+    boundedText(reference[key], key, TOOL_PROTOCOL_BOUNDS.revisionChars);
+  }
+}
+
+function sameRevision(left: ToolRevisionReference, right: ToolRevisionReference): boolean {
+  return left.toolName === right.toolName && left.toolRevision === right.toolRevision &&
+    left.handlerRevision === right.handlerRevision && left.intentRevision === right.intentRevision;
+}
+
+function boundedText(value: unknown, label: string, max: number): asserts value is string {
+  if (typeof value !== 'string' || value.trim() !== value || value.length === 0 || value.length > max ||
+    containsDisallowedControlCharacter(value)) {
+    throw new TypeError(`Tool ${label} must contain 1–${max} bounded text characters.`);
+  }
+}
+
+function containsDisallowedControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x08 || code === 0x0b || code === 0x0c || code >= 0x0e && code <= 0x1f) return true;
+  }
+  return false;
+}
+
+function assertByteLimit(value: PortableValue, max: number, label: string): void {
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > max) {
+    throw new TypeError(`${label} exceeds ${max} bytes.`);
+  }
+}
+
+function validateSchema(value: unknown, label: string): void {
+  if (!isRecord(value)) throw new TypeError(`Tool ${label} schema must be an object.`);
+  const schema = strictPortableSnapshot(value, `${label} schema`);
+  if (!isRecord(schema)) throw new TypeError(`Tool ${label} schema must be an object.`);
+  assertByteLimit(schema, TOOL_PROTOCOL_BOUNDS.schemaBytes, `${label} schema`);
+  const schemaText = JSON.stringify(schema);
+  if ('$async' in schema && schema.$async === true) {
+    throw new TypeError('Tool schemas must validate synchronously.');
+  }
+  if (label === 'output' && schemaText.includes('schemanaut.agent-tool-result.v1')) {
+    throw new TypeError('Tool output schemas cannot declare the Runtime private result envelope.');
+  }
+  // Only successful compilation is shared; label-specific checks still run on every call.
+  if (validatedSchemaCache.has(schemaText)) return;
+  // A fresh compiler isolates schema IDs across independent contribution owners.
+  const compiler = new Ajv2020({
+    strictSchema: true, strictTypes: false, allowUnionTypes: true,
+    coerceTypes: false, useDefaults: false, removeAdditional: false,
+  });
+  compiler.compile(schema);
+  if (validatedSchemaCache.size >= MAX_VALIDATED_SCHEMA_CACHE_ENTRIES) {
+    validatedSchemaCache.clear();
+  }
+  validatedSchemaCache.add(schemaText);
+}
+
+function validateClassifications(definition: ToolInvocationDefinition): void {
+  const { access, recoveryClass, readonly, execution } = definition;
+  if (!['read', 'write', 'external', 'destructive'].includes(access) ||
+    !['read', 'idempotent', 'transactional', 'non_idempotent'].includes(recoveryClass) ||
+    !['read', 'write', 'exclusive'].includes(execution.concurrency)) {
+    throw new TypeError('Tool access, recoveryClass and concurrency are required.');
+  }
+  if ((access === 'read' && !readonly) ||
+    ((access === 'write' || access === 'destructive') && readonly) ||
+    (recoveryClass === 'read' && !readonly) ||
+    (execution.concurrency === 'read' && access !== 'read') ||
+    (readonly && execution.concurrency === 'write')) {
+    throw new TypeError('Tool readonly, access, recovery and concurrency declarations conflict.');
+  }
+}
+
+function validatePermissionDeclaration(definition: ToolInvocationDefinition): void {
+  const permission = definition.permission;
+  if (permission === undefined) return; // Actual facts are required from prepare, never inferred here.
+  if (!isRecord(permission)) throw new TypeError('Tool permission declaration must be an object.');
+  const actions = new Set(['read', 'write', 'execute', 'network', 'delete', 'database-query',
+    'database-mutation', 'database-schema', 'credential', 'admin', 'unknown']);
+  for (const key of ['actions', 'paths', 'hosts'] as const) {
+    const values = permission[key];
+    if (values === undefined) continue;
+    if (!Array.isArray(values) || values.length > TOOL_PROTOCOL_BOUNDS.facts) {
+      throw new TypeError(`Too many permission ${key}.`);
+    }
+    for (const value of values) {
+      boundedText(value, `permission.${key}`, TOOL_PROTOCOL_BOUNDS.factChars);
+      if (key === 'actions' && !actions.has(value)) throw new TypeError(`Unknown permission action: ${value}`);
+    }
+  }
+  for (const key of ['network', 'externalWrite', 'destructive', 'credentials', 'admin'] as const) {
+    if (permission[key] !== undefined && typeof permission[key] !== 'boolean') {
+      throw new TypeError(`Tool permission.${key} must be boolean.`);
+    }
+  }
+  if ((permission.destructive === true && definition.access !== 'destructive') ||
+    (definition.readonly && (permission.externalWrite === true || permission.destructive === true ||
+      permission.actions?.some((action) => ['write', 'delete', 'database-mutation', 'database-schema'].includes(action))))) {
+    throw new TypeError('Tool static permission declaration contradicts its access.');
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function toolIdKey(id: AgentToolId): string {
-  return `${id.namespace ?? ''}\u0000${id.name}`;
 }
 
 function uniqueStrings(values: readonly string[] | undefined): string[] {
@@ -687,7 +1120,7 @@ function replaceMap<K, V>(target: Map<K, V>, source: ReadonlyMap<K, V>): void {
   for (const [key, value] of source) target.set(key, value);
 }
 
-function toLlmTool(tool: RegisteredAgentTool): LlmTool {
+function toLlmTool(tool: CatalogAgentTool): LlmTool {
   return {
     name: tool.name,
     ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
@@ -713,6 +1146,13 @@ function stableInvocationRevision(
     .update(canonicalJson(portableDescriptor))
     .digest('hex');
   return `${descriptorDigest}:${handlerRevision}`;
+}
+
+function schemaDigest(descriptor: AgentToolDescriptor): string {
+  return createHash('sha256').update(canonicalJson(strictPortableSnapshot({
+    inputSchema: descriptor.inputSchema,
+    outputSchema: descriptor.outputSchema,
+  }, 'Tool schemas'))).digest('hex');
 }
 
 function canonicalJson(value: PortableValue): string {
@@ -752,7 +1192,17 @@ function strictPortableSnapshot(
   value: unknown,
   path: string,
   ancestors = new WeakSet<object>(),
+  depth = 0,
+  budget = { units: 0 },
 ): PortableValue {
+  budget.units += typeof value === 'string' ? value.length : 1;
+  if (budget.units > TOOL_PROTOCOL_BOUNDS.descriptorBytes) {
+    throw new TypeError(`${path} exceeds the descriptor traversal budget.`);
+  }
+  if (depth > TOOL_PROTOCOL_BOUNDS.depth) throw new TypeError(`${path} exceeds the descriptor depth limit.`);
+  if (typeof value === 'string' && value.length > TOOL_PROTOCOL_BOUNDS.descriptorBytes) {
+    throw new TypeError(`${path} exceeds the descriptor string limit.`);
+  }
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new TypeError(`${path} must contain finite numbers.`);
@@ -794,7 +1244,7 @@ function strictPortableSnapshot(
         ) {
           throw new TypeError(`${path}[${index}] must be a dense data property.`);
         }
-        result.push(strictPortableSnapshot(property.value, `${path}[${index}]`, ancestors));
+        result.push(strictPortableSnapshot(property.value, `${path}[${index}]`, ancestors, depth + 1, budget));
       }
       return result;
     }
@@ -806,6 +1256,7 @@ function strictPortableSnapshot(
     const result: Record<string, PortableValue> = Object.create(null) as
       Record<string, PortableValue>;
     for (const key of keys) {
+      budget.units += key.length;
       const property = Object.getOwnPropertyDescriptor(value, key);
       if (
         property === undefined || property.get !== undefined || property.set !== undefined ||
@@ -813,7 +1264,7 @@ function strictPortableSnapshot(
       ) {
         throw new TypeError(`${path}.${key} must be an enumerable data property.`);
       }
-      result[key] = strictPortableSnapshot(property.value, `${path}.${key}`, ancestors);
+      result[key] = strictPortableSnapshot(property.value, `${path}.${key}`, ancestors, depth + 1, budget);
     }
     return result;
   } finally {

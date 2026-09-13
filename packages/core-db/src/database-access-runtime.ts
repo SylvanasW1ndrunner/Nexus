@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  ArtifactRef,
   CapabilityProfile,
   ConnectionHealth,
   ConnectionProfile,
@@ -27,6 +28,7 @@ import type {
   ResourceRelation,
   ResourceScope,
   ResultBatch,
+  ResultHandle,
 } from '@dbagent/shared';
 import {
   ContractValidationError,
@@ -39,9 +41,13 @@ import {
   CapabilityUnavailableError,
   DATABASE_CAPABILITIES,
 } from './capability-resolver.js';
-import type { ConnectorContext, TransactionOptions } from './connector.js';
+import type { ConnectorContext, DatabaseConnector, TransactionOptions } from './connector.js';
 import { ConnectorNotFoundError, ConnectorRegistry } from './connector-registry.js';
-import { parseSql, permissionAllows } from './sql-parser.js';
+import { operationClassAllows, parseSql } from './sql-parser.js';
+import {
+  DatabaseResultStoreError,
+  type DatabaseResultStore,
+} from './result-store.js';
 
 export interface CredentialResolver {
   resolve(reference: CredentialReference): Promise<DatabaseCredential>;
@@ -59,6 +65,7 @@ export type DatabaseAccessRuntimeOptions = {
   maxAuditEvents?: number;
   maxTrackedQueries?: number;
   now?: () => Date;
+  resultStore?: DatabaseResultStore;
 };
 
 export type DatabaseAccessMetrics = {
@@ -103,6 +110,7 @@ export class DatabaseAccessRuntime {
   readonly #maxAuditEvents: number;
   readonly #maxTrackedQueries: number;
   readonly #now: () => Date;
+  #resultStore: DatabaseResultStore | undefined;
   readonly #metric = {
     submittedQueries: 0,
     cancelledQueries: 0,
@@ -124,6 +132,28 @@ export class DatabaseAccessRuntime {
       'maxTrackedQueries',
     );
     this.#now = options.now ?? (() => new Date());
+    this.#resultStore = options.resultStore;
+  }
+
+  /**
+   * Completes a host-composed Runtime with its Project-owned result store.
+   * Attaching a different store after composition would split result identity,
+   * so it fails instead of silently replacing the producer boundary.
+   */
+  attachResultStore(resultStore: DatabaseResultStore): void {
+    if (this.#resultStore && this.#resultStore !== resultStore) {
+      throw runtimeError(
+        'RESULT_STORE_ALREADY_CONFIGURED',
+        'conflict',
+        'DatabaseAccessRuntime already uses a different result store.',
+        { stage: 'result' },
+      );
+    }
+    this.#resultStore = resultStore;
+  }
+
+  get resultStore(): DatabaseResultStore | undefined {
+    return this.#resultStore;
   }
 
   createProfile(profile: ConnectionProfile): ConnectionProfile {
@@ -216,7 +246,7 @@ export class DatabaseAccessRuntime {
       return structuredClone(result);
     } catch (error) {
       await this.#recordFailure('database.profile.test', profileId, started, error);
-      throw this.#normalizeError(error, 'connect', profileId, context.credential);
+      throw this.#normalizeError(error, 'connect', profileId);
     }
   }
 
@@ -245,7 +275,7 @@ export class DatabaseAccessRuntime {
       return structuredClone(stored);
     } catch (error) {
       await this.#recordFailure('database.connect', profileId, started, error);
-      throw this.#normalizeError(error, 'connect', profileId, context.credential);
+      throw this.#normalizeError(error, 'connect', profileId);
     }
   }
 
@@ -279,7 +309,7 @@ export class DatabaseAccessRuntime {
       return structuredClone(stored);
     } catch (error) {
       await this.#recordFailure('database.reconnect', profileId, started, error);
-      throw this.#normalizeError(error, 'connect', profileId, context.credential);
+      throw this.#normalizeError(error, 'connect', profileId);
     }
   }
 
@@ -467,13 +497,13 @@ export class DatabaseAccessRuntime {
     this.#validateSubmission(submission);
     const context = await this.#context(submission.profileId, undefined, true, false);
     try {
-      const permissionMode = submission.authorization?.permissionMode ?? 'read';
-      const requiredPermission = parseSql(submission.sql).requiredPermission;
-      if (!permissionAllows(permissionMode, requiredPermission)) {
+      const authorizedClass = submission.authorization?.authorizedClass ?? 'query';
+      const requiredOperationClass = parseSql(submission.sql).requiredOperationClass;
+      if (!operationClassAllows(authorizedClass, requiredOperationClass)) {
         throw runtimeError(
           'QUERY_PERMISSION_DENIED',
           'authorization',
-          `SQL requires ${requiredPermission} permission, but the effective mode is ${permissionMode}.`,
+          `SQL requires the ${requiredOperationClass} operation class, but authorization permits ${authorizedClass}.`,
           {
             stage: 'submit',
             profileId: submission.profileId,
@@ -482,7 +512,7 @@ export class DatabaseAccessRuntime {
       }
       const effectiveAuthorization: NonNullable<QuerySubmission['authorization']> = {
         ...(submission.authorization ?? {}),
-        permissionMode,
+        authorizedClass,
       };
       const effectiveSubmission: QuerySubmission = {
         ...submission,
@@ -493,10 +523,10 @@ export class DatabaseAccessRuntime {
       if (submission.executionMode === 'async') {
         this.#capabilityResolver.require(capabilities, { key: DATABASE_CAPABILITIES.QUERY_ASYNC });
       }
-      const job = await this.connectors
-        .get(context.profile.connectorId)
-        .submit(context, cloneQuerySubmission(effectiveSubmission));
+      const connector = this.connectors.get(context.profile.connectorId);
+      let job = await connector.submit(context, cloneQuerySubmission(effectiveSubmission));
       this.#validateJob(job, submission.profileId, context.profile.connectorId);
+      job = await this.#ensureDurableResult(context, connector, job, submission.batchSize);
       const binding: QueryJobBinding = {
         profileId: submission.profileId,
         ...(context.session ? { sessionId: context.session.id } : {}),
@@ -534,14 +564,16 @@ export class DatabaseAccessRuntime {
   async getJob(jobId: string): Promise<QueryJob> {
     const { context, binding } = await this.#jobContext(jobId);
     try {
-      const job = await this.connectors.get(context.profile.connectorId).getJob(context, jobId);
+      const connector = this.connectors.get(context.profile.connectorId);
+      let job = await connector.getJob(context, jobId);
+      job = await this.#ensureDurableResult(context, connector, job);
       binding.terminal = isTerminalJob(job);
       if (job.result) this.#results.set(job.result.id, binding);
       this.#pruneTrackedQueries();
       await this.#recordTerminalJobAudit(job, binding);
       return structuredClone(job);
     } catch (error) {
-      throw this.#normalizeError(error, 'execute', binding.profileId, undefined, jobId);
+      throw this.#normalizeError(error, 'execute', binding.profileId, jobId);
     }
   }
 
@@ -571,7 +603,7 @@ export class DatabaseAccessRuntime {
     } catch (error) {
       this.#metric.platformCancelTotalMs += performance.now() - platformStarted;
       await this.#recordFailure('database.query.cancel', binding.profileId, started, error, jobId);
-      throw this.#normalizeError(error, 'cancel', binding.profileId, undefined, jobId);
+      throw this.#normalizeError(error, 'cancel', binding.profileId, jobId);
     }
   }
 
@@ -579,6 +611,23 @@ export class DatabaseAccessRuntime {
     handleId: string,
     input: { cursor?: string; limit?: number } = {},
   ): Promise<ResultBatch> {
+    if (this.#resultStore) {
+      try {
+        const page = await this.#resultStore.page(handleId, input);
+        return cloneResultBatch({
+          handleId: page.handleId,
+          rows: page.rows,
+          rowOffset: page.rowOffset,
+          complete: page.complete,
+          byteCount: page.byteCount,
+          ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+        });
+      } catch (error) {
+        if (!(error instanceof DatabaseResultStoreError) || error.code !== 'NOT_FOUND') {
+          throw this.#normalizeError(error, 'result');
+        }
+      }
+    }
     const binding = this.#results.get(handleId);
     if (!binding) {
       throw runtimeError('RESULT_NOT_FOUND', 'not-found', `Unknown result handle: ${handleId}`, {
@@ -597,16 +646,101 @@ export class DatabaseAccessRuntime {
 
   async releaseResult(handleId: string): Promise<boolean> {
     const binding = this.#results.get(handleId);
-    if (!binding) return false;
-    const context = await this.#context(binding.profileId, undefined, false, false);
-    const connector = this.connectors.get(context.profile.connectorId);
-    if (!connector.releaseResult) return false;
-    try {
-      const released = await connector.releaseResult(context, handleId);
+    let connectorReleased = false;
+    if (binding) {
+      const context = await this.#context(binding.profileId, undefined, false, false);
+      const connector = this.connectors.get(context.profile.connectorId);
+      if (connector.releaseResult) {
+        try {
+          connectorReleased = await connector.releaseResult(context, handleId);
+        } catch (error) {
+          throw this.#normalizeError(error, 'result', binding.profileId);
+        }
+      }
+    }
+    if (this.#resultStore) {
+      try {
+        if (await this.#resultStore.expire(handleId, 'released')) {
+          this.#results.delete(handleId);
+          return true;
+        }
+      } catch (error) {
+        throw this.#normalizeError(error, 'result');
+      }
+    }
+    if (connectorReleased) {
       this.#results.delete(handleId);
-      return released;
+      return true;
+    }
+    return false;
+  }
+
+  async #ensureDurableResult(
+    context: ConnectorContext,
+    connector: DatabaseConnector,
+    job: QueryJob,
+    batchSize?: number,
+  ): Promise<QueryJob> {
+    if (!this.#resultStore || job.state !== 'succeeded' || !job.result) return job;
+    try {
+      const existing = await this.#resultStore.getHandle(job.result.id);
+      if (
+        existing.jobId !== job.id ||
+        existing.format !== job.result.format ||
+        !sameResultColumns(existing.columns, job.result.columns)
+      ) {
+        throw new DatabaseResultStoreError(
+          'CONFLICT',
+          `Result identity ${job.result.id} is already bound to another query result.`,
+        );
+      }
+      return { ...job, result: existing };
     } catch (error) {
-      throw this.#normalizeError(error, 'result', binding.profileId);
+      if (!(error instanceof DatabaseResultStoreError) || error.code !== 'NOT_FOUND') throw error;
+    }
+
+    const sourceHandle = job.result;
+    let writer: Awaited<ReturnType<DatabaseResultStore['create']>> | undefined;
+    try {
+      writer = await this.#resultStore.create({
+        resultId: sourceHandle.id,
+        jobId: job.id,
+        format: sourceHandle.format,
+        columns: sourceHandle.columns,
+        ...(sourceHandle.expiresAt === undefined ? {} : { expiresAt: sourceHandle.expiresAt }),
+        hasMore: false,
+        truncated: false,
+      });
+      let ordinal = 0;
+      for await (const batch of connectorResultBatches(
+        connector,
+        context,
+        sourceHandle,
+        batchSize,
+      )) {
+        const operationId = `connector-result:${job.id}:${ordinal}`;
+        try {
+          await writer.append(batch.rows, { operationId });
+        } catch (error) {
+          if (!(error instanceof DatabaseResultStoreError) || error.code !== 'INJECTED_CRASH') {
+            throw error;
+          }
+          await writer.append(batch.rows, { operationId });
+        }
+        ordinal += 1;
+      }
+      const durable = await writer.commit();
+      await connector.releaseResult?.(context, sourceHandle.id).catch(() => undefined);
+      return { ...job, result: durable };
+    } catch (error) {
+      try {
+        const recovered = await this.#resultStore.getHandle(sourceHandle.id);
+        return { ...job, result: recovered };
+      } catch {
+        await writer?.abort().catch(() => undefined);
+        await this.#resultStore.discardStaged(sourceHandle.id).catch(() => undefined);
+        throw error;
+      }
     }
   }
 
@@ -614,6 +748,38 @@ export class DatabaseAccessRuntime {
     handleId: string,
     input: { batchSize?: number } = {},
   ): AsyncIterable<ResultBatch> {
+    if (this.#resultStore) {
+      try {
+        let durableCursor: string | undefined;
+        const seen = new Set<string>();
+        do {
+          const page = await this.#resultStore.page(handleId, {
+            ...(durableCursor === undefined ? {} : { cursor: durableCursor }),
+            ...(input.batchSize === undefined ? {} : { limit: input.batchSize }),
+          });
+          yield cloneResultBatch({
+            handleId: page.handleId,
+            rows: page.rows,
+            rowOffset: page.rowOffset,
+            complete: page.complete,
+            byteCount: page.byteCount,
+            ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+          });
+          if (page.complete) return;
+          if (!page.nextCursor || seen.has(page.nextCursor)) {
+            throw runtimeError('RESULT_CURSOR_INVALID', 'provider', 'Result store returned an invalid cursor', {
+              stage: 'result',
+            });
+          }
+          seen.add(page.nextCursor);
+          durableCursor = page.nextCursor;
+        } while (durableCursor);
+      } catch (error) {
+        if (!(error instanceof DatabaseResultStoreError) || error.code !== 'NOT_FOUND') {
+          throw this.#normalizeError(error, 'result');
+        }
+      }
+    }
     const binding = this.#results.get(handleId);
     if (!binding) {
       throw runtimeError('RESULT_NOT_FOUND', 'not-found', `Unknown result handle: ${handleId}`, {
@@ -651,6 +817,41 @@ export class DatabaseAccessRuntime {
       seen.add(batch.nextCursor);
       cursor = batch.nextCursor;
     } while (cursor);
+  }
+
+  async exportResult(handleId: string, format: 'csv' | 'jsonl'): Promise<ArtifactRef> {
+    if (!this.#resultStore) {
+      throw runtimeError(
+        'RESULT_EXPORT_UNAVAILABLE',
+        'unsupported',
+        'A durable result store is required for complete result export.',
+        { stage: 'result' },
+      );
+    }
+    try {
+      return await this.#resultStore.export(handleId, format);
+    } catch (error) {
+      throw this.#normalizeError(error, 'result');
+    }
+  }
+
+  async openResultExport(
+    artifact: ArtifactRef,
+    options: { signal?: AbortSignal; idleTimeoutMs?: number } = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    if (!this.#resultStore) {
+      throw runtimeError(
+        'RESULT_EXPORT_UNAVAILABLE',
+        'unsupported',
+        'A durable result store is required to open an exported result.',
+        { stage: 'result' },
+      );
+    }
+    try {
+      return await this.#resultStore.openExport(artifact, options);
+    } catch (error) {
+      throw this.#normalizeError(error, 'result');
+    }
   }
 
   async beginTransaction(
@@ -813,7 +1014,12 @@ export class DatabaseAccessRuntime {
   }
 
   async close(): Promise<void> {
-    const connected = [...this.#profileSessions.keys()];
+    // Keep disconnected sessions queryable for their audit identity, but they
+    // are already retired. Retrying their connector close turns an otherwise
+    // idempotent owner shutdown into a false NOT_CONNECTED failure.
+    const connected = [...this.#profileSessions.keys()].filter(
+      (profileId) => this.getSessionForProfile(profileId)?.status === 'connected',
+    );
     const failures: unknown[] = [];
     for (const profileId of connected) {
       try {
@@ -1219,14 +1425,10 @@ export class DatabaseAccessRuntime {
     error: unknown,
     stage: NonNullable<DatabaseAccessError['stage']>,
     profileId?: string,
-    credential?: DatabaseCredential,
     jobId?: string,
   ): DatabaseAccessRuntimeError {
     if (error instanceof DatabaseAccessRuntimeError) return error;
-    const normalized = normalizeUnknownError(error, stage, profileId, jobId);
-    normalized.message = redact(normalized.message, credential);
-    if (normalized.detail) normalized.detail = redact(normalized.detail, credential);
-    return new DatabaseAccessRuntimeError(normalized);
+    return new DatabaseAccessRuntimeError(normalizeUnknownError(error, stage, profileId, jobId));
   }
 }
 
@@ -1315,6 +1517,40 @@ function normalizeUnknownError(
   profileId?: string,
   jobId?: string,
 ): DatabaseAccessError {
+  if (error instanceof DatabaseResultStoreError) {
+    const classification: Record<
+      DatabaseResultStoreError['code'],
+      { code: string; category: DatabaseAccessError['category']; retryable: boolean }
+    > = {
+      NOT_FOUND: { code: 'RESULT_NOT_FOUND', category: 'not-found', retryable: false },
+      NOT_COMMITTED: { code: 'RESULT_NOT_COMMITTED', category: 'conflict', retryable: true },
+      EXPIRED: { code: 'RESULT_EXPIRED', category: 'not-found', retryable: false },
+      CORRUPT: { code: 'RESULT_CORRUPT', category: 'provider', retryable: false },
+      CURSOR_INVALID: { code: 'CURSOR_INVALID', category: 'validation', retryable: false },
+      INVALID_ARGUMENT: {
+        code: 'RESULT_REQUEST_INVALID',
+        category: 'validation',
+        retryable: false,
+      },
+      CONFLICT: { code: 'RESULT_CONFLICT', category: 'conflict', retryable: false },
+      UNSUPPORTED_SCHEMA: {
+        code: 'RESULT_STORE_SCHEMA_UNSUPPORTED',
+        category: 'unsupported',
+        retryable: false,
+      },
+      STORAGE_FAILURE: { code: 'STORAGE_FAILURE', category: 'internal', retryable: true },
+      INJECTED_CRASH: { code: 'STORAGE_FAILURE', category: 'internal', retryable: true },
+    };
+    const mapped = classification[error.code];
+    return {
+      ...mapped,
+      message: error.message,
+      ...(stage === 'internal' ? {} : { stage }),
+      outcome: 'unchanged',
+      ...(profileId ? { profileId } : {}),
+      ...(jobId ? { jobId } : {}),
+    };
+  }
   if (error instanceof CapabilityUnavailableError) {
     return {
       code: 'CAPABILITY_UNAVAILABLE',
@@ -1358,6 +1594,53 @@ function normalizeUnknownError(
   };
 }
 
+async function* connectorResultBatches(
+  connector: DatabaseConnector,
+  context: ConnectorContext,
+  handle: ResultHandle,
+  batchSize: number | undefined,
+): AsyncIterable<ResultBatch> {
+  if (connector.streamResult) {
+    yield* connector.streamResult(context, handle.id, {
+      ...(batchSize === undefined ? {} : { batchSize }),
+    });
+    return;
+  }
+  let cursor: string | undefined;
+  const seen = new Set<string>();
+  do {
+    const batch = await connector.readResult(context, handle.id, {
+      ...(cursor === undefined ? {} : { cursor }),
+      ...(batchSize === undefined ? {} : { limit: batchSize }),
+    });
+    yield batch;
+    if (batch.complete) return;
+    if (!batch.nextCursor || seen.has(batch.nextCursor)) {
+      throw runtimeError(
+        'RESULT_CURSOR_INVALID',
+        'provider',
+        'Connector returned an invalid result cursor while persisting its result.',
+        { stage: 'result', profileId: context.profile.id },
+      );
+    }
+    seen.add(batch.nextCursor);
+    cursor = batch.nextCursor;
+  } while (cursor);
+}
+
+function sameResultColumns(
+  left: ResultHandle['columns'],
+  right: ResultHandle['columns'],
+): boolean {
+  return left.length === right.length && left.every((column, index) => {
+    const candidate = right[index];
+    return candidate !== undefined &&
+      column.name === candidate.name &&
+      column.dataType === candidate.dataType &&
+      column.nativeType === candidate.nativeType;
+  });
+}
+
 function unsupportedTransactionAction(
   action: string,
   profileId: string,
@@ -1388,19 +1671,18 @@ function validateEndpoint(
     }
   }
   if (endpoint.transport === 'jdbc') {
-    if (!endpoint.url.startsWith('jdbc:') || /\/\/[^/@:]+:[^/@]+@/.test(endpoint.url)) {
+    if (!endpoint.url.startsWith('jdbc:')) {
       throw runtimeError(
         'JDBC_ENDPOINT_INVALID',
         'validation',
-        'JDBC URL must use jdbc: and cannot contain credentials',
+        'JDBC URL must use jdbc:',
         { stage: 'profile', profileId },
       );
     }
   }
   if (endpoint.transport === 'http') {
-    let url: URL;
     try {
-      url = new URL(endpoint.baseUrl);
+      new URL(endpoint.baseUrl);
     } catch {
       throw runtimeError(
         'HTTP_ENDPOINT_INVALID',
@@ -1412,20 +1694,11 @@ function validateEndpoint(
         },
       );
     }
-    if (url.username || url.password) {
+    if (Object.keys(endpoint.headers ?? {}).some((key) => key.toLowerCase() === 'cookie')) {
       throw runtimeError(
-        'HTTP_ENDPOINT_SECRET',
+        'HTTP_COOKIE_NOT_PORTABLE',
         'validation',
-        'HTTP endpoint cannot contain credentials',
-        { stage: 'profile', profileId },
-      );
-    }
-    const secretHeaders = new Set(['authorization', 'proxy-authorization', 'cookie', 'x-api-key']);
-    if (Object.keys(endpoint.headers ?? {}).some((key) => secretHeaders.has(key.toLowerCase()))) {
-      throw runtimeError(
-        'HTTP_HEADER_SECRET',
-        'validation',
-        'Secret-bearing headers must come from a credential resolver',
+        'Cookie headers must stay in an execute-only HTTP or browser session',
         { stage: 'profile', profileId },
       );
     }
@@ -1485,7 +1758,7 @@ function hasOperationAuthorization(request: DatabaseOperationRequest): boolean {
   return Boolean(
     request.authorization?.approvalId ||
     request.authorization?.policyId ||
-    request.authorization?.permissionMode === 'full',
+    request.authorization?.authorizedClass === 'schema-admin',
   );
 }
 
@@ -1514,7 +1787,7 @@ function cloneResultBatch(batch: ResultBatch): ResultBatch {
 
 function cloneDatabaseValue(value: DbColumnValue): DbColumnValue {
   if (Buffer.isBuffer(value)) return Buffer.from(value);
-  if (value instanceof Uint8Array) return Uint8Array.from(value);
+  if (value instanceof Uint8Array) return Buffer.from(value);
   if (value instanceof Date) return new Date(value.getTime());
   if (Array.isArray(value)) return value.map((item) => cloneDatabaseValue(item));
   if (value && typeof value === 'object') {
@@ -1526,17 +1799,4 @@ function cloneDatabaseValue(value: DbColumnValue): DbColumnValue {
     );
   }
   return value;
-}
-
-function redact(message: string, credential: DatabaseCredential | undefined): string {
-  let redacted = message.replace(/(\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***:***@');
-  const secrets = [
-    credential?.password,
-    credential?.token,
-    credential?.privateKey,
-    credential?.certificate,
-    ...Object.values(credential?.properties ?? {}),
-  ].filter((value): value is string => Boolean(value && value.length >= 3));
-  for (const secret of secrets) redacted = redacted.split(secret).join('[REDACTED]');
-  return redacted;
 }

@@ -1,411 +1,187 @@
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  ToolRegistry,
-  createAgentSession,
-  isAgentToolResultEnvelope,
-} from '@dbagent/core-agent';
-import { registerWorkspaceTools } from '../src/index.js';
+import { createNoReplaceWorkspaceMutationAdapter } from '../src/workspace-mutation-adapter.js';
+import { createNodeWorkspaceMutationPrimitive } from '../src/node-workspace-mutation-primitive.js';
+import { createWorkspaceToolGeneration } from '../src/workspace-tools.js';
 
-const temporaryDirectories: string[] = [];
+const directories: string[] = [];
+const PATCH_FILE_BYTES = 8 * 1024 * 1024;
+afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
-  );
+describe('workspace prepared tools', () => {
+  it('has exactly the four current tool names with no write/edit aliases', async () => {
+    const root = await temporaryDirectory();
+    const generation = createWorkspaceToolGeneration({ rootPath: root });
+    expect(generation.contributions.map(({ definition }) => definition.name)).toEqual([
+      'workspace_list', 'workspace_read', 'workspace_search', 'workspace_apply_patch',
+    ]);
+    expect(generation.contributions.find(({ definition }) => definition.name === 'workspace_apply_patch')?.definition).toMatchObject({ access: 'destructive', recoveryClass: 'transactional' });
+  });
+
+  it('returns ordinary bounded payloads for list, read, and search', async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, 'revenue.sql'), 'SELECT sum(net_amount) FROM orders;\n', 'utf8');
+    const generation = createWorkspaceToolGeneration({ rootPath: root });
+    await expect(execute(generation, 'workspace_list', { path: '.' })).resolves.toMatchObject({ status: 'ok', entries: [{ path: 'revenue.sql', type: 'file' }] });
+    await expect(execute(generation, 'workspace_read', { path: 'revenue.sql', maxBytes: 16 })).resolves.toMatchObject({ status: 'ok', path: 'revenue.sql' });
+    await expect(execute(generation, 'workspace_search', { query: 'net_amount' })).resolves.toMatchObject({ status: 'ok', matches: [{ path: 'revenue.sql', line: 1 }] });
+    await expect(execute(generation, 'workspace_apply_patch', { action: 'update', path: 'revenue.sql', expectedDigest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000', edits: [{ oldText: 'orders', newText: 'paid_orders' }] })).resolves.toMatchObject({ status: 'unavailable', reason: 'conditional_mutation_backend_unavailable' });
+  }, 20_000);
+
+  it('rejects a stale read digest before any payload is emitted', async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, 'file.txt'), 'first', 'utf8');
+    const generation = createWorkspaceToolGeneration({ rootPath: root });
+    const contribution = generation.contributions.find(({ definition }) => definition.name === 'workspace_read')!;
+    const prepared = await contribution.runtime.prepare({ path: 'file.txt' }, prepareContext(contribution.definition));
+    await writeFile(join(root, 'file.txt'), 'second', 'utf8');
+    await expect(generation.revalidateTarget(prepared, executeContext(prepared))).resolves.toBe('target_changed');
+  });
+
+  it('ignores prepared targets owned by another Tool domain', async () => {
+    const root = await temporaryDirectory();
+    const generation = createWorkspaceToolGeneration({ rootPath: root });
+    const foreign = {
+      input: {},
+      permission: { toolName: 'data_profile' },
+      targetIdentity: { kind: 'data-file', path: join(root, 'data.json') },
+    } as never;
+    await expect(generation.revalidateTarget(foreign, executeContext(foreign))).resolves.toBeUndefined();
+  });
 });
 
-describe('workspace tools', () => {
-  it('applies an atomic multi-edit patch and returns durable artifact evidence', async () => {
-    const directory = await temporaryDirectory();
-    await writeFile(
-      join(directory, 'service.ts'),
-      'export const host = "localhost";\nexport const port = 3000;\n',
-      'utf8',
-    );
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, { rootPath: directory });
-    const session = createAgentSession({
-      id: 'workspace-patch-session',
-      title: 'Workspace patch',
-      mode: 'edit',
-      now: fixedNow,
+describe('streamed workspace mutation publication', () => {
+  it('creates byte-faithful content from a streamed source', async () => {
+    const root = await temporaryDirectory();
+    const adapter = createNoReplaceWorkspaceMutationAdapter(createNodeWorkspaceMutationPrimitive());
+    const binding = await adapter.prepare({
+      rootPath: root, requestedPath: 'result.ndjson', action: 'create', transactionKey: 'streamed-create', signal: activeSignal(),
+    });
+    const bytes = new Uint8Array([0, 255, 10, 13, 42]);
+
+    const result = await adapter.execute(binding, {
+      desiredSource: byteStream(bytes.subarray(0, 2), bytes.subarray(2)), maxSourceBytes: bytes.byteLength,
+      signal: activeSignal(), deadline: activeDeadline(),
     });
 
-    const patched = await registry.get('workspace_patch')!.handler(
-      {
-        path: 'service.ts',
-        edits: [
-          { oldText: '"localhost"', newText: '"127.0.0.1"' },
-          { oldText: '3000', newText: '3721' },
-        ],
-      },
-      { session },
-    );
-
-    expect(isAgentToolResultEnvelope(patched)).toBe(true);
-    if (!isAgentToolResultEnvelope(patched)) throw new Error('Expected result envelope.');
-    expect(patched.modelProjection).toMatchObject({ path: 'service.ts', replacements: 2 });
-    expect(patched.completionEvidence).toMatchObject({
-      kind: 'artifact',
-      deliveryReady: true,
-      outcome: 'succeeded',
-    });
-    await expect(readFile(join(directory, 'service.ts'), 'utf8')).resolves.toContain(
-      '"127.0.0.1"',
-    );
-
-    const beforeFailure = await readFile(join(directory, 'service.ts'), 'utf8');
-    await expect(
-      registry.get('workspace_patch')!.handler(
-        {
-          path: 'service.ts',
-          edits: [
-            { oldText: '3721', newText: '4000' },
-            { oldText: 'missing fragment', newText: 'never written' },
-          ],
-        },
-        { session },
-      ),
-    ).rejects.toThrow('edit 2');
-    await expect(readFile(join(directory, 'service.ts'), 'utf8')).resolves.toBe(beforeFailure);
-  });
-
-  it('writes, reads, searches and edits durable Agent artifacts', async () => {
-    const directory = await temporaryDirectory();
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, { rootPath: directory });
-    expect(registry.get('shell_run')).toBeUndefined();
-    const session = createAgentSession({
-      id: 'workspace-session',
-      title: 'Workspace',
-      mode: 'edit',
-      now: fixedNow,
-    });
-    const context = { session };
-
-    await registry.get('workspace_write')!.handler(
-      {
-        path: 'sql/revenue.sql',
-        content: 'SELECT sum(net_amount) AS revenue FROM orders;\n',
-      },
-      context,
-    );
-    const read = (await registry
-      .get('workspace_read')!
-      .handler({ path: 'sql/revenue.sql' }, context)) as { content: string };
-    const search = (await registry
-      .get('workspace_search')!
-      .handler({ query: 'net_amount' }, context)) as {
-      matches: Array<{ path: string; line: number; text: string }>;
-    };
-    await registry.get('workspace_edit')!.handler(
-      {
-        path: 'sql/revenue.sql',
-        oldText: 'orders',
-        newText: 'paid_orders',
-      },
-      context,
-    );
-
-    expect(read.content).toContain('sum(net_amount)');
-    expect(search.matches).toHaveLength(1);
-    expect(search.matches[0]).toMatchObject({
-      path: 'sql/revenue.sql',
-      line: 1,
-    });
-    expect(typeof search.matches[0]?.text).toBe('string');
-    await expect(readFile(join(directory, 'sql', 'revenue.sql'), 'utf8')).resolves.toContain(
-      'paid_orders',
-    );
-    expect(session.artifacts).toHaveLength(1);
-    expect(session.artifacts?.[0]).toMatchObject({
-      path: 'sql/revenue.sql',
-      mediaType: 'application/sql',
+    await expect(readFile(join(root, 'result.ndjson'))).resolves.toEqual(Buffer.from(bytes));
+    expect(result).toMatchObject({
+      status: 'ok', sizeBytes: bytes.byteLength,
+      digest: 'sha256:5a44f143bd89e639ab6bd15d97c5989b3d5f58f4d7c0055f884bd781e0032468',
     });
   });
 
-  it('blocks lexical and symbolic-link-independent parent escapes', async () => {
-    const directory = await temporaryDirectory();
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, { rootPath: directory });
-    const session = createAgentSession({
-      id: 'workspace-session',
-      title: 'Workspace',
-      mode: 'edit',
-      now: fixedNow,
+  it('does not replace a target created after streamed preparation', async () => {
+    const root = await temporaryDirectory();
+    const adapter = createNoReplaceWorkspaceMutationAdapter(createNodeWorkspaceMutationPrimitive());
+    const binding = await adapter.prepare({
+      rootPath: root, requestedPath: 'result.ndjson', action: 'create', transactionKey: 'streamed-conflict', signal: activeSignal(),
     });
+    await writeFile(join(root, 'result.ndjson'), 'existing', 'utf8');
 
-    await expect(
-      registry
-        .get('workspace_write')!
-        .handler({ path: '../outside.sql', content: 'select 1' }, { session }),
-    ).rejects.toThrow('escapes the project workspace');
-    await expect(
-      registry
-        .get('workspace_read')!
-        .handler({ path: join(directory, 'absolute.sql') }, { session }),
-    ).rejects.toThrow('project-relative');
+    await expect(adapter.execute(binding, {
+      desiredSource: byteStream(new Uint8Array([1, 2, 3])), maxSourceBytes: 3, signal: activeSignal(), deadline: activeDeadline(),
+    })).rejects.toThrow('concurrent file occupied');
+    await expect(readFile(join(root, 'result.ndjson'), 'utf8')).resolves.toBe('existing');
   });
 
-  it('accepts a canonical symlinked workspace root but rejects a link that resolves outside it', async () => {
-    const directory = await temporaryDirectory();
-    const actualRoot = join(directory, 'actual-root');
-    const linkedRoot = join(directory, 'linked-root');
-    const outsideRoot = join(directory, 'outside-root');
-    await mkdir(actualRoot);
-    await mkdir(outsideRoot);
-    await writeFile(join(actualRoot, 'inside.txt'), 'inside', 'utf8');
-    await writeFile(join(outsideRoot, 'outside.txt'), 'outside', 'utf8');
-    await directoryLink(actualRoot, linkedRoot);
-    await directoryLink(outsideRoot, join(actualRoot, 'escape'));
-
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, { rootPath: linkedRoot });
-    const session = createAgentSession({
-      id: 'workspace-symlink-session',
-      title: 'Workspace symlink boundary',
-      mode: 'read',
-      now: fixedNow,
+  it('cleans up streamed temporary state when its byte limit is exceeded', async () => {
+    const root = await temporaryDirectory();
+    const adapter = createNoReplaceWorkspaceMutationAdapter(createNodeWorkspaceMutationPrimitive());
+    const binding = await adapter.prepare({
+      rootPath: root, requestedPath: 'too-large.ndjson', action: 'create', transactionKey: 'streamed-limit', signal: activeSignal(),
     });
 
-    await expect(
-      registry.get('workspace_read')!.handler({ path: 'inside.txt' }, { session }),
-    ).resolves.toMatchObject({ path: 'inside.txt', content: 'inside' });
-    await expect(
-      registry.get('workspace_read')!.handler({ path: 'escape/outside.txt' }, { session }),
-    ).rejects.toThrow('escapes the project workspace');
+    await expect(adapter.execute(binding, {
+      desiredSource: byteStream(new Uint8Array([1, 2]), new Uint8Array([3, 4])), maxSourceBytes: 3,
+      signal: activeSignal(), deadline: activeDeadline(),
+    })).rejects.toThrow('exceeds its byte limit');
+    await expect(readdir(root)).resolves.toEqual([]);
   });
 
-  it('bounds shell output and keeps execution inside the project', async () => {
-    const directory = await temporaryDirectory();
-    await writeFile(join(directory, 'marker.txt'), 'ok', 'utf8');
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, {
-      rootPath: directory,
-      maxOutputChars: 64,
-      enableShell: true,
+  it('cleans up the transaction when the supplied stream is already locked', async () => {
+    const root = await temporaryDirectory();
+    const adapter = createNoReplaceWorkspaceMutationAdapter(createNodeWorkspaceMutationPrimitive());
+    const binding = await adapter.prepare({
+      rootPath: root, requestedPath: 'locked.ndjson', action: 'create', transactionKey: 'streamed-locked', signal: activeSignal(),
     });
-    const session = createAgentSession({
-      id: 'workspace-session',
-      title: 'Workspace',
-      mode: 'full',
-      now: fixedNow,
-    });
-    const command = `"${process.execPath}" -e "process.stdout.write('x'.repeat(200))"`;
-
-    const result = (await registry
-      .get('shell_run')!
-      .handler({ command, timeoutMs: 10_000 }, { session })) as {
-      exitCode: number;
-      stdout: string;
-      truncated: boolean;
-    };
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout.length).toBeLessThanOrEqual(64);
-    expect(result.stdout).toContain('bytes omitted');
-    expect(result.truncated).toBe(true);
-  });
-
-  it('does not pass arbitrary host secrets into an explicitly enabled shell', async () => {
-    const directory = await temporaryDirectory();
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, { rootPath: directory, enableShell: true });
-    const session = createAgentSession({
-      id: 'workspace-secret-session',
-      title: 'Workspace secret boundary',
-      mode: 'full',
-      now: fixedNow,
-    });
-    process.env.SCHEMANAUT_TEST_SECRET = 'must-not-reach-child';
+    const source = new ReadableStream<Uint8Array>();
+    const lock = source.getReader();
     try {
-      const command = `"${process.execPath}" -e "process.stdout.write(process.env.SCHEMANAUT_TEST_SECRET || 'absent')"`;
-      const result = (await registry
-        .get('shell_run')!
-        .handler({ command, timeoutMs: 10_000 }, { session })) as {
-        stdout: string;
-      };
-      expect(result.stdout).toBe('absent');
+      await expect(adapter.execute(binding, {
+        desiredSource: source, maxSourceBytes: 1, signal: activeSignal(), deadline: activeDeadline(),
+      })).rejects.toThrow(/locked/u);
+      await expect(readdir(root)).resolves.toEqual([]);
     } finally {
-      delete process.env.SCHEMANAUT_TEST_SECRET;
+      lock.releaseLock();
     }
   });
 
-  it('does not start a shell process when its signal is already aborted', async () => {
-    const directory = await temporaryDirectory();
-    const markerPath = join(directory, 'pre-aborted-marker.txt');
-    const scriptPath = join(directory, 'write-marker.mjs');
-    await writeFile(
-      scriptPath,
-      "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], 'started');\n",
-      'utf8',
-    );
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, { rootPath: directory, enableShell: true });
-    const session = createAgentSession({
-      id: 'workspace-pre-aborted-session',
-      title: 'Workspace pre-aborted shell',
-      mode: 'full',
-      now: fixedNow,
-    });
-    const controller = new AbortController();
-    controller.abort();
+  it('keeps legacy string create recovery at the 8 MiB ceiling', async () => {
+    const root = await temporaryDirectory();
+    const { adapter, binding } = await stagedCreateRecovery(root, false);
 
-    await expect(
-      registry
-        .get('shell_run')!
-        .handler(
-          { command: shellCommand(scriptPath, markerPath), timeoutMs: 10_000 },
-          { session, signal: controller.signal },
-        ),
-    ).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(access(markerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(adapter.recover(binding, activeSignal())).rejects.toThrow('readable file limit');
+    await expect(readFile(join(root, binding.entryName))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('terminates the complete shell process tree when a running command is cancelled', async () => {
-    const directory = await temporaryDirectory();
-    const fixture = await processTreeFixture(directory, 1_200);
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, { rootPath: directory, enableShell: true });
-    const session = createAgentSession({
-      id: 'workspace-cancel-tree-session',
-      title: 'Workspace cancelled process tree',
-      mode: 'full',
-      now: fixedNow,
-    });
-    const controller = new AbortController();
+  it('recovers a streamed create above the legacy 8 MiB ceiling', async () => {
+    const root = await temporaryDirectory();
+    const { adapter, binding, bytes } = await stagedCreateRecovery(root, true);
 
-    const running = registry.get('shell_run')!.handler(
-      {
-        command: shellCommand(
-          fixture.parentScript,
-          fixture.childScript,
-          fixture.markerPath,
-          fixture.readyPath,
-          '1200',
-        ),
-        timeoutMs: 10_000,
-      },
-      { session, signal: controller.signal },
-    );
-    await waitForPath(fixture.readyPath);
-    controller.abort();
-    await running;
-    await delay(1_500);
-
-    await expect(access(fixture.markerPath)).rejects.toMatchObject({ code: 'ENOENT' });
-  }, 10_000);
-
-  it('terminates the complete shell process tree after a timeout', async () => {
-    const directory = await temporaryDirectory();
-    const fixture = await processTreeFixture(directory, 3_500);
-    const registry = new ToolRegistry();
-    registerWorkspaceTools(registry, { rootPath: directory, enableShell: true });
-    const session = createAgentSession({
-      id: 'workspace-timeout-tree-session',
-      title: 'Workspace timed out process tree',
-      mode: 'full',
-      now: fixedNow,
-    });
-
-    const result = (await registry.get('shell_run')!.handler(
-      {
-        command: shellCommand(
-          fixture.parentScript,
-          fixture.childScript,
-          fixture.markerPath,
-          fixture.readyPath,
-          '3500',
-        ),
-        timeoutMs: 1_500,
-      },
-      { session },
-    )) as { timedOut: boolean };
-    expect(result.timedOut).toBe(true);
-    await delay(2_300);
-
-    await expect(access(fixture.markerPath)).rejects.toMatchObject({ code: 'ENOENT' });
-  }, 10_000);
+    await expect(adapter.recover(binding, activeSignal())).resolves.toMatchObject({ status: 'ok', sizeBytes: bytes.byteLength });
+    await expect(readFile(join(root, binding.entryName))).resolves.toEqual(bytes);
+  });
 });
 
-async function temporaryDirectory(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), 'schemanaut-workspace-'));
-  temporaryDirectories.push(directory);
-  return directory;
+async function temporaryDirectory(): Promise<string> { const path = await mkdtemp(join(tmpdir(), 'nexus-workspace-')); directories.push(path); return path; }
+
+function byteStream(...chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
 }
 
-function fixedNow(): string {
-  return '2026-07-25T00:00:00.000Z';
+function activeSignal(): AbortSignal { return new AbortController().signal; }
+function activeDeadline(): string { return new Date(Date.now() + 10_000).toISOString(); }
+
+async function stagedCreateRecovery(root: string, streamed: boolean) {
+  const adapter = createNoReplaceWorkspaceMutationAdapter(createNodeWorkspaceMutationPrimitive());
+  const binding = await adapter.prepare({
+    rootPath: root, requestedPath: streamed ? 'streamed-recovery.ndjson' : 'legacy-recovery.txt', action: 'create',
+    transactionKey: streamed ? 'streamed-recovery' : 'legacy-recovery', signal: activeSignal(),
+  });
+  const bytes = Buffer.alloc(PATCH_FILE_BYTES + 1, streamed ? 0x53 : 0x4c);
+  const desiredDigest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  await writeFile(join(root, binding.temporaryName), bytes);
+  await writeFile(join(root, binding.transactionName), `${JSON.stringify({
+    protocol: 'workspace-mutation-journal.v1', transactionName: binding.transactionName, action: 'create', phase: 'temporary_ready', desiredDigest,
+    ...(streamed ? { streamed: true } : {}),
+  })}\n`, 'utf8');
+  return { adapter, binding, bytes };
 }
 
-async function directoryLink(target: string, path: string): Promise<void> {
-  await symlink(target, path, process.platform === 'win32' ? 'junction' : 'dir');
+function prepareContext(descriptor: { name: string; toolRevision: string; handlerRevision: string; limits: unknown }) {
+  return {
+    hostId: 'local', projectId: 'project-tools', sessionId: 'session-tools', runId: 'run-tools', turnId: 'turn-tools', invocationId: 'invocation-tools',
+    descriptor: { flatName: descriptor.name }, toolRevision: descriptor.toolRevision, handlerRevision: descriptor.handlerRevision, generation: 1,
+    limits: descriptor.limits, signal: new AbortController().signal,
+  } as never;
 }
 
-function shellCommand(scriptPath: string, ...args: string[]): string {
-  return [process.execPath, scriptPath, ...args]
-    .map((value) => `"${value.replaceAll('"', '\\"')}"`)
-    .join(' ');
+function executeContext(intent: unknown) {
+  return { hostId: 'local', projectId: 'project-tools', sessionId: 'session-tools', runId: 'run-tools', turnId: 'turn-tools', invocationId: 'invocation-tools', intent, signal: new AbortController().signal, deadline: new Date(Date.now() + 10_000).toISOString() } as never;
 }
 
-async function processTreeFixture(
-  directory: string,
-  childDelayMs: number,
-): Promise<{
-  parentScript: string;
-  childScript: string;
-  markerPath: string;
-  readyPath: string;
-}> {
-  const parentScript = join(directory, `tree-parent-${childDelayMs}.mjs`);
-  const childScript = join(directory, `tree-child-${childDelayMs}.mjs`);
-  const markerPath = join(directory, `tree-marker-${childDelayMs}.txt`);
-  const readyPath = join(directory, `tree-ready-${childDelayMs}.txt`);
-  await writeFile(
-    childScript,
-    [
-      "import { writeFileSync } from 'node:fs';",
-      'const delayMs = Number(process.argv[3]);',
-      "setTimeout(() => { writeFileSync(process.argv[2], 'leaked'); }, delayMs);",
-      'setTimeout(() => process.exit(0), delayMs + 500);',
-      '',
-    ].join('\n'),
-    'utf8',
-  );
-  await writeFile(
-    parentScript,
-    [
-      "import { spawn } from 'node:child_process';",
-      "import { writeFileSync } from 'node:fs';",
-      'const child = spawn(process.execPath, [process.argv[2], process.argv[3], process.argv[5]], {',
-      "  stdio: 'ignore',",
-      '});',
-      "writeFileSync(process.argv[4], String(child.pid ?? 'missing'));",
-      'setTimeout(() => process.exit(0), Number(process.argv[5]) + 750);',
-      '',
-    ].join('\n'),
-    'utf8',
-  );
-  return { parentScript, childScript, markerPath, readyPath };
-}
-
-async function waitForPath(path: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    try {
-      await access(path);
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    await delay(25);
-  }
-  throw new Error(`Timed out waiting for fixture path: ${path}`);
-}
-
-async function delay(milliseconds: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+async function execute(generation: ReturnType<typeof createWorkspaceToolGeneration>, name: string, input: Record<string, unknown>) {
+  const contribution = generation.contributions.find(({ definition }) => definition.name === name)!;
+  const context = prepareContext(contribution.definition);
+  const intent = await contribution.runtime.prepare(input as never, context);
+  return await contribution.runtime.execute(intent.input, executeContext(intent));
 }

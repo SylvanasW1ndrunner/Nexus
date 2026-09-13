@@ -14,17 +14,29 @@ describe('built-package Tool authority boundaries', () => {
         let calls = 0;
         const rawHandler = () => {
           calls += 1;
-          return api.createAgentToolResultEnvelope({
-            modelProjection: { ok: true }, durableSummary: { ok: true },
-          });
+          return { ok: true };
         };
         const registry = new api.ToolRegistry();
         registry.registerInvocation({
           name: 'sealed_tool', description: 'sealed fixture', dangerLevel: 'safe',
-          readonly: true, effect: 'read', handlerRevision: 'sealed_tool@1',
-          requiredPermission: 'read', exposure: 'direct', execution: { concurrency: 'read' },
+          readonly: true, source: 'unknown', access: 'read', recoveryClass: 'read',
+          toolRevision: 'sealed_tool@1', handlerRevision: 'sealed_tool-handler@1',
+          intentRevision: 'prepared-tool-intent.v1', permission: { actions: ['read'] },
+          exposure: 'direct', execution: { concurrency: 'read', timeoutMs: 1_000 },
+          limits: { timeoutMs: 1_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+          outputSchema: { type: 'object' }, failurePolicy: { onUnknown: { failureKind: 'unknown', retryable: false } },
           inputSchema: { type: 'object' },
-        }, { execute: rawHandler });
+        }, {
+          revision: { toolName: 'sealed_tool', toolRevision: 'sealed_tool@1', handlerRevision: 'sealed_tool-handler@1', intentRevision: 'prepared-tool-intent.v1' },
+          prepare: () => ({
+            input: {}, toolRevision: 'sealed_tool@1', handlerRevision: 'sealed_tool-handler@1', intentRevision: 'prepared-tool-intent.v1',
+            targetIdentity: {}, generation: 'test', action: { summary: 'Read sealed fixture.' },
+            permission: { toolName: 'sealed_tool', dangerLevel: 'safe', readonly: true, access: 'read', recoveryClass: 'read', actions: ['read'], targetIdentity: {}, targets: [] },
+            access: 'read', recoveryClass: 'read', concurrency: 'read', resourceKeys: [],
+            limits: { timeoutMs: 1_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+          }),
+          execute: rawHandler,
+        });
         const snapshot = registry.captureSnapshot();
         let constructorError;
         try {

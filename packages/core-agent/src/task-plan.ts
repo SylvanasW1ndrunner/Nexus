@@ -256,6 +256,6 @@ function requireText(value: string, name: string): string {
 function deepFreezePlan<T>(value: T, seen = new WeakSet<object>()): T {
   if (value === null || typeof value !== 'object' || seen.has(value)) return value;
   seen.add(value);
-  Object.values(value).forEach((item) => deepFreezePlan(item, seen));
+  for (const nested of Object.values(value)) deepFreezePlan(nested, seen);
   return Object.freeze(value);
 }

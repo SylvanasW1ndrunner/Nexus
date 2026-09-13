@@ -1,37 +1,16 @@
-import { spawn } from 'node:child_process';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { loadEnvFile } from './load-env.mjs';
+#!/usr/bin/env node
 
-const root = fileURLToPath(new URL('../', import.meta.url));
-await loadEnvFile(join(root, '.env'));
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const runner = fileURLToPath(new URL('./run-unified-agent-live-test.mjs', import.meta.url));
+const child = spawn(process.execPath, [runner], {
+  env: { ...process.env, DBAGENT_LIVE_ACCEPTANCE_SCOPE: 'code-repair' },
+  stdio: 'inherit',
+  windowsHide: true,
+});
 
 await new Promise((resolve, reject) => {
-  const child = spawn(
-    process.execPath,
-    [
-      join(root, 'node_modules', 'vitest', 'vitest.mjs'),
-      'run',
-      'test/general-agent.live.integration.test.ts',
-      '--pool=threads',
-    ],
-    {
-      cwd: join(root, 'packages', 'sdk'),
-      env: {
-        ...process.env,
-        DBAGENT_RUN_GENERAL_AGENT_LIVE: '1',
-      },
-      stdio: 'inherit',
-      windowsHide: true,
-    },
-  );
   child.once('error', reject);
-  child.once('exit', (code, signal) => {
-    if (signal) {
-      reject(new Error(`General Agent live test stopped by ${signal}.`));
-      return;
-    }
-    if (code === 0) resolve();
-    else reject(new Error(`General Agent live test failed with exit code ${code ?? 1}.`));
-  });
-});
+  child.once('exit', (code, signal) => signal ? reject(new Error(`Unified live runner stopped by ${signal}.`)) : resolve(code ?? 1));
+}).then((code) => { if (code !== 0) process.exitCode = code; });

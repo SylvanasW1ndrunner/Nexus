@@ -50,8 +50,7 @@ export type ContractValidationIssue = {
     | 'INVALID_VALUE'
     | 'INVALID_TIME'
     | 'UNSUPPORTED_VERSION'
-    | 'NON_PORTABLE_VALUE'
-    | 'SECRET_MATERIAL';
+    | 'NON_PORTABLE_VALUE';
   path: string;
   message: string;
 };

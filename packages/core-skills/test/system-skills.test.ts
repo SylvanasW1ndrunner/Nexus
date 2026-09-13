@@ -2,21 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { createSystemSkillRegistry, loadSystemSkills, systemSkillSource } from '../src/index.js';
 
 describe('SchemaNaut system Agent Skills', () => {
-  it('loads four UTF-8 Markdown Skills from packaged assets', async () => {
+  it('exposes only generic, metadata-first system workflows', async () => {
     const skills = await loadSystemSkills();
-    expect(skills.map(({ name }) => name)).toEqual([
-      'discover-schema-and-shape',
-      'query-and-answer',
-      'recover-from-sql-error',
-      'write-and-verify',
+    expect(skills.map(({ name, description, scope }) => ({
+      name, description, scope,
+    }))).toEqual([
+      {
+        name: 'delegate-and-synthesize',
+        description: 'Delegate independent bounded work when delegation is available, then synthesize evidence.',
+        scope: 'system',
+      },
+      {
+        name: 'diagnose-with-evidence',
+        description: 'Diagnose a problem from observable evidence and verify the proposed resolution.',
+        scope: 'system',
+      },
+      {
+        name: 'investigate-implement-verify',
+        description: 'Investigate a project task, make a focused implementation, and verify the result.',
+        scope: 'system',
+      },
     ]);
     for (const skill of skills) {
-      expect(skill.scope).toBe('system');
-      expect(skill.instructions.length).toBeGreaterThan(100);
-      expect(`${skill.description}\n${skill.instructions}`).not.toMatch(
-        /�|鏌ヨ|绯荤粺|鍐欏叆|鎵ц/,
-      );
-      expect(skill.extensions).toEqual({});
+      expect(skill.instructions).not.toMatch(/\b(database|sql)\b|internal hash|planId/iu);
     }
   });
 
@@ -31,23 +39,12 @@ describe('SchemaNaut system Agent Skills', () => {
     }
   });
 
-  it('keeps built-in Skills procedural instead of prescribing concrete SQL choices', async () => {
-    const skills = await loadSystemSkills();
-    const writeAndVerify = skills.find((skill) => skill.name === 'write-and-verify');
-
-    expect(writeAndVerify).toBeDefined();
-    expect(writeAndVerify?.instructions).not.toMatch(
-      /最小变更|先\s*`DROP`|\bTRUNCATE\b|create-new-object/i,
-    );
-  });
-
   it('provides a metadata-only system catalog', async () => {
     const registry = await createSystemSkillRegistry();
-    expect(registry.catalogForModel()).toHaveLength(4);
-    expect(Object.keys(registry.catalogForModel()[0]!).sort()).toEqual([
-      'description',
-      'name',
-      'scope',
+    expect(registry.catalogForModel()).toEqual([
+      expect.objectContaining({ name: 'delegate-and-synthesize', scope: 'system' }),
+      expect.objectContaining({ name: 'diagnose-with-evidence', scope: 'system' }),
+      expect.objectContaining({ name: 'investigate-implement-verify', scope: 'system' }),
     ]);
     expect(systemSkillSource()).toMatchObject({
       scope: 'system',

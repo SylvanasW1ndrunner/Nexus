@@ -10,8 +10,6 @@
   "references": [
     { "path": "../shared" },
     { "path": "../core-agent" },
-    { "path": "../core-db" },
-    { "path": "../core-rag" },
     { "path": "../core-skills" }
   ],
   "include": ["src/**/*.ts"]

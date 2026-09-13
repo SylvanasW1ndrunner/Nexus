@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type {
   AppError,
   CapabilityDescriptor,
@@ -14,7 +16,6 @@ import type {
   DatabaseTransaction,
   DbColumnValue,
   PortableValue,
-  QueryExecutionResult,
   QueryJob,
   QueryResultRow,
   QuerySubmission,
@@ -35,10 +36,11 @@ import type {
   DiscoveryRequest,
   TransactionOptions,
 } from './connector.js';
-import type { DatabaseConnectionConfig } from './types.js';
+import type { DatabaseConnectionConfig, QueryExecutionObserver } from './types.js';
 import {
   PostgresDriver,
   type PostgresCatalogEntry,
+  type PostgresConnectorDriver,
   type PostgresServerInfo,
 } from './postgres-driver.js';
 import {
@@ -46,14 +48,24 @@ import {
   createStableRelationId,
   createStableResourceId,
 } from '@dbagent/core-resource';
+import { ProjectDatabaseResultStore } from './project-result-store.js';
+import {
+  DatabaseResultStoreError,
+  type DatabaseResultStore,
+  type DatabaseResultWriter,
+} from './result-store.js';
 
 const DEFAULT_RESULT_TTL_MS = 60 * 60 * 1_000;
 const DEFAULT_MAX_RETAINED_RESULTS = 256;
 const DEFAULT_MAX_RETAINED_RESULT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_RETAINED_JOBS = 1_024;
+const RELEASED_RESULTS_BEFORE_GC = 16;
+const RELEASED_BYTES_BEFORE_GC = 64 * 1024 * 1024;
 const DEFAULT_DISCOVERY_PAGE_SIZE = 500;
 const DEFAULT_RESULT_PAGE_SIZE = 1_000;
-const MAX_RESULT_PAGE_SIZE = 10_000;
+
+/** Stable registry identity used by every PostgreSQL connection profile. */
+export const POSTGRES_CONNECTOR_ID = 'postgres-native';
 
 type ConnectedPostgres = {
   session: ConnectionSession;
@@ -65,13 +77,13 @@ type ConnectedPostgres = {
 
 type InternalQueryJob = {
   job: QueryJob;
-  result?: QueryExecutionResult;
   backendPid?: number;
   cancelRequested: boolean;
   execution?: Promise<void>;
 };
 
 export type PostgresConnectorOptions = {
+  resultStore?: DatabaseResultStore;
   resultTtlMs?: number;
   maxRetainedResults?: number;
   maxRetainedResultBytes?: number;
@@ -80,7 +92,7 @@ export type PostgresConnectorOptions = {
 
 export class PostgresConnector implements DatabaseConnector {
   readonly manifest: ConnectorManifest;
-  readonly #driver: PostgresDriver;
+  readonly #driver: PostgresConnectorDriver;
   readonly #capabilityResolver = new CapabilityResolver();
   readonly #connections = new Map<string, ConnectedPostgres>();
   readonly #jobs = new Map<string, InternalQueryJob>();
@@ -89,9 +101,13 @@ export class PostgresConnector implements DatabaseConnector {
   readonly #maxRetainedResults: number;
   readonly #maxRetainedResultBytes: number;
   readonly #maxRetainedJobs: number;
+  readonly #resultStore: DatabaseResultStore;
+  #resultStoreReady: Promise<void> | undefined;
   #retainedResultBytes = 0;
+  #releasedResultsSinceGc = 0;
+  #releasedBytesSinceGc = 0;
 
-  constructor(driver = new PostgresDriver(), options: PostgresConnectorOptions = {}) {
+  constructor(driver: PostgresConnectorDriver = new PostgresDriver(), options: PostgresConnectorOptions = {}) {
     this.#driver = driver;
     this.#resultTtlMs = positiveRetentionOption(
       options.resultTtlMs,
@@ -113,6 +129,22 @@ export class PostgresConnector implements DatabaseConnector {
       DEFAULT_MAX_RETAINED_JOBS,
       'maxRetainedJobs',
     );
+    if (options.resultStore) {
+      this.#resultStore = options.resultStore;
+    } else {
+      const fallbackIdentity = randomUUID();
+      this.#resultStore = new ProjectDatabaseResultStore({
+        projectId: `unscoped:${fallbackIdentity}`,
+        rootDir: join(
+          tmpdir(),
+          'schemanaut',
+          'database-results',
+          `unscoped-${process.pid}-${fallbackIdentity}`,
+        ),
+      });
+      // Compatibility for callers that only inspect the connector manifest.
+      // Production composition injects one Project-owned durable store.
+    }
     this.manifest = createPostgresManifest();
   }
 
@@ -216,7 +248,7 @@ export class PostgresConnector implements DatabaseConnector {
       );
     }
     this.#connections.delete(context.profile.id);
-    this.#purgeProfileQueries(context.profile.id);
+    await this.#purgeProfileQueries(context.profile.id);
   }
 
   async reconnect(context: ConnectorContext): Promise<ConnectionSession> {
@@ -399,6 +431,8 @@ export class PostgresConnector implements DatabaseConnector {
     internal.execution = execution;
     if (submission.executionMode !== 'async') {
       await execution;
+    } else {
+      void execution.catch(() => undefined);
     }
     return structuredClone(internal.job);
   }
@@ -442,57 +476,63 @@ export class PostgresConnector implements DatabaseConnector {
     return structuredClone(internal.job);
   }
 
-  readResult(
+  async readResult(
     _context: ConnectorContext,
     handleId: string,
     input: { cursor?: string; limit?: number } = {},
   ): Promise<ResultBatch> {
-    return Promise.resolve().then(() => {
-      this.#pruneRetainedResults();
-      const jobId = this.#resultJobs.get(handleId);
-      const internal = jobId ? this.#jobs.get(jobId) : undefined;
-      if (!internal?.job.result || !internal.result) {
-        throw connectorNotFound(
-          'RESULT_NOT_FOUND',
-          `Result handle was not found: ${handleId}`,
-          'result',
-        );
-      }
-      if (
-        internal.job.result.expiresAt &&
-        new Date(internal.job.result.expiresAt).getTime() <= Date.now()
-      ) {
-        internal.job = { ...internal.job, state: 'expired' };
-        throw connectorNotFound('RESULT_EXPIRED', `Result handle expired: ${handleId}`, 'result');
-      }
-      const offset = decodeOffset(input.cursor);
-      const limit = Math.min(
-        Math.max(input.limit ?? DEFAULT_RESULT_PAGE_SIZE, 1),
-        MAX_RESULT_PAGE_SIZE,
+    await this.#ensureResultStoreReady();
+    await this.#pruneRetainedResults();
+    const jobId = this.#resultJobs.get(handleId);
+    const internal = jobId ? this.#jobs.get(jobId) : undefined;
+    if (!internal?.job.result) {
+      throw connectorNotFound(
+        'RESULT_NOT_FOUND',
+        `Result handle was not found: ${handleId}`,
+        'result',
       );
-      const rows = internal.result.rows.slice(offset, offset + limit);
-      const nextOffset = offset + rows.length;
-      const complete = nextOffset >= internal.result.rows.length;
+    }
+    try {
+      const page = await this.#resultStore.page(handleId, {
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        limit: Math.min(input.limit ?? DEFAULT_RESULT_PAGE_SIZE, DEFAULT_RESULT_PAGE_SIZE),
+      });
+      const binaryColumns = new Set(
+        internal.job.result.columns
+          .filter(isPostgresBinaryColumn)
+          .map(({ name }) => name),
+      );
       return {
-        handleId,
-        rows: rows.map(cloneDatabaseRow),
-        rowOffset: offset,
-        complete,
-        byteCount: Buffer.byteLength(stringifyPublicJson(rows)),
-        ...(!complete ? { nextCursor: encodeOffset(nextOffset) } : {}),
+        handleId: page.handleId,
+        rows: page.rows.map((row) => restorePostgresResultRow(row, binaryColumns)),
+        rowOffset: page.rowOffset,
+        complete: page.complete,
+        byteCount: page.byteCount,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
       };
-    });
+    } catch (error) {
+      if (error instanceof DatabaseResultStoreError) {
+        if (error.code === 'EXPIRED') internal.job = { ...internal.job, state: 'expired' };
+        throw resultStoreConnectorError(error, handleId);
+      }
+      throw error;
+    }
   }
 
-  releaseResult(context: ConnectorContext, handleId: string): Promise<boolean> {
+  async releaseResult(context: ConnectorContext, handleId: string): Promise<boolean> {
+    await this.#ensureResultStoreReady();
     const jobId = this.#resultJobs.get(handleId);
     const internal = jobId ? this.#jobs.get(jobId) : undefined;
     if (!internal || internal.job.profileId !== context.profile.id) {
-      return Promise.resolve(false);
+      return false;
     }
-    const released = this.#evictResult(handleId);
+    const releasedBytes = internal.job.result?.byteCount ?? 0;
+    const released = await this.#evictResult(handleId, false, true, 'released');
+    if (released) {
+      await this.#collectReleasedResultGarbage(releasedBytes).catch(() => undefined);
+    }
     this.#pruneRetainedJobs();
-    return Promise.resolve(released);
+    return released;
   }
 
   async *streamResult(
@@ -707,15 +747,6 @@ export class PostgresConnector implements DatabaseConnector {
       completedAt: new Date().toISOString(),
       output,
     };
-  }
-
-  get legacyDriver(): PostgresDriver {
-    return this.#driver;
-  }
-
-  getLegacyConnection(profileId: string): SavedConnection | undefined {
-    const connection = this.#connections.get(profileId)?.connection;
-    return connection ? structuredClone(connection) : undefined;
   }
 
   #config(
@@ -985,7 +1016,28 @@ export class PostgresConnector implements DatabaseConnector {
       progress: 0.1,
       startedAt,
     };
-    const observer = {
+    const resultId = `result_${internal.job.id}`;
+    let writer: DatabaseResultWriter | undefined;
+    let streamedResult = false;
+    let persistenceError: unknown;
+    const expiresAt = new Date(Date.now() + this.#resultTtlMs).toISOString();
+    const ensureWriter = async (
+      columns: ResultHandle['columns'],
+      completeResult: boolean,
+    ): Promise<DatabaseResultWriter> => {
+      if (writer) return writer;
+      await this.#ensureResultStoreReady();
+      writer = await this.#resultStore.create({
+        resultId,
+        jobId: internal.job.id,
+        format: 'rows',
+        columns,
+        expiresAt,
+        ...(completeResult ? { hasMore: false, truncated: false } : {}),
+      });
+      return writer;
+    };
+    const observer: QueryExecutionObserver = {
       onBackendPid: ({ backendPid }: { backendPid: number }) => {
         internal.backendPid = backendPid;
         internal.job = { ...internal.job, vendorQueryId: String(backendPid), progress: 0.25 };
@@ -1002,6 +1054,23 @@ export class PostgresConnector implements DatabaseConnector {
           );
         }
       },
+      ...(submission.batchSize === undefined ? {} : { resultBatchSize: submission.batchSize }),
+      onResultBatch: async ({ columns, rows, ordinal }) => {
+        streamedResult = true;
+        try {
+          const batchWriter = await ensureWriter(columns, true);
+          const operationId = `query-result:${internal.job.id}:${ordinal}`;
+          try {
+            await batchWriter.append(rows, { operationId });
+          } catch (error) {
+            if (!isRecoverableAppendResponseLoss(error)) throw error;
+            await batchWriter.append(rows, { operationId });
+          }
+        } catch (error) {
+          persistenceError = error;
+          throw error;
+        }
+      },
     };
     const request = {
       queryId: internal.job.id,
@@ -1014,17 +1083,29 @@ export class PostgresConnector implements DatabaseConnector {
       ...(submission.confirmed !== undefined ? { confirmed: submission.confirmed } : {}),
       ...(submission.transactionMode ? { transactionMode: submission.transactionMode } : {}),
     };
-    const enforceReadOnly = submission.authorization?.permissionMode === 'read';
+    const enforceReadOnly = submission.authorization?.authorizedClass === 'query';
     const executionConnection = enforceReadOnly
       ? { ...connected.connection, readOnly: true }
       : connected.connection;
-    const result = submission.transactionId
-      ? await this.#driver.executeInTransaction(submission.transactionId, request, observer, {
-          enforceReadOnly,
-        })
-      : await this.#driver.execute(request, executionConnection, observer);
+    let result: Awaited<ReturnType<PostgresConnectorDriver['execute']>>;
+    try {
+      result = submission.transactionId
+        ? await this.#driver.executeInTransaction(submission.transactionId, request, observer, {
+            enforceReadOnly,
+          })
+        : await this.#driver.execute(request, executionConnection, observer);
+    } catch (error) {
+      await this.#failResultPersistence(
+        internal,
+        resultId,
+        writer,
+        persistenceError ?? error,
+      );
+      return;
+    }
     const completedAt = new Date().toISOString();
     if (!result.ok) {
+      await this.#discardStagedResult(resultId, writer);
       const cancelled = result.error.code === 'QUERY_CANCELLED' || internal.cancelRequested;
       internal.job = {
         ...internal.job,
@@ -1040,19 +1121,50 @@ export class PostgresConnector implements DatabaseConnector {
       };
       return;
     }
-    internal.result = result.data;
-    const byteCount = Buffer.byteLength(stringifyPublicJson(result.data.rows));
-    const handle: ResultHandle = {
-      id: randomUUID(),
-      jobId: internal.job.id,
-      format: 'rows',
-      columns: result.data.columns,
-      rowCount: result.data.returnedRowCount ?? result.data.rows.length,
-      byteCount,
-      expiresAt: new Date(Date.now() + this.#resultTtlMs).toISOString(),
-      ...(result.data.hasMore !== undefined ? { hasMore: result.data.hasMore } : {}),
-      ...(result.data.truncated !== undefined ? { truncated: result.data.truncated } : {}),
-    };
+    let handle: ResultHandle | undefined;
+    try {
+      const resultWriter = writer ?? await ensureWriter(result.data.columns, false);
+      if (!streamedResult) {
+        await resultWriter.append(result.data.rows, {
+          operationId: `query-result:${internal.job.id}:0`,
+        });
+      }
+      handle = await resultWriter.commit();
+    } catch (error) {
+      try {
+        handle = await this.#resultStore.getHandle(resultId);
+      } catch {
+        await writer?.abort().catch(() => undefined);
+        await this.#resultStore.discardStaged(resultId).catch(() => undefined);
+        await this.#resultStore.collectGarbage({
+          stagedTtlMs: 0,
+          tombstoneTtlMs: 0,
+        }).catch(() => undefined);
+        internal.job = {
+          ...internal.job,
+          state: 'failed',
+          progress: 1,
+          completedAt,
+          error: resultPersistenceError(error, internal.job.profileId, internal.job.id),
+        };
+        return;
+      }
+    }
+    if (!handle) {
+      internal.job = {
+        ...internal.job,
+        state: 'failed',
+        progress: 1,
+        completedAt,
+        error: resultPersistenceError(
+          new Error('Result persistence did not return a handle.'),
+          internal.job.profileId,
+          internal.job.id,
+        ),
+      };
+      return;
+    }
+    const byteCount = handle.byteCount ?? 0;
     this.#resultJobs.set(handle.id, internal.job.id);
     this.#retainedResultBytes += byteCount;
     internal.job = {
@@ -1063,16 +1175,46 @@ export class PostgresConnector implements DatabaseConnector {
       result: handle,
       safety: result.data.safety,
     };
-    this.#pruneRetainedResults();
+    await this.#pruneRetainedResults();
   }
 
-  #pruneRetainedResults(): void {
+  async #failResultPersistence(
+    internal: InternalQueryJob,
+    resultId: string,
+    writer: DatabaseResultWriter | undefined,
+    error: unknown,
+  ): Promise<void> {
+    await this.#discardStagedResult(resultId, writer);
+    internal.job = {
+      ...internal.job,
+      state: 'failed',
+      progress: 1,
+      completedAt: new Date().toISOString(),
+      error: resultPersistenceError(error, internal.job.profileId, internal.job.id),
+    };
+  }
+
+  async #discardStagedResult(
+    resultId: string,
+    writer: DatabaseResultWriter | undefined,
+  ): Promise<void> {
+    await writer?.abort().catch(() => undefined);
+    await this.#resultStore.discardStaged(resultId).catch(() => undefined);
+    await this.#resultStore.collectGarbage({
+      stagedTtlMs: 0,
+      tombstoneTtlMs: 0,
+    }).catch(() => undefined);
+  }
+
+  async #pruneRetainedResults(): Promise<void> {
     const now = Date.now();
+    let evicted = false;
     for (const [handleId, jobId] of this.#resultJobs) {
       const internal = this.#jobs.get(jobId);
       const expiresAt = internal?.job.result?.expiresAt;
       if (expiresAt && new Date(expiresAt).getTime() <= now) {
-        this.#evictResult(handleId, true);
+        await this.#evictResult(handleId, true, true, 'ttl');
+        evicted = true;
       }
     }
     while (
@@ -1082,20 +1224,57 @@ export class PostgresConnector implements DatabaseConnector {
     ) {
       const oldest = this.#resultJobs.keys().next().value;
       if (!oldest) break;
-      this.#evictResult(oldest);
+      await this.#evictResult(oldest, false, true, 'capacity');
+      evicted = true;
     }
     this.#pruneRetainedJobs();
+    if (evicted) await this.#collectResultGarbage();
   }
 
-  #evictResult(handleId: string, expired = false): boolean {
+  #ensureResultStoreReady(): Promise<void> {
+    if (!this.#resultStoreReady) {
+      const attempt = this.#collectResultGarbage().catch((error: unknown) => {
+        if (this.#resultStoreReady === attempt) this.#resultStoreReady = undefined;
+        throw error;
+      });
+      this.#resultStoreReady = attempt;
+    }
+    return this.#resultStoreReady;
+  }
+
+  async #collectReleasedResultGarbage(byteCount: number): Promise<void> {
+    this.#releasedResultsSinceGc += 1;
+    this.#releasedBytesSinceGc += byteCount;
+    if (
+      this.#releasedResultsSinceGc < RELEASED_RESULTS_BEFORE_GC &&
+      this.#releasedBytesSinceGc < RELEASED_BYTES_BEFORE_GC
+    ) return;
+    await this.#collectResultGarbage({ stagedTtlMs: 0 });
+  }
+
+  async #collectResultGarbage(options = {}): Promise<void> {
+    await this.#resultStore.collectGarbage(options);
+    this.#releasedResultsSinceGc = 0;
+    this.#releasedBytesSinceGc = 0;
+  }
+
+  async #evictResult(
+    handleId: string,
+    expired = false,
+    persist = false,
+    reason = 'released',
+  ): Promise<boolean> {
     const jobId = this.#resultJobs.get(handleId);
     if (!jobId) return false;
     const internal = this.#jobs.get(jobId);
+    if (persist) {
+      const expiredInStore = await this.#resultStore.expire(handleId, reason);
+      if (!expiredInStore) return false;
+    }
     this.#resultJobs.delete(handleId);
     if (!internal) return true;
     const byteCount = internal.job.result?.byteCount ?? 0;
     this.#retainedResultBytes = Math.max(0, this.#retainedResultBytes - byteCount);
-    delete internal.result;
     const jobWithoutResult = { ...internal.job };
     delete jobWithoutResult.result;
     internal.job = expired
@@ -1108,15 +1287,15 @@ export class PostgresConnector implements DatabaseConnector {
     if (this.#jobs.size <= this.#maxRetainedJobs) return;
     for (const [jobId, internal] of this.#jobs) {
       if (this.#jobs.size <= this.#maxRetainedJobs) break;
-      if (!isTerminal(internal.job.state) || internal.result) continue;
+      if (!isTerminal(internal.job.state) || internal.job.result) continue;
       this.#jobs.delete(jobId);
     }
   }
 
-  #purgeProfileQueries(profileId: string): void {
+  async #purgeProfileQueries(profileId: string): Promise<void> {
     for (const [handleId, jobId] of this.#resultJobs) {
       if (this.#jobs.get(jobId)?.job.profileId === profileId) {
-        this.#evictResult(handleId);
+        await this.#evictResult(handleId);
       }
     }
     for (const [jobId, internal] of this.#jobs) {
@@ -1219,7 +1398,7 @@ function createPostgresManifest(): ConnectorManifest {
     capabilities[key] = descriptor(key, 'unsupported', reason);
   }
   return {
-    id: 'postgres-native',
+    id: POSTGRES_CONNECTOR_ID,
     displayName: 'PostgreSQL Native Connector',
     version: '1.0.0',
     engine: 'postgres',
@@ -1305,7 +1484,7 @@ function descriptor(
   return {
     key,
     status,
-    source: 'postgres-native:manifest',
+    source: `${POSTGRES_CONNECTOR_ID}:manifest`,
     observedAt: new Date().toISOString(),
     ...(reason ? { reason } : {}),
   };
@@ -1426,6 +1605,69 @@ function connectorNotFound(
   });
 }
 
+function resultStoreConnectorError(
+  error: DatabaseResultStoreError,
+  handleId: string,
+): PostgresConnectorError {
+  const classification: Record<
+    DatabaseResultStoreError['code'],
+    { code: string; category: DatabaseAccessError['category']; retryable?: boolean }
+  > = {
+    NOT_FOUND: { code: 'RESULT_NOT_FOUND', category: 'not-found' },
+    NOT_COMMITTED: { code: 'RESULT_NOT_COMMITTED', category: 'conflict' },
+    EXPIRED: { code: 'RESULT_EXPIRED', category: 'not-found' },
+    CORRUPT: { code: 'RESULT_CORRUPT', category: 'provider' },
+    CURSOR_INVALID: { code: 'CURSOR_INVALID', category: 'validation' },
+    INVALID_ARGUMENT: { code: 'RESULT_REQUEST_INVALID', category: 'validation' },
+    CONFLICT: { code: 'RESULT_CONFLICT', category: 'conflict' },
+    UNSUPPORTED_SCHEMA: {
+      code: 'RESULT_STORE_SCHEMA_UNSUPPORTED',
+      category: 'unsupported',
+    },
+    STORAGE_FAILURE: { code: 'STORAGE_FAILURE', category: 'internal', retryable: true },
+    INJECTED_CRASH: { code: 'STORAGE_FAILURE', category: 'internal', retryable: true },
+  };
+  const mapped = classification[error.code];
+  return new PostgresConnectorError({
+    code: mapped.code,
+    category: mapped.category,
+    message: `${error.message} (${handleId})`,
+    stage: 'result',
+    retryable: mapped.retryable ?? false,
+    outcome: 'unchanged',
+  });
+}
+
+function resultPersistenceError(
+  error: unknown,
+  profileId: string,
+  jobId: string,
+): DatabaseAccessError {
+  if (error instanceof DatabaseResultStoreError) {
+    const mapped = resultStoreConnectorError(error, `result_${jobId}`).databaseError;
+    return {
+      ...mapped,
+      profileId,
+      jobId,
+      outcome: 'unknown',
+    };
+  }
+  return {
+    code: 'STORAGE_FAILURE',
+    category: 'internal',
+    message: error instanceof Error ? error.message : String(error),
+    stage: 'result',
+    profileId,
+    jobId,
+    retryable: true,
+    outcome: 'unknown',
+  };
+}
+
+function isRecoverableAppendResponseLoss(error: unknown): boolean {
+  return error instanceof DatabaseResultStoreError && error.code === 'INJECTED_CRASH';
+}
+
 function unwrap<T>(
   result: { ok: true; data: T } | { ok: false; error: AppError },
   stage: NonNullable<DatabaseAccessError['stage']>,
@@ -1472,4 +1714,23 @@ function cloneDatabaseValue(value: DbColumnValue): DbColumnValue {
   if (Array.isArray(value)) return value.map((item) => cloneDatabaseValue(item));
   if (value && typeof value === 'object') return cloneDatabaseRow(value);
   return value;
+}
+
+function isPostgresBinaryColumn(
+  column: ResultHandle['columns'][number],
+): boolean {
+  return [column.dataType, column.nativeType]
+    .some((type) => type?.trim().toLowerCase() === 'bytea');
+}
+
+function restorePostgresResultRow(
+  row: QueryResultRow,
+  binaryColumns: ReadonlySet<string>,
+): QueryResultRow {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [
+    key,
+    binaryColumns.has(key) && value instanceof Uint8Array
+      ? Buffer.from(value)
+      : cloneDatabaseValue(value),
+  ]));
 }

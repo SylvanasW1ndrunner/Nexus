@@ -1,26 +1,29 @@
 import { describe, expect, it } from 'vitest';
+import type {
+  ScheduledToolInvocation,
+  ToolInvocationScheduleState,
+} from '../src/tools/tool-scheduler.js';
 
-type State =
-  | 'proposed'
-  | 'awaiting_approval'
-  | 'authorized'
-  | 'denied'
-  | 'started'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled'
-  | 'outcome_unknown'
-  | 'observed';
-
-type Effect = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
+type RecoveryClass = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
 
 function invocation(
   invocationId: string,
   actionOrdinal: number,
-  effect: Effect,
-  state: State,
-) {
-  return Object.freeze({ invocationId, actionOrdinal, effect, state });
+  recoveryClass: RecoveryClass,
+  state: ToolInvocationScheduleState,
+): ScheduledToolInvocation {
+  const read = recoveryClass === 'read';
+  return Object.freeze({
+    invocationId,
+    actionOrdinal,
+    recoveryClass,
+    access: read ? 'read' as const : 'write' as const,
+    concurrency: read ? 'read' as const : 'write' as const,
+    // Distinct resources make the read window deliberately parallelizable;
+    // individual tests add a shared key when they exercise serialization.
+    resourceKeys: [`fixture:${invocationId}`],
+    state,
+  });
 }
 
 async function scheduler() {

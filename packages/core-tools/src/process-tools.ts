@@ -12,7 +12,7 @@ const MAX_RUNTIME_MS = 1_800_000;
 const limits = { timeoutMs: MAX_RUNTIME_MS + 15_000, maxInputBytes: 262_144, maxOutputBytes: 65_536, maxArtifactBytes: 128 * 1024 * 1024, maxDepth: 20, maxRecords: 2000 } as const;
 const outputSchema = { type: 'object', additionalProperties: false, required: ['status', 'summary'], properties: {
   status: { type: 'string', enum: ['ok', 'partial', 'unavailable'] }, summary: { type: 'string' }, reason: { type: 'string' },
-  process: { type: 'object' }, spool: { type: 'object' }, executionBoundary: { type: 'object' },
+  process: { type: 'object' }, retainedOutput: { type: 'boolean' }, executionBoundary: { type: 'object' },
 } };
 const cursorSchema = { type: 'object', additionalProperties: false, required: ['processId', 'stdoutBytes', 'stderrBytes'], properties: { processId: { type: 'string', minLength: 1, maxLength: 128 }, stdoutBytes: { type: 'integer', minimum: 0 }, stderrBytes: { type: 'integer', minimum: 0 } } };
 const boolCapabilities = { type: 'object', additionalProperties: false, properties: Object.fromEntries(['network', 'externalWrite', 'destructive', 'credentials', 'admin'].map(key => [key, { type: 'boolean' }])) };
@@ -68,9 +68,9 @@ export function createProcessExecToolContribution(options: ProcessToolOptions): 
         const owner = ownerFor(context);
         const snapshot = await invoke(() => options.runtime!.exec({ ...owner, prepared: plan, background: input.background === true, timeoutMs: input.timeoutMs as number, deadline: context.deadline, signal: input.background === true ? context.runSignal ?? context.signal : context.signal }));
         const result = payload(snapshot);
-        const spool = input.background === true ? undefined : await invoke(() => options.runtime!.readCompleteSpool({ ...owner, processId: snapshot.processId, signal: context.signal, deadline: context.deadline }));
-        return { ...result, ...(spool === undefined ? {} : { spool, ...(spool.outputComplete ? {} : { status: 'partial', summary: result.summary + ' Retained output is incomplete.', process: { ...snapshot, outputComplete: false, outputReadable: spool.outputReadable } }) }), executionBoundary: { decision: plan.boundary.decision, enforcement: plan.boundary.decision === 'native-allow' || plan.boundary.decision === 'ask-unsandboxed' ? 'native' : 'sandboxed', executorId: plan.boundary.executorId, executorRevision: plan.boundary.executorRevision, boundaryRevision: plan.boundary.boundaryRevision } };
+        return { ...result, ...(input.background !== true && hasTruncatedOutput(snapshot) ? { retainedOutput: true } : {}), executionBoundary: { decision: plan.boundary.decision, enforcement: plan.boundary.decision === 'native-allow' || plan.boundary.decision === 'ask-unsandboxed' ? 'native' : 'sandboxed', executorId: plan.boundary.executorId, executorRevision: plan.boundary.executorRevision, boundaryRevision: plan.boundary.boundaryRevision } };
       },
+      retainResult: processResultRetention(options),
     },
   };
 }
@@ -124,9 +124,9 @@ export function createProcessControlToolContribution(options: ProcessToolOptions
           : action === 'write' ? options.runtime!.write({ ...base, input: input.input as string, end: input.end === true, timeoutMs: input.timeoutMs as number })
           : options.runtime!.terminate(base));
         const result = payload(snapshot);
-        const spool = action === 'poll' && input.includeSpool === true ? await invoke(() => options.runtime!.readCompleteSpool(base)) : undefined;
-        return { ...result, ...(spool === undefined ? {} : { spool, ...(spool.outputComplete ? {} : { status: 'partial', summary: result.summary + ' Retained output is incomplete.', process: { ...snapshot, outputComplete: false, outputReadable: spool.outputReadable } }) }) };
+        return { ...result, ...(action === 'poll' && input.includeSpool === true ? { retainedOutput: true } : {}) };
       },
+      retainResult: processResultRetention(options),
     },
   };
 }
@@ -135,7 +135,7 @@ export function createProcessControlToolContribution(options: ProcessToolOptions
 export function createProcessTargetRevalidator(runtime: ProcessRuntime): ToolTargetRevalidator {
   return async (prepared, context) => {
     const target = prepared.targetIdentity as unknown as PreparedProcessTarget;
-    if (!target || target.kind !== 'process-exec' && target.kind !== 'process-control') throw expectedToolError('precondition', 'Not a process target.');
+    if (!target || target.kind !== 'process-exec' && target.kind !== 'process-control') return;
     await invoke(() => runtime.revalidate(target, context.signal));
   };
 }
@@ -164,6 +164,23 @@ function payload(snapshot: ProcessRuntimeSnapshot) {
   if (!snapshot.outputComplete && snapshot.status !== 'orphaned' && snapshot.exitCode === null) throw expectedToolError('external', 'Process result and output integrity cannot be confirmed.', { outcome: 'unknown' });
   return { status: !snapshot.outputComplete || snapshot.status === 'orphaned' || snapshot.status === 'timed_out' || snapshot.status === 'terminated' ? 'partial' : 'ok', summary: 'Process ' + snapshot.processId + ': ' + snapshot.status + (snapshot.exitCode === null ? '' : ', exit code ' + snapshot.exitCode) + (!snapshot.outputComplete ? '; output is incomplete.' : '.'), process: snapshot };
 }
+function hasTruncatedOutput(snapshot: ProcessRuntimeSnapshot): boolean {
+  return snapshot.output.stdout.truncated || snapshot.output.stderr.truncated;
+}
+function processResultRetention(options: ProcessToolOptions) {
+  return async (result: PortableValue, context: ToolExecuteContext) => {
+    if (options.runtime === undefined || result === null || typeof result !== 'object' || Array.isArray(result)) return undefined;
+    const record = result as Record<string, PortableValue>;
+    if (record.retainedOutput !== true || record.process === null || typeof record.process !== 'object' || Array.isArray(record.process)) return undefined;
+    const processId = (record.process as Record<string, PortableValue>).processId;
+    if (typeof processId !== 'string' || processId.trim() === '') return undefined;
+    const spool = await invoke(() => options.runtime!.readCompleteSpool({ ...ownerFor(context), processId, signal: context.signal, deadline: context.deadline }));
+    const bytes = new TextEncoder().encode(JSON.stringify(spool));
+    return { mediaType: 'application/json', source: oneChunk(bytes), expectedByteSize: bytes.byteLength, identity: processId };
+  };
+}
+// eslint-disable-next-line @typescript-eslint/require-await -- AsyncIterable must retain the synchronous single-chunk behavior.
+async function* oneChunk(bytes: Uint8Array): AsyncIterable<Uint8Array> { yield bytes; }
 export function assertAuthorizedProcessBoundary(plan: PreparedProcessExecution, context: ToolExecuteContext): void {
   if (context.hostId !== plan.boundary.hostId || context.authorization.policyMode !== plan.boundary.mode || context.authorization.policyRevision !== plan.boundary.policyRevision) throw new ToolExecutionError({ code: 'target_changed', category: 'precondition', retryable: true, outcome: 'not_applied' }, 'Process Host or effective global policy changed; prepare again.');
   if ((plan.boundary.decision === 'ask' || plan.boundary.decision === 'ask-unsandboxed') && context.authorization.approvalId === undefined) throw expectedToolError('precondition', 'This process boundary requires explicit approval.');

@@ -123,6 +123,54 @@ describe('version 2 replay indexing contract', () => {
     expect(JSON.stringify(encoded.wireRequest)).toContain('future_part');
   });
 
+  it('replays exact current-origin state while remapping older compatible history', () => {
+    const request: CanonicalModelRequest = {
+      model: 'm1',
+      messages: [
+        { role: 'assistant', content: [{
+          type: 'tool-call', callId: 'call-old-model', name: 'old_tool', arguments: {},
+        }] },
+        { role: 'tool', content: [{
+          type: 'tool-result', callId: 'call-old-model', output: { old: true }, isError: false,
+        }] },
+        { role: 'assistant', content: [
+          {
+            type: 'provider-opaque', opaqueRef: 'attempt-current:opaque:0',
+            protocol: 'openai-chat', origin: { connectionId: 'conn-history', model: 'm1' },
+            replay: 'same-connection-only', value: { type: 'future_part', current: true },
+          },
+          { type: 'tool-call', callId: 'call-current-model', name: 'current_tool', arguments: {} },
+        ] },
+        { role: 'tool', content: [{
+          type: 'tool-result', callId: 'call-current-model', output: { current: true }, isError: false,
+        }] },
+      ],
+    };
+    const previous = {
+      ...envelope('attempt-old-model', [{
+        callId: 'call-old-model', draftCallKey: 'attempt-old-model:0',
+        wireIdentity: { callId: 'wire-old-model' }, replay: 'same-connection-only' as const,
+      }]),
+      origin: { ...origin, model: 'm0' },
+    };
+    const current = envelope('attempt-current', [{
+      callId: 'call-current-model', draftCallKey: 'attempt-current:1',
+      wireIdentity: { callId: 'wire-current-model' }, replay: 'same-connection-only',
+    }], ['attempt-current:opaque:0']);
+
+    const encoded = openAIChatCodec.encode(request, {
+      requestId: 'mixed-origin-history', target: origin,
+      replay: { mode: 'compatible-protocol', envelopes: [previous, current] },
+    });
+    const wire = JSON.stringify(encoded.wireRequest);
+
+    expect(wire).not.toContain('wire-old-model');
+    expect(wire.match(/mixed-origin-history:call:0/g)).toHaveLength(2);
+    expect(wire.match(/wire-current-model/g)).toHaveLength(2);
+    expect(wire).toContain('future_part');
+    expect(encoded.opaqueBlockRefs).toEqual(['attempt-current:opaque:0']);
+  });
+
   it('rejects an opaque ref that is not a member of any replay envelope', () => {
     const request: CanonicalModelRequest = {
       model: 'm1',

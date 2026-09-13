@@ -1,7 +1,8 @@
-import type { AgentRunState } from '../events/agent-event.js';
+import type { AgentResumableState, AgentRunState } from '../events/agent-event.js';
 import type { ToolScheduleDecision } from '../tools/tool-scheduler.js';
 
 export type AgentWaitReason =
+  | 'tool_input'
   | 'approval'
   | 'input_required'
   | 'outcome_resolution'
@@ -16,11 +17,15 @@ export type AgentRunStateSnapshot =
 
 export type AgentStateSignal =
   | Readonly<{ type: 'run-started' }>
-  | Readonly<{ type: 'context-compaction-required' }>
-  | Readonly<{ type: 'context-compacted' }>
+  | Readonly<{ type: 'turn-captured' }>
+  | Readonly<{ type: 'run-steered' }>
+  | Readonly<{ type: 'context-compaction-required'; coveredSequence?: number }>
+  | Readonly<{ type: 'context-compacted'; coveredSequence?: number }>
   | Readonly<{ type: 'context-ready' }>
   | Readonly<{ type: 'model-attempt-started' }>
+  | Readonly<{ type: 'model-attempt-discarded' }>
   | Readonly<{ type: 'model-attempt-committed'; hasActions: boolean }>
+  | Readonly<{ type: 'model-turn-completed'; hasActions: boolean }>
   | Readonly<{ type: 'schedule-decided'; decision: ToolScheduleDecision }>
   | Readonly<{ type: 'turn-observed' }>
   | Readonly<{ type: 'delivery-revision-requested' }>
@@ -36,8 +41,7 @@ export type AgentStateSignal =
   | Readonly<{ type: 'limit-reached' }>
   | Readonly<{
       type: 'run-resumed';
-      resumeState: 'Preparing' | 'ResolvingActions' | 'AwaitingUser';
-      waitReason?: AgentWaitReason;
+      resumeState: AgentResumableState;
     }>
   | Readonly<{ type: 'interrupted' }>
   | Readonly<{ type: 'failed' }>;
@@ -126,6 +130,7 @@ export function transitionAgentRunState(
         ? { state: 'Preparing' }
         : invalidTransition(current, signal);
     case 'Preparing':
+      if (signal.type === 'turn-captured' || signal.type === 'run-steered') return current;
       if (signal.type === 'no-progress-recorded') return current;
       if (signal.type === 'context-compaction-required') return { state: 'Compacting' };
       if (signal.type === 'context-ready') return { state: 'CallingModel' };
@@ -138,12 +143,16 @@ export function transitionAgentRunState(
         ? { state: 'Preparing' }
         : invalidTransition(current, signal);
     case 'CallingModel':
+      if (signal.type === 'model-turn-completed') {
+        return { state: signal.hasActions ? 'ResolvingActions' : 'Finalizing' };
+      }
       if (signal.type === 'model-attempt-started') return { state: 'ReceivingModel' };
       if (signal.type === 'input-required') {
         return { state: 'AwaitingUser', waitReason: signal.reason };
       }
       return invalidTransition(current, signal);
     case 'ReceivingModel':
+      if (signal.type === 'model-attempt-discarded') return { state: 'CallingModel' };
       if (signal.type === 'model-attempt-committed') {
         return { state: signal.hasActions ? 'ResolvingActions' : 'Finalizing' };
       }
@@ -158,13 +167,24 @@ export function transitionAgentRunState(
       if (current.state === 'ApplyingObservations' && signal.type === 'turn-observed') {
         return { state: 'Preparing' };
       }
+      if (
+        current.state === 'ApplyingObservations' &&
+        signal.type === 'outcome-resolution-required'
+      ) {
+        return { state: 'AwaitingUser', waitReason: 'outcome_resolution' };
+      }
       return invalidTransition(current, signal);
     case 'AwaitingUser':
       if (signal.type === 'schedule-decided') return stateFromSchedule(signal.decision);
       if (signal.type === 'input-supplied') return { state: 'Preparing' };
-      if (signal.type === 'run-resumed') return resumeState(signal);
+      if (
+        signal.type === 'outcome-resolution-required' &&
+        current.waitReason === 'outcome_resolution'
+      ) return current;
+      if (signal.type === 'run-resumed') return { state: signal.resumeState };
       return invalidTransition(current, signal);
     case 'Finalizing':
+      if (signal.type === 'run-steered') return { state: 'Preparing' };
       if (signal.type === 'delivery-revision-requested') return { state: 'Preparing' };
       if (signal.type === 'outcome-resolution-required') {
         return { state: 'AwaitingUser', waitReason: 'outcome_resolution' };
@@ -179,7 +199,7 @@ export function transitionAgentRunState(
     case 'LimitReached':
     case 'Interrupted':
       return signal.type === 'run-resumed'
-        ? resumeState(signal)
+        ? { state: signal.resumeState }
         : invalidTransition(current, signal);
     case 'Completed':
     case 'Failed':
@@ -221,21 +241,6 @@ function stateFromSchedule(decision: ToolScheduleDecision): AgentRunStateSnapsho
     case 'ApplyingObservations': return { state: 'ApplyingObservations' };
     case 'TurnReadyToClose': return { state: 'ApplyingObservations' };
   }
-}
-
-function resumeState(
-  signal: Extract<AgentStateSignal, { type: 'run-resumed' }>,
-): AgentRunStateSnapshot {
-  if (signal.resumeState === 'AwaitingUser') {
-    if (signal.waitReason === undefined) {
-      throw invalidProjection('Resuming to AwaitingUser requires a typed wait reason.');
-    }
-    return { state: 'AwaitingUser', waitReason: signal.waitReason };
-  }
-  if (signal.waitReason !== undefined) {
-    throw invalidProjection('A wait reason is valid only when resuming to AwaitingUser.');
-  }
-  return { state: signal.resumeState };
 }
 
 function requireFinalizationProjection(projection: AgentRunCompletionProjection): void {

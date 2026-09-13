@@ -52,6 +52,7 @@ export class LlmModelCatalogManager {
   private readonly modelsDev: LlmModelsDevIndex;
   private readonly now: () => number;
   private readonly snapshots = new Map<string, LlmCatalogSnapshot>();
+  private readonly refreshTails = new Map<string, Promise<void>>();
 
   constructor(options: {
     store: LlmModelCatalogStore;
@@ -66,6 +67,17 @@ export class LlmModelCatalogManager {
   async refresh(input: LlmModelCatalogRefreshInput): Promise<LlmCatalogSnapshot> {
     assertMatchingResolution(input.connection, input.resolution);
     const cacheKey = modelCacheKey(input.connection, input.resolution);
+    const operationKey = this.store.cachePath(cacheKey);
+    return await this.withRefreshOperation(operationKey, async () =>
+      await this.refreshExclusive(input, cacheKey),
+    );
+  }
+
+  private async refreshExclusive(
+    input: LlmModelCatalogRefreshInput,
+    cacheKey: LlmModelCatalogCacheKey,
+  ): Promise<LlmCatalogSnapshot> {
+    const previous = await this.store.read(cacheKey);
     try {
       const modelIds = uniqueModelIds(
         input.resolution.models.length > 0
@@ -87,9 +99,15 @@ export class LlmModelCatalogManager {
         for (const [modelId, value] of values) metadata.set(modelId, value);
       }
       const fetchedAt = new Date(this.now()).toISOString();
+      const previousByModel = new Map(
+        (previous?.snapshot.models ?? []).map((model) => [model.modelId, model.metadata] as const),
+      );
+      const explicitlyInspected = new Set(inspect);
       const cachedModels = modelIds.map((modelId) => ({
         modelId,
-        metadata: metadataToCache(metadata.get(modelId)),
+        metadata: explicitlyInspected.has(modelId)
+          ? metadataToCache(metadata.get(modelId))
+          : structuredClone(previousByModel.get(modelId) ?? {}),
       }));
       await this.store.write(cacheKey, {
         fetchedAt,
@@ -100,7 +118,7 @@ export class LlmModelCatalogManager {
       return this.installSnapshot(input, cachedModels, 'endpoint', fetchedAt, false);
     } catch (error) {
       if (input.signal?.aborted) throw error;
-      const cached = await this.store.read(cacheKey);
+      const cached = previous ?? await this.store.read(cacheKey);
       if (!cached) throw error;
       return this.installSnapshot(
         input,
@@ -109,6 +127,22 @@ export class LlmModelCatalogManager {
         cached.snapshot.fetchedAt,
         true,
       );
+    }
+  }
+
+  private async withRefreshOperation<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.refreshTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.refreshTails.set(key, current);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.refreshTails.get(key) === current) this.refreshTails.delete(key);
     }
   }
 
@@ -201,6 +235,9 @@ function cachedModelCandidate(
     ...(metadata.contextTokens === undefined ? {} : { contextTokens: metadata.contextTokens }),
     ...(metadata.maxInputTokens === undefined ? {} : { maxInputTokens: metadata.maxInputTokens }),
     ...(metadata.maxOutputTokens === undefined ? {} : { maxOutputTokens: metadata.maxOutputTokens }),
+    ...(metadata.openAIChatMaxOutputTokensWireKey === undefined
+      ? {}
+      : { openAIChatMaxOutputTokensWireKey: metadata.openAIChatMaxOutputTokensWireKey }),
     ...(metadata.family === undefined ? {} : { family: metadata.family }),
     ...(metadata.parameterSize === undefined ? {} : { parameterSize: metadata.parameterSize }),
     ...(metadata.quantization === undefined ? {} : { quantization: metadata.quantization }),
@@ -232,6 +269,9 @@ function metadataToCache(metadata?: LlmModelMetadata): LlmCachedEndpointModel['m
     ...(metadata.contextTokens === undefined ? {} : { contextTokens: metadata.contextTokens }),
     ...(metadata.maxInputTokens === undefined ? {} : { maxInputTokens: metadata.maxInputTokens }),
     ...(metadata.maxOutputTokens === undefined ? {} : { maxOutputTokens: metadata.maxOutputTokens }),
+    ...(metadata.openAIChatMaxOutputTokensWireKey === undefined
+      ? {}
+      : { openAIChatMaxOutputTokensWireKey: metadata.openAIChatMaxOutputTokensWireKey }),
     ...(metadata.generationParameters === undefined
       ? {}
       : { generationParameters: { ...metadata.generationParameters } }),
@@ -254,7 +294,7 @@ function modelCacheKey(
 ): LlmModelCatalogCacheKey {
   return {
     connectionId: connection.id,
-    credentialScope: connection.credentialScope,
+    credentialRevision: connection.credentialRevision,
     pluginId: resolution.pluginId,
     pluginVersion: resolution.pluginVersion,
   };

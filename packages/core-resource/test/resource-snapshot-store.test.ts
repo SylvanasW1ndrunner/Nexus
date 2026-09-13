@@ -59,7 +59,7 @@ describe('resource snapshot stores', () => {
     expect((await readdir(join(directory, 'state with spaces'))).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
-  it('returns undefined for a missing file and rejects corruption without leaking content', async () => {
+  it('returns undefined for a missing file and rejects structurally invalid snapshots', async () => {
     const directory = await createTemporaryDirectory();
     const file = join(directory, 'resources.json');
     const store = new JsonFileResourceSnapshotStore(file);
@@ -73,10 +73,9 @@ describe('resource snapshot stores', () => {
       failure = error as ResourceSnapshotStoreError;
     }
     expect(failure).toMatchObject({ code: 'SNAPSHOT_INVALID' });
-    expect(String(failure)).not.toContain('do-not-return');
   });
 
-  it('rejects secret-bearing snapshots before write and cleans failed temporary files', async () => {
+  it('persists snapshots with arbitrary portable attribute content and cleans failed temporary files', async () => {
     const directory = await createTemporaryDirectory();
     const registry = new ResourceRegistry();
     registry.upsertResource(testResource('public.orders'));
@@ -95,10 +94,8 @@ describe('resource snapshot stores', () => {
     });
     unsafe.lastEventSequence += 1;
     const store = new JsonFileResourceSnapshotStore(join(directory, 'resources.json'));
-    await expect(store.save(unsafe)).rejects.toMatchObject({
-      code: 'SNAPSHOT_INVALID',
-    });
-    expect(await readdir(directory)).toEqual([]);
+    await expect(store.save(unsafe)).resolves.toBeUndefined();
+    await expect(store.load()).resolves.toEqual(unsafe);
 
     const destinationDirectory = join(directory, 'destination');
     await mkdir(destinationDirectory);

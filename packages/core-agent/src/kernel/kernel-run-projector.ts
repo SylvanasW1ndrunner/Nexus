@@ -7,7 +7,7 @@ export type CreateKernelRunProjectionInput = Readonly<{
   projectId: string;
   sessionId: string;
   runId: string;
-  environmentBindingId: string;
+  environmentBindingId: string | null;
   createdAt: string;
 }>;
 
@@ -52,15 +52,28 @@ export function projectKernelRunEvent(
       next = { ...current, environmentBindingId: event.payload.environmentBindingId };
       break;
     case 'run.started':
+      next = current.environmentBindingId === null
+        ? increment(current, event, { state: 'Preparing', waitReason: null })
+        : { ...current, state: 'Preparing', waitReason: null, updatedAt: event.occurredAt };
+      break;
     case 'run.resumed':
-      next = { ...current, state: 'Preparing', waitReason: null, updatedAt: event.occurredAt };
+      next = increment(current, event, {
+        state: event.payload.resumeState,
+        waitReason: null,
+        ...(event.payload.clearTurn === true
+          ? { currentTurnId: null, turnSnapshotId: null, currentAttemptId: null }
+          : {}),
+      });
       break;
     case 'run.steered':
-      next = increment(current, event, { state: 'Preparing', waitReason: null });
+      next = increment(current, event, {
+        state: 'Preparing', waitReason: null, currentTurnId: null,
+        turnSnapshotId: null, currentAttemptId: null,
+      });
       break;
     case 'turn.started':
       next = increment(current, event, {
-        state: 'CallingModel', currentTurnId: event.turnId ?? null,
+        state: 'Preparing', currentTurnId: event.turnId ?? null,
         turnSnapshotId: event.payload.turnSnapshotId ?? null,
         currentAttemptId: null, waitReason: null,
       });
@@ -106,11 +119,20 @@ export function projectKernelRunEvent(
         state: 'Preparing', noProgressCount: current.noProgressCount + 1,
       });
       break;
+    case 'context.compaction_requested':
+      next = increment(current, event, {});
+      break;
+    case 'runtime.command_applied':
+      next = increment(current, event, {});
+      break;
     case 'context.compaction_started':
       next = increment(current, event, { state: 'Compacting' });
       break;
     case 'context.compacted':
       next = increment(current, event, { state: 'Preparing' });
+      break;
+    case 'context.compaction_failed':
+      next = increment(current, event, { state: 'Interrupted', waitReason: null });
       break;
     case 'tool.observed':
     case 'tool.outcome_resolved':
@@ -121,27 +143,57 @@ export function projectKernelRunEvent(
         updatedAt: event.occurredAt,
       };
       break;
-    case 'tool.validated':
+    case 'tool.waiting_for_user':
+    case 'tool.timed_out':
+    case 'tool.unsupported_revision':
+    case 'tool.permission_evaluated':
+    case 'tool.prepared':
     case 'tool.approval_requested':
     case 'tool.authorized':
     case 'tool.denied':
     case 'tool.started':
     case 'tool.progress':
+    case 'tool.hook_rejected':
+    case 'tool.hook_warning':
     case 'tool.succeeded':
     case 'tool.failed':
     case 'tool.cancelled':
-    case 'tool.outcome_unknown':
+    case 'tool.unknown':
     case 'tool.outcome_resolution_requested':
     case 'tool.retry_authorized':
       next = { ...current, updatedAt: event.occurredAt };
       break;
+    case 'tool.transition_committed': {
+      const protectedState = isProtectedToolState(current, event.payload.action);
+      const state = event.payload.schedule.state === 'TurnReadyToClose'
+        ? 'ApplyingObservations'
+        : event.payload.schedule.state;
+      next = increment(current, event, protectedState
+        ? {}
+        : {
+            state,
+            waitReason: event.payload.schedule.state === 'AwaitingUser'
+              ? event.payload.schedule.reason
+              : null,
+          });
+      break;
+    }
     case 'delivery.decided':
       next = {
         ...current,
+        state: event.payload.outcome === 'revision-requested' ? 'Preparing' : current.state,
         evidenceRevision: event.payload.evidenceRevision,
         deliveryStatus: event.payload.status,
         updatedAt: event.occurredAt,
       };
+      break;
+    case 'turn.closed':
+      next = event.payload.reason === 'revision-requested' || event.payload.reason === 'observed'
+        ? increment(current, event, {
+            state: 'Preparing', currentTurnId: null, turnSnapshotId: null,
+            currentAttemptId: null, waitReason: null,
+          })
+        : current;
       break;
     case 'run.completed':
       next = increment(current, event, {
@@ -179,6 +231,19 @@ export function projectKernelSchedule(
     waitReason: decision.state === 'AwaitingUser' ? decision.reason : null,
     updatedAt: occurredAt,
   });
+}
+
+function isProtectedToolState(
+  current: KernelRunProjection,
+  action: Extract<AgentEvent, { type: 'tool.transition_committed' }>['payload']['action'],
+): boolean {
+  if (current.state === 'AwaitingUser') {
+    return action !== 'decide-approval' && action !== 'resolve-outcome' && action !== 'settle-question';
+  }
+  return current.state === 'Finalizing' || current.state === 'Cancelling' ||
+    current.state === 'LimitReached' || current.state === 'Interrupted' ||
+    current.state === 'Completed' || current.state === 'Failed' ||
+    current.state === 'Cancelled';
 }
 
 function increment(

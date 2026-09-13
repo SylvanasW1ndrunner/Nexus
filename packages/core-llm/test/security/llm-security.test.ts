@@ -1,33 +1,30 @@
 /* eslint-disable @typescript-eslint/require-await, @typescript-eslint/no-unsafe-argument -- Provider doubles and Vitest asymmetric matchers are intentionally untyped. */
 import { describe, expect, it } from 'vitest';
 import {
-  LlmGateway,
   LlmProviderError,
   OpenAICompatibleProvider,
   StructuredOutputValidator,
-  type LlmProvider,
 } from '../../src/index.js';
 
 describe('LLM security boundaries', () => {
-  it('does not expose a credential echoed by an upstream error', async () => {
-    const secret = 'sk-super-secret-value';
+  it('preserves an upstream error within the typed provider-error contract', async () => {
+    const detail = 'upstream failure detail';
     const provider = new OpenAICompatibleProvider({
-      id: 'redaction',
-      name: 'redaction',
-      apiKey: secret,
+      id: 'upstream-error',
+      name: 'upstream-error',
+      apiKey: 'test-key',
       baseUrl: 'https://example.invalid/v1',
       fetch: async () =>
-        new Response(JSON.stringify({ error: { message: `invalid credential ${secret}` } }), {
+        new Response(JSON.stringify({ error: { message: detail } }), {
           status: 401,
           headers: { 'content-type': 'application/json' },
         }),
     });
-    await expect(
-      provider.chat({ model: 'm', messages: [{ role: 'user', content: 'test' }] }),
-    ).rejects.not.toThrow(secret);
+    await expect(provider.chat({ model: 'm', messages: [{ role: 'user', content: 'test' }] }))
+      .rejects.toThrow(detail);
   });
 
-  it('redacts sensitive default header values from error messages and nested details', async () => {
+  it('preserves provider error messages and details without content filtering', async () => {
     const authorizationToken = 'custom-authorization-token';
     const customSecret = 'custom-header-secret';
     const provider = new OpenAICompatibleProvider({
@@ -63,26 +60,36 @@ describe('LLM security boundaries', () => {
       message: (error as LlmProviderError).message,
       detail: (error as LlmProviderError).detail,
     });
-    expect(serialized).toContain('[REDACTED]');
-    expect(serialized).not.toContain(authorizationToken);
-    expect(serialized).not.toContain(customSecret);
+    expect(serialized).toContain(authorizationToken);
+    expect(serialized).toContain(customSecret);
   });
 
-  it('stores no prompt, response, user id or tenant id in telemetry', async () => {
-    const gateway = new LlmGateway();
-    gateway.registerProvider(okProvider(), [{ model: 'm' }]);
-    const result = await gateway.execute({
-      providerId: 'safe',
-      request: { model: 'm', messages: [{ role: 'user', content: 'sensitive customer prompt' }] },
-      context: { tenantId: 'secret-tenant', userId: 'private-user', taskType: 'security' },
-      maxRetries: 0,
-      maxFallbacks: 0,
+  it('retains the narrow Cookie-value isolation exception', async () => {
+    const cookieValue = 'session=keep-isolated';
+    const provider = new OpenAICompatibleProvider({
+      id: 'cookie-error',
+      name: 'cookie-error',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.invalid/v1',
+      defaultHeaders: {
+        Cookie: cookieValue,
+      },
+      fetch: async () => {
+        throw new LlmProviderError(
+          'LLM_NETWORK_ERROR',
+          `upstream echoed ${cookieValue}`,
+          true,
+        );
+      },
     });
-    const serialized = JSON.stringify(gateway.telemetry.list({ requestId: result.requestId }));
-    expect(serialized).not.toContain('sensitive customer prompt');
-    expect(serialized).not.toContain('secret-tenant');
-    expect(serialized).not.toContain('private-user');
-    expect(serialized).not.toContain('safe response');
+
+    const error = await provider
+      .chat({ model: 'm', messages: [{ role: 'user', content: 'test' }] })
+      .catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(LlmProviderError);
+    expect((error as LlmProviderError).message).toContain('[REDACTED]');
+    expect((error as LlmProviderError).message).not.toContain(cookieValue);
   });
 
   it('rejects unknown tools and schema-invalid arguments before execution', () => {
@@ -95,21 +102,3 @@ describe('LLM security boundaries', () => {
     ).toThrowError(expect.objectContaining({ code: 'LLM_STRUCTURED_OUTPUT_INVALID' }));
   });
 });
-
-function okProvider(): LlmProvider {
-  return {
-    id: 'safe',
-    name: 'safe',
-    mode: 'private',
-    async chat() {
-      return {
-        text: 'safe response',
-        toolCalls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-      };
-    },
-    async isAvailable() {
-      return { available: true };
-    },
-  };
-}

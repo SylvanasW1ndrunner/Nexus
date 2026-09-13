@@ -67,10 +67,7 @@ export type LlmGenerationParameterName =
   | 'stop'
   | 'reasoningEffort';
 
-export type LlmGenerationParameterSupport = Record<
-  LlmGenerationParameterName,
-  LlmCapabilityStatus
->;
+export type LlmGenerationParameterSupport = Record<LlmGenerationParameterName, LlmCapabilityStatus>;
 
 export type LlmChatRequest = {
   model: string;
@@ -142,10 +139,17 @@ export type LlmProviderAvailability = {
   detail?: string;
 };
 
-export type LlmModelMetadataSource =
-  | 'provider-api'
-  | 'models-dev'
-  | 'provider-declaration';
+export type LlmModelMetadataSource = 'provider-api' | 'models-dev' | 'provider-declaration';
+
+/**
+ * The one OpenAI Chat output-token field an endpoint has explicitly advertised.
+ * This is route-encoding metadata, never a caller-selectable generation option.
+ */
+export type OpenAIChatMaxOutputTokensWireKey =
+  | 'max_tokens'
+  | 'max_completion_tokens'
+  | 'max_output_tokens'
+  | 'max_new_tokens';
 
 export type LlmModelMetadata = {
   model: string;
@@ -154,6 +158,7 @@ export type LlmModelMetadata = {
   contextTokens?: number;
   maxInputTokens?: number;
   maxOutputTokens?: number;
+  openAIChatMaxOutputTokensWireKey?: OpenAIChatMaxOutputTokensWireKey;
   generationParameters?: Partial<LlmGenerationParameterSupport>;
   family?: string;
   parameterSize?: string;
@@ -166,6 +171,7 @@ export type LlmCapabilityName =
   | 'toolCalling'
   | 'structuredOutput'
   | 'reasoning'
+  | 'vision'
   | 'embeddings'
   | 'rerank';
 
@@ -174,7 +180,6 @@ export type LlmCapabilityStatus = 'supported' | 'unsupported' | 'unknown';
 export type LlmProviderCapabilities = Record<LlmCapabilityName, LlmCapabilityStatus>;
 
 export type LlmProviderProtocolCapabilityName =
-  | 'nativeDeferredTools'
   | 'namespaceTools'
   | 'toolReferences'
   | 'parallelToolCalls'
@@ -205,10 +210,7 @@ export type LlmProviderProtocolProfile = {
   capabilities: LlmProviderProtocolCapabilities;
 };
 
-export type LlmProviderProtocolProfileInput = Omit<
-  LlmProviderProtocolProfile,
-  'capabilities'
-> & {
+export type LlmProviderProtocolProfileInput = Omit<LlmProviderProtocolProfile, 'capabilities'> & {
   capabilities?: Partial<LlmProviderProtocolCapabilities>;
 };
 
@@ -218,6 +220,7 @@ export const UNKNOWN_LLM_CAPABILITIES: Readonly<LlmProviderCapabilities> = Objec
   toolCalling: 'unknown',
   structuredOutput: 'unknown',
   reasoning: 'unknown',
+  vision: 'unknown',
   embeddings: 'unknown',
   rerank: 'unknown',
 });
@@ -234,7 +237,6 @@ export const UNKNOWN_LLM_GENERATION_PARAMETERS: Readonly<LlmGenerationParameterS
 
 export const UNKNOWN_LLM_PROVIDER_PROTOCOL_CAPABILITIES: Readonly<LlmProviderProtocolCapabilities> =
   Object.freeze({
-    nativeDeferredTools: 'unknown',
     namespaceTools: 'unknown',
     toolReferences: 'unknown',
     parallelToolCalls: 'unknown',
@@ -272,7 +274,6 @@ export type LlmErrorCode =
   | 'LLM_CAPABILITY_UNSUPPORTED'
   | 'LLM_PARAMETER_UNSUPPORTED'
   | 'LLM_MODEL_BINDING_INVALID'
-  | 'TOOL_PROTOCOL_MISMATCH'
   | 'LLM_NO_ROUTE'
   | 'LLM_POLICY_VIOLATION'
   | 'LLM_BUDGET_EXCEEDED'

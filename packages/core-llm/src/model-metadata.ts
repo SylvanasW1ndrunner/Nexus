@@ -6,6 +6,7 @@ import {
   type LlmCapabilityStatus,
   type LlmGenerationParameterName,
   type LlmGenerationParameterSupport,
+  type OpenAIChatMaxOutputTokensWireKey,
   type LlmProviderCapabilities,
 } from './types.js';
 
@@ -34,6 +35,7 @@ export type LlmModelMetadataCandidate = {
   contextTokens?: number | null;
   maxInputTokens?: number | null;
   maxOutputTokens?: number | null;
+  openAIChatMaxOutputTokensWireKey?: OpenAIChatMaxOutputTokensWireKey | null;
   roles?: Partial<Record<LlmModelRole, boolean | null>>;
   capabilities?: Partial<LlmProviderCapabilities>;
   generationParameters?: Partial<LlmGenerationParameterSupport>;
@@ -56,6 +58,7 @@ export type LlmCatalogModel = {
   contextTokens: LlmMetadataValue<number>;
   maxInputTokens: LlmMetadataValue<number>;
   maxOutputTokens: LlmMetadataValue<number>;
+  openAIChatMaxOutputTokensWireKey: LlmMetadataValue<OpenAIChatMaxOutputTokensWireKey>;
   roles: Record<LlmModelRole, LlmMetadataValue<boolean>>;
   capabilities: Record<LlmCapabilityName, LlmMetadataValue<LlmCapabilityStatus>>;
   generationParameters: Record<
@@ -149,11 +152,25 @@ export function mergeLlmCatalogModel(input: {
       (candidate) => candidate.maxOutputTokens,
       positiveInteger,
     ),
+    openAIChatMaxOutputTokensWireKey: selectMetadataValue(
+      candidates,
+      (candidate) => candidate.openAIChatMaxOutputTokensWireKey,
+      isOpenAIChatMaxOutputTokensWireKey,
+    ),
     roles,
     capabilities,
     generationParameters,
     pricing: selectMetadataValue(candidates, (candidate) => candidate.pricing, validPricing),
   };
+}
+
+function isOpenAIChatMaxOutputTokensWireKey(
+  value: unknown,
+): value is OpenAIChatMaxOutputTokensWireKey {
+  return value === 'max_tokens' ||
+    value === 'max_completion_tokens' ||
+    value === 'max_output_tokens' ||
+    value === 'max_new_tokens';
 }
 
 export class LlmModelsDevIndex {

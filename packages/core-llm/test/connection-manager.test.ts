@@ -40,9 +40,9 @@ describe('LlmConnectionManager', () => {
       .toEqual(['second.example-chat']);
   });
 
-  it('merges request, session and project parameters with explicit source attribution', async () => {
+  it('merges request, session and global parameters with explicit source attribution', async () => {
     const manager = await createManager({
-      projectParameters: { temperature: 0.1, topP: 0.8, maxOutputTokens: 2_048 },
+      globalParameters: { temperature: 0.1, topP: 0.8, maxOutputTokens: 2_048 },
       plugins: [capabilityPlugin()],
     });
     const [connection] = manager.replaceConnections([{ endpoint: 'http://127.0.0.1:8999' }]);
@@ -63,10 +63,30 @@ describe('LlmConnectionManager', () => {
     });
     expect(effective.sources).toMatchObject({
       temperature: 'request',
-      topP: 'project',
+      topP: 'global',
       seed: 'session',
       stop: 'request',
     });
+  });
+
+  it('publishes global connections and parameters as one validated configuration', async () => {
+    const manager = await createManager({
+      globalParameters: { temperature: 0.2 },
+      plugins: [capabilityPlugin()],
+    });
+    const [connection] = manager.replaceConnections([
+      { name: 'stable', endpoint: 'http://127.0.0.1:8999' },
+    ]);
+    await manager.discover(connection!.id);
+    const selection = { connectionId: connection!.id, modelId: 'chat-model' };
+
+    expect(() => manager.replaceConfiguration({
+      connections: [{ name: 'replacement', endpoint: 'https://replacement.example/v1' }],
+      globalParameters: { temperature: -1 },
+    })).toThrow();
+
+    expect(manager.connections()).toMatchObject([{ name: 'stable' }]);
+    expect(manager.effectiveParameters(selection).values.temperature).toBe(0.2);
   });
 
   it('fails before a request for a known unsupported parameter and passes unknown support through', async () => {
@@ -83,14 +103,14 @@ describe('LlmConnectionManager', () => {
       'LLM_PARAMETER_UNSUPPORTED',
     );
 
-    const result = await manager.executeChat({
-      selection: { connectionId: connection!.id, modelId: 'chat-model' },
-      request: { messages: [{ role: 'user', content: 'hello' }] },
-      parameters: { temperature: 0.42 },
-      context: { tenantId: 'tenant', taskType: 'agent' },
+    const selection = { connectionId: connection!.id, modelId: 'chat-model' };
+    const effective = manager.effectiveParameters(selection, {
+      request: { temperature: 0.42 },
     });
-    expect(provider.lastTemperature).toBe(0.42);
-    expect(result.response.text).toBe('ok');
+    const bundle = await manager.prepareModelSessionBundle(selection, {
+      generation: effective.values,
+    });
+    expect(bundle.primary.generation.temperature).toBe(0.42);
   });
 
   it('applies Provider Plugin parameter support and normalization at the wire boundary', async () => {
@@ -116,37 +136,12 @@ describe('LlmConnectionManager', () => {
       () => manager.effectiveParameters(selection, { request: { seed: 7 } }),
       'LLM_PARAMETER_UNSUPPORTED',
     );
-    await manager.chat({
-      selection,
-      request: { messages: [{ role: 'user', content: 'hello' }] },
-      parameters: { temperature: 0.2 },
-      context: { tenantId: 'tenant', taskType: 'agent' },
+    const bundle = await manager.prepareModelSessionBundle(selection, {
+      generation: manager.effectiveParameters(selection, {
+        request: { temperature: 0.2 },
+      }).values,
     });
-    expect(provider.lastTemperature).toBe(0.4);
-  });
-
-  it('normalizes unknown transport failures through the selected Provider Plugin classifier', async () => {
-    const provider = new CapabilityProvider();
-    provider.chat = () => Promise.reject(new Error('relay-overloaded'));
-    const plugin: LlmProviderPlugin = {
-      ...capabilityPlugin(provider),
-      errors: {
-        classify: (error) =>
-          error instanceof Error && error.message === 'relay-overloaded'
-            ? new LlmProviderError('LLM_RATE_LIMITED', 'The relay is overloaded.', true, 429)
-            : undefined,
-      },
-    };
-    const manager = await createManager({ plugins: [plugin] });
-    const [connection] = manager.replaceConnections([{ endpoint: 'http://127.0.0.1:8999' }]);
-
-    await expect(
-      manager.chat({
-        selection: { connectionId: connection!.id, modelId: 'chat-model' },
-        request: { messages: [{ role: 'user', content: 'hello' }] },
-        context: { tenantId: 'tenant', taskType: 'agent' },
-      }),
-    ).rejects.toMatchObject({ code: 'LLM_RATE_LIMITED', statusCode: 429, retryable: true });
+    expect(bundle.primary.generation.temperature).toBe(0.4);
   });
 
   it('validates maxOutputTokens against discovered model limits', async () => {
@@ -262,13 +257,9 @@ describe('LlmConnectionManager', () => {
     expect(second.model.modelId).toBe('chat-model');
     expect(metadataCalls).toBe(1);
     expect(manager.models({ connectionId: connection!.id })).toHaveLength(3);
-    await expect(
-      manager.chat({
-        selection,
-        request: { messages: [{ role: 'user', content: 'hello' }] },
-        context: { tenantId: 'tenant', taskType: 'agent' },
-      }),
-    ).resolves.toMatchObject({ text: 'ok' });
+    await expect(manager.prepareModelSessionBundle(selection)).resolves.toMatchObject({
+      primary: { route: { modelId: 'chat-model', protocol: 'openai-chat' } },
+    });
   });
 
   it('keeps an unchanged runtime and catalog across settings reloads', async () => {
@@ -313,7 +304,7 @@ class CapabilityProvider implements LlmProvider {
   readonly id = 'placeholder';
   readonly name = 'Capability provider';
   readonly mode = 'private' as const;
-  readonly protocol = 'legacy-normalized';
+  readonly protocol = 'openai-chat';
   readonly capabilities = {
     chat: 'supported' as const,
     streaming: 'supported' as const,
@@ -370,7 +361,7 @@ function capabilityPlugin(provider = new CapabilityProvider()): LlmProviderPlugi
       id: 'capability-test',
       name: 'Capability test',
       version: '1.0.0',
-      protocol: 'legacy-normalized',
+      protocol: 'openai-chat',
       priority: 100,
     },
     match: () => ({ score: 100, evidence: [] }),

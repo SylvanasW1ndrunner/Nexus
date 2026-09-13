@@ -70,7 +70,7 @@ CLI-only 的 `@nwlworkshop/schemanaut@0.1.0-alpha.2`。最终 Alpha 3 tarball �
 
 - `corepack pnpm typecheck`：25/25 Turbo task 通过。
 - `corepack pnpm lint`：13/13 workspace package 通过。
-- 强制未缓存的 `corepack pnpm test --force`：26/26 Turbo task 通过，共 1,828 项通过、25 项按环境合同跳过。
+- 强制未缓存的 `corepack pnpm exec turbo test --concurrency=1 --force`：26/26 Turbo task 通过，共 1,828 项通过、25 项按环境合同跳过。
 - `corepack pnpm test:script-contracts`：43/43 项通过。
 - `corepack pnpm test:capability-runtime`：106/106 项通过。
 - `corepack pnpm test:npm-package:contracts`：11/11 项通过。

@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "src", "composite": true, "declaration": true, "declarationMap": true },
+  "references": [{ "path": "../shared" }, { "path": "../core-agent" }, { "path": "../core-tools" }],
+  "include": ["src/**/*.ts"]
+}

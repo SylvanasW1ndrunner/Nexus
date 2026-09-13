@@ -1,118 +1,140 @@
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
-import { OpenAICompatibleProvider } from '../packages/core-llm/dist/index.js';
-import { DatabaseAgentRuntime } from '../packages/sdk/dist/index.js';
-import { loadEnvFile } from './load-env.mjs';
+import { createNotRunLiveReport } from './lib/live-agent-report.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-await loadEnvFile(join(root, '.env'));
 
-const apiKey = process.env.TEST_SILICONFLOW_API_KEY ?? process.env.DBAGENT_LLM_API_KEY;
-assert.ok(apiKey, '需要 TEST_SILICONFLOW_API_KEY 或 DBAGENT_LLM_API_KEY。');
-const baseUrl = process.env.DBAGENT_LLM_BASE_URL ?? 'https://api.siliconflow.cn/v1';
-const preferredModels = parseModels(process.env.DBAGENT_MULTI_MODEL_LIVE_MODELS) ?? [
+const apiKey =
+  process.env.TEST_LLM_API_KEY ??
+  process.env.TEST_SILICONFLOW_API_KEY;
+const endpoint =
+  process.env.TEST_LLM_ENDPOINT ??
+  process.env.TEST_SILICONFLOW_BASE_URL ??
+  'https://api.siliconflow.cn/v1';
+const configuredModelsInput = process.env.TEST_LLM_MODELS;
+const preferredModels = [
   'deepseek-ai/DeepSeek-V4-Pro',
   'Qwen/Qwen3.6-35B-A3B',
   'MiniMaxAI/MiniMax-M2.5',
   'zai-org/GLM-4.5-Air',
 ];
+const reportPath = join(root, 'reports', 'llm-platform', 'multi-model-live.json');
+let report;
 
-const provider = new OpenAICompatibleProvider({
-  id: 'siliconflow',
-  name: 'SiliconFlow live compatibility',
-  baseUrl,
-  apiKey,
-  timeoutMs: 180_000,
-  maxRetries: 1,
-});
-const availableModels = new Set(await provider.listModels());
-const models = preferredModels.filter((model) => availableModels.has(model));
-assert.equal(
-  models.length,
-  preferredModels.length,
-  `候选模型未全部出现在 Endpoint：${preferredModels.filter((model) => !availableModels.has(model)).join(', ')}`,
-);
+if (!apiKey) {
+  report = createNotRunLiveReport({
+    kind: 'multi-model-user-acceptance',
+    reason: 'TEST_LLM_API_KEY or TEST_SILICONFLOW_API_KEY is required.',
+    endpointOrigin: publicEndpointOrigin(endpoint),
+  });
+} else {
+  const projectDirectory = await mkdtemp(join(tmpdir(), 'schemanaut-multi-model-live-'));
+  const { AgentRuntime, GlobalConfigStore } = await import('../packages/agent-host/dist/index.js');
+  const { LlmConnectionManager } = await import('../packages/core-llm/dist/index.js');
+  const llmManager = new LlmConnectionManager({ cacheDirectory: join(projectDirectory, 'llm-cache') });
+  llmManager.replaceConnections([{ name: 'Live endpoint', endpoint, apiKey }]);
+  const runtime = new AgentRuntime({
+    projectDirectory,
+    stateDatabasePath: ':memory:',
+    llmManager,
+    globalConfigStore: new GlobalConfigStore({ path: join(projectDirectory, 'config.toml') }),
+  });
+  const runs = [];
+  let routeProtocol = 'unknown';
+  let setupError;
+  let configuredModels;
 
-const runtime = new DatabaseAgentRuntime({
-  provider,
-  model: models[0],
-  tenantId: 'multi-model-live',
-  sessionDatabasePath: ':memory:',
-});
-const runs = [];
+  try {
+    configuredModels = parseModels(configuredModelsInput);
+    const connection = runtime.listLlmConnections()[0];
+    assert.ok(connection, 'The injected live endpoint was not available.');
+    const discovery = await runtime.discoverLlmConnection({ connectionId: connection.id });
+    routeProtocol = discovery.resolution.protocol;
+    const generationModels = discovery.catalog.models.filter(
+      (model) => model.roles.generation.value !== false,
+    );
+    const available = new Set(generationModels.map((model) => model.modelId));
+    const requested = configuredModels ?? preferredModels;
+    const selected = requested.filter((model) => available.has(model));
+    for (const model of generationModels) {
+      if (selected.length >= 3) break;
+      if (!selected.includes(model.modelId)) selected.push(model.modelId);
+    }
+    assert.ok(
+      selected.length >= 3,
+      `At least three generation models are required; found ${selected.length}.`,
+    );
 
-try {
-  for (const model of models) {
+  for (const modelId of selected.slice(0, Math.max(3, configuredModels?.length ?? 3))) {
     const startedAt = performance.now();
-    const run = { model, passed: false };
+    const run = { modelId, passed: false };
     try {
-      runtime.configureProvider(provider, model, {
-        generation: { temperature: 0.1, maxOutputTokens: 4096 },
+      const prepared = await runtime.previewModelParameters({
+        connectionId: connection.id,
+        modelId,
       });
-      const metadata = runtime.llmModels().find(
-        (candidate) => candidate.providerId === provider.id && candidate.model === model,
-      );
-      assert.ok(metadata, `模型未进入 Runtime 注册表：${model}`);
-      assert.notEqual(metadata.limits.contextTokens, 32_768, `${model} 被错误回退为 32K。`);
-      assert.ok(metadata.limits.contextTokens, `${model} 未从内置目录解析出上下文。`);
-      Object.assign(run, {
-        contextTokens: metadata.limits.contextTokens,
-        maxOutputTokens: metadata.limits.maxOutputTokens,
-        metadataSource: metadata.discovery?.source ?? 'unknown',
-      });
+      const selection = { connectionId: connection.id, modelId };
+      const temperature =
+        generationModels.find((candidate) => candidate.modelId === modelId)?.generationParameters.temperature.value === 'unsupported'
+          ? undefined
+          : 0.1;
+      const requestParameters = temperature === undefined ? {} : { temperature };
 
-      const first = await runtime.llmChat(
+      const basicStartedAt = performance.now();
+      const basic = await runtime.llmChat(
+        {
+          messages: [{ role: 'user', content: 'Reply with exactly: SCHEMANAUT_LIVE_OK' }],
+          ...requestParameters,
+        },
+        { model: selection, taskType: 'live-basic', timeoutMs: 180_000, maxRetries: 1 },
+      );
+      assert.match(basic.text, /SCHEMANAUT_LIVE_OK/i);
+
+      const streamStartedAt = performance.now();
+      let streamedText = '';
+      let firstStreamEventMs;
+      for await (const event of runtime.llmStream(
+        {
+          messages: [{ role: 'user', content: 'Reply with exactly: STREAM_OK' }],
+          ...requestParameters,
+        },
+        { model: selection, taskType: 'live-stream', timeoutMs: 180_000, maxRetries: 1 },
+      )) {
+        firstStreamEventMs ??= Math.round(performance.now() - streamStartedAt);
+        if (event.type === 'text-delta') streamedText += event.text;
+      }
+      assert.match(streamedText, /STREAM_OK/i);
+
+      const toolStartedAt = performance.now();
+      const toolRequest = await runtime.llmChat(
         {
           messages: [
             {
               role: 'system',
-              content:
-                'Use the provided tool exactly once. Do not print XML, JSON tool markup, or a final answer before the tool result.',
+              content: 'Call lookup_metric exactly once. Do not print a textual tool-call representation.',
             },
-            { role: 'user', content: '请调用 lookup_metric 查询 orders 指标。' },
+            { role: 'user', content: 'Use lookup_metric to get the orders metric.' },
           ],
-          tools: [
-            {
-              name: 'lookup_metric',
-              description: 'Return one named metric.',
-              inputSchema: {
-                type: 'object',
-                properties: { name: { type: 'string', enum: ['orders'] } },
-                required: ['name'],
-                additionalProperties: false,
-              },
-            },
-          ],
-          temperature: 0.1,
-          maxTokens: 4096,
+          tools: [metricTool()],
+          ...requestParameters,
         },
-        {
-          taskType: 'multi-model-native-tool-call',
-          timeoutMs: 180_000,
-          maxRetries: 0,
-          maxFallbacks: 0,
-        },
+        { model: selection, taskType: 'live-tool-call', timeoutMs: 180_000, maxRetries: 1 },
       );
-      run.firstResponse = {
-        finishReason: first.finishReason ?? null,
-        toolCallCount: first.toolCalls.length,
-        textPreview: preview(first.text),
-        usage: first.usage ?? null,
-      };
-      assert.equal(first.toolCalls.length, 1, `${model} 没有返回一个结构化 Tool Call。`);
-      assert.equal(first.toolCalls[0]?.name, 'lookup_metric');
-      assert.equal(first.toolCalls[0]?.arguments.name, 'orders');
-      assert.doesNotMatch(first.text, /<\/?tool[_-]?calls?\b/i);
+      assert.equal(toolRequest.toolCalls.length, 1);
+      assert.equal(toolRequest.toolCalls[0]?.name, 'lookup_metric');
+      assert.equal(toolRequest.toolCalls[0]?.arguments.name, 'orders');
+      assert.doesNotMatch(toolRequest.text, /<\/?tool[_-]?calls?\b/i);
 
-      const call = first.toolCalls[0];
-      const second = await runtime.llmChat(
+      const call = toolRequest.toolCalls[0];
+      const final = await runtime.llmChat(
         {
           messages: [
-            { role: 'user', content: '请调用 lookup_metric 查询 orders 指标，并交付结果。' },
-            { role: 'assistant', content: first.text, toolCalls: first.toolCalls },
+            { role: 'user', content: 'Use lookup_metric to get the orders metric and deliver it.' },
+            { role: 'assistant', content: toolRequest.text, toolCalls: toolRequest.toolCalls },
             {
               role: 'tool',
               toolCallId: call.id,
@@ -120,92 +142,104 @@ try {
               content: '{"name":"orders","value":42}',
             },
           ],
-          tools: [
-            {
-              name: 'lookup_metric',
-              description: 'Return one named metric.',
-              inputSchema: {
-                type: 'object',
-                properties: { name: { type: 'string', enum: ['orders'] } },
-                required: ['name'],
-                additionalProperties: false,
-              },
-            },
-          ],
-          temperature: 0.1,
-          maxTokens: 4096,
+          tools: [metricTool()],
+          ...requestParameters,
         },
-        {
-          taskType: 'multi-model-native-tool-result',
-          timeoutMs: 180_000,
-          maxRetries: 0,
-          maxFallbacks: 0,
-        },
+        { model: selection, taskType: 'live-tool-result', timeoutMs: 180_000, maxRetries: 1 },
       );
-      run.finalResponse = {
-        finishReason: second.finishReason ?? null,
-        toolCallCount: second.toolCalls.length,
-        textPreview: preview(second.text),
-        usage: second.usage ?? null,
-      };
-      assert.equal(second.toolCalls.length, 0, `${model} 收到结果后仍重复调用了工具。`);
-      assert.match(second.text, /42/);
-      assert.doesNotMatch(second.text, /<\/?tool[_-]?calls?\b/i);
+      assert.equal(final.toolCalls.length, 0);
+      assert.match(final.text, /42/);
+      assert.doesNotMatch(final.text, /<\/?tool[_-]?calls?\b/i);
+
       Object.assign(run, {
         passed: true,
-        latencyMs: Math.round(performance.now() - startedAt),
+        contextTokens: prepared.contextTokens.value,
+        contextSource: prepared.contextTokens.source,
+        toolCalling: generationModels.find((candidate) => candidate.modelId === modelId)?.capabilities.toolCalling.value,
+        effectiveParameters: requestParameters,
+        basicLatencyMs: Math.round(performance.now() - basicStartedAt),
+        firstStreamEventMs: firstStreamEventMs ?? null,
+        toolCallLatencyMs: Math.round(performance.now() - toolStartedAt),
+        totalLatencyMs: Math.round(performance.now() - startedAt),
         usage: {
-          first: first.usage ?? null,
-          second: second.usage ?? null,
+          basic: basic.usage ?? null,
+          toolRequest: toolRequest.usage ?? null,
+          final: final.usage ?? null,
         },
       });
     } catch (error) {
       Object.assign(run, {
-        latencyMs: Math.round(performance.now() - startedAt),
-        error: serializeError(error),
+        totalLatencyMs: Math.round(performance.now() - startedAt),
+        error: serializeError(error, apiKey),
       });
     }
     runs.push(run);
+    }
+  } catch (error) {
+    setupError = serializeError(error, apiKey);
+  } finally {
+    await runtime.close().catch(() => undefined);
+    await rm(projectDirectory, { recursive: true, force: true });
   }
-} finally {
-  await runtime.close();
-}
 
-const report = {
-  kind: 'multi-model-native-tool-compatibility',
-  generatedAt: new Date().toISOString(),
-  provider: 'siliconflow',
-  protocol: 'openai-chat',
-  passed: runs.length === models.length && runs.every((run) => run.passed),
-  models: runs,
-};
-const reportPath = join(root, 'reports', 'llm-platform', 'multi-model-tool-live.json');
+  const passed = setupError === undefined && runs.length >= 3 && runs.every((run) => run.passed);
+  report = {
+    kind: 'multi-model-user-acceptance',
+    generatedAt: new Date().toISOString(),
+    status: passed ? 'passed' : 'failed',
+    endpointOrigin: publicEndpointOrigin(endpoint),
+    routeProtocol,
+    passed,
+    ...(setupError === undefined ? {} : { setupError }),
+    runs,
+  };
+}
 await mkdir(dirname(reportPath), { recursive: true });
 await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 console.log(JSON.stringify(report, null, 2));
 console.log(`Report: ${reportPath}`);
-if (!report.passed) process.exitCode = 1;
+if (report.status === 'failed') process.exitCode = 1;
+
+function metricTool() {
+  return {
+    name: 'lookup_metric',
+    description: 'Return one named metric.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', enum: ['orders'] } },
+      required: ['name'],
+      additionalProperties: false,
+    },
+  };
+}
 
 function parseModels(value) {
   if (!value?.trim()) return undefined;
-  const models = value
-    .split(',')
-    .map((model) => model.trim())
-    .filter(Boolean);
-  if (models.length < 2) throw new Error('DBAGENT_MULTI_MODEL_LIVE_MODELS 至少包含两个模型。');
+  const models = [...new Set(value.split(',').map((model) => model.trim()).filter(Boolean))];
+  if (models.length < 3) throw new Error('TEST_LLM_MODELS must contain at least three models.');
   return models;
 }
 
-function preview(value) {
-  return value.trim().replace(/\s+/g, ' ').slice(0, 500);
-}
-
-function serializeError(error) {
-  if (!(error instanceof Error)) return { name: 'UnknownError', message: String(error) };
+function serializeError(error, secret) {
+  if (!(error instanceof Error)) {
+    return { name: 'UnknownError', message: redact(String(error), secret) };
+  }
   return {
     name: error.name,
-    message: error.message,
+    message: redact(error.message, secret),
     ...(typeof error.code === 'string' ? { code: error.code } : {}),
     ...(typeof error.statusCode === 'number' ? { statusCode: error.statusCode } : {}),
   };
+}
+
+function redact(value, secret) {
+  return secret ? value.replaceAll(secret, '[REDACTED]') : value;
+}
+
+function publicEndpointOrigin(value) {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return 'invalid-endpoint';
+  }
 }

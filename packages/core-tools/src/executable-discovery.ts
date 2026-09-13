@@ -15,7 +15,7 @@ export type ExecutableLaunchDescriptor = Readonly<{
 export type ExecutableDiscoveryResult = Readonly<{ status: 'available'; launch: ExecutableLaunchDescriptor }> | Readonly<{ status: 'unavailable'; reason: 'not_found' | 'unsupported_launcher'; diagnostic: string }>;
 
 function safePath(value: string): void {
-  if (typeof value !== 'string' || value.length > 8192 || !isAbsolute(value) || /[\x00-\x1f\x7f]/u.test(value)) throw new Error('Executable path is invalid.');
+  if (typeof value !== 'string' || value.length > 8192 || !isAbsolute(value) || hasUnsafePathCharacter(value)) throw new Error('Executable path is invalid.');
 }
 async function identify(path: string, executable: boolean, platform: NodeJS.Platform): Promise<ExecutableFileIdentity> {
   safePath(path);
@@ -31,13 +31,15 @@ async function identify(path: string, executable: boolean, platform: NodeJS.Plat
 }
 
 export async function validateExecutableDescriptor(descriptor: ExecutableLaunchDescriptor, platform: NodeJS.Platform = process.platform): Promise<void> {
-  if (!descriptor || !['executable', 'node-npm-shim'].includes(descriptor.kind) || !Array.isArray(descriptor.files) || descriptor.files.length > 2 || !Array.isArray(descriptor.prefixArgv) || !Array.isArray(descriptor.nodePath) || descriptor.nodePath.length > 64) throw new Error('Executable descriptor is invalid.');
+  if (!descriptor || !['executable', 'node-npm-shim'].includes(descriptor.kind) || !isArray(descriptor.files) || descriptor.files.length > 2 || !isArray(descriptor.prefixArgv) || !isArray(descriptor.nodePath) || descriptor.nodePath.length > 64) throw new Error('Executable descriptor is invalid.');
   if (descriptor.kind === 'executable' ? descriptor.files.length !== 0 || descriptor.prefixArgv.length !== 0 || descriptor.nodePath.length !== 0 : descriptor.files.length !== 2 || descriptor.prefixArgv.length !== 1 || descriptor.prefixArgv[0] !== descriptor.files[1]?.path || basename(descriptor.executable.path).toLowerCase() !== 'node.exe') throw new Error('Executable descriptor is invalid.');
   const executable = await identify(descriptor.executable.path, true, platform);
   const files = await Promise.all(descriptor.files.map(file => identify(file.path, false, platform)));
   if (JSON.stringify(executable) !== JSON.stringify(descriptor.executable) || JSON.stringify(files) !== JSON.stringify(descriptor.files)) throw new Error('Executable identity changed.');
   if (descriptor.kind === 'node-npm-shim') {
-    const parsed = await readNodeShim(descriptor.files[0]!.path);
+    const shim = descriptor.files[0];
+    if (!shim) throw new Error('Executable descriptor is invalid.');
+    const parsed = await readNodeShim(shim.path);
     if (await realpath(parsed.entry) !== descriptor.prefixArgv[0] || JSON.stringify(parsed.nodePath) !== JSON.stringify(descriptor.nodePath)) throw new Error('Executable shim binding changed.');
   }
   executablePolicyName(descriptor);
@@ -55,8 +57,9 @@ export function executablePolicyName(descriptor: ExecutableLaunchDescriptor): st
 export class PathExecutableDiscovery {
   private readonly directories: readonly string[];
   constructor(environment: NodeJS.ProcessEnv = process.env, private readonly platform: NodeJS.Platform = process.platform) {
-    const path = Object.entries(environment).find(([key]) => this.platform === 'win32' ? key.toUpperCase() === 'PATH' : key === 'PATH')?.[1] ?? '';
-    this.directories = Object.freeze(path.split(platform === 'win32' ? ';' : ':').filter(value => isAbsolute(value) && value.length <= 8192 && !/[\x00-\x1f\x7f]/u.test(value)).slice(0, 256));
+    const pathValue = Object.entries(environment as Record<string, string | undefined>).find(([key]) => this.platform === 'win32' ? key.toUpperCase() === 'PATH' : key === 'PATH')?.[1];
+    const path = typeof pathValue === 'string' ? pathValue : '';
+    this.directories = Object.freeze(path.split(platform === 'win32' ? ';' : ':').filter(value => isAbsolute(value) && value.length <= 8192 && !hasUnsafePathCharacter(value)).slice(0, 256));
   }
   async discover(name: string): Promise<ExecutableDiscoveryResult> {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(name)) return unavailable('unsupported_launcher');
@@ -88,6 +91,17 @@ export class PathExecutableDiscovery {
     await validateExecutableDescriptor(descriptor, this.platform);
     return descriptor;
   }
+}
+
+function isArray(value: unknown): boolean {
+  return Array.isArray(value);
+}
+
+function hasUnsafePathCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
 }
 
 async function readNodeShim(path: string): Promise<{ entry: string; nodePath: string[] }> {

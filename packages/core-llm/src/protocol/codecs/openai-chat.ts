@@ -42,6 +42,8 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
     const session = createProtocolEncodeSession(context, this.protocol, request);
+    const maxOutputTokensWireKey =
+      context.routeEncoding?.openAIChatMaxOutputTokensWireKey ?? 'max_tokens';
     return session.finish({
       model: request.model,
       messages: request.messages.flatMap((message) => encodeMessage(message, session)),
@@ -61,8 +63,12 @@ export class OpenAIChatCodec implements ModelProtocolCodec {
       ...(request.topP === undefined ? {} : { top_p: request.topP }),
       ...(request.maxOutputTokens === undefined
         ? {}
-        : { max_completion_tokens: request.maxOutputTokens }),
+        : { [maxOutputTokensWireKey]: request.maxOutputTokens }),
+      ...(request.seed === undefined ? {} : { seed: request.seed }),
       ...(request.stop === undefined ? {} : { stop: request.stop }),
+      ...(request.reasoningEffort === undefined
+        ? {}
+        : { reasoning_effort: request.reasoningEffort }),
     });
   }
 

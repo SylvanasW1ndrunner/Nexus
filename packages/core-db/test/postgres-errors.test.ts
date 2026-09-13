@@ -52,12 +52,15 @@ describe('classifyPostgresRuntimeError', () => {
     });
   });
 
-  it('keeps SQL and catalog errors as query failures', () => {
-    expect(
-      classifyPostgresRuntimeError(pgError('42601', 'syntax error at or near "fromm"')),
-    ).toMatchObject({
-      code: 'QUERY_FAILED',
-      detail: 'syntax error at or near "fromm"',
+  it.each([
+    ['42601', 'syntax error at or near "fromm"'],
+    ['42703', 'column "missing_column" does not exist'],
+    ['42P01', 'relation "missing_table" does not exist'],
+  ])('classifies SQLSTATE %s statement validation errors as correctable SQL input', (code, detail) => {
+    expect(classifyPostgresRuntimeError(pgError(code, detail))).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'PostgreSQL rejected invalid SQL.',
+      detail,
       retryable: false,
     });
   });

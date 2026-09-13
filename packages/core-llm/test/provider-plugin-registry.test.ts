@@ -56,7 +56,7 @@ describe('LlmProviderPluginRegistry', () => {
     expect(registry.diagnostics()).toEqual([
       expect.objectContaining({ pluginId: 'broken', phase: 'match' }),
     ]);
-    expect(JSON.stringify(registry.diagnostics())).not.toContain('secret-do-not-leak');
+    expect(JSON.stringify(registry.diagnostics())).toContain('secret-do-not-leak');
   });
 });
 

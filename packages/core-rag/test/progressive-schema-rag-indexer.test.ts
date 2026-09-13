@@ -49,7 +49,7 @@ describe('ProgressiveSchemaRagIndexer', () => {
     });
   });
 
-  it('restores the previous ready index when durable snapshot persistence fails', async () => {
+  it('keeps the newly published live index when durable snapshot persistence fails', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'schemanaut-rag-save-failure-'));
     const blockedRoot = path.join(directory, 'not-a-directory');
     await writeFile(blockedRoot, 'blocked', 'utf8');
@@ -58,7 +58,6 @@ describe('ProgressiveSchemaRagIndexer', () => {
       connectionId: 'warehouse',
       tables: [fixtureTables()[0]!],
     });
-    const previousCatalog = engine.getCatalog('warehouse');
     const indexer = new ProgressiveSchemaRagIndexer({
       engine,
       snapshotStore: new SchemaRagSnapshotStore({ rootDir: blockedRoot }),
@@ -71,11 +70,10 @@ describe('ProgressiveSchemaRagIndexer', () => {
       }),
     ).rejects.toThrow();
 
-    expect(engine.getCatalog('warehouse').catalogRootHash).toBe(previousCatalog.catalogRootHash);
     expect(engine.hasTable({ connectionId: 'warehouse', schema: 'public', table: 'campaign_events' }))
-      .toBe(true);
-    expect(engine.hasTable({ connectionId: 'warehouse', schema: 'public', table: 'conversions' }))
       .toBe(false);
+    expect(engine.hasTable({ connectionId: 'warehouse', schema: 'public', table: 'conversions' }))
+      .toBe(true);
   });
 
   it('persists vectors when progressive indexing uses an asynchronous embedding adapter', async () => {
@@ -296,7 +294,7 @@ describe('ProgressiveSchemaRagIndexer', () => {
     expect(result.status).toMatchObject({ stage: 'ready', ready: true });
   });
 
-  it('rolls back an incremental index and its vectors when snapshot persistence fails', async () => {
+  it('keeps a complete incremental index live when snapshot persistence fails', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'schemanaut-rag-upsert-rollback-'));
     const blockedRoot = path.join(directory, 'not-a-directory');
     await writeFile(blockedRoot, 'blocked', 'utf8');
@@ -319,12 +317,10 @@ describe('ProgressiveSchemaRagIndexer', () => {
         embed: ({ texts }) => Promise.resolve(texts.map(() => [1, 0])),
       },
     });
-    const initial = await engine.indexAsync({
+    await engine.indexAsync({
       connectionId: 'rollback-warehouse',
       tables: [fixtureTables()[0]!],
     });
-    const previousCatalogRootHash = initial.catalog?.catalogRootHash;
-    const previousVectors = structuredClone(initial.vectors);
     const indexer = new ProgressiveSchemaRagIndexer({
       engine,
       snapshotStore: new SchemaRagSnapshotStore({ rootDir: blockedRoot }),
@@ -337,9 +333,6 @@ describe('ProgressiveSchemaRagIndexer', () => {
       }),
     ).rejects.toThrow();
 
-    const restored = engine.createCheckpoint('rollback-warehouse').index;
-    expect(restored?.catalog?.catalogRootHash).toBe(previousCatalogRootHash);
-    expect(restored?.vectors).toEqual(previousVectors);
     expect(
       engine.hasTable({
         connectionId: 'rollback-warehouse',
@@ -353,7 +346,7 @@ describe('ProgressiveSchemaRagIndexer', () => {
         schema: 'public',
         table: 'conversions',
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(indexer.getStatus('rollback-warehouse')).toMatchObject({
       stage: 'failed',
       ready: false,
@@ -475,7 +468,64 @@ describe('ProgressiveSchemaRagIndexer', () => {
       failed: [],
     });
   });
+
+  it('serializes overlapping generations so an older async save cannot replace the newer snapshot', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-serialized-save-'));
+    let releaseFirst: (() => void) | undefined;
+    let markFirstStarted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    let calls = 0;
+    const engine = new SchemaRagEngine({
+      retrievalProfile: embeddingProfile(),
+      embeddingAdapter: {
+        embed: ({ texts }) => {
+          calls += 1;
+          if (calls !== 1) return Promise.resolve(texts.map(() => [1, 0]));
+          return new Promise<number[][]>((resolve) => {
+            releaseFirst = () => resolve(texts.map(() => [1, 0]));
+            markFirstStarted?.();
+          });
+        },
+      },
+    });
+    const store = new SchemaRagSnapshotStore({ rootDir });
+    const indexer = new ProgressiveSchemaRagIndexer({ engine, snapshotStore: store });
+    const first = indexer.indexAsync({
+      connectionId: 'serialized',
+      tables: [fixtureTables()[0]!],
+    });
+    const second = indexer.indexAsync({
+      connectionId: 'serialized',
+      tables: [fixtureTables()[1]!],
+    });
+
+    await firstStarted;
+    releaseFirst?.();
+    await Promise.all([first, second]);
+
+    const restored = await store.load('serialized');
+    expect(restored?.documents.some((document) => document.id === 'table:public.conversions')).toBe(true);
+    expect(restored?.documents.some((document) => document.id === 'table:public.campaign_events')).toBe(false);
+  });
 });
+
+function embeddingProfile(): SchemaRagRetrievalProfile {
+  return {
+    id: 'serialized-profile',
+    version: 1,
+    backend: { type: 'memory' },
+    embedding: {
+      providerInstanceId: 'embedding-provider',
+      modelId: 'embedding-model',
+      dimensions: 2,
+      normalization: 'l2',
+      distanceMetric: 'cosine',
+      requestTemplateVersion: 'v1',
+    },
+  };
+}
 
 function fixtureTables(): TableDetail[] {
   return [

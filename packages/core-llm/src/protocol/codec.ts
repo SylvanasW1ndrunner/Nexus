@@ -1,4 +1,5 @@
 import { assertPortableValue, type PortableValue } from '@dbagent/shared';
+import type { OpenAIChatMaxOutputTokensWireKey } from '../types.js';
 import type {
   DecodedModelContentBlock,
   ModelMessage,
@@ -21,6 +22,14 @@ export type CanonicalModelTool = {
   inputSchema: PortableValue;
 };
 
+export type CanonicalGenerationParameterName =
+  | 'temperature'
+  | 'topP'
+  | 'maxOutputTokens'
+  | 'seed'
+  | 'stop'
+  | 'reasoningEffort';
+
 export type CanonicalModelRequest = {
   model: string;
   messages: ModelMessage[];
@@ -28,7 +37,9 @@ export type CanonicalModelRequest = {
   temperature?: number;
   topP?: number;
   maxOutputTokens?: number;
+  seed?: number;
   stop?: string[];
+  reasoningEffort?: 'low' | 'medium' | 'high';
 };
 
 export type AttemptDecodeContext = {
@@ -36,9 +47,15 @@ export type AttemptDecodeContext = {
   origin: ModelOrigin;
 };
 
+/** Immutable route-selected wire variants; never derived from caller parameters. */
+export type ModelRouteEncoding = Readonly<{
+  openAIChatMaxOutputTokensWireKey?: OpenAIChatMaxOutputTokensWireKey;
+}>;
+
 export type ModelEncodeContext = {
   requestId: string;
   target: ModelOrigin;
+  routeEncoding?: ModelRouteEncoding;
   replay:
     | { mode: 'new' }
     | { mode: 'same-connection'; envelopes: readonly ModelProtocolEnvelope[] }
@@ -72,6 +89,7 @@ export interface ModelProtocolCodec<
 export type ModelProtocolErrorCode =
   | 'INVALID_WIRE_RESPONSE'
   | 'INVALID_TOOL_ARGUMENTS'
+  | 'UNSUPPORTED_GENERATION_PARAMETER'
   | 'DUPLICATE_WIRE_CALL_ID'
   | 'INCOMPLETE_MODEL_ATTEMPT'
   | 'PROTOCOL_MISMATCH'
@@ -86,6 +104,26 @@ export class ModelProtocolError extends Error {
   ) {
     super(message);
     this.name = 'ModelProtocolError';
+  }
+}
+
+/**
+ * A protocol codec may only omit a generation field when that field is absent.
+ * This protects direct Canonical Codec consumers in addition to ModelSession's
+ * metadata-based capability gate.
+ */
+export function assertRepresentableGenerationParameters(
+  request: CanonicalModelRequest,
+  protocol: ModelProtocol,
+  unsupported: readonly CanonicalGenerationParameterName[],
+): void {
+  for (const parameter of unsupported) {
+    if (request[parameter] !== undefined) {
+      throw new ModelProtocolError(
+        'UNSUPPORTED_GENERATION_PARAMETER',
+        `${protocol} cannot represent generation parameter ${parameter}.`,
+      );
+    }
   }
 }
 
@@ -350,11 +388,12 @@ export function createProtocolEncodeSession(
   ): boolean => {
     if (!envelopeOwnsOpaque(block, sourceEnvelope)) return false;
     const exactOrigin =
-      context.replay.mode === 'same-connection' &&
+      context.replay.mode !== 'new' &&
       block.protocol === protocol &&
       block.origin.connectionId === context.target.connectionId &&
       block.origin.model === context.target.model &&
       sourceEnvelope.origin.connectionId === context.target.connectionId &&
+      sourceEnvelope.origin.model === context.target.model &&
       sourceEnvelope.origin.protocol === protocol;
     const compatible =
       context.replay.mode === 'compatible-protocol' &&
@@ -388,17 +427,24 @@ export function createProtocolEncodeSession(
           `No replay envelope contains canonical call ${callId}`,
         );
       }
+      const exactEnvelope =
+        indexed?.envelope.origin.connectionId === context.target.connectionId &&
+        indexed.envelope.origin.model === context.target.model &&
+        indexed.envelope.origin.protocol === protocol;
       let wireIdentity: ModelWireIdentity;
       if (context.replay.mode === 'same-connection') {
-        if (
-          indexed?.envelope.origin.connectionId !== context.target.connectionId ||
-          indexed.envelope.origin.protocol !== protocol
-        ) {
+        if (!exactEnvelope) {
           throw new ModelProtocolError(
             'PROTOCOL_MISMATCH',
             `Replay envelope for canonical call ${callId} does not match the encode target`,
           );
         }
+        wireIdentity = source?.wireIdentity ?? generatedWireIdentity(
+          protocol,
+          context.requestId,
+          correlations.length,
+        );
+      } else if (exactEnvelope) {
         wireIdentity = source?.wireIdentity ?? generatedWireIdentity(
           protocol,
           context.requestId,
@@ -413,7 +459,7 @@ export function createProtocolEncodeSession(
         draftCallKey: source?.draftCallKey ?? `${context.requestId}:${correlations.length}`,
         wireIdentity,
         replay:
-          context.replay.mode === 'same-connection'
+          exactEnvelope
             ? (source?.replay ?? 'same-connection-only')
             : 'compatible-protocol',
       });
@@ -450,6 +496,7 @@ export function createProtocolEncodeSession(
       }
       if (projectedOpaqueRefs.has(block.opaqueRef)) return undefined;
       if (!replayableOpaque(block, sourceEnvelope)) {
+        if (context.replay.mode === 'compatible-protocol') return undefined;
         throw new ModelProtocolError(
           'OPAQUE_REPLAY_FORBIDDEN',
           'Provider-opaque content cannot be replayed on the encode target',

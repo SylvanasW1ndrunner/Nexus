@@ -3,7 +3,6 @@ import {
   CURRENT_CONTRACT_VERSION,
   ContractValidationError,
   assertContractEnvelope,
-  assertNoSecretMaterial,
   assertPortableValue,
   createContractEnvelope,
   fromPortableValue,
@@ -85,25 +84,6 @@ describe('common public contracts', () => {
     }
   });
 
-  it('detects nested credentials without returning the credential value', () => {
-    const credential = 'postgres://admin:do-not-return@localhost/app';
-    let failure: ContractValidationError | undefined;
-    try {
-      assertNoSecretMaterial({
-        safe: true,
-        nested: [{ Api_Key: 'key-do-not-return-1234567890' }, credential],
-      });
-    } catch (error) {
-      failure = error as ContractValidationError;
-    }
-
-    expect(failure).toBeInstanceOf(ContractValidationError);
-    expect(failure?.issues[0]?.path).toBe('$.nested[0].Api_Key');
-    expect(JSON.stringify(failure)).not.toContain('do-not-return');
-    expect(() =>
-      assertNoSecretMaterial({ credentialReference: { reference: 'vault://database/main' } }),
-    ).not.toThrow();
-  });
 });
 
 function captureContractFailure(operation: () => void): ContractValidationError {

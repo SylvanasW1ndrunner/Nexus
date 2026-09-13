@@ -1,10 +1,11 @@
+import { executionPermissionAudit, permissionAudit, preparedToolIntent } from './permission-audit-fixture.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
+import { createModelSessionBundle, describeModelSessionBundle } from '@dbagent/core-llm';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AgentJournalError } from '../src/events/agent-journal.js';
 import { RunEventCommitter } from '../src/events/run-event-committer.js';
 import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
 import { upcastAgentEvent } from '../src/events/event-upcasters.js';
@@ -14,6 +15,7 @@ import {
   type EnvironmentBindingInput,
   type TurnSnapshotInput,
 } from '../src/kernel/run-controller.js';
+import { createTestModelSession } from './model-session-fixture.js';
 import { validatedAttemptFixture, validatedTextAttemptFixture } from './validated-attempt-fixture.js';
 
 const roots: string[] = [];
@@ -26,34 +28,79 @@ afterEach(() => {
 });
 
 describe('journal-driven RunController', () => {
-  it('atomically prepares a turn with immutable environment and turn snapshots', async () => {
+  it('atomically captures immutable turn inputs before context becomes ready', async () => {
     const { journal, controller, runId } = await fixture();
-    const prepared = await controller.prepareTurn({
+    const expectedEnvironment = await environment();
+    const captured = await controller.captureTurn({
       commandId: 'prepare-1',
       expectedRunRevision: 1,
       turnId: 'turn-1',
-      environment: environment(),
+      environment: expectedEnvironment,
       snapshot: snapshot(),
+    });
+    expect(captured.run.state).toBe('Preparing');
+    const prepared = await controller.commitContextReady({
+      commandId: 'context-ready-1',
+      expectedRunRevision: captured.run.revision,
+      turnId: 'turn-1',
+      expectedTurnRevision: 1,
     });
 
     expect(prepared.run.state).toBe('CallingModel');
     expect(prepared.run.currentTurnId).toBe('turn-1');
-    expect(prepared.environment.payload.modelRoute.primary.maxInputTokens).toBe(131_072);
-    expect(prepared.snapshot.payload.capability.revision).toBe('cap-r1');
-    expect(prepared.snapshot.environmentBindingId).toBe(prepared.environment.environmentBindingId);
+    expect(captured.environment.payload.modelSession).toEqual(expectedEnvironment.modelSession);
+    expect(captured.snapshot.payload.capability.revision).toBe('cap-r1');
+    expect(captured.snapshot.payload.runtimeProtocol?.content).toEqual([
+      { type: 'text', text: 'Follow the durable protocol.' },
+    ]);
+    expect(captured.snapshot.payload.promptSections?.[0]?.content).toEqual([
+      { type: 'text', text: 'Captured project instructions.' },
+    ]);
+    expect(captured.snapshot.environmentBindingId).toBe(captured.environment.environmentBindingId);
 
     const reopened = new SqliteAgentJournal({ filePath: journal.filePath });
     expect(await reopened.getKernelRunProjection(scope(runId))).toEqual(prepared.run);
-    expect(await reopened.getEnvironmentBinding(scope(runId))).toEqual(prepared.environment);
-    expect(await reopened.getTurnSnapshot(turnScope(runId, 'turn-1'))).toEqual(prepared.snapshot);
+    expect(await reopened.getEnvironmentBinding(scope(runId))).toEqual(captured.environment);
+    expect(await reopened.getTurnSnapshot(turnScope(runId, 'turn-1'))).toEqual(captured.snapshot);
+  });
+
+  it('durably captures discoverable Capability external-context activation metadata', async () => {
+    const { journal, controller, runId } = await fixture();
+    const input = snapshot();
+    const activation = {
+      kind: 'external_context' as const,
+      selection: 'automatic' as const,
+      providerId: 'fixture-provider',
+      probeRevision: 'fixture-probe.v1',
+      candidates: [{ candidateId: 'fixture', label: 'Fixture', fingerprint: 'fixture-fingerprint' }],
+    };
+
+    const captured = await controller.captureTurn({
+      commandId: 'prepare-capability-activation', expectedRunRevision: 1, turnId: 'turn-capability-activation',
+      environment: await environment(),
+      snapshot: {
+        ...input,
+        turnSnapshotId: 'snapshot-capability-activation',
+        discoverableCapabilities: [{
+          name: 'fixture.capability', description: 'Fixture external Capability.', status: 'available',
+          target: { moduleId: 'fixture.module', instanceId: 'primary' }, activation,
+        }],
+      },
+    });
+
+    expect(captured.snapshot.payload.discoverableCapabilities).toEqual([expect.objectContaining({
+      name: 'fixture.capability', activation,
+    })]);
+    const reopened = new SqliteAgentJournal({ filePath: journal.filePath });
+    expect((await reopened.getTurnSnapshot(turnScope(runId, 'turn-capability-activation')))?.payload.discoverableCapabilities).toEqual(captured.snapshot.payload.discoverableCapabilities);
   });
 
   it('rolls back both facts and projections at every injected prepare boundary', async () => {
     const { journal, controller, runId } = await fixture();
     journal.failKernelAt('after-events-before-projection');
-    await expect(controller.prepareTurn({
+    await expect(controller.captureTurn({
       commandId: 'prepare-fault', expectedRunRevision: 1, turnId: 'turn-fault',
-      environment: environment(), snapshot: snapshot(),
+      environment: await environment(), snapshot: snapshot(),
     })).rejects.toThrow('INJECTED_KERNEL_FAILURE');
 
     expect(await journal.getEnvironmentBinding(scope(runId))).toBeNull();
@@ -84,9 +131,9 @@ describe('journal-driven RunController', () => {
     const secondIngress = await first.journal.createRun({
       projectId: 'project-1', sessionId: 'session-1', clientRequestId: 'request-b', input: 'b',
     });
-    await first.controller.prepareTurn({
+    await first.controller.captureTurn({
       commandId: 'prepare-a', expectedRunRevision: 1, turnId: 'turn-a',
-      environment: environment(), snapshot: snapshot(),
+      environment: await environment(), snapshot: snapshot(),
     });
     const secondLease = await first.journal.acquireRunLease({
       projectId: 'project-1', runId: secondIngress.runId, ownerId: 'other', ttlMs: 60_000,
@@ -110,21 +157,21 @@ describe('journal-driven RunController', () => {
 
   it('requires exact Project and Session identity for every Kernel read boundary', async () => {
     const { journal, controller, runId } = await fixture();
-    await controller.prepareTurn({
+    await controller.captureTurn({
       commandId: 'prepare-scoped-read', expectedRunRevision: 1, turnId: 'turn-scoped-read',
-      environment: environment(), snapshot: snapshot(),
+      environment: await environment(), snapshot: snapshot(),
     });
     const wrongScope = { projectId: 'project-1', sessionId: 'session-other', runId };
 
-    await expect(journal.getKernelRunProjection(wrongScope as never)).rejects.toMatchObject({
+    await expect(journal.getKernelRunProjection(wrongScope)).rejects.toMatchObject({
       code: 'RUN_IDENTITY_CONFLICT',
     });
-    await expect(journal.getEnvironmentBinding(wrongScope as never)).rejects.toMatchObject({
+    await expect(journal.getEnvironmentBinding(wrongScope)).rejects.toMatchObject({
       code: 'RUN_IDENTITY_CONFLICT',
     });
     await expect(journal.getTurnSnapshot({
       ...wrongScope, turnId: 'turn-scoped-read',
-    } as never)).rejects.toMatchObject({ code: 'RUN_IDENTITY_CONFLICT' });
+    })).rejects.toMatchObject({ code: 'RUN_IDENTITY_CONFLICT' });
     await expect(journal.readRunEvents({
       ...wrongScope, afterSequence: 0, limit: 20,
     })).rejects.toMatchObject({ code: 'RUN_IDENTITY_CONFLICT' });
@@ -132,9 +179,9 @@ describe('journal-driven RunController', () => {
 
   it('detects snapshot payload tampering instead of trusting a stale digest', async () => {
     const { journal, controller, runId } = await fixture();
-    await controller.prepareTurn({
+    await controller.captureTurn({
       commandId: 'prepare-tamper', expectedRunRevision: 1, turnId: 'turn-tamper',
-      environment: environment(), snapshot: snapshot(),
+      environment: await environment(), snapshot: snapshot(),
     });
     const database = new DatabaseSync(journal.filePath);
     database.prepare(`UPDATE agent_snapshots SET payload_json = ? WHERE snapshot_id = ?`)
@@ -147,9 +194,9 @@ describe('journal-driven RunController', () => {
 
   it('rebuilds Kernel, Environment and Turn Snapshot projections only from Journal facts', async () => {
     const { journal, controller, runId } = await fixture();
-    const prepared = await controller.prepareTurn({
+    const prepared = await captureReadyTurn(controller, {
       commandId: 'prepare-replay', expectedRunRevision: 1, turnId: 'turn-replay',
-      environment: environment(), snapshot: snapshot(),
+      environment: await environment(), snapshot: snapshot(),
     });
     const attempt = await validatedTextAttemptFixture('attempt-replay');
     const started = await controller.startModelAttempt({
@@ -195,17 +242,17 @@ describe('journal-driven RunController', () => {
       ownerId: 'owner-winner', leaseTtlMs: 60_000,
     });
     await winner.acquire();
-    await expect(stale.prepareTurn({
+    await expect(stale.captureTurn({
       commandId: 'stale-write', expectedRunRevision: 1, turnId: 'turn-stale',
-      environment: environment(), snapshot: snapshot(),
-    })).rejects.toMatchObject({ code: 'FENCING_TOKEN_STALE' });
+      environment: await environment(), snapshot: snapshot(),
+    })).rejects.toMatchObject({ code: 'RUN_LEASE_LOST' });
   });
 
   it('binds the exact active Attempt and moves a zero-tool Turn to Finalizing', async () => {
     const { journal, controller, runId } = await fixture();
-    const prepared = await controller.prepareTurn({
+    const prepared = await captureReadyTurn(controller, {
       commandId: 'prepare-final', expectedRunRevision: 1, turnId: 'turn-final',
-      environment: environment(), snapshot: snapshot(),
+      environment: await environment(), snapshot: snapshot(),
     });
     const attempt = await validatedTextAttemptFixture('attempt-final');
     const started = await controller.startModelAttempt({
@@ -222,6 +269,7 @@ describe('journal-driven RunController', () => {
       commandId: 'wrong-attempt',
       lease: { ownerId: 'owner-1', fencingToken: 1 },
       expectedRunRevision: started.run.revision, expectedTurnRevision: 1,
+      billingMode: 'byok',
       attempt: wrongAttempt,
     })).rejects.toMatchObject({ code: 'MODEL_COMMIT_CONFLICT' });
 
@@ -229,7 +277,7 @@ describe('journal-driven RunController', () => {
       projectId: 'project-1', sessionId: 'session-1', runId, turnId: 'turn-final',
       commandId: 'right-attempt',
       lease: { ownerId: 'owner-1', fencingToken: 1 },
-      expectedRunRevision: started.run.revision, expectedTurnRevision: 1, attempt,
+      expectedRunRevision: started.run.revision, expectedTurnRevision: 1, billingMode: 'byok', attempt,
     });
     expect(committed.invocations).toEqual([]);
     expect(await journal.getKernelRunProjection(scope(runId))).toEqual(expect.objectContaining({
@@ -256,6 +304,11 @@ describe('journal-driven RunController', () => {
     }));
     const reopened = new SqliteAgentJournal({ filePath: ready.journal.filePath });
     expect(await reopened.getKernelRunProjection(scope(ready.runId))).toEqual(result.run);
+    await expect(reopened.getRunCompletion(scope(ready.runId))).resolves.toMatchObject({
+      finalContentRef: 'artifact:final-answer',
+      deliveryStatus: 'not-required',
+      evidenceRefs: [],
+    });
     await reopened.rebuildProjectProjections('project-1');
     expect(await reopened.getKernelRunProjection(scope(ready.runId))).toEqual(result.run);
   });
@@ -281,9 +334,9 @@ describe('journal-driven RunController', () => {
 
   it('persists cancellation intent, waits for the active Attempt, then settles atomically', async () => {
     const { journal, controller, runId } = await fixture();
-    const prepared = await controller.prepareTurn({
+    const prepared = await captureReadyTurn(controller, {
       commandId: 'prepare-cancel', expectedRunRevision: 1, turnId: 'turn-cancel',
-      environment: environment(), snapshot: snapshot(),
+      environment: await environment(), snapshot: snapshot(),
     });
     const attempt = await validatedTextAttemptFixture('attempt-cancel');
     const started = await controller.startModelAttempt({
@@ -324,19 +377,114 @@ describe('journal-driven RunController', () => {
     expect(await reopened.getKernelRunProjection(scope(runId))).toEqual(settled.run);
   });
 
-  it('persists a no-progress evidence fingerprint and restores its monotonic cursor', async () => {
-    const { journal, controller, runId } = await fixture();
-    const prepared = await controller.prepareTurn({
-      commandId: 'prepare-no-progress', expectedRunRevision: 1, turnId: 'turn-no-progress',
-      environment: environment(), snapshot: snapshot(),
+  it('settles cancellation when a closed Turn remains projected across a boundary race', async () => {
+    const ready = await finalizingFixture();
+    const revised = await ready.controller.finalize({
+      commandId: 'request-delivery-revision', expectedRunRevision: ready.run.revision,
+      turnId: 'turn-final', expectedTurnRevision: 2,
+      finalContentRef: 'artifact:pending-answer',
+      decision: {
+        evidenceRevision: 0, status: 'unverified', outcome: 'revision-requested',
+        verifierId: 'fixture-completion-guard', verifierRevision: 'v1', evidenceRefs: [],
+        observation: { issue: 'pending-action-final' },
+      },
     });
-    const database = new DatabaseSync(journal.filePath);
-    database.prepare('UPDATE agent_runs SET state = ? WHERE run_id = ?')
-      .run('Preparing', runId);
+    expect(revised.run).toEqual(expect.objectContaining({
+      state: 'Preparing', currentTurnId: null,
+    }));
+    const requested = await ready.controller.requestCancel({
+      commandId: 'cancel-after-delivery-revision',
+      expectedRunRevision: revised.run.revision,
+      reason: 'deadline',
+    });
+    const database = new DatabaseSync(ready.journal.filePath);
+    database.prepare(
+      'UPDATE agent_kernel_runs SET current_turn_id = ? WHERE run_id = ?',
+    ).run('turn-final', ready.runId);
     database.close();
+    const settled = await ready.controller.settleCancellation({
+      commandId: 'settle-after-delivery-revision',
+      expectedRunRevision: requested.run.revision,
+    });
+
+    expect(settled.events.map(({ type }) => type)).toEqual(['run.cancelled']);
+    expect(settled.run.state).toBe('Cancelled');
+    expect(await ready.journal.countEvents('turn.closed')).toBe(1);
+  });
+
+  it('persists a no-progress evidence fingerprint and restores its monotonic cursor', async () => {
+    const ready = await toolKernelFixture('no-progress');
+    const validated = await commitTool(ready.journal, {
+      ...await ready.toolCommand('validate-no-progress', ready.invocationRevision), action: 'validate',
+      canonicalToolId: { name: 'query_database' }, toolRevision: '1', recoveryClass: 'read',
+      intentDigest: ready.intentDigest(ready.invocationId), authorization: 'allow', permissionAudit: permissionAudit('allow'), actionSummary: 'Run query', approvalSummary: 'Run query',
+    });
+    const started = await commitTool(ready.journal, {
+      ...await ready.toolCommand('start-no-progress', validated.invocation.revision), action: 'start',
+      intentDigest: ready.intentDigest(ready.invocationId), idempotencyKey: 'no-progress-invocation', attempt: 1, permissionAudit: executionPermissionAudit(),
+    });
+    const finished = await commitTool(ready.journal, {
+      ...await ready.toolCommand('finish-no-progress', started.invocation.revision), action: 'finish',
+      intentDigest: ready.intentDigest(ready.invocationId), outcome: 'succeeded', summary: 'Query completed.', resultRefs: [],
+      durableSummary: { rowCount: 1 },
+    });
+    await commitTool(ready.journal, {
+      ...await ready.toolCommand('observe-no-progress', finished.invocation.revision), action: 'observe',
+      observation: {
+        observationId: 'observation-no-progress', invocationId: ready.invocationId,
+        summary: 'Query completed.', evidenceRefs: [], outcome: 'succeeded',
+        modelProjection: { rows: [{ value: 1 }] },
+      },
+    });
+    const secondary = ready.secondaryInvocation;
+    if (secondary === undefined) throw new Error('Tool fixture has no secondary Invocation.');
+    const secondaryValidated = await commitTool(ready.journal, {
+      ...await ready.toolCommand(
+        'validate-no-progress-result', secondary.revision, secondary,
+      ),
+      action: 'validate', canonicalToolId: { name: 'read_result' }, toolRevision: '1',
+      recoveryClass: 'read', intentDigest: ready.intentDigest(secondary.invocationId), authorization: 'allow', permissionAudit: permissionAudit('allow', 'read', 'read_result'),
+      actionSummary: 'Read query result',
+      approvalSummary: 'Read query result',
+    });
+    const secondaryStarted = await commitTool(ready.journal, {
+      ...await ready.toolCommand(
+        'start-no-progress-result', secondaryValidated.invocation.revision, secondary,
+      ),
+      action: 'start', idempotencyKey: 'no-progress-result-invocation', attempt: 1, permissionAudit: executionPermissionAudit('read', 'read_result'),
+      intentDigest: ready.intentDigest(secondary.invocationId),
+    });
+    const secondaryFinished = await commitTool(ready.journal, {
+      ...await ready.toolCommand(
+        'finish-no-progress-result', secondaryStarted.invocation.revision, secondary,
+      ),
+      action: 'finish', outcome: 'succeeded', summary: 'Result page read.', resultRefs: [],
+      intentDigest: ready.intentDigest(secondary.invocationId),
+      durableSummary: { rowCount: 1 },
+    });
+    await commitTool(ready.journal, {
+      ...await ready.toolCommand(
+        'observe-no-progress-result', secondaryFinished.invocation.revision, secondary,
+      ),
+      action: 'observe',
+      observation: {
+        observationId: 'observation-no-progress-result', invocationId: secondary.invocationId,
+        summary: 'Result page read.', evidenceRefs: [], outcome: 'succeeded',
+        modelProjection: { rows: [{ value: 1 }] },
+      },
+    });
+    const observedRun = await ready.journal.getKernelRunProjection(scope(ready.runId));
+    if (observedRun === null) throw new Error('Missing observed Run projection.');
+    const closed = await ready.controller.closeObservedTurn({
+      commandId: 'close-no-progress',
+      expectedRunRevision: observedRun.revision,
+      turnId: ready.turnId,
+      expectedTurnRevision: 2,
+    });
     const fingerprint = 'a'.repeat(64);
-    const recorded = await controller.recordNoProgress({
-      commandId: 'record-no-progress', expectedRunRevision: prepared.run.revision, fingerprint,
+    const recorded = await ready.controller.recordNoProgress({
+      commandId: 'record-no-progress', expectedRunRevision: closed.run.revision,
+      turnId: ready.turnId, fingerprint,
     });
     expect(recorded.events).toEqual([
       expect.objectContaining({ type: 'turn.no_progress', payload: { fingerprint } }),
@@ -344,19 +492,18 @@ describe('journal-driven RunController', () => {
     expect(recorded.run).toEqual(expect.objectContaining({
       state: 'Preparing', noProgressCount: 1,
     }));
-    const reopened = new SqliteAgentJournal({ filePath: journal.filePath });
-    expect(await reopened.getKernelRunProjection(scope(runId))).toEqual(recorded.run);
+    const reopened = new SqliteAgentJournal({ filePath: ready.journal.filePath });
+    expect(await reopened.getKernelRunProjection(scope(ready.runId))).toEqual(recorded.run);
     await reopened.rebuildProjectProjections('project-1');
-    expect(await reopened.getKernelRunProjection(scope(runId))).toEqual(recorded.run);
+    expect(await reopened.getKernelRunProjection(scope(ready.runId))).toEqual(recorded.run);
   });
 
   it('rebuilds the exact approval wait projection produced online', async () => {
     const ready = await toolKernelFixture('approval');
-    const digest = 'a'.repeat(64);
     const validated = await commitTool(ready.journal, {
-      ...ready.toolCommand('validate-approval', ready.invocationRevision), action: 'validate',
-      canonicalToolId: { name: 'query_database' }, toolRevision: '1', effect: 'read',
-      normalizedArgumentsDigest: digest, authorization: 'ask', approvalSummary: 'Run query',
+      ...await ready.toolCommand('validate-approval', ready.invocationRevision), action: 'validate',
+      canonicalToolId: { name: 'query_database' }, toolRevision: '1', recoveryClass: 'read',
+      intentDigest: ready.intentDigest(ready.invocationId), authorization: 'ask', permissionAudit: permissionAudit('ask'), actionSummary: 'Run query', approvalSummary: 'Run query',
     });
     expect(validated.approval?.status).toBe('pending');
     const online = await ready.journal.getKernelRunProjection(scope(ready.runId));
@@ -372,23 +519,22 @@ describe('journal-driven RunController', () => {
 
   it('rebuilds the exact evidence revision and digest produced online', async () => {
     const ready = await toolKernelFixture('evidence');
-    const digest = 'b'.repeat(64);
     const validated = await commitTool(ready.journal, {
-      ...ready.toolCommand('validate-evidence', ready.invocationRevision), action: 'validate',
-      canonicalToolId: { name: 'query_database' }, toolRevision: '1', effect: 'read',
-      normalizedArgumentsDigest: digest, authorization: 'allow', approvalSummary: 'Run query',
+      ...await ready.toolCommand('validate-evidence', ready.invocationRevision), action: 'validate',
+      canonicalToolId: { name: 'query_database' }, toolRevision: '1', recoveryClass: 'read',
+      intentDigest: ready.intentDigest(ready.invocationId), authorization: 'allow', permissionAudit: permissionAudit('allow'), actionSummary: 'Run query', approvalSummary: 'Run query',
     });
     const started = await commitTool(ready.journal, {
-      ...ready.toolCommand('start-evidence', validated.invocation.revision), action: 'start',
-      idempotencyKey: 'evidence-invocation', attempt: 1,
+      ...await ready.toolCommand('start-evidence', validated.invocation.revision), action: 'start',
+      intentDigest: ready.intentDigest(ready.invocationId), idempotencyKey: 'evidence-invocation', attempt: 1, permissionAudit: executionPermissionAudit(),
     });
     const finished = await commitTool(ready.journal, {
-      ...ready.toolCommand('finish-evidence', started.invocation.revision), action: 'finish',
-      outcome: 'succeeded', summary: 'Query completed.', resultRefs: [],
+      ...await ready.toolCommand('finish-evidence', started.invocation.revision), action: 'finish',
+      intentDigest: ready.intentDigest(ready.invocationId), outcome: 'succeeded', summary: 'Query completed.', resultRefs: [],
       durableSummary: { rowCount: 1 },
     });
     await commitTool(ready.journal, {
-      ...ready.toolCommand('observe-evidence', finished.invocation.revision), action: 'observe',
+      ...await ready.toolCommand('observe-evidence', finished.invocation.revision), action: 'observe',
       observation: {
         observationId: 'observation-evidence', invocationId: ready.invocationId,
         summary: 'Query completed.', evidenceRefs: [], outcome: 'succeeded',
@@ -396,9 +542,9 @@ describe('journal-driven RunController', () => {
       },
     });
     const online = await ready.journal.getKernelRunProjection(scope(ready.runId));
-    expect(online).toEqual(expect.objectContaining({
-      evidenceRevision: 1, evidenceDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
-    }));
+    if (online === null) throw new Error('Missing online Kernel projection.');
+    expect(online.evidenceRevision).toBe(1);
+    expect(online.evidenceDigest).toMatch(/^[a-f0-9]{64}$/u);
 
     await ready.journal.rebuildProjectProjections('project-1');
     const replayed = await ready.journal.getKernelRunProjection(scope(ready.runId));
@@ -470,28 +616,34 @@ async function fixture(clientRequestId = 'request-1') {
   return { journal, controller, runId: ingress.runId, lease };
 }
 
-function environment(): EnvironmentBindingInput {
+let environmentBinding: Promise<EnvironmentBindingInput> | undefined;
+
+function environment(): Promise<EnvironmentBindingInput> {
+  environmentBinding ??= createEnvironmentBinding(
+    'environment-1', 'connection-1', 'model-1',
+  );
+  return environmentBinding;
+}
+
+async function createEnvironmentBinding(
+  environmentBindingId: string,
+  connectionId: string,
+  modelId: string,
+): Promise<EnvironmentBindingInput> {
+  const session = await createTestModelSession({ connectionId, modelId });
   return {
-    environmentBindingId: 'environment-1',
+    environmentBindingId,
     settingsRevision: 'settings-r1',
     permissionPolicyRevision: 'permission-r1',
-    modelRoute: {
-      routeRevision: 'route-r1',
-      primary: {
-        connectionId: 'connection-1', modelId: 'model-1', protocol: 'openai-responses',
-        codecRevision: 'openai-responses@1', maxInputTokens: 131_072, maxOutputTokens: 8_192,
-        generation: { temperature: 0.2 },
-      },
-      fallbacks: [],
-    },
+    modelSession: describeModelSessionBundle(createModelSessionBundle({ primary: session })),
   };
 }
 
 async function finalizingFixture() {
   const base = await fixture();
-  const prepared = await base.controller.prepareTurn({
+  const prepared = await captureReadyTurn(base.controller, {
     commandId: 'prepare-final', expectedRunRevision: 1, turnId: 'turn-final',
-    environment: environment(), snapshot: snapshot(),
+    environment: await environment(), snapshot: snapshot(),
   });
   const attempt = await validatedTextAttemptFixture('attempt-final');
   const started = await base.controller.startModelAttempt({
@@ -502,7 +654,7 @@ async function finalizingFixture() {
   await new RunEventCommitter(base.journal).commitValidatedAttempt({
     projectId: 'project-1', sessionId: 'session-1', runId: base.runId, turnId: 'turn-final',
     commandId: 'attempt-commit', lease: { ownerId: 'owner-1', fencingToken: 1 },
-    expectedRunRevision: started.run.revision, expectedTurnRevision: 1, attempt,
+    expectedRunRevision: started.run.revision, expectedTurnRevision: 1, billingMode: 'byok', attempt,
   });
   const run = await base.journal.getKernelRunProjection(scope(base.runId));
   if (run === null) throw new Error('Missing prepared Run');
@@ -512,9 +664,9 @@ async function finalizingFixture() {
 async function toolKernelFixture(label: string) {
   const base = await fixture(`request-${label}`);
   const turnId = `turn-${label}`;
-  const prepared = await base.controller.prepareTurn({
+  const prepared = await captureReadyTurn(base.controller, {
     commandId: `prepare-${label}`, expectedRunRevision: 1, turnId,
-    environment: toolEnvironment(), snapshot: toolSnapshot(label),
+    environment: await toolEnvironment(), snapshot: toolSnapshot(label),
   });
   const attempt = await validatedAttemptFixture(`attempt-${label}`);
   const started = await base.controller.startModelAttempt({
@@ -524,36 +676,58 @@ async function toolKernelFixture(label: string) {
   const committed = await new RunEventCommitter(base.journal).commitValidatedAttempt({
     projectId: 'project-1', sessionId: 'session-1', runId: base.runId, turnId,
     commandId: `attempt-commit-${label}`, lease: { ownerId: 'owner-1', fencingToken: 1 },
-    expectedRunRevision: started.run.revision, expectedTurnRevision: 1, attempt,
+    expectedRunRevision: started.run.revision, expectedTurnRevision: 1, billingMode: 'byok', attempt,
   });
   const invocation = committed.invocations[0];
   if (invocation === undefined) throw new Error('Tool fixture has no Invocation.');
+  const preparedResults = new Map<string, Awaited<ReturnType<ReturnType<typeof openToolLifecycleCommitter>['commit']>>>();
+  for (const [index, target] of committed.invocations.entries()) {
+    const name = index === 0 ? 'query_database' : 'read_result';
+    const intent = preparedToolIntent({ toolName: name, toolRevision: '1', handlerRevision: `${name}-handler@1` });
+    const run = await currentRunRevision(base.journal, base.runId);
+    preparedResults.set(target.invocationId, await openToolLifecycleCommitter(base.journal).commit({
+      projectId: 'project-1', sessionId: 'session-1', runId: base.runId, turnId,
+      invocationId: target.invocationId, commandId: `prepare-tool-${label}-${index}`,
+      lease: { ownerId: 'owner-1', fencingToken: 1 }, expectedRunRevision: run,
+      expectedInvocationRevision: target.revision, action: 'prepare',
+      canonicalToolId: { name }, catalogRevision: 'fixture-catalog@1',
+      intent: intent.intent, intentDigest: intent.intentDigest, deadline: '2030-01-01T00:00:00.000Z',
+    }));
+  }
+  const preparedInvocation = preparedResults.get(invocation.invocationId);
+  if (preparedInvocation === undefined) throw new Error('Tool preparation did not commit.');
   return {
     ...base, turnId, invocationId: invocation.invocationId,
-    invocationRevision: invocation.revision,
-    toolCommand: (commandId: string, expectedInvocationRevision: number) => ({
+    invocationRevision: preparedInvocation.invocation.revision,
+    secondaryInvocation: committed.invocations[1] === undefined ? undefined : preparedResults.get(committed.invocations[1].invocationId)?.invocation,
+    toolCommand: async (
+      commandId: string,
+      expectedInvocationRevision: number,
+      targetInvocation: typeof invocation = invocation,
+    ) => ({
       projectId: 'project-1', sessionId: 'session-1', runId: base.runId,
-      turnId, invocationId: invocation.invocationId, commandId,
+      turnId, invocationId: targetInvocation.invocationId, commandId,
       lease: { ownerId: 'owner-1', fencingToken: 1 },
-      expectedRunRevision: 4, expectedInvocationRevision,
+      expectedRunRevision: await currentRunRevision(base.journal, base.runId),
+      expectedInvocationRevision,
     }),
+    intentDigest: (invocationId: string) => preparedResults.get(invocationId)?.invocation.intentDigest ?? '',
   };
 }
 
-function toolEnvironment(): EnvironmentBindingInput {
-  return {
-    environmentBindingId: 'environment-tool', settingsRevision: 'settings-r1',
-    permissionPolicyRevision: 'permission-r1',
-    modelRoute: {
-      routeRevision: 'route-tool-r1',
-      primary: {
-        connectionId: 'connection-current', modelId: 'model-current',
-        protocol: 'openai-responses', codecRevision: 'openai-responses@1',
-        maxInputTokens: 12_288, maxOutputTokens: 4_096, generation: {},
-      },
-      fallbacks: [],
-    },
-  };
+async function currentRunRevision(journal: SqliteAgentJournal, runId: string): Promise<number> {
+  const run = await journal.getKernelRunProjection(scope(runId));
+  if (run === null) throw new Error('Expected Kernel Run projection.');
+  return run.revision;
+}
+
+let toolEnvironmentBinding: Promise<EnvironmentBindingInput> | undefined;
+
+function toolEnvironment(): Promise<EnvironmentBindingInput> {
+  toolEnvironmentBinding ??= createEnvironmentBinding(
+    'environment-tool', 'connection-current', 'model-current',
+  );
+  return toolEnvironmentBinding;
 }
 
 function toolSnapshot(label: string): TurnSnapshotInput {
@@ -561,6 +735,16 @@ function toolSnapshot(label: string): TurnSnapshotInput {
     turnSnapshotId: `snapshot-${label}`,
     capability: { snapshotId: `capability-${label}`, revision: 'cap-r1' },
     promptRevision: 'prompt-r1',
+    runtimeProtocol: {
+      id: 'runtime-protocol', source: 'runtime', scope: 'static', priority: 0,
+      revision: 'runtime-r1', cacheability: 'stable', tokenEstimate: 4,
+      content: [{ type: 'text', text: 'Follow the durable protocol.' }],
+    },
+    promptSections: [{
+      id: 'project-instructions', source: 'project', scope: 'turn', priority: 10,
+      revision: 'project-r1', cacheability: 'stable', tokenEstimate: 4,
+      content: [{ type: 'text', text: 'Captured project instructions.' }],
+    }],
     tools: [
       { name: 'query_database', revision: '1' },
       { name: 'read_result', revision: '1' },
@@ -576,11 +760,34 @@ function commitTool(
   return openToolLifecycleCommitter(journal).commit(command);
 }
 
+async function captureReadyTurn(
+  controller: RunController,
+  input: Parameters<RunController['captureTurn']>[0],
+) {
+  const captured = await controller.captureTurn(input);
+  return await controller.commitContextReady({
+    commandId: `${input.commandId}:context-ready`,
+    expectedRunRevision: captured.run.revision,
+    turnId: input.turnId,
+    expectedTurnRevision: 1,
+  });
+}
+
 function snapshot(): TurnSnapshotInput {
   return {
     turnSnapshotId: 'snapshot-1',
     capability: { snapshotId: 'capability-1', revision: 'cap-r1' },
     promptRevision: 'prompt-r1',
+    runtimeProtocol: {
+      id: 'runtime-protocol', source: 'runtime', scope: 'static', priority: 0,
+      revision: 'runtime-r1', cacheability: 'stable', tokenEstimate: 4,
+      content: [{ type: 'text', text: 'Follow the durable protocol.' }],
+    },
+    promptSections: [{
+      id: 'project-instructions', source: 'project', scope: 'turn', priority: 10,
+      revision: 'project-r1', cacheability: 'stable', tokenEstimate: 4,
+      content: [{ type: 'text', text: 'Captured project instructions.' }],
+    }],
     tools: [{ name: 'workspace_read', revision: 'tool-r1' }],
     skills: [{ id: 'project-guide', revision: 'skill-r1' }],
     verifiers: [{ id: 'delivery', revision: 'verifier-r1', required: true }],

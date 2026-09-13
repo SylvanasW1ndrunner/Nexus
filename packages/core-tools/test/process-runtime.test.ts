@@ -33,11 +33,15 @@ describe('ProcessRuntime', () => {
     const { root, runtime } = await fixture();
     const child = join(root, 'child.mjs');
     const marker = join(root, 'leaked.txt');
-    await writeFile(child, "import { writeFileSync } from 'node:fs'; setTimeout(() => writeFileSync(process.argv[2], 'leaked'), 700); setTimeout(() => process.exit(0), 1200);", 'utf8');
-    const source = `require('node:child_process').spawn(process.execPath, ['${child.replaceAll('\\', '\\\\')}', '${marker.replaceAll('\\', '\\\\')}'], { stdio: 'ignore' }); setTimeout(() => {}, 10000);`;
-    await expect(runtime.exec({ ...owner, signal: signal(), timeoutMs: 150, prepared: await prepared(runtime, root, nodeCommand(source)) })).rejects.toMatchObject({ kind: 'external', outcome: 'unknown' });
-    await delay(1_000);
-    await expect(access(marker)).resolves.toBeUndefined();
+    const ready = join(root, 'child-ready.txt');
+    const release = join(root, 'child-release.txt');
+    await writeFile(child, "import { existsSync, writeFileSync } from 'node:fs'; writeFileSync(process.argv[3], 'ready'); const timer = setInterval(() => { if (existsSync(process.argv[4])) { clearInterval(timer); writeFileSync(process.argv[2], 'leaked'); process.exit(0); } }, 20); setTimeout(() => process.exit(0), 5000);", 'utf8');
+    const source = `require('node:child_process').spawn(process.execPath, ['${child.replaceAll('\\', '\\\\')}', '${marker.replaceAll('\\', '\\\\')}', '${ready.replaceAll('\\', '\\\\')}', '${release.replaceAll('\\', '\\\\')}'], { stdio: 'ignore' }); setTimeout(() => {}, 10000);`;
+    const started = await runtime.exec({ ...owner, signal: signal(), background: true, timeoutMs: 10_000, prepared: await prepared(runtime, root, nodeCommand(source)) });
+    await waitForPath(ready);
+    await expect(runtime.terminate({ ...owner, processId: started.processId, signal: signal() })).rejects.toMatchObject({ kind: 'external', outcome: 'unknown' });
+    await writeFile(release, 'release', { flag: 'wx' });
+    await waitForPath(marker);
   }, 20_000);
 });
 
@@ -53,3 +57,12 @@ async function prepared(runtime: ProcessRuntime, cwd: string, source: string) {
 }
 function nodeCommand(source: string): string { return [process.execPath, '-e', source].map(value => `"${value.replaceAll('"', '\\"')}"`).join(' '); }
 async function delay(ms: number): Promise<void> { await new Promise(resolve => setTimeout(resolve, ms)); }
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try { await access(path); return; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for ${path}.`);
+}

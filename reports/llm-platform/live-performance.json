@@ -1,33 +1,61 @@
 {
   "kind": "llm-live-performance",
   "status": "passed",
-  "generatedAt": "2026-07-31T20:45:10.693Z",
-  "provider": "siliconflow",
-  "model": "deepseek-ai/DeepSeek-V4-Pro",
-  "sampleCount": 3,
+  "generatedAt": "2026-08-07T12:16:58.713Z",
+  "endpoint": "https://api.siliconflow.cn/v1",
+  "requestedModel": "Qwen/Qwen3.6-35B-A3B",
+  "sampleCount": 1,
+  "connection": {
+    "id": "llm_fdb77946782d106edf4e",
+    "pluginId": "openai-compatible",
+    "protocol": "openai-chat"
+  },
+  "model": {
+    "id": "Qwen/Qwen3.6-35B-A3B",
+    "contextTokens": {
+      "value": 262144,
+      "source": "models-dev",
+      "observedAt": "2026-08-07T11:30:52.494Z"
+    },
+    "maxInputTokens": {
+      "value": null,
+      "source": "unknown"
+    },
+    "maxOutputTokens": {
+      "value": 65536,
+      "source": "models-dev",
+      "observedAt": "2026-08-07T11:30:52.494Z"
+    }
+  },
+  "effectiveParameters": {
+    "temperature": 0,
+    "maxTokens": 4096
+  },
+  "discoveryLatencyMs": 495.6,
   "sync": {
     "latencyMs": {
-      "min": 1474.92,
-      "p50": 1938.01,
-      "p95": 40967.74,
-      "max": 40967.74,
-      "mean": 14793.56
+      "min": 1265.97,
+      "p50": 1265.97,
+      "p95": 1265.97,
+      "max": 1265.97,
+      "mean": 1265.97
     },
     "usage": {
-      "promptTokens": 284,
-      "completionTokens": 2031,
-      "totalTokens": 2315
+      "promptTokens": 15,
+      "completionTokens": 138,
+      "totalTokens": 153
     },
     "allUsageReportedByProvider": true
   },
   "stream": {
-    "firstTokenMs": 27834.37,
-    "totalLatencyMs": 27905.02,
+    "firstEventMs": 17767.04,
+    "firstVisibleTextMs": 17767.04,
+    "totalLatencyMs": 17829.78,
     "usage": {
-      "promptTokens": 97,
-      "completionTokens": 1422,
-      "totalTokens": 1519
+      "promptTokens": 25,
+      "completionTokens": 2384,
+      "totalTokens": 2409
     }
   },
-  "note": "真实 Endpoint 小样本，仅用于当前环境基线，不代表供应商 SLA 或并发容量。"
+  "note": "Live endpoint sample; network and model latency are reported separately from local runtime benchmarks."
 }

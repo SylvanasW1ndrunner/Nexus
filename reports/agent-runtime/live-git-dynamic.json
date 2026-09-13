@@ -1,0 +1,9 @@
+{
+  "generatedAt": "2026-09-10T19:31:40.990Z",
+  "scenario": "git-dynamic",
+  "provider": "SiliconFlow OpenAI-compatible",
+  "model": "deepseek-ai/DeepSeek-V4-Flash",
+  "passed": true,
+  "durationMs": 40027,
+  "evidence": "Git commit, deferred tool_search activation, and Journal invocations matched."
+}

@@ -1,0 +1,9 @@
+{
+  "generatedAt": "2026-09-11T07:30:03.530Z",
+  "scenario": "database-long-result",
+  "provider": "SiliconFlow OpenAI-compatible",
+  "model": "deepseek-ai/DeepSeek-V4-Flash",
+  "passed": true,
+  "durationMs": 28582,
+  "evidence": "Independent PostgreSQL query, sql_execute invocation, result Artifact, and Journal evidence matched."
+}

@@ -1,6 +1,7 @@
 import type { ModelMessage } from '../content.js';
 import {
   asRecord,
+  assertRepresentableGenerationParameters,
   assertContextProtocol,
   createDecodedAttempt,
   createProtocolEncodeSession,
@@ -41,6 +42,7 @@ export class AnthropicMessagesCodec implements ModelProtocolCodec {
 
 
   encode(request: CanonicalModelRequest, context: ModelEncodeContext) {
+    assertRepresentableGenerationParameters(request, this.protocol, ['seed', 'reasoningEffort']);
     const session = createProtocolEncodeSession(context, this.protocol, request);
     const system: Array<{ type: 'text'; text: string }> = [];
     for (const message of request.messages) {

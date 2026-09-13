@@ -7,6 +7,7 @@ import * as core from '../src/index.js';
 import {
   HttpJsonTransport,
   ModelExecutionGateway,
+  NdjsonTransport,
   SseTransport,
   createBuiltinLlmProviderPlugins,
   createModelSession,
@@ -162,25 +163,20 @@ describe('Task 2 independent review contracts', () => {
     })).toThrow(/codec revision/i);
   });
 
-  it('rejects unprojected generation fields and output limits at Session creation', () => {
+  it('validates output limits while retaining representable generation fields in a Session', () => {
     expect(() => createModelSession({
       route: route({ maxOutputTokens: 64 }),
       generation: { maxOutputTokens: 65 },
       codec: openAIChatCodec,
       client: new RecordingClient(chatResponse('bad')),
     })).toThrow(/maxOutputTokens/i);
-    expect(() => createModelSession({
-      route: route(),
-      generation: { seed: 7 },
+    const session = createModelSession({
+      route: route({ generationParameters: { seed: 'supported', reasoningEffort: 'supported' } }),
+      generation: { seed: 7, reasoningEffort: 'high' },
       codec: openAIChatCodec,
       client: new RecordingClient(chatResponse('bad')),
-    })).toThrow(/seed/i);
-    expect(() => createModelSession({
-      route: route(),
-      generation: { reasoningEffort: 'high' },
-      codec: openAIChatCodec,
-      client: new RecordingClient(chatResponse('bad')),
-    })).toThrow(/reasoningEffort/i);
+    });
+    expect(session.generation).toEqual({ seed: 7, reasoningEffort: 'high' });
   });
 
   it('uses canonical protocol IDs in every builtin manifest', () => {
@@ -232,34 +228,32 @@ describe('Task 2 independent review contracts', () => {
     await expect(collect(response.events)).rejects.toMatchObject({ retryable: false });
   });
 
-  it('routes the legacy LlmGateway compatibility API through ModelExecutionGateway', async () => {
-    const executeAttempt = vi.spyOn(ModelExecutionGateway.prototype, 'executeAttempt');
-    const gateway = new core.LlmGateway();
-    gateway.registerProvider({
-      id: 'legacy',
-      name: 'legacy',
-      mode: 'byok',
-      chat: async () => ({ text: 'ok', toolCalls: [] }),
-      isAvailable: async () => ({ available: true }),
-    }, [{ model: 'm' }]);
-
-    await gateway.chat({
-      providerId: 'legacy',
-      request: { model: 'm', messages: [{ role: 'user', content: 'hello' }] },
-      context: { tenantId: 't', taskType: 'compatibility' },
-      maxRetries: 0,
-      maxFallbacks: 0,
+  it('parses Ollama NDJSON streams through a canonical one-attempt transport', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"message":{"content":"a"}}\n{"done":true}\n'));
+        controller.close();
+      },
     });
+    const transport = new NdjsonTransport({
+      url: 'https://example.test/api/chat',
+      fetch: async () => new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'application/x-ndjson' },
+      }),
+    });
+    const response = await transport.execute(clientRequest());
+    if (response.kind !== 'stream') throw new Error('Expected stream');
 
-    expect(executeAttempt).toHaveBeenCalledTimes(1);
-    executeAttempt.mockRestore();
+    await expect(collect(response.events)).resolves.toEqual([
+      { message: { content: 'a' } },
+      { done: true },
+    ]);
   });
 
-  it('keeps ConnectionManager as preparation-only and bypasses legacy LlmGateway execution', async () => {
+  it('keeps ConnectionManager preparation-only and executes its Session through the canonical gateway', async () => {
     const cacheDirectory = await mkdtemp(join(tmpdir(), 'task2-single-spine-'));
     cleanupDirectories.push(cacheDirectory);
-    const oldExecute = vi.spyOn(core.LlmGateway.prototype, 'execute');
-    const executeAttempt = vi.spyOn(ModelExecutionGateway.prototype, 'executeAttempt');
     const manager = new core.LlmConnectionManager({
       cacheDirectory,
       plugins: [managerPlugin()],
@@ -268,18 +262,18 @@ describe('Task 2 independent review contracts', () => {
       }), { status: 200, headers: { 'content-type': 'application/json' } }),
     });
     const [connection] = manager.replaceConnections([{ endpoint: 'https://manager.test/v1' }]);
-
-    const result = await manager.executeChat({
-      selection: { connectionId: connection!.id, modelId: 'model-1' },
-      request: { messages: [{ role: 'user', content: 'hello' }] },
-      context: { tenantId: 't', taskType: 'single-spine' },
+    const bundle = await manager.prepareModelSessionBundle({
+      connectionId: connection!.id,
+      modelId: 'model-1',
     });
+    const result = await new ModelExecutionGateway().executeAttempt(bundle, simpleRequest());
 
-    expect(result.response.text).toBe('canonical');
-    expect(oldExecute).not.toHaveBeenCalled();
-    expect(executeAttempt).toHaveBeenCalledTimes(1);
-    oldExecute.mockRestore();
-    executeAttempt.mockRestore();
+    expect(result.attempt.blocks).toContainEqual({ type: 'text', text: 'canonical' });
+    expect(bundle.primary.route).toMatchObject({
+      connectionId: connection!.id,
+      modelId: 'model-1',
+      protocol: 'openai-chat',
+    });
   });
 
   it('waits for bounded iterator abort acknowledgement before completing a timeout', async () => {
@@ -305,6 +299,25 @@ describe('Task 2 independent review contracts', () => {
       timeouts: { connectMs: 50, firstEventMs: 5, idleMs: 50, totalMs: 100 },
     })).rejects.toMatchObject({ code: 'MODEL_TIMEOUT', phase: 'first-event' });
     expect(acknowledged).toBe(true);
+  });
+
+  it('detaches the source abort listener when canonical request projection fails', async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    const invalidRequest = {
+      model: 'model-1',
+      messages: [{ role: 'user', content: [{ type: 'text', text: () => 'not cloneable' }] }],
+    } as unknown as CanonicalModelRequest;
+
+    await expect(new ModelExecutionGateway().executeAttempt(
+      session(new RecordingClient(chatResponse('unused'))),
+      invalidRequest,
+      { signal: controller.signal },
+    )).rejects.toBeInstanceOf(Error);
+
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledTimes(1);
   });
 });
 

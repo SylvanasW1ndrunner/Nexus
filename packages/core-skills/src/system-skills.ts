@@ -6,10 +6,10 @@ import type { SkillDirectorySource, SkillDocument, SkillRegistryOptions } from '
 
 export function systemSkillsDirectory(): string {
   const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
-  const bundledDirectory = resolve(runtimeDirectory, 'skills');
+  const bundledDirectory = resolve(runtimeDirectory, 'skills', 'system');
   return existsSync(bundledDirectory)
     ? bundledDirectory
-    : resolve(runtimeDirectory, '..', 'skills');
+    : resolve(runtimeDirectory, '..', 'skills', 'system');
 }
 
 export function systemSkillSource(): SkillDirectorySource {
@@ -28,6 +28,13 @@ export async function createSystemSkillRegistry(
   const registry = new SkillRegistry({
     sources: [systemSkillSource(), ...(options.sources ?? [])],
     ...(options.sessionOverlay === undefined ? {} : { sessionOverlay: options.sessionOverlay }),
+    ...(options.capabilityResolver === undefined
+      ? {}
+      : { capabilityResolver: options.capabilityResolver }),
+    ...(options.revisionCachePath === undefined
+      ? {}
+      : { revisionCachePath: options.revisionCachePath }),
+    ...(options.bundleLimits === undefined ? {} : { bundleLimits: options.bundleLimits }),
   });
   await registry.refresh();
   return registry;

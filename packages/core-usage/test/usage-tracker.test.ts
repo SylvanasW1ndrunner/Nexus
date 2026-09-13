@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { UsageSnapshot } from '@dbagent/shared';
-import { UsageTracker } from '../src/usage-tracker.js';
+import { UsageTracker, UsageTrackerStateError } from '../src/usage-tracker.js';
 
 const tempDirs: string[] = [];
 
@@ -18,139 +18,202 @@ afterEach(async () => {
 });
 
 describe('UsageTracker', () => {
-  it('returns a BYOK zero-use snapshot when history is missing', async () => {
+  it('returns a BYOK zero-use snapshot when no direct usage or projection exists', async () => {
     const current = await new UsageTracker(await historyPath()).current();
 
-    expect(current).toMatchObject({
-      mode: 'byok',
-      completedRounds: 0,
-      totalTokens: 0,
-    });
+    expect(current).toMatchObject({ mode: 'byok', totalTokens: 0 });
     expect(Date.parse(current.windowStartedAt)).not.toBeNaN();
   });
 
-  it('reads history newest-first and respects the requested limit', async () => {
-    const path = await historyPath();
-    await saveHistory(path, [snapshot(3), snapshot(2), snapshot(1)]);
+  it('records direct provider token usage', async () => {
+    const tracker = new UsageTracker(await historyPath());
 
-    await expect(new UsageTracker(path).history(2)).resolves.toEqual([snapshot(3), snapshot(2)]);
-  });
-
-  it('increments the current local query count and prepends it to history', async () => {
-    const path = await historyPath();
-    await saveHistory(path, [snapshot(5), snapshot(4)]);
-
-    const tracker = new UsageTracker(path);
-    await expect(tracker.recordLocalQuery()).resolves.toEqual(snapshot(6));
-    await expect(tracker.history()).resolves.toEqual([snapshot(6), snapshot(5), snapshot(4)]);
-  });
-
-  it('caps retained history at one hundred snapshots', async () => {
-    const path = await historyPath();
-    await saveHistory(
-      path,
-      Array.from({ length: 100 }, (_, index) => snapshot(100 - index)),
-    );
-
-    const tracker = new UsageTracker(path);
-    const history = await tracker.recordLocalQuery().then(() => tracker.history(200));
-
-    expect(history).toHaveLength(100);
-    expect(history[0]).toEqual(snapshot(101));
-    expect(history.at(-1)).toEqual(snapshot(2));
-  });
-
-  it('records provider token usage without incrementing conversation rounds', async () => {
-    const path = await historyPath();
-    await saveHistory(path, [snapshot(5)]);
-
-    const tracker = new UsageTracker(path);
-    await expect(
-      tracker.recordTokens('byok', { promptTokens: 30.8, completionTokens: 7.9, totalTokens: 37.8 }),
-    ).resolves.toEqual({
-      ...snapshot(5),
-      promptTokens: 30,
-      completionTokens: 7,
-      totalTokens: 37,
-    });
-    await expect(
-      tracker.recordTokens('byok', { promptTokens: -1, completionTokens: -2, totalTokens: -10 }),
-    ).resolves.toEqual({
-      ...snapshot(5),
-      promptTokens: 30,
-      completionTokens: 7,
-      totalTokens: 37,
-    });
-  });
-
-  it('tracks a successful Agent round with token usage and persistent round history', async () => {
-    const path = await historyPath();
-    const tracker = new UsageTracker(path, fixedUsageOptions());
-
-    const round = await tracker.startConversationRound('session_orders', 'byok');
-    await tracker.recordLlmCall(round, { promptTokens: 10, completionTokens: 5, totalTokens: 15 });
-    await tracker.recordLlmCall(round, { promptTokens: 20, completionTokens: 8, totalTokens: 28 });
-    await expect(tracker.endConversationRound(round, 'success')).resolves.toMatchObject({
-      mode: 'byok',
-      completedRounds: 1,
-      promptTokens: 30,
-      completionTokens: 13,
-      totalTokens: 43,
-    });
-
-    await expect(tracker.roundHistory()).resolves.toMatchObject([
-      {
-        id: 'round_1',
-        sessionId: 'session_orders',
-        mode: 'byok',
-        status: 'success',
-        promptTokens: 30,
-        completionTokens: 13,
-        totalTokens: 43,
-      },
-    ]);
-  });
-
-  it('counts completed and user-aborted rounds but not system-failed rounds', async () => {
-    const path = await historyPath();
-    const tracker = new UsageTracker(path, fixedUsageOptions());
-
-    const aborted = await tracker.startConversationRound('session_abort', 'byok');
-    await tracker.endConversationRound(aborted, 'aborted');
-    const failed = await tracker.startConversationRound('session_failed', 'byok');
-    await tracker.endConversationRound(failed, 'failed', 'provider timeout');
+    await tracker.recordTokens('byok', { promptTokens: 30, completionTokens: 7, totalTokens: 37 });
 
     await expect(tracker.current()).resolves.toMatchObject({
-      completedRounds: 1,
+      mode: 'byok', promptTokens: 30, completionTokens: 7, totalTokens: 37,
     });
-    await expect(tracker.roundHistory()).resolves.toMatchObject([
-      { sessionId: 'session_failed', status: 'failed', errorMessage: 'provider timeout' },
-      { sessionId: 'session_abort', status: 'aborted' },
+  });
+
+  it('projects an authoritative source as an absolute total without changing direct history', async () => {
+    const tracker = new UsageTracker(await historyPath());
+    await tracker.recordTokens('byok', { promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+    const release = tracker.attachAbsoluteProjection({
+      sourceKey: 'journal:C:/project-a/.schemanaut/state.db',
+      getSnapshot: () => Promise.resolve(snapshot({ promptTokens: 40, completionTokens: 20, totalTokens: 60 })),
+    });
+
+    await expect(tracker.current()).resolves.toMatchObject({
+      mode: 'byok', promptTokens: 50, completionTokens: 25, totalTokens: 75,
+    });
+    await expect(tracker.current()).resolves.toMatchObject({ totalTokens: 75 });
+    await expect(tracker.directHistory()).resolves.toHaveLength(1);
+
+    release();
+    await expect(tracker.current()).resolves.toMatchObject({ totalTokens: 15 });
+  });
+
+  it('counts one authority once when multiple runtime readers attach and falls back after release', async () => {
+    const tracker = new UsageTracker();
+    const first = tracker.attachAbsoluteProjection({
+      sourceKey: 'journal:project-a',
+      getSnapshot: () => Promise.resolve(snapshot({ totalTokens: 12 })),
+    });
+    const second = tracker.attachAbsoluteProjection({
+      sourceKey: 'journal:project-a',
+      getSnapshot: () => Promise.resolve(snapshot({ totalTokens: 20 })),
+    });
+
+    await expect(tracker.current()).resolves.toMatchObject({ totalTokens: 12 });
+    first();
+    await expect(tracker.current()).resolves.toMatchObject({ totalTokens: 20 });
+    second();
+    await expect(tracker.current()).resolves.toMatchObject({ totalTokens: 0 });
+  });
+
+  it('rejects an unavailable authoritative projection and exposes its typed status', async () => {
+    const tracker = new UsageTracker();
+    tracker.attachAbsoluteProjection({
+      sourceKey: 'journal:broken',
+      getSnapshot: () => Promise.resolve({ mode: 'byok', totalTokens: Number.NaN } as UsageSnapshot),
+    });
+
+    await expect(tracker.current()).rejects.toMatchObject({ code: 'PROJECTION_UNAVAILABLE' });
+    await expect(tracker.currentAll()).rejects.toMatchObject({ code: 'PROJECTION_UNAVAILABLE' });
+    const [status] = await tracker.projectionStatus();
+    expect(status?.sourceKey).toBe('journal:broken');
+    expect(status?.status).toBe('failed');
+    expect(status?.failure?.code).toBe('INVALID_SNAPSHOT');
+  });
+
+  it('serializes concurrent direct persistent writers without losing either update', async () => {
+    const path = await historyPath();
+    const first = new UsageTracker(path);
+    const second = new UsageTracker(path);
+
+    await Promise.all([
+      first.recordTokens('byok', { promptTokens: 1, completionTokens: 2, totalTokens: 3 }),
+      second.recordTokens('byok', { promptTokens: 4, completionTokens: 5, totalTokens: 9 }),
+    ]);
+
+    await expect(new UsageTracker(path).current()).resolves.toMatchObject({
+      promptTokens: 5, completionTokens: 7, totalTokens: 12,
+    });
+  });
+
+  it('retains direct totals across modes even after bounded history evicts their old snapshots', async () => {
+    const path = await historyPath();
+    const tracker = new UsageTracker(path, { historyLimit: 1 });
+    await tracker.recordTokens('byok', { promptTokens: 1, completionTokens: 0, totalTokens: 1 });
+    for (let index = 0; index < 100; index += 1) {
+      await tracker.recordTokens('managed', { promptTokens: 0, completionTokens: 1, totalTokens: 1 });
+    }
+
+    await expect(tracker.current('byok')).resolves.toMatchObject({ totalTokens: 1 });
+    await expect(tracker.current('managed')).resolves.toMatchObject({ totalTokens: 100 });
+    await expect(tracker.directHistory()).resolves.toHaveLength(1);
+  });
+
+  it('retains direct totals when history retention is disabled', async () => {
+    const tracker = new UsageTracker(await historyPath(), { historyLimit: 0 });
+    await tracker.recordTokens('byok', { promptTokens: 2, completionTokens: 3, totalTokens: 5 });
+
+    await expect(tracker.current()).resolves.toMatchObject({ totalTokens: 5 });
+    await expect(tracker.directHistory()).resolves.toEqual([]);
+  });
+
+  it('rejects a corrupt persisted state rather than guessing a usage balance', async () => {
+    const path = await historyPath();
+    await saveHistory(path, {
+      version: 2,
+      directTotals: {
+        byok: { mode: 'byok', windowStartedAt: 'not-a-date', promptTokens: -4, completionTokens: 'bad', totalTokens: 3.9 },
+      },
+      directHistory: [],
+    });
+
+    const tracker = new UsageTracker(path);
+    await expect(tracker.current()).rejects.toBeInstanceOf(UsageTrackerStateError);
+  });
+
+  it('rejects invalid direct-call token records instead of silently recording zero usage', async () => {
+    const tracker = new UsageTracker();
+
+    await expect(tracker.recordTokens('byok', {
+      promptTokens: -1,
+      completionTokens: 0,
+      totalTokens: 0,
+    })).rejects.toBeInstanceOf(UsageTrackerStateError);
+    await expect(tracker.recordTokens('managed', {
+      promptTokens: Number.MAX_SAFE_INTEGER + 1,
+      completionTokens: 0,
+      totalTokens: 0,
+    })).rejects.toBeInstanceOf(UsageTrackerStateError);
+    await expect(tracker.recordTokens('managed', {
+      promptTokens: 1.5,
+      completionTokens: 0,
+      totalTokens: 0,
+    })).rejects.toBeInstanceOf(UsageTrackerStateError);
+    await expect(tracker.recordTokens('unknown' as never, {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    })).rejects.toBeInstanceOf(UsageTrackerStateError);
+
+    await expect(tracker.currentAll()).resolves.toEqual([
+      expect.objectContaining({ mode: 'byok', totalTokens: 0 }),
+      expect.objectContaining({ mode: 'managed', totalTokens: 0 }),
     ]);
   });
 
+  it('rejects V2 persisted state with unknown keys or billing modes', async () => {
+    const path = await historyPath();
+    await saveHistory(path, {
+      version: 2,
+      directTotals: {
+        byok: snapshot({ totalTokens: 2 }),
+        enterprise: { ...snapshot({ totalTokens: 3 }), mode: 'enterprise' },
+      },
+      directHistory: [],
+      ignored: true,
+    });
+
+    await expect(new UsageTracker(path).current()).rejects.toBeInstanceOf(UsageTrackerStateError);
+  });
+
+  it('migrates the explicit legacy snapshot history into direct totals', async () => {
+    const path = await historyPath();
+    await saveHistory(path, [{ ...snapshot({ totalTokens: 7 }), completedRounds: 3 }]);
+
+    await expect(new UsageTracker(path).current()).resolves.toMatchObject({ totalTokens: 7 });
+  });
+
+  it('rejects a projection that claims two totals for the same mode', async () => {
+    const tracker = new UsageTracker();
+    tracker.attachAbsoluteProjection({
+      sourceKey: 'journal:duplicate-mode',
+      getSnapshot: () => Promise.resolve([snapshot({ totalTokens: 2 }), snapshot({ totalTokens: 3 })]),
+    });
+
+    await expect(tracker.current()).rejects.toMatchObject({ code: 'PROJECTION_UNAVAILABLE' });
+    const [status] = await tracker.projectionStatus();
+    expect(status?.status).toBe('failed');
+    expect(status?.failure?.code).toBe('INVALID_SNAPSHOT');
+  });
 });
 
-function snapshot(completedRounds: number): UsageSnapshot {
+function snapshot(tokens: Partial<Pick<UsageSnapshot, 'promptTokens' | 'completionTokens' | 'totalTokens'>>): UsageSnapshot {
   return {
     mode: 'byok',
     windowStartedAt: '2026-06-08T00:00:00.000Z',
-    completedRounds,
     promptTokens: 0,
     completionTokens: 0,
     totalTokens: 0,
+    ...tokens,
   };
 }
 
-async function saveHistory(path: string, history: UsageSnapshot[]): Promise<void> {
+async function saveHistory(path: string, state: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(history, null, 2)}\n`, 'utf8');
-}
-
-function fixedUsageOptions() {
-  let nextId = 0;
-  return {
-    now: () => new Date('2026-06-17T00:00:00.000Z'),
-    createRoundId: () => `round_${++nextId}`,
-  };
+  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 }

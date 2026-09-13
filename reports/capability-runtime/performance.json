@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "kind": "capability-runtime-performance",
+  "status": "failed",
+  "generatedAt": "2026-09-11T14:10:59.617Z",
+  "environment": {
+    "node": "v24.18.1",
+    "platform": "win32 10.0.26200",
+    "cpuCount": 32
+  },
+  "thresholds": {
+    "registrationMs": 5000,
+    "capabilitySnapshotP95Ms": 500,
+    "capabilityDiscoveryP95Ms": 750,
+    "capabilityActivationMs": 750,
+    "toolSnapshotP95Ms": 500,
+    "toolExposureP95Ms": 500,
+    "unrelatedOwnerRefreshP95Ms": 500,
+    "modelToolCount": 12,
+    "modelSchemaChars": 4000
+  },
+  "checks": {
+    "registration": true,
+    "capabilitySnapshot": true,
+    "capabilityDiscovery": true,
+    "capabilityActivation": true,
+    "toolSnapshot": true,
+    "toolExposure": true,
+    "unrelatedOwnerRefresh": true,
+    "stableToolRevision": true,
+    "boundedDirectTools": false,
+    "boundedModelSchema": true
+  },
+  "results": [
+    {
+      "size": 1000,
+      "registration": {
+        "elapsedMs": 3.962
+      },
+      "capabilitySnapshot": {
+        "p50Ms": 2.093,
+        "p95Ms": 4.193,
+        "maxMs": 4.193,
+        "rawSamplesMs": [
+          4.193,
+          2.009,
+          2.018,
+          2.093,
+          2.543
+        ]
+      },
+      "capabilityDiscovery": {
+        "p50Ms": 0.752,
+        "p95Ms": 0.988,
+        "maxMs": 0.988,
+        "rawSamplesMs": [
+          0.988,
+          0.763,
+          0.752,
+          0.741,
+          0.73
+        ]
+      },
+      "capabilityActivation": {
+        "elapsedMs": 4.579
+      },
+      "toolSnapshot": {
+        "p50Ms": 0.228,
+        "p95Ms": 0.697,
+        "maxMs": 0.697,
+        "rawSamplesMs": [
+          0.228,
+          0.23,
+          0.216,
+          0.697,
+          0.222
+        ]
+      },
+      "unrelatedOwnerRefresh": {
+        "p50Ms": 1.188,
+        "p95Ms": 2.816,
+        "maxMs": 2.816,
+        "rawSamplesMs": [
+          2.816,
+          0.927,
+          1.125,
+          1.188,
+          1.847
+        ],
+        "catalogToolRevisionStable": true
+      },
+      "toolExposure": {
+        "p50Ms": 9.01,
+        "p95Ms": 10.459,
+        "maxMs": 10.459,
+        "rawSamplesMs": [
+          9.01,
+          9.174,
+          8.932,
+          10.459,
+          8.822
+        ],
+        "modelToolCount": 14,
+        "discoverableToolCount": 1001,
+        "modelSchemaChars": 2297
+      }
+    },
+    {
+      "size": 10000,
+      "registration": {
+        "elapsedMs": 13.165
+      },
+      "capabilitySnapshot": {
+        "p50Ms": 19.173,
+        "p95Ms": 28.498,
+        "maxMs": 28.498,
+        "rawSamplesMs": [
+          28.498,
+          19.503,
+          16.972,
+          15.933,
+          19.173
+        ]
+      },
+      "capabilityDiscovery": {
+        "p50Ms": 8.007,
+        "p95Ms": 9.76,
+        "maxMs": 9.76,
+        "rawSamplesMs": [
+          7.95,
+          8.007,
+          7.665,
+          9.76,
+          9.565
+        ]
+      },
+      "capabilityActivation": {
+        "elapsedMs": 18.25
+      },
+      "toolSnapshot": {
+        "p50Ms": 3.503,
+        "p95Ms": 6.412,
+        "maxMs": 6.412,
+        "rawSamplesMs": [
+          6.412,
+          3.832,
+          3.503,
+          3.273,
+          3.407
+        ]
+      },
+      "unrelatedOwnerRefresh": {
+        "p50Ms": 10.197,
+        "p95Ms": 12.709,
+        "maxMs": 12.709,
+        "rawSamplesMs": [
+          9.459,
+          10.377,
+          9.583,
+          12.709,
+          10.197
+        ],
+        "catalogToolRevisionStable": true
+      },
+      "toolExposure": {
+        "p50Ms": 91.193,
+        "p95Ms": 94.354,
+        "maxMs": 94.354,
+        "rawSamplesMs": [
+          94.354,
+          92.472,
+          87.736,
+          91.193,
+          89.96
+        ],
+        "modelToolCount": 14,
+        "discoverableToolCount": 10001,
+        "modelSchemaChars": 2297
+      }
+    }
+  ]
+}

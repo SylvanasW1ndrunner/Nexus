@@ -1,4 +1,3 @@
-import { redactKnownSecrets } from './known-secret-sanitizer.js';
 import type { LlmConnection } from './llm-connection.js';
 import type {
   LlmProviderPlugin,
@@ -54,11 +53,7 @@ export class LlmProviderPluginRegistry {
           registrationOrder: order,
         });
       } catch (error) {
-        const secrets = connectionSecrets(connection);
-        const detail = redactKnownSecrets(
-          error instanceof Error ? error.message : 'Provider Plugin match failed.',
-          secrets,
-        );
+        const detail = error instanceof Error ? error.message : 'Provider Plugin match failed.';
         diagnostics.push({
           pluginId: plugin.manifest.id,
           phase: 'match',
@@ -88,10 +83,4 @@ function validateManifest(plugin: LlmProviderPlugin): void {
   if (!Number.isFinite(plugin.manifest.priority)) {
     throw new Error('Provider Plugin priority must be finite.');
   }
-}
-
-function connectionSecrets(connection: LlmConnection): string[] {
-  return [connection.apiKey, ...Object.values(connection.headers)].filter(
-    (secret): secret is string => Boolean(secret),
-  );
 }

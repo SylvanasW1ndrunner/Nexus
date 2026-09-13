@@ -7,8 +7,8 @@ import {
   PermissionManager,
   SqliteAgentJournal,
   ToolRegistry,
-  createAgentToolResultEnvelope,
 } from '../../src/index.js';
+import { preparedToolIntent } from '../permission-audit-fixture.js';
 import { ToolInvocationRuntime } from '../../src/tools/tool-invocation-runtime.js';
 
 type RecoveryRaceInput = {
@@ -28,7 +28,7 @@ type RecoveryRaceInput = {
     fencingToken: number;
     expiresAt: string;
   };
-  effect: 'read' | 'idempotent' | 'transactional';
+  recoveryClass: 'read' | 'idempotent' | 'transactional';
 };
 
 const encodedInput = process.env.DBAGENT_TOOL_RECOVERY_RACE_INPUT;
@@ -38,13 +38,13 @@ const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
   DatabaseSync: new (path: string) => NodeDatabaseSync;
 };
 
-const handler = async (_arguments: Readonly<Record<string, unknown>>, context: {
+const handler = async (_prepared: unknown, context: {
   idempotencyKey: string;
 }) => {
   const database = new DatabaseSync(input.counterPath);
   try {
     database.prepare('INSERT INTO handler_calls (call_id) VALUES (?)').run(randomUUID());
-    if (input.effect === 'idempotent') {
+    if (input.recoveryClass === 'idempotent') {
       database.prepare('INSERT OR IGNORE INTO effects (idempotency_key) VALUES (?)')
         .run(context.idempotencyKey);
     } else {
@@ -55,10 +55,7 @@ const handler = async (_arguments: Readonly<Record<string, unknown>>, context: {
     const count = Number(
       (database.prepare('SELECT COUNT(*) AS count FROM effects').get() as { count: number }).count,
     );
-    return createAgentToolResultEnvelope({
-      modelProjection: { counter: count },
-      durableSummary: { counter: count },
-    });
+    return { counter: count };
   } finally {
     database.close();
   }
@@ -68,27 +65,40 @@ const journal = new SqliteAgentJournal({ filePath: input.journalPath });
 const registry = new ToolRegistry();
 registry.registerInvocation({
   name: 'query_database', description: 'persistent counter fixture', dangerLevel: 'safe',
-  readonly: input.effect === 'read', effect: input.effect,
-  handlerRevision: 'query_database@1', requiredPermission: 'read', exposure: 'direct',
-  execution: { concurrency: input.effect === 'read' ? 'read' : 'write', timeoutMs: 10_000 },
+  readonly: input.recoveryClass === 'read', source: 'unknown',
+  access: input.recoveryClass === 'read' ? 'read' : 'write', recoveryClass: input.recoveryClass,
+  toolRevision: 'query_database@1', handlerRevision: 'query_database-handler@1', intentRevision: 'prepared-tool-intent.v1',
+  permission: { actions: ['read'] }, exposure: 'direct',
+  limits: { timeoutMs: 10_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+  outputSchema: { type: 'object' }, failurePolicy: { onUnknown: { failureKind: 'unknown', retryable: false } },
+  execution: { concurrency: input.recoveryClass === 'read' ? 'read' : 'write', timeoutMs: 10_000 },
   inputSchema: {
     type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'],
   },
 }, {
+  revision: { toolName: 'query_database', toolRevision: 'query_database@1', handlerRevision: 'query_database-handler@1', intentRevision: 'prepared-tool-intent.v1' },
+  prepare: (preparedInput, context) => ({
+    ...preparedToolIntent({ toolName: 'query_database', toolRevision: 'query_database@1', handlerRevision: 'query_database-handler@1', recoveryClass: input.recoveryClass }).intent,
+    input: structuredClone(preparedInput), toolRevision: context.toolRevision,
+    handlerRevision: context.handlerRevision, intentRevision: context.intentRevision,
+    generation: context.generation, limits: context.limits,
+  }),
   execute: handler,
-  ...(input.effect === 'transactional' ? { recover: handler } : {}),
+  ...(input.recoveryClass === 'transactional' ? { recover: handler } : {}),
 });
 registry.registerInvocation({
   name: 'read_result', description: 'unused fixture Tool', dangerLevel: 'safe', readonly: true,
-  effect: 'read', handlerRevision: 'read_result@1', requiredPermission: 'read',
-  exposure: 'direct', execution: { concurrency: 'read' },
+  source: 'unknown', access: 'read', recoveryClass: 'read',
+  toolRevision: 'read_result@1', handlerRevision: 'read_result-handler@1', intentRevision: 'prepared-tool-intent.v1', permission: { actions: ['read'] },
+  exposure: 'direct', limits: { timeoutMs: 10_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+  outputSchema: { type: 'object' }, failurePolicy: { onUnknown: { failureKind: 'unknown', retryable: false } }, execution: { concurrency: 'read', timeoutMs: 10_000 },
   inputSchema: {
     type: 'object', properties: { resultRef: { type: 'string' } }, required: ['resultRef'],
   },
 }, {
-  execute: () => createAgentToolResultEnvelope({
-    modelProjection: { skipped: true }, durableSummary: { skipped: true },
-  }),
+  revision: { toolName: 'read_result', toolRevision: 'read_result@1', handlerRevision: 'read_result-handler@1', intentRevision: 'prepared-tool-intent.v1' },
+  prepare: () => preparedToolIntent({ toolName: 'read_result', toolRevision: 'read_result@1', handlerRevision: 'read_result-handler@1' }).intent,
+  execute: () => ({ skipped: true }),
 });
 
 await writeFile(input.readyPath, 'ready', 'utf8');
@@ -101,9 +111,17 @@ for (;;) {
   }
 }
 
+const snapshot = registry.captureSnapshot();
+const allowedTools = snapshot.llmTools().map(({ name }) => {
+  const revision = snapshot.invocationRevision(name);
+  if (revision === undefined) throw new Error(`Missing Invocation revision for ${name}.`);
+  return { name, revision };
+});
 const runtime = new ToolInvocationRuntime({
   journal,
-  registry: registry.captureSnapshot(),
+  registry: snapshot,
+  allowedTools,
+  revalidateTarget: () => undefined,
   permissionManager: new PermissionManager(),
   binding: {
     projectId: input.projectId,
@@ -111,7 +129,7 @@ const runtime = new ToolInvocationRuntime({
     runId: input.runId,
     turnId: input.turnId,
     lease: input.lease,
-    mode: 'full',
+    mode: 'full-access',
   },
 });
 await runtime.recover(input.invocationId);

@@ -27,7 +27,7 @@ export type GlobalConfigSettings = Readonly<{
     connections: readonly GlobalModelConnectionSettings[];
     parameters: Readonly<LlmGenerationConfig>;
   }>;
-  agent: Readonly<{ permission_mode: 'default' | 'auto' | 'full-access' }>;
+  agent: Readonly<{ permission_mode: 'default' | 'auto' | 'full-access'; require_sandbox: boolean }>;
   permissions: Readonly<{ rules: readonly GlobalPermissionRule[] }>;
 }>;
 export type GlobalPermissionRule = Readonly<{
@@ -250,7 +250,7 @@ function defaultSettings(): GlobalConfigSettings {
   return deepFreeze({
     version: 1,
     models: { connections: [], parameters: {} },
-    agent: { permission_mode: 'default' },
+    agent: { permission_mode: 'default', require_sandbox: false },
     permissions: { rules: [] },
   });
 }
@@ -258,7 +258,7 @@ function normalizeSettings(value: unknown): GlobalConfigSettings {
   const root = value as {
     version: 1;
     models?: { connections?: GlobalModelConnectionSettings[]; parameters?: LlmGenerationConfig };
-    agent?: { permission_mode?: 'default' | 'auto' | 'full-access' };
+    agent?: { permission_mode?: 'default' | 'auto' | 'full-access'; require_sandbox?: boolean };
     permissions?: { rules?: GlobalPermissionRule[] };
   };
   return deepFreeze({
@@ -267,7 +267,7 @@ function normalizeSettings(value: unknown): GlobalConfigSettings {
       connections: root.models?.connections ?? [],
       parameters: root.models?.parameters ?? {},
     },
-    agent: { permission_mode: root.agent?.permission_mode ?? 'default' },
+    agent: { permission_mode: root.agent?.permission_mode ?? 'default', require_sandbox: root.agent?.require_sandbox ?? false },
     permissions: { rules: root.permissions?.rules ?? [] },
   });
 }

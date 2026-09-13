@@ -6,12 +6,10 @@ import { Socket } from 'node:net';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { loadEnvFile } from './load-env.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 if (process.argv.includes('--live-llm')) {
-  await loadEnvFile(join(root, '.env'));
-  process.env.DBAGENT_RUN_SDK_LIVE = '1';
+  process.env.DBAGENT_RUN_AGENT_LIVE = '1';
 }
 const require = createRequire(join(root, 'packages', 'core-db', 'package.json'));
 const { Client } = require('pg');
@@ -36,18 +34,18 @@ await runVitest('packages/core-db/test/postgres.integration.test.ts', {
 await runVitest('packages/core-db/test/postgres-connector.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
-await runVitest('packages/sdk/test/postgres.integration.test.ts', {
+await runVitest('packages/agent-host/test/postgres.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
-await runVitest('packages/sdk/test/postgres-scenarios.integration.test.ts', {
+await runVitest('packages/agent-host/test/postgres-scenarios.integration.test.ts', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
-if (process.env.DBAGENT_RUN_SDK_LIVE === '1') {
-  await runVitest('packages/sdk/test/general-agent.live.integration.test.ts', {
+if (process.env.DBAGENT_RUN_AGENT_LIVE === '1') {
+  await runVitest('packages/agent-host/test/general-agent.live.integration.test.ts', {
     DBAGENT_RUN_GENERAL_AGENT_LIVE: '1',
   });
 }
-await runNodeScript('scripts/tests/postgres-scenario-performance.mjs', {
+await runNodeScript('scripts/tests/postgres-scenario-performance-suite.mjs', {
   DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
 });
 await writeScenarioManifest();
@@ -55,11 +53,11 @@ await writeScenarioManifest();
 async function resetScenarioReports() {
   await mkdir(scenarioReportDirectory, { recursive: true });
   const reportNames = ['functional.json', 'performance.json', 'manifest.json'];
-  if (process.env.DBAGENT_RUN_SDK_LIVE === '1') reportNames.push('live.json');
+  if (process.env.DBAGENT_RUN_AGENT_LIVE === '1') reportNames.push('live.json');
   for (const name of reportNames) {
     await rm(join(scenarioReportDirectory, name), { force: true });
   }
-  if (process.env.DBAGENT_RUN_SDK_LIVE === '1') {
+  if (process.env.DBAGENT_RUN_AGENT_LIVE === '1') {
     await rm(join(root, 'reports', 'agent-runtime', 'live-project.json'), { force: true });
   }
 }
@@ -94,7 +92,7 @@ async function writeScenarioManifest() {
   let live;
   let generalAgent;
   const livePath = join(scenarioReportDirectory, 'live.json');
-  if (process.env.DBAGENT_RUN_SDK_LIVE === '1') {
+  if (process.env.DBAGENT_RUN_AGENT_LIVE === '1') {
     const liveText = await readFile(livePath, 'utf8');
     const liveReport = JSON.parse(liveText);
     if (liveReport.runId !== scenarioRunId || liveReport.passed !== true) {

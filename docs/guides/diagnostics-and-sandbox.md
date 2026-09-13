@@ -40,9 +40,8 @@ The BrowserSession Host Port/browser connector reuses the user's existing
 browser session signed in outside SchemaNaut. It is the narrow exception to
 Agent-facing API content: under its product contract, the Agent receives only opaque
 browser session/page references; schemas accept no Cookie, API Header, or Authorization,
-and Cookie/Set-Cookie are omitted from prepared intents, results, and the
+and browser protocol/session Cookie/Set-Cookie fields and values are omitted from prepared intents, results, and the
 Journal. This does not inspect or redact page bodies, external command output,
 or user browser-test code output. The CLI has no embedded Chromium. External
 Playwright is only an unauthenticated screenshot/test backend or user-maintained
-test configuration, not a shared-login-state guarantee. Base web_fetch is
-stateless; web_search API credentials remain HTTPS-only.
+test configuration, not a shared-login-state guarantee.

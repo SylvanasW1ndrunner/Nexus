@@ -4,7 +4,6 @@ import type {
   ModelContentBlock,
   ModelMessage,
 } from '@dbagent/core-llm';
-import { assertNoSecretMaterial } from '@dbagent/shared';
 
 export type PromptSectionSource =
   | 'runtime'
@@ -178,6 +177,12 @@ export class PromptRuntime {
   }
 }
 
+/** Validates, clones and deeply freezes one semantic Prompt contribution. */
+export function snapshotPromptSection(section: PromptSection): PromptSection {
+  validateSection(section);
+  return freezeSection(section);
+}
+
 function replaceUserRoleSections(sections: readonly PromptSection[]): PromptSection[] {
   const lastUser = [...sections].reverse().find(({ source }) => source === 'user');
   if (lastUser === undefined) return [...sections];
@@ -195,7 +200,7 @@ function validateSection(section: PromptSection): void {
     typeof section.revision !== 'string' || section.revision.trim() === '' ||
     section.revision.length > 512 ||
     !['stable', 'volatile', 'never'].includes(section.cacheability) ||
-    !Array.isArray(section.content) || section.content.length === 0 ||
+    !isArrayValue(section.content) || section.content.length === 0 ||
     !Number.isSafeInteger(section.tokenEstimate) || section.tokenEstimate < 0
   ) {
     throw new PromptRuntimeError('PROMPT_SECTION_INVALID', 'Prompt section is malformed.');
@@ -237,11 +242,6 @@ function validateSemanticBlock(block: ModelContentBlock): void {
     ) {
       throw new PromptRuntimeError('PROMPT_SECTION_INVALID', 'Prompt resource reference is malformed.');
     }
-    try {
-      assertNoSecretMaterial(block);
-    } catch {
-      throw new PromptRuntimeError('PROMPT_SECTION_INVALID', 'Prompt sections cannot embed secrets.');
-    }
     return;
   }
   throw new PromptRuntimeError('PROMPT_SECTION_INVALID', 'Unsupported prompt protocol block.');
@@ -276,6 +276,10 @@ function checkpointMessage(summary: string): ModelMessage {
 
 function cloneBlock(block: ModelContentBlock): ModelContentBlock {
   return deepFreeze(structuredClone(block));
+}
+
+function isArrayValue(value: unknown): boolean {
+  return Array.isArray(value);
 }
 
 function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {

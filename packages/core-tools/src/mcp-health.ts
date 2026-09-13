@@ -38,6 +38,12 @@ export type McpHealthManagerOptions = {
   now?: () => string;
 };
 
+/** Opaque lifecycle snapshot; includes non-public rate/threshold state. */
+export type McpHealthTransactionSnapshot = Readonly<{
+  state: McpServerHealthState | undefined;
+  cpuOverLimitSince: string | undefined;
+}>;
+
 export type McpToolTimeoutOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -105,6 +111,32 @@ export class McpHealthManager {
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
+  capture(serverId: string): McpHealthTransactionSnapshot {
+    const state = this.states.get(serverId);
+    return Object.freeze({
+      state: state === undefined ? undefined : {
+        ...state,
+        warnings: [...state.warnings],
+        ...(state.resource === undefined ? {} : { resource: { ...state.resource } }),
+      },
+      cpuOverLimitSince: this.cpuOverLimitSince.get(serverId),
+    });
+  }
+
+  restore(serverId: string, snapshot: McpHealthTransactionSnapshot): void {
+    if (snapshot.state === undefined) {
+      this.states.delete(serverId);
+    } else {
+      this.states.set(serverId, {
+        ...snapshot.state,
+        warnings: [...snapshot.state.warnings],
+        ...(snapshot.state.resource === undefined ? {} : { resource: { ...snapshot.state.resource } }),
+      });
+    }
+    if (snapshot.cpuOverLimitSince === undefined) this.cpuOverLimitSince.delete(serverId);
+    else this.cpuOverLimitSince.set(serverId, snapshot.cpuOverLimitSince);
+  }
+
   markStarting(serverId: string): McpServerHealthState {
     return this.update(serverId, (state) => ({
       ...state,
@@ -134,6 +166,16 @@ export class McpHealthManager {
       healthy: false,
       lastError: undefined,
       nextRestartAt: undefined,
+    }));
+  }
+
+  recordDiagnostic(serverId: string, message: string): McpServerHealthState {
+    const bounded = message.trim().slice(0, 240);
+    if (!bounded) return this.get(serverId);
+    return this.update(serverId, (state) => ({
+      ...state,
+      lastError: bounded,
+      warnings: [...state.warnings, bounded].slice(-8),
     }));
   }
 

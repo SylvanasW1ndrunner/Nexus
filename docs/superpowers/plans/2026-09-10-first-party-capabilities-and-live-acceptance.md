@@ -18,9 +18,9 @@
 - 不做任何通用 Secret/credential 内容识别、拦截或脱敏。唯一狭义 API 隔离是本轮 BrowserSession Host Port/
   浏览器连接器复用现有浏览器登录态时，产品合同中 Agent 只获得不透明的 browser session/page 引用；Agent-facing
   schema 不接受 Cookie、API Header 或 Authorization，且
-  Cookie/Set-Cookie 不进入 prepared intent、结果或 Journal；这不扫描网页正文、外部命令输出或用户 browser_test
+  浏览器协议和会话中的 Cookie/Set-Cookie 字段和值不进入 prepared intent、结果或 Journal；这不扫描网页正文、外部命令输出或用户 browser_test
   代码输出。外部 Playwright 仅作无登录截图/测试后端或用户维护的测试配置；当前 CLI 无内嵌 Chromium，不保证
-  共享登录态。基础 web_fetch 无状态，web_search API 凭据 HTTPS-only。
+  共享登录态。
 
 ## Task 1: 分离用户文档和开发文档，并冻结本轮产品边界
 
@@ -257,7 +257,7 @@
 
 1. 本轮实现 BrowserSession Host Port/浏览器连接器。v1 连接用户在 SchemaNaut 外启动并登录的本机 Chrome/Edge CDP 会话以复用登录态；后续可以替换为 extension 或 native bridge。
 2. Agent 只获得不透明的 browser session/page 引用和 `browser_navigate`、`browser_read`、`browser_click`、`browser_type_or_interact`、`browser_screenshot`、`browser_test`；允许完成这些操作所需的页面交互。
-3. Cookie、API Header 和 Authorization 不进入 Agent schema，Cookie/Set-Cookie 不进入 prepared intent、结果或 Journal。CLI 不内嵌 Chromium；外部 Playwright 仅作无登录截图/测试回退或用户维护的测试配置，不承担登录态共享。`browser_pdf` 可作为可选导出，而非核心登录会话接口。
+3. Cookie、API Header 和 Authorization 不进入 Agent schema，浏览器协议和会话中的 Cookie/Set-Cookie 字段和值不进入 prepared intent、结果或 Journal。CLI 不内嵌 Chromium；外部 Playwright 仅作无登录截图/测试回退或用户维护的测试配置，不承担登录态共享。`browser_pdf` 可作为可选导出，而非核心登录会话接口。
 4. 浏览器访问声明联网，输出文件声明写入；`browser_test` 是高风险代码执行，且不得把 Playwright 或 notebook 的影响假称为仅限声明路径。不存在可证明浏览器隔离时，不得称其处于 Sandbox。
 5. Documents 按操作使用 pandoc/pdftotext/pdfinfo；实现 metadata、extract、convert，模块允许 degraded。
 6. Data & Notebook 内置有界 JSON/JSONL/CSV profile 与 ipynb inspect；Jupyter 缺失只使 notebook_run unavailable。

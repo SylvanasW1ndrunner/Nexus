@@ -342,7 +342,173 @@ describe('SchemaRagEngine', () => {
       'Schema RAG index is not available for connection: conn_1',
     );
   });
+
+  it('keeps the live slot readable until an asynchronous replacement is fully vectorized', async () => {
+    let releaseEmbedding: ((vectors: number[][]) => void) | undefined;
+    const engine = new SchemaRagEngine({
+      retrievalProfile: embeddingProfile(),
+      embeddingAdapter: {
+        embed: ({ texts }) =>
+          new Promise<number[][]>((resolve) => {
+            releaseEmbedding = () => resolve(texts.map(() => [1, 0]));
+          }),
+      },
+    });
+    engine.index({
+      connectionId: 'atomic',
+      tables: [namedTable('live_before_publish')],
+      retrievalProfile: plainProfile(),
+    });
+
+    const replacing = engine.indexAsync({
+      connectionId: 'atomic',
+      tables: [namedTable('candidate_not_yet_live')],
+    });
+
+    expect(engine.hasTable({ connectionId: 'atomic', schema: 'public', table: 'live_before_publish' }))
+      .toBe(true);
+    expect(engine.hasTable({ connectionId: 'atomic', schema: 'public', table: 'candidate_not_yet_live' }))
+      .toBe(false);
+
+    releaseEmbedding?.([]);
+    await replacing;
+    expect(engine.hasTable({ connectionId: 'atomic', schema: 'public', table: 'candidate_not_yet_live' }))
+      .toBe(true);
+  });
+
+  it('discards a failed asynchronous candidate without rolling back a newer live slot', async () => {
+    let rejectEmbedding: ((error: Error) => void) | undefined;
+    const engine = new SchemaRagEngine({
+      retrievalProfile: embeddingProfile(),
+      embeddingAdapter: {
+        embed: () =>
+          new Promise<number[][]>((_resolve, reject) => {
+            rejectEmbedding = reject;
+          }),
+      },
+    });
+    engine.index({
+      connectionId: 'atomic',
+      tables: [namedTable('stable')],
+      retrievalProfile: plainProfile(),
+    });
+
+    const failing = engine.indexAsync({
+      connectionId: 'atomic',
+      tables: [namedTable('failed_candidate')],
+    });
+    engine.index({
+      connectionId: 'atomic',
+      tables: [namedTable('newer_live')],
+      retrievalProfile: plainProfile(),
+    });
+    rejectEmbedding?.(new Error('embedding failed'));
+
+    await expect(failing).rejects.toThrow('embedding failed');
+    expect(engine.hasTable({ connectionId: 'atomic', schema: 'public', table: 'newer_live' }))
+      .toBe(true);
+    expect(engine.hasTable({ connectionId: 'atomic', schema: 'public', table: 'stable' })).toBe(false);
+  });
+
+  it('isolates published slots from returned and loaded index objects', async () => {
+    const engine = new SchemaRagEngine();
+    const returned = engine.index({ connectionId: 'isolated', tables: [namedTable('live')] });
+    returned.documents.length = 0;
+    returned.graph.clear();
+
+    expect(engine.hasTable({ connectionId: 'isolated', schema: 'public', table: 'live' })).toBe(true);
+
+    const asyncReturned = await engine.indexAsync({
+      connectionId: 'async_isolated',
+      tables: [namedTable('async_live')],
+    });
+    asyncReturned.documents.length = 0;
+    expect(engine.hasTable({ connectionId: 'async_isolated', schema: 'public', table: 'async_live' }))
+      .toBe(true);
+
+    const loaded = engine.index({ connectionId: 'loaded', tables: [namedTable('loaded_live')] });
+    const receiver = new SchemaRagEngine();
+    receiver.loadIndex(loaded);
+    loaded.documents.length = 0;
+    loaded.graph.clear();
+
+    expect(receiver.hasTable({ connectionId: 'loaded', schema: 'public', table: 'loaded_live' })).toBe(true);
+  });
+
+  it('keeps a captured read view on its original slot after replacement', () => {
+    const engine = new SchemaRagEngine();
+    engine.index({ connectionId: 'view', tables: [namedTable('old_table')] });
+    const view = engine.captureReadView('view');
+    engine.index({ connectionId: 'view', tables: [namedTable('new_table')] });
+
+    expect(view.search({ query: 'old_table', limit: 1 })[0]?.document.id).toBe('table:public.old_table');
+    expect(engine.search({ connectionId: 'view', query: 'new_table', limit: 1 })[0]?.document.id)
+      .toBe('table:public.new_table');
+  });
+
+  it('rejects an async candidate that a later synchronous publication supersedes', async () => {
+    let rejectOrResolve: (() => void) | undefined;
+    const engine = new SchemaRagEngine({
+      retrievalProfile: embeddingProfile(),
+      embeddingAdapter: {
+        embed: ({ texts }) => new Promise<number[][]>((resolve) => {
+          rejectOrResolve = () => resolve(texts.map(() => [1, 0]));
+        }),
+      },
+    });
+    const older = engine.indexAsync({ connectionId: 'superseded', tables: [namedTable('old')] });
+    engine.index({
+      connectionId: 'superseded',
+      tables: [namedTable('new')],
+      retrievalProfile: plainProfile(),
+    });
+    rejectOrResolve?.();
+
+    await expect(older).rejects.toMatchObject({ code: 'SCHEMA_RAG_OPERATION_SUPERSEDED' });
+    expect(engine.hasTable({ connectionId: 'superseded', schema: 'public', table: 'new' })).toBe(true);
+  });
+
+  it('requires asynchronous writes for embedding retrieval profiles', () => {
+    const engine = new SchemaRagEngine({ retrievalProfile: embeddingProfile() });
+
+    expect(() => engine.index({ connectionId: 'embedding', tables: [namedTable('must_be_async')] }))
+      .toThrow('requires asynchronous indexing');
+  });
 });
+
+function embeddingProfile() {
+  return {
+    id: 'atomic-embedding',
+    version: 1,
+    backend: { type: 'memory' as const },
+    embedding: {
+      providerInstanceId: 'test',
+      modelId: 'test',
+      dimensions: 2,
+      normalization: 'l2' as const,
+      distanceMetric: 'cosine' as const,
+      requestTemplateVersion: 'v1',
+    },
+  };
+}
+
+function plainProfile() {
+  return {
+    id: 'plain',
+    version: 1,
+    backend: { type: 'memory' as const },
+  };
+}
+
+function namedTable(name: string): TableDetail {
+  return {
+    schema: 'public',
+    name,
+    type: 'table',
+    primaryKey: ['id'],
+    columns: [column('id', 1, 'uuid', false, 'id', true)],
+  };
+}
 
 function indexedEngine(): SchemaRagEngine {
   const engine = new SchemaRagEngine();

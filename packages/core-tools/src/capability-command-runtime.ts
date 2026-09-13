@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { PREPARED_TOOL_INTENT_REVISION, ToolExecutionError, expectedToolError, validatePreparedIntent, type AgentToolPermissionFacts, type InvocationLimits, type PreparedToolIntent, type ToolExecuteContext, type ToolPrepareContext } from '@dbagent/core-agent';
 import type { PortableValue } from '@dbagent/shared';
 import type { ExecutableLaunchDescriptor } from './executable-discovery.js';
-import { ProcessRuntime, ProcessRuntimeError, type PreparedProcessExecution, type ProcessPathTarget } from './process-runtime.js';
+import { ProcessRuntimeError, type PreparedProcessExecution, type ProcessPathTarget, type ProcessRuntime } from './process-runtime.js';
 import type { ProcessRequestedCapabilities } from './sandbox-executor.js';
 import { assertAuthorizedProcessBoundary } from './process-tools.js';
 
@@ -30,8 +30,9 @@ export class CapabilityCommandRuntime {
     for (const key of Object.keys(limits) as Array<keyof InvocationLimits>) if (!Number.isSafeInteger(limits[key]) || limits[key] < 1 || limits[key] > context.limits[key]) throw expectedToolError('invalid_argument', 'Command limits exceed the registered Tool limits.');
     const timeoutMs = input.timeoutMs ?? Math.min(plan.runtimeLimits.defaultMs, plan.runtimeLimits.runMs, Math.max(1, limits.timeoutMs - 10_000));
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > plan.runtimeLimits.runMs || timeoutMs > limits.timeoutMs) throw expectedToolError('invalid_argument', 'Command timeout is invalid.');
-    if (!Array.isArray(input.resourceKeys) || input.resourceKeys.length > 120 || input.resourceKeys.some(key => typeof key !== 'string' || !key || key.length > 4096 || /[\x00-\x1f]/u.test(key))) throw expectedToolError('invalid_argument', 'Command resource identities are invalid.');
-    const readonly = input.permission.access === 'read';
+    if (!isArray(input.resourceKeys) || input.resourceKeys.length > 120 || input.resourceKeys.some(key => typeof key !== 'string' || !key || key.length > 4096 || hasControlCharacter(key))) throw expectedToolError('invalid_argument', 'Command resource identities are invalid.');
+    const readonly = input.permission.recoveryClass === 'read' &&
+      input.requested.externalWrite !== true && input.requested.destructive !== true;
     const facts: AgentToolPermissionFacts = {
       toolName: context.descriptor.flatName, ...input.permission, readonly, ...input.requested,
       unknownRisk: input.requested.unknownRisk || plan.boundary.decision === 'ask-unsandboxed',
@@ -43,7 +44,7 @@ export class CapabilityCommandRuntime {
       input: { plan: plan as unknown as PortableValue, timeoutMs }, targetIdentity: { kind: 'process-exec', plan } as unknown as PortableValue,
       runPolicy: context.runPolicy, generation: context.generation, toolRevision: context.toolRevision, handlerRevision: context.handlerRevision, intentRevision: PREPARED_TOOL_INTENT_REVISION,
       action: { summary: 'Run ' + context.descriptor.flatName }, permission: facts, access: facts.access, recoveryClass: facts.recoveryClass,
-      concurrency: readonly ? 'read' : 'exclusive', resourceKeys: [...new Set(['process-run:' + context.runId, ...input.resourceKeys])], limits,
+      concurrency: input.permission.access === 'read' ? 'read' : 'exclusive', resourceKeys: [...new Set(['process-run:' + context.runId, ...Array.from(input.resourceKeys)])], limits,
     };
     return validatePreparedIntent(intent);
   }
@@ -63,6 +64,14 @@ export class CapabilityCommandRuntime {
       executionBoundary: { decision: plan.boundary.decision, enforcement: plan.boundary.capabilities.filesystem && plan.boundary.capabilities.network && plan.boundary.capabilities.processTree ? 'sandboxed' : 'native', treeStopProof: snapshot.treeStopProof, executorId: plan.boundary.executorId, executorRevision: plan.boundary.executorRevision, boundaryRevision: plan.boundary.boundaryRevision },
     };
   }
+}
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((character) => (character.codePointAt(0) ?? 0) <= 0x1f);
+}
+
+function isArray(value: unknown): boolean {
+  return Array.isArray(value);
 }
 
 async function invoke<T>(operation: () => Promise<T>): Promise<T> {

@@ -4,7 +4,7 @@ import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SOURCE_URL = 'https://models.dev/api.json';
+const SOURCE_URL = 'https://models.dev/catalog.json';
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, '..');
 const outputPath = resolve(
@@ -17,7 +17,7 @@ const outputPath = resolve(
 const temporaryPath = `${outputPath}.tmp`;
 
 const controller = new AbortController();
-const timeout = setTimeout(() => controller.abort(), 30_000);
+const timeout = setTimeout(() => controller.abort(), 90_000);
 timeout.unref?.();
 
 try {
@@ -50,7 +50,7 @@ async function readRemoteCatalog(signal) {
 function inputFileArgument(args) {
   if (args.length === 0) return undefined;
   if (args.length !== 2 || args[0] !== '--input' || !args[1]) {
-    throw new Error('Usage: node scripts/update-model-catalog.mjs [--input path-to-api.json]');
+    throw new Error('Usage: node scripts/update-model-catalog.mjs [--input path-to-catalog.json]');
   }
   return args[1];
 }
@@ -78,29 +78,21 @@ async function fetchCatalog(signal) {
 }
 
 function compactCatalog(source) {
-  if (!isRecord(source)) throw new Error('models.dev response must be an object.');
+  if (!isRecord(source) || !isRecord(source.models) || !isRecord(source.providers)) {
+    throw new Error('models.dev catalog response must contain models and providers objects.');
+  }
+  const baseModels = compactModels(source.models);
   const providers = {};
-  for (const providerId of Object.keys(source).sort()) {
-    const provider = source[providerId];
+  for (const providerId of Object.keys(source.providers).sort()) {
+    const provider = source.providers[providerId];
     if (!isRecord(provider) || !isRecord(provider.models)) continue;
-    const models = {};
-    for (const modelId of Object.keys(provider.models).sort()) {
-      const model = provider.models[modelId];
-      if (!isRecord(model) || typeof model.name !== 'string' || !model.name.trim()) continue;
-      const limits = compactLimits(model.limit);
-      const capabilities = compactCapabilities(model);
-      const cost = compactCost(model.cost);
-      models[modelId] = {
-        name: model.name.trim(),
-        ...(typeof model.family === 'string' && model.family.trim()
-          ? { family: model.family.trim() }
-          : {}),
-        ...(limits === undefined ? {} : { limits }),
-        ...(capabilities === undefined ? {} : { capabilities }),
-        ...(cost === undefined ? {} : { cost }),
+    const models = compactModels(provider.models);
+    if (Object.keys(models).length > 0) {
+      providers[providerId] = {
+        ...(validProviderApi(provider.api) ? { api: provider.api.trim().replace(/\/+$/, '') } : {}),
+        models,
       };
     }
-    if (Object.keys(models).length > 0) providers[providerId] = { models };
   }
   return {
     schemaVersion: 1,
@@ -109,8 +101,30 @@ function compactCatalog(source) {
       url: SOURCE_URL,
       generatedAt: new Date().toISOString(),
     },
+    models: baseModels,
     providers,
   };
+}
+
+function compactModels(source) {
+  const models = {};
+  for (const modelId of Object.keys(source).sort()) {
+    const model = source[modelId];
+    if (!isRecord(model) || typeof model.name !== 'string' || !model.name.trim()) continue;
+    const limits = compactLimits(model.limit);
+    const capabilities = compactCapabilities(model);
+    const cost = compactCost(model.cost);
+    models[modelId] = {
+      name: model.name.trim(),
+      ...(typeof model.family === 'string' && model.family.trim()
+        ? { family: model.family.trim() }
+        : {}),
+      ...(limits === undefined ? {} : { limits }),
+      ...(capabilities === undefined ? {} : { capabilities }),
+      ...(cost === undefined ? {} : { cost }),
+    };
+  }
+  return models;
 }
 
 function compactLimits(value) {
@@ -153,12 +167,28 @@ function nonNegativeFinite(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+function validProviderApi(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function modelCount(snapshot) {
-  return Object.values(snapshot.providers).reduce(
+  return Object.keys(snapshot.models).length + Object.values(snapshot.providers).reduce(
     (count, provider) => count + Object.keys(provider.models).length,
     0,
   );

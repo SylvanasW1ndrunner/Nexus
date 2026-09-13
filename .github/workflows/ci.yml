@@ -11,9 +11,6 @@ on:
 permissions:
   contents: read
 
-env:
-  SCHEMANAUT_PACKAGE_VERIFY_INSTALL_MODE: prefer-offline
-
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -30,6 +27,29 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run ci
+
+  npm-package:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm release:local
+      - name: Upload local npm package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/SchemaNaut-v*/
+          if-no-files-found: error
 
   postgres-integration:
     runs-on: ubuntu-latest
@@ -60,15 +80,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:postgres
-      - name: Verify isolated npm package against PostgreSQL
-        run: pnpm test:npm-package:functional
-        env:
-          SCHEMANAUT_PACKAGE_VERIFY_POSTGRES: '1'
-          SCHEMANAUT_PACKAGE_VERIFY_PG_HOST: 127.0.0.1
-          SCHEMANAUT_PACKAGE_VERIFY_PG_PORT: '5432'
-          SCHEMANAUT_PACKAGE_VERIFY_PG_DATABASE: dbagent_core_db_test
-          SCHEMANAUT_PACKAGE_VERIFY_PG_USER: postgres
-          SCHEMANAUT_PACKAGE_VERIFY_PG_PASSWORD: postgres
       - name: Upload PostgreSQL acceptance evidence
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -93,4 +104,3 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
-      - run: pnpm test:npm-package:functional

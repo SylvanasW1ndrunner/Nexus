@@ -34,7 +34,6 @@ const MODEL_PROTOCOL_CODEC_REGISTRY = new Map<
   [anthropicMessagesCodec.revision, anthropicMessagesCodec],
   [ollamaChatCodec.revision, ollamaChatCodec],
 ]);
-let legacyNormalizedCodec: ModelProtocolCodec | undefined;
 
 export function resolveModelProtocolCodec(
   protocol: string,
@@ -49,27 +48,11 @@ export function resolveModelProtocolCodec(
 
 /** Internal exact-identity gate; package exports prevent consumer deep imports. */
 export function resolveExactModelProtocolCodec(codec: ModelProtocolCodec): ModelProtocolCodec {
-  const registered = codec.protocol === 'legacy-normalized'
-    ? legacyNormalizedCodec
-    : resolveModelProtocolCodec(codec.protocol, codec.revision);
-  if (registered === undefined || registered !== codec) {
+  const registered = resolveModelProtocolCodec(codec.protocol, codec.revision);
+  if (registered !== codec) {
     throw new Error(
       `ModelSession requires the exact registered singleton for ${codec.protocol} at ${codec.revision}.`,
     );
   }
   return registered;
-}
-
-/** Internal one-time edge registration; not reachable through the package root. */
-export function installLegacyNormalizedCodec(codec: ModelProtocolCodec): void {
-  if (
-    legacyNormalizedCodec !== undefined ||
-    codec.protocol !== 'legacy-normalized' ||
-    codec.revision !== 'legacy-normalized@1' ||
-    !Object.isFrozen(codec) ||
-    !Object.isFrozen(Object.getPrototypeOf(codec))
-  ) {
-    throw new Error('The legacy-normalized codec singleton is invalid or already installed.');
-  }
-  legacyNormalizedCodec = codec;
 }

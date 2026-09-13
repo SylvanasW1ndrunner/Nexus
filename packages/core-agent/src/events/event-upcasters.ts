@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { PortableValue } from '@dbagent/shared';
+import type { AgentMode } from '../types.js';
 import type { AgentEvent, AgentEventPayloadMap, AgentEventType } from './agent-event.js';
 import {
   AGENT_EVENT_SCHEMA_REGISTRY,
-  validateAndRedactEventPayload,
+  validateAndSnapshotEventPayload,
 } from './event-schema-registry.js';
 
 export type StoredAgentEvent<T extends AgentEventType = AgentEventType> = Omit<
@@ -23,8 +24,155 @@ export type AgentEventUpcasterRegistry = {
 function currentVersionUpcaster<T extends AgentEventType>(type: T): AgentEventUpcaster<T> {
   return (schemaVersion, payload) => {
     const current = AGENT_EVENT_SCHEMA_REGISTRY[type].schemaVersion;
+    if (schemaVersion === 1 && type === 'run.created') {
+      const legacy = legacyRecord(payload, 'run.created v1 payload');
+      const configuration = legacy.configuration === undefined
+        ? undefined
+        : legacyRecord(legacy.configuration, 'run.created v1 configuration');
+      const roleInstructions = configuration?.roleInstructions;
+      if (roleInstructions !== undefined && typeof roleInstructions !== 'string') {
+        throw new Error('run.created v1 roleInstructions must be a string.');
+      }
+      const withoutRoleInstructions = { ...(configuration ?? {}) };
+      delete withoutRoleInstructions.roleInstructions;
+      return validateAndSnapshotEventPayload(type, {
+        ...legacy,
+        ...(configuration === undefined
+          ? {}
+          : {
+            configuration: {
+              ...withoutRoleInstructions,
+              ...(roleInstructions === undefined || withoutRoleInstructions.rolePrompt !== undefined
+                ? {}
+                : { rolePrompt: { run: { mode: 'replace', content: roleInstructions } } }),
+            },
+          }),
+      });
+    }
+    if (schemaVersion === 1 && type === 'run.resumed') {
+      const legacy = legacyRecord(payload, 'run.resumed v1 payload');
+      legacyExactKeys(legacy, [], ['reason']);
+      return validateAndSnapshotEventPayload(type, {
+        resumeState: 'Preparing',
+        ...(legacy.reason === undefined
+          ? {}
+          : { reason: legacyString(legacy.reason, 'reason') }),
+      });
+    }
+    if (schemaVersion === 1 && type === 'run.limit_reached') {
+      const legacy = legacyRecord(payload, 'run.limit_reached v1 payload');
+      legacyExactKeys(legacy, ['limit'], ['value']);
+      return validateAndSnapshotEventPayload(type, {
+        limit: legacyString(legacy.limit, 'limit'),
+        ...(legacy.value === undefined
+          ? {}
+          : { value: legacyNonNegativeInteger(legacy.value, 'value') }),
+        resumeState: 'Preparing',
+      });
+    }
+    if (schemaVersion === 1 && type === 'run.interrupted') {
+      const legacy = legacyRecord(payload, 'run.interrupted v1 payload');
+      legacyExactKeys(legacy, ['code'], ['detail']);
+      return validateAndSnapshotEventPayload(type, {
+        code: legacyString(legacy.code, 'code'),
+        ...(legacy.detail === undefined ? {} : { detail: legacy.detail }),
+        resumeState: 'Preparing',
+      });
+    }
+    if (schemaVersion === 1 && type === 'context.compaction_started') {
+      const legacy = legacyRecord(payload, 'context.compaction_started v1 payload');
+      const checkpointId = legacyString(legacy.checkpointId, 'checkpointId');
+      return validateAndSnapshotEventPayload(type, {
+        checkpointId,
+        decisionId: checkpointId,
+        reason: 'automatic',
+        coveredSequence: 0,
+      });
+    }
+    if (schemaVersion === 1 && type === 'context.compacted') {
+      const legacy = legacyRecord(payload, 'context.compacted v1 payload');
+      const checkpointId = legacyString(legacy.checkpointId, 'checkpointId');
+      const summaryRef = legacyString(legacy.summaryRef, 'summaryRef');
+      return validateAndSnapshotEventPayload(type, {
+        checkpointId,
+        decisionId: checkpointId,
+        summaryRef,
+        summary: `Legacy context checkpoint: ${summaryRef}`,
+        coveredSequence: legacyNonNegativeInteger(
+          legacy.coveredSequence,
+          'coveredSequence',
+        ),
+        attemptId: `legacy-context-${checkpointId}`,
+      });
+    }
+    if (schemaVersion === 2 && type === 'context.compacted') {
+      return validateAndSnapshotEventPayload(type, payload);
+    }
+    if (schemaVersion === 1 && type === 'context.compaction_failed') {
+      const legacy = legacyRecord(payload, 'context.compaction_failed v1 payload');
+      const checkpointId = legacyString(legacy.checkpointId, 'checkpointId');
+      return validateAndSnapshotEventPayload(type, {
+        checkpointId,
+        decisionId: checkpointId,
+        code: legacyString(legacy.code, 'code'),
+      });
+    }
+    if (schemaVersion === 1 && type === 'usage.recorded') {
+      const legacy = legacyRecord(payload, 'usage.recorded v1 payload');
+      const encoded = JSON.stringify(legacy);
+      return validateAndSnapshotEventPayload(type, {
+        scope: legacyEnum(
+          legacy.scope,
+          ['run', 'turn', 'attempt', 'tool'] as const,
+          'usage scope',
+        ),
+        usageId: `legacy-usage-${createHash('sha256').update(encoded).digest('hex')}`,
+        purpose: legacy.scope === 'tool' ? 'tool' : 'agent-turn',
+        billingMode: 'byok',
+        inputTokens: legacyNonNegativeInteger(legacy.inputTokens, 'inputTokens'),
+        outputTokens: legacyNonNegativeInteger(legacy.outputTokens, 'outputTokens'),
+        totalTokens: legacyNonNegativeInteger(legacy.totalTokens, 'totalTokens'),
+      });
+    }
+    if (schemaVersion === 2 && type === 'usage.recorded') {
+      const legacy = legacyRecord(payload, 'usage.recorded v2 payload');
+      return validateAndSnapshotEventPayload(type, { ...legacy, billingMode: 'byok' });
+    }
+    if (schemaVersion === 1 && type === 'runtime.command_applied') {
+      const legacy = legacyRecord(payload, 'runtime.command_applied v1 payload');
+      legacyExactKeys(legacy, [
+        'commandId', 'kind', 'origin', 'expectedRunRevision', 'fencingToken',
+        'projectionRevision', 'effect',
+      ]);
+      const kind = legacyEnum(legacy.kind, [
+        'plan.create', 'plan.update', 'skill.activate',
+        'child.start', 'child.list', 'child.wait', 'child.steer', 'child.cancel',
+      ] as const, 'Runtime Command kind');
+      const effect = legacyRecord(legacy.effect ?? null, 'Runtime Command effect');
+      let upgradedEffect: PortableValue = effect;
+      if (kind === 'child.start') {
+        legacyExactKeys(effect, ['childRunId', 'task', 'context', 'status']);
+        upgradedEffect = { ...effect, revision: 1 };
+      } else if (kind === 'child.steer') {
+        legacyExactKeys(effect, ['childRunId', 'input']);
+        // Zero is a durable legacy sentinel: replay derives the next child revision.
+        upgradedEffect = { ...effect, revision: 0 };
+      } else if (kind === 'child.cancel') {
+        legacyExactKeys(effect, ['childRunId', 'reason']);
+        upgradedEffect = { ...effect, revision: 0 };
+      } else if (kind === 'skill.activate') {
+        legacyExactKeys(effect, ['ids']);
+        const ids = legacyStringArray(effect.ids, 'Skill activation ids');
+        upgradedEffect = { activations: ids.map(legacySkillActivation) };
+      }
+      return validateAndSnapshotEventPayload(type, {
+        ...legacy,
+        kind,
+        effect: upgradedEffect,
+      });
+    }
     if (type === 'legacy.imported' && schemaVersion === 1) {
-      return validateAndRedactEventPayload(type, upcastLegacyImportedV1(payload));
+      return validateAndSnapshotEventPayload(type, upcastLegacyImportedV1(payload));
     }
     if (type === 'artifact.created' && schemaVersion === 1) {
       if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -41,7 +189,7 @@ function currentVersionUpcaster<T extends AgentEventType>(type: T): AgentEventUp
       const legacyDigest = createHash('sha256')
         .update(`legacy-artifact\0${legacy.artifactId}`)
         .digest('hex');
-      return validateAndRedactEventPayload(type, {
+      return validateAndSnapshotEventPayload(type, {
         artifactId: `artifact_${legacyDigest}`,
         handle: `legacy-agent-artifact:${legacyDigest}`,
         checksum: null,
@@ -57,13 +205,64 @@ function currentVersionUpcaster<T extends AgentEventType>(type: T): AgentEventUp
       }
       const legacy = payload as Record<string, PortableValue>;
       const deliveryStatus = legacy.deliveryStatus;
-      if (!['delivered', 'pending', 'failed'].includes(String(deliveryStatus))) {
+      if (
+        deliveryStatus !== 'delivered' &&
+        deliveryStatus !== 'pending' &&
+        deliveryStatus !== 'failed'
+      ) {
         throw new Error('CORRUPT_EVENT:run.completed v1 delivery status is invalid.');
       }
-      return validateAndRedactEventPayload(type, {
+      return validateAndSnapshotEventPayload(type, {
         finalContentRef: legacy.finalContentRef,
         deliveryStatus: deliveryStatus === 'delivered' ? 'not-required' : 'unverified',
         evidenceRefs: legacy.evidenceRefs,
+      });
+    }
+    if (type === 'delivery.decided' && schemaVersion === 1) {
+      const legacy = legacyRecord(payload, 'delivery.decided v1 payload');
+      legacyExactKeys(legacy, [
+        'evidenceRevision', 'status', 'outcome', 'evidenceRefs',
+      ], ['verifierId', 'verifierRevision', 'reason']);
+      const outcome = legacyEnum(
+        legacy.outcome,
+        ['accepted', 'revision-requested', 'failed'] as const,
+        'delivery outcome',
+      );
+      const reason = legacy.reason === undefined
+        ? undefined
+        : legacyString(legacy.reason, 'delivery reason');
+      return validateAndSnapshotEventPayload(type, {
+        evidenceRevision: legacyNonNegativeInteger(
+          legacy.evidenceRevision,
+          'delivery evidenceRevision',
+        ),
+        status: legacyEnum(
+          legacy.status,
+          ['not-required', 'verified', 'unverified'] as const,
+          'delivery status',
+        ),
+        outcome,
+        ...(legacy.verifierId === undefined
+          ? {}
+          : { verifierId: legacyString(legacy.verifierId, 'delivery verifierId') }),
+        ...(legacy.verifierRevision === undefined
+          ? {}
+          : {
+              verifierRevision: legacyString(
+                legacy.verifierRevision,
+                'delivery verifierRevision',
+              ),
+            }),
+        evidenceRefs: legacyStringArray(legacy.evidenceRefs, 'delivery evidenceRefs'),
+        ...(reason === undefined ? {} : { reason }),
+        ...(outcome === 'revision-requested'
+          ? {
+              observation: {
+                code: 'DELIVERY_REVISION_REQUIRED_LEGACY',
+                ...(reason === undefined ? {} : { detail: reason }),
+              },
+            }
+          : {}),
       });
     }
     if (type === 'artifact.created' && schemaVersion === 2) {
@@ -75,18 +274,43 @@ function currentVersionUpcaster<T extends AgentEventType>(type: T): AgentEventUp
         const digest = prior.artifactId.startsWith('artifact_')
           ? prior.artifactId.slice('artifact_'.length)
           : createHash('sha256').update(`legacy-artifact\0${prior.artifactId}`).digest('hex');
-        return validateAndRedactEventPayload(type, {
+        return validateAndSnapshotEventPayload(type, {
           ...prior,
           artifactId: `artifact_${digest}`,
           handle: `legacy-agent-artifact:${digest}`,
         });
       }
-      return validateAndRedactEventPayload(type, prior);
+      return validateAndSnapshotEventPayload(type, prior);
     }
     if (schemaVersion !== current) {
       throw new Error(`UNSUPPORTED_EVENT_SCHEMA:${type}:${schemaVersion}`);
     }
-    return validateAndRedactEventPayload(type, payload);
+    return validateAndSnapshotEventPayload(type, payload);
+  };
+}
+
+/** Old id-only activations cannot be made exact; preserve an explicit durable
+ * placeholder so recovery produces an integrity error instead of omitting a
+ * promised Skill body. New facts always carry the complete cache reference. */
+function legacySkillActivation(id: string): PortableValue {
+  const match = /^skill:(system|user|project|session):([^:]+):([a-f0-9]{64})$/u.exec(id);
+  const scope = match?.[1] ?? 'system';
+  const name = match?.[2] ?? 'legacy-skill';
+  const revisionId = match?.[3] ?? createHash('sha256').update(id).digest('hex');
+  return {
+    id,
+    revision: {
+      schemaVersion: 1,
+      revisionId,
+      scope,
+      sourceId: 'legacy-id-only-activation',
+      sourcePath: 'legacy-id-only-activation',
+      bundleRoot: 'legacy-id-only-activation',
+      sourceOrder: 0,
+      name,
+      contentDigest: revisionId,
+      bundleDigest: revisionId,
+    },
   };
 }
 
@@ -311,6 +535,11 @@ function legacyNullableString(value: PortableValue | undefined, label: string): 
   return legacyString(value, label);
 }
 
+function legacyStringArray(value: PortableValue | undefined, label: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`CORRUPT_EVENT:${label} must be an array.`);
+  return value.map((item, index) => legacyString(item, `${label}[${index}]`));
+}
+
 function legacyEnum<const T extends readonly string[]>(
   value: PortableValue | undefined,
   allowed: T,
@@ -343,8 +572,10 @@ function legacyFiniteNumber(value: PortableValue | undefined, label: string): nu
   return value;
 }
 
-function legacyMode(value: PortableValue | undefined): 'read' | 'edit' | 'full' {
-  return legacyEnum(value, ['read', 'edit', 'full'] as const, 'session mode');
+function legacyMode(value: PortableValue | undefined): AgentMode {
+  if (value === 'default' || value === 'auto' || value === 'full-access') return value;
+  const legacy = legacyEnum(value, ['read', 'edit', 'full'] as const, 'session mode');
+  return legacy === 'full' ? 'full-access' : 'default';
 }
 
 function legacySubagentStatus(

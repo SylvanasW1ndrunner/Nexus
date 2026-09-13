@@ -36,6 +36,11 @@ describe('Agent run state machine', () => {
     },
     {
       from: { state: 'ReceivingModel' },
+      signal: { type: 'model-attempt-discarded' },
+      to: { state: 'CallingModel' },
+    },
+    {
+      from: { state: 'ReceivingModel' },
       signal: { type: 'model-attempt-committed', hasActions: true },
       to: { state: 'ResolvingActions' },
     },
@@ -122,12 +127,17 @@ describe('Agent run state machine', () => {
   });
 
   it('rejects an impossible transition with one typed projection error', () => {
-    expect(() => transitionAgentRunState(
+    expectStateMachineError(() => transitionAgentRunState(
       { state: 'Completed' },
       { type: 'context-ready' },
-    )).toThrowError(expect.objectContaining<Partial<AgentStateMachineError>>({
-      code: 'RUN_PROJECTION_INVALID',
-    }));
+    ), 'RUN_PROJECTION_INVALID');
+  });
+
+  it('accepts Attempt recovery only from ReceivingModel', () => {
+    expectStateMachineError(() => transitionAgentRunState(
+      { state: 'CallingModel' },
+      { type: 'model-attempt-discarded' },
+    ), 'RUN_PROJECTION_INVALID');
   });
 
   it('does not complete while an external outcome is unresolved', () => {
@@ -153,18 +163,18 @@ describe('Agent run state machine', () => {
       finalContentRef: 'artifact:final',
       delivery: { status: 'verified' as const, evidenceRevision: 7 },
     };
-    expect(() => deriveAgentRunState({
+    expectStateMachineError(() => deriveAgentRunState({
       ...base,
       openAttempt: true,
       committedInvocationCount: 0,
       observationCount: 0,
-    })).toThrowError(expect.objectContaining({ code: 'RUN_PROJECTION_INVALID' }));
-    expect(() => deriveAgentRunState({
+    }), 'RUN_PROJECTION_INVALID');
+    expectStateMachineError(() => deriveAgentRunState({
       ...base,
       openAttempt: false,
       committedInvocationCount: 2,
       observationCount: 1,
-    })).toThrowError(expect.objectContaining({ code: 'RUN_PROJECTION_INVALID' }));
+    }), 'RUN_PROJECTION_INVALID');
   });
 
   it('completes only from committed final content and the matching delivery decision', () => {
@@ -181,3 +191,19 @@ describe('Agent run state machine', () => {
     })).toEqual({ state: 'Completed' });
   });
 });
+
+function expectStateMachineError(
+  action: () => unknown,
+  code: AgentStateMachineError['code'],
+): void {
+  let caught: unknown;
+  try {
+    action();
+  } catch (error) {
+    caught = error;
+  }
+  if (!(caught instanceof AgentStateMachineError)) {
+    throw new Error('Expected AgentStateMachineError.');
+  }
+  expect(caught.code).toBe(code);
+}

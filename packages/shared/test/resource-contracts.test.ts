@@ -53,13 +53,12 @@ describe('resource public contracts', () => {
     ).not.toThrow();
   });
 
-  it('rejects invalid versions, chronology, facts and secret attributes', () => {
+  it('rejects invalid versions, chronology and facts', () => {
     const invalid = [
       resource({ version: 0 }),
       resource({ updatedAt: '2026-07-22T23:59:59.000Z' }),
       resource({ facts: { owner: [] } }),
       resource({ facts: { owner: [{ value: 'x', source, confidence: 2 }] } }),
-      resource({ attributes: { password: 'do-not-return' } }),
     ];
     invalid.forEach((item) => {
       expect(() => assertResourceDescriptor(item)).toThrowError(
@@ -142,7 +141,7 @@ describe('resource public contracts', () => {
     ).toThrowError(ContractValidationError);
   });
 
-  it('rejects secret material in snapshot metadata and events', () => {
+  it('accepts arbitrary portable snapshot metadata and event attributes', () => {
     const baseSnapshot = {
       contractVersion: '1.0',
       createdAt: time,
@@ -154,20 +153,17 @@ describe('resource public contracts', () => {
       lastEventSequence: 0,
     };
 
-    expect(() =>
-      assertResourceRegistrySnapshot({
-        ...baseSnapshot,
-        apiKey: 'should-never-be-persisted',
-      }),
-    ).toThrowError(ContractValidationError);
-    expect(() =>
-      assertResourceRegistrySnapshot({
+    expect(() => assertResourceRegistrySnapshot({
+      ...baseSnapshot,
+      apiKey: 'should-never-be-persisted',
+    })).not.toThrow();
+    expect(() => assertResourceRegistrySnapshot({
         ...baseSnapshot,
         events: [
           {
             id: 'event-1',
             sequence: 1,
-            type: 'resource-upserted',
+            type: 'resource-updated',
             occurredAt: time,
             source,
             resourceId: 'resource-1',
@@ -175,8 +171,7 @@ describe('resource public contracts', () => {
           },
         ],
         lastEventSequence: 1,
-      }),
-    ).toThrowError(ContractValidationError);
+      })).not.toThrow();
   });
 });
 

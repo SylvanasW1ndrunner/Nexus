@@ -1,123 +1,98 @@
-import { describe, expect, it, vi } from 'vitest';
-import {
-  ToolRegistry,
-  createAgentToolResultEnvelope,
-  readAgentToolResultEnvelope,
-} from '../src/index.js';
+import { describe, expect, it } from 'vitest';
+import { BASE_TOOL_MANIFEST, ToolRegistry, overlayToolCatalogSnapshot } from '../src/index.js';
+import { normalizeAgentToolResult } from '../src/tool-result.js';
+import { invocationContribution } from './fixtures/invocation-contribution.js';
 
 describe('tool catalog contract', () => {
-  it('separates structured descriptors from executable runtimes and versions every mutation', async () => {
+  it('publishes the immutable 14-Tool Runtime baseline in consumption order', () => {
+    expect(BASE_TOOL_MANIFEST).toEqual([
+      { name: 'ask_user', schemaRevision: 'ask_user.v1' },
+      { name: 'tool_search', schemaRevision: 'tool_search.v1' },
+      { name: 'result_read', schemaRevision: 'result_read.v1' },
+      { name: 'result_materialize', schemaRevision: 'result_materialize.v1' },
+      { name: 'result_save', schemaRevision: 'result_save.v1' },
+      { name: 'skill', schemaRevision: 'skill.v1' },
+      { name: 'workspace_list', schemaRevision: 'workspace_list.v1' },
+      { name: 'workspace_read', schemaRevision: 'workspace_read.v1' },
+      { name: 'workspace_search', schemaRevision: 'workspace_search.v1' },
+      { name: 'workspace_apply_patch', schemaRevision: 'workspace_apply_patch.v1' },
+      { name: 'process_exec', schemaRevision: 'process_exec.v1' },
+      { name: 'process_control', schemaRevision: 'process_control.v1' },
+      { name: 'web_search', schemaRevision: 'web_search.v1' },
+      { name: 'web_fetch', schemaRevision: 'web_fetch.v1' },
+    ]);
+  });
+
+  it('keeps Run-private Tool overlays isolated without mutating the shared catalog', () => {
     const registry = new ToolRegistry();
-    const onChange = vi.fn();
-    const unsubscribe = registry.subscribe(onChange);
+    const base = registry.captureSnapshot();
+    const first = overlayToolCatalogSnapshot(base, invocationContribution('run_skill', { marker: 'first' }, {
+      exposure: 'direct', toolRevision: 'run_skill@1', handlerRevision: 'run-skill-first@1',
+    }));
+    const secondBase = registry.captureSnapshot();
+    const second = overlayToolCatalogSnapshot(secondBase, invocationContribution('run_skill', { marker: 'second' }, {
+      exposure: 'direct', toolRevision: 'run_skill@1', handlerRevision: 'run-skill-second@1',
+    }));
+    try {
+      expect(registry.listDescriptors()).toEqual([]);
+      expect(first.get('run_skill')?.descriptor.handlerRevision).toBe('run-skill-first@1');
+      expect(second.get('run_skill')?.descriptor.handlerRevision).toBe('run-skill-second@1');
+    } finally {
+      first.release();
+      second.release();
+    }
+  });
 
-    registry.register(
-      {
-        namespace: 'postgres.analytics',
-        name: 'query_events',
-        title: '查询事件',
-        description: 'Query event rows with filters',
-        aliases: ['事件查询', 'filter events'],
-        tags: ['database', 'analytics'],
-        inputSchema: {
-          type: 'object',
-          properties: {
-            eventType: { type: 'string', description: '事件类型 event type' },
-          },
-        },
-        outputSchema: { type: 'object' },
-        dangerLevel: 'safe',
-        readonly: true,
-        exposure: 'deferred',
-        source: 'database',
-      },
-      (args) => ({ eventType: args.eventType }),
+  it('separates immutable descriptors from executable runtimes and versions every mutation', () => {
+    const registry = new ToolRegistry();
+    registry.registerInvocation(
+      invocationContribution('query_events', { eventType: 'page_view' }, {
+        exposure: 'deferred', toolRevision: 'query_events@1', handlerRevision: 'query-events-handler@1',
+      }).definition,
+      invocationContribution('query_events', { eventType: 'page_view' }, {
+        exposure: 'deferred', toolRevision: 'query_events@1', handlerRevision: 'query-events-handler@1',
+      }).runtime,
     );
-
-    expect(registry.catalogRevision).toBe(1);
-    expect(registry.listDescriptors()).toHaveLength(1);
-    expect(registry.listDescriptors()[0]).toMatchObject({
-      id: { namespace: 'postgres.analytics', name: 'query_events' },
-      flatName: 'query_events',
-      title: '查询事件',
-      aliases: ['事件查询', 'filter events'],
-      tags: ['database', 'analytics'],
-      exposure: 'deferred',
-      execution: { concurrency: 'read' },
+    const descriptor = registry.get('query_events')?.descriptor;
+    expect(descriptor).toMatchObject({
+      flatName: 'query_events', exposure: 'deferred', access: 'read', recoveryClass: 'read',
+      toolRevision: 'query_events@1', handlerRevision: 'query-events-handler@1',
+      execution: { concurrency: 'read', timeoutMs: 1_000 },
     });
-    expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({ revision: 1, kind: 'registered', toolName: 'query_events' }),
-    );
-
-    const runtime = registry.getRuntime({ namespace: 'postgres.analytics', name: 'query_events' });
-    expect(runtime).toBeDefined();
-    expect(
-      await runtime?.handler(
-        { eventType: 'page_view' },
-        { session: minimalSession('catalog-session') },
-      ),
-    ).toEqual({ eventType: 'page_view' });
-
     expect(registry.unregister('query_events')).toBe(true);
     expect(registry.catalogRevision).toBe(2);
-    expect(onChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ revision: 2, kind: 'unregistered', toolName: 'query_events' }),
-    );
-
-    unsubscribe();
   });
 
-  it('keeps duplicate registration and missing removal from producing false catalog revisions', () => {
-    const registry = new ToolRegistry();
-    registry.register(toolDefinition('one'), () => undefined);
-
-    expect(() => registry.register(toolDefinition('one'), () => undefined)).toThrow(
-      'Tool already registered: one',
-    );
-    expect(registry.unregister('missing')).toBe(false);
-    expect(registry.catalogRevision).toBe(1);
+  it('rejects the removed private envelope at the Runtime result boundary', () => {
+    expect(() => normalizeAgentToolResult({
+      type: 'schemanaut.agent-tool-result.v1', modelProjection: { rows: [] }, durableSummary: { rowCount: 0 },
+    }, {
+      outputSchema: { type: 'object' },
+      limits: { timeoutMs: 1_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+      provenance: {
+        issuer: 'runtime', hostId: 'host', sessionId: 'session', runId: 'run',
+        invocationId: 'invocation', toolName: 'query_events', toolRevision: 'query_events@1',
+        handlerRevision: 'query-events-handler@1', intentRevision: 'prepared-tool-intent.v1',
+        source: 'fixture', generation: 'fixture@1',
+      },
+    })).toThrow(/result/i);
   });
 
-  it('carries independent model, user, durable and audit projections without merging them', () => {
-    const result = createAgentToolResultEnvelope({
-      modelProjection: { rows: [{ id: 1 }] },
-      userProjection: { previewRows: [{ id: 1 }, { id: 2 }], hasMore: true },
-      durableSummary: { rowCount: 20_000 },
-      auditEvidence: { status: 'success', durationMs: 13, resultType: 'tabular' },
-      completionEvidence: { kind: 'database-result', deliveryReady: true, rowCount: 20_000 },
+  it('fits an automatic Artifact observation inside the minimum projection budget', () => {
+    const normalized = normalizeAgentToolResult({
+      status: 'ok', summary: 'large result', output: 'x'.repeat(70_000),
+    }, {
+      outputSchema: { type: 'object' },
+      limits: { timeoutMs: 1_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+      projectionBudget: { maxTokens: 1_024, estimateTokens: text => Buffer.byteLength(text, 'utf8') },
+      provenance: {
+        issuer: 'runtime', hostId: 'host', sessionId: 'session', runId: 'run',
+        invocationId: 'invocation', toolName: 'query_events', toolRevision: 'query_events@1',
+        handlerRevision: 'query-events-handler@1', intentRevision: 'prepared-tool-intent.v1',
+        source: 'fixture', generation: 'fixture@1',
+      },
     });
-
-    const projections = readAgentToolResultEnvelope(result);
-    expect(projections.modelProjection).toEqual({ rows: [{ id: 1 }] });
-    expect(projections.userProjection).toEqual({
-      previewRows: [{ id: 1 }, { id: 2 }],
-      hasMore: true,
-    });
-    expect(projections.durableSummary).toEqual({ rowCount: 20_000 });
-    expect(projections.auditEvidence).toEqual({
-      status: 'success',
-      durationMs: 13,
-      resultType: 'tabular',
-    });
+    expect(normalized.artifactBytes?.byteLength).toBeGreaterThan(65_536);
+    expect(Buffer.byteLength(normalized.preview, 'utf8')).toBeLessThan(1_024);
   });
 });
-
-function toolDefinition(name: string) {
-  return {
-    name,
-    description: name,
-    inputSchema: { type: 'object' },
-    dangerLevel: 'safe' as const,
-  };
-}
-
-function minimalSession(id: string) {
-  return {
-    id,
-    title: id,
-    mode: 'read' as const,
-    messages: [],
-    tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-    aborted: false,
-  };
-}

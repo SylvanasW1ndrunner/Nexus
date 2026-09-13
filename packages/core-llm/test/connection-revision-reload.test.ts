@@ -58,7 +58,6 @@ describe('opaque connection revision reload compatibility', () => {
     expect(rotated!.connectionConfigurationRevision)
       .toBe(original!.connectionConfigurationRevision);
     expect(rotated!.credentialRevision).not.toBe(original!.credentialRevision);
-    expect(rotated!.credentialScope).toBe(rotated!.credentialRevision);
   });
 
   it('gives each explicit revision priority while reusing the omitted unchanged revision', async () => {

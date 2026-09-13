@@ -66,7 +66,7 @@ describe('ModelSession', () => {
     expect(client.requests[0]?.wireRequest).toMatchObject({
       model: 'test-model',
       temperature: 0.25,
-      max_completion_tokens: 128,
+      max_tokens: 128,
       stop: ['END'],
     });
   });

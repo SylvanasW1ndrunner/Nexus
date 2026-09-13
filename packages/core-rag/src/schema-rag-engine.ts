@@ -40,16 +40,41 @@ export type SchemaRagEngineOptions = {
   rerankAdapter?: SchemaRagRerankAdapter;
 };
 
-export type SchemaRagEngineCheckpoint = {
+export class SchemaRagOperationSupersededError extends Error {
+  readonly code = 'SCHEMA_RAG_OPERATION_SUPERSEDED';
+
+  constructor(readonly connectionId: string) {
+    super(`Schema RAG indexing operation was superseded for connection: ${connectionId}`);
+    this.name = 'SchemaRagOperationSupersededError';
+  }
+}
+
+export type SchemaRagReadView = Readonly<{
   connectionId: string;
-  index?: SchemaRagIndex;
-  legacyTables?: NonNullable<SchemaRagIndexInput['tables']>;
+  getCatalog(): KnowledgeCatalog;
+  getIndexManifest(): NonNullable<SchemaRagIndex['manifest']>;
+  listResources(input: Omit<Parameters<SchemaRagEngine['listResources']>[0], 'connectionId'>): KnowledgeCatalogNode[];
+  getResource(input: Omit<Parameters<SchemaRagEngine['getResource']>[0], 'connectionId'>): ReturnType<SchemaRagEngine['getResource']>;
+  listTables(input: Omit<SchemaRagListTablesRequest, 'connectionId'>): SchemaRagTableSummary[];
+  describeTable(input: Omit<SchemaRagTableRef, 'connectionId'>): SchemaRagTableDescription;
+  getRelations(input: Omit<SchemaRagTableRef, 'connectionId'>): SchemaRagRelationsResult;
+  search(input: Omit<SchemaRagSearchRequest, 'connectionId'>): SchemaRagSearchResult[];
+  searchAsync(input: Omit<SchemaRagSearchRequest, 'connectionId'>): Promise<SchemaRagSearchResult[]>;
+  buildContext(input: Omit<SchemaRagContextRequest, 'connectionId'>): SchemaRagContext;
+  buildContextAsync(input: Omit<SchemaRagContextRequest, 'connectionId'>): Promise<SchemaRagContext>;
+}>;
+
+type SchemaRagSlot = {
+  index: SchemaRagIndex;
+  profile: SchemaRagRetrievalProfile;
+  legacyTables?: Map<string, NonNullable<SchemaRagIndexInput['tables']>[number]>;
+  revision: number;
 };
 
 export class SchemaRagEngine {
-  private readonly indexes = new Map<string, SchemaRagIndex>();
-  private readonly legacyTables = new Map<string, Map<string, NonNullable<SchemaRagIndexInput['tables']>[number]>>();
-  private readonly profiles = new Map<string, SchemaRagRetrievalProfile>();
+  /** One immutable-after-publication read slot per connection. */
+  private readonly slots = new Map<string, SchemaRagSlot>();
+  private readonly epochs = new Map<string, number>();
   private readonly defaultProfile: SchemaRagRetrievalProfile;
   private readonly embeddingAdapter: SchemaRagEmbeddingAdapter | undefined;
   private readonly rerankAdapter: SchemaRagRerankAdapter | undefined;
@@ -63,6 +88,76 @@ export class SchemaRagEngine {
   }
 
   index(input: SchemaRagIndexInput): SchemaRagIndex {
+    this.assertSynchronousWriteAllowed(input.retrievalProfile);
+    const epoch = this.reserveEpoch(input.connectionId);
+    const candidate = this.buildCandidate(input);
+    return this.publish(input.connectionId, epoch, candidate);
+  }
+
+  async indexAsync(input: SchemaRagIndexInput): Promise<SchemaRagIndex> {
+    const epoch = this.reserveEpoch(input.connectionId);
+    const candidate = this.buildCandidate(input);
+    await this.buildVectors(candidate.index, candidate.profile);
+    if (this.isCurrentEpoch(input.connectionId, epoch)) {
+      return this.publish(input.connectionId, epoch, candidate);
+    }
+    throw new SchemaRagOperationSupersededError(input.connectionId);
+  }
+
+  upsertTables(input: SchemaRagIndexInput): SchemaRagIndex {
+    if ((input.tables?.length ?? 0) === 0) return this.requireIndex(input.connectionId);
+    const current = this.slots.get(input.connectionId);
+    if (!current) return this.index(input);
+    this.assertSynchronousWriteAllowed(input.retrievalProfile ?? current.profile);
+    if (!current.legacyTables) {
+      throw new Error(
+        'Incremental TableDetail updates require an index originally built from TableDetail input.',
+      );
+    }
+    const tables = new Map(current.legacyTables);
+    for (const table of input.tables ?? []) {
+      tables.set(tableDocumentId(table.schema, table.name), structuredClone(table));
+    }
+    const epoch = this.reserveEpoch(input.connectionId);
+    const candidate = this.buildCandidate({
+      connectionId: input.connectionId,
+      tables: [...tables.values()],
+      glossary: input.glossary ?? current.index.glossary,
+      indexedAt: input.indexedAt ?? current.index.indexedAt,
+      retrievalProfile: input.retrievalProfile ?? current.profile,
+    });
+    return this.publish(input.connectionId, epoch, candidate);
+  }
+
+  async upsertTablesAsync(input: SchemaRagIndexInput): Promise<SchemaRagIndex> {
+    if ((input.tables?.length ?? 0) === 0) return this.requireIndex(input.connectionId);
+    const current = this.slots.get(input.connectionId);
+    if (!current) return await this.indexAsync(input);
+    if (!current.legacyTables) {
+      throw new Error(
+        'Incremental TableDetail updates require an index originally built from TableDetail input.',
+      );
+    }
+    const tables = new Map(current.legacyTables);
+    for (const table of input.tables ?? []) {
+      tables.set(tableDocumentId(table.schema, table.name), structuredClone(table));
+    }
+    const epoch = this.reserveEpoch(input.connectionId);
+    const candidate = this.buildCandidate({
+      connectionId: input.connectionId,
+      tables: [...tables.values()],
+      glossary: input.glossary ?? current.index.glossary,
+      indexedAt: input.indexedAt ?? current.index.indexedAt,
+      retrievalProfile: input.retrievalProfile ?? current.profile,
+    });
+    await this.buildVectors(candidate.index, candidate.profile);
+    if (this.isCurrentEpoch(input.connectionId, epoch)) {
+      return this.publish(input.connectionId, epoch, candidate);
+    }
+    throw new SchemaRagOperationSupersededError(input.connectionId);
+  }
+
+  private buildCandidate(input: SchemaRagIndexInput): Omit<SchemaRagSlot, 'revision'> {
     const indexedAt = input.indexedAt ?? new Date().toISOString();
     const catalog = input.resources
       ? buildKnowledgeCatalog({
@@ -104,119 +199,170 @@ export class SchemaRagEngine {
       retrievalProfile,
       indexedAt,
     };
-    if (input.tables) {
-      this.legacyTables.set(
-        input.connectionId,
-        new Map(
-          input.tables.map((table) => [
-            tableDocumentId(table.schema, table.name),
-            structuredClone(table),
-          ]),
-        ),
-      );
-    } else {
-      this.legacyTables.delete(input.connectionId);
-    }
-    this.indexes.set(input.connectionId, index);
-    this.profiles.set(input.connectionId, retrievalProfile);
-    return index;
-  }
-
-  async indexAsync(input: SchemaRagIndexInput): Promise<SchemaRagIndex> {
-    const checkpoint = this.createCheckpoint(input.connectionId);
-    try {
-      const index = this.index(input);
-      return await this.buildVectors(index);
-    } catch (error) {
-      this.restoreCheckpoint(checkpoint);
-      throw error;
-    }
-  }
-
-  upsertTables(input: SchemaRagIndexInput): SchemaRagIndex {
-    if ((input.tables?.length ?? 0) === 0) return this.requireIndex(input.connectionId);
-    const existing = this.indexes.get(input.connectionId);
-    if (!existing) return this.index(input);
-    const tables = this.legacyTables.get(input.connectionId);
-    if (!tables) {
-      throw new Error(
-        'Incremental TableDetail updates require an index originally built from TableDetail input.',
-      );
-    }
-    for (const table of input.tables ?? []) {
-      tables.set(tableDocumentId(table.schema, table.name), structuredClone(table));
-    }
-    return this.index({
-      connectionId: input.connectionId,
-      tables: [...tables.values()],
-      glossary: input.glossary ?? existing.glossary,
-      indexedAt: input.indexedAt ?? existing.indexedAt,
-      retrievalProfile: input.retrievalProfile ?? existing.retrievalProfile ?? this.defaultProfile,
-    });
-  }
-
-  async upsertTablesAsync(input: SchemaRagIndexInput): Promise<SchemaRagIndex> {
-    const checkpoint = this.createCheckpoint(input.connectionId);
-    try {
-      const index = this.upsertTables(input);
-      if ((input.tables?.length ?? 0) === 0) return index;
-      return await this.buildVectors(index);
-    } catch (error) {
-      this.restoreCheckpoint(checkpoint);
-      throw error;
-    }
+    return {
+      index,
+      profile: retrievalProfile,
+      ...(input.tables === undefined
+        ? {}
+        : {
+            legacyTables: new Map(
+              input.tables.map((table) => [
+                tableDocumentId(table.schema, table.name),
+                structuredClone(table),
+              ]),
+            ),
+          }),
+    };
   }
 
   loadIndex(index: SchemaRagIndex): SchemaRagIndex {
     assertRestoredIndex(index);
-    this.indexes.set(index.connectionId, index);
-    this.profiles.set(
-      index.connectionId,
-      normalizeRetrievalProfile(index.retrievalProfile ?? this.defaultProfile),
-    );
-    return index;
-  }
-
-  createCheckpoint(connectionId: string): SchemaRagEngineCheckpoint {
-    const index = this.indexes.get(connectionId);
-    const legacyTables = this.legacyTables.get(connectionId);
-    return {
-      connectionId,
-      ...(index === undefined ? {} : { index: structuredClone(index) }),
-      ...(legacyTables === undefined
-        ? {}
-        : { legacyTables: structuredClone([...legacyTables.values()]) }),
-    };
-  }
-
-  restoreCheckpoint(checkpoint: SchemaRagEngineCheckpoint): void {
-    this.clear(checkpoint.connectionId);
-    if (checkpoint.index) this.loadIndex(structuredClone(checkpoint.index));
-    if (checkpoint.legacyTables) {
-      this.legacyTables.set(
-        checkpoint.connectionId,
-        new Map(
-          checkpoint.legacyTables.map((table) => [
-            tableDocumentId(table.schema, table.name),
-            structuredClone(table),
-          ]),
-        ),
-      );
-    }
+    const epoch = this.reserveEpoch(index.connectionId);
+    return this.publish(index.connectionId, epoch, {
+      index,
+      profile: normalizeRetrievalProfile(index.retrievalProfile ?? this.defaultProfile),
+    });
   }
 
   clear(connectionId: string): void {
-    this.indexes.delete(connectionId);
-    this.legacyTables.delete(connectionId);
-    this.profiles.delete(connectionId);
+    this.reserveEpoch(connectionId);
+    this.slots.delete(connectionId);
   }
 
   hasIndex(connectionId: string): boolean {
-    return this.indexes.has(connectionId);
+    return this.slots.has(connectionId);
+  }
+
+  /** Captures one complete RAG slot; later publications do not alter this view. */
+  captureReadView(connectionId: string): SchemaRagReadView {
+    const slot = this.requireSlot(connectionId);
+    const index = slot.index;
+    const catalog = requireSlotCatalog(slot);
+    const search = (input: Omit<SchemaRagSearchRequest, 'connectionId'>) =>
+      structuredClone(searchSchemaRagIndex(index, { connectionId, ...input }));
+    const searchAsync = async (input: Omit<SchemaRagSearchRequest, 'connectionId'>) =>
+      structuredClone(
+        await searchSchemaRagIndexAsync({
+          index,
+          request: { connectionId, ...input },
+          profile: slot.profile,
+          ...(this.embeddingAdapter === undefined
+            ? {}
+            : { embeddingAdapter: this.embeddingAdapter }),
+          ...(this.rerankAdapter === undefined ? {} : { rerankAdapter: this.rerankAdapter }),
+        }),
+      );
+    const listResources = (input: Omit<Parameters<SchemaRagEngine['listResources']>[0], 'connectionId'>) => {
+      const parentId = input.parentId ?? catalog.rootIds[0];
+      if (!parentId) return [];
+      const parent = catalog.nodes[parentId];
+      if (!parent) throw new Error(`Knowledge resource is not indexed: ${parentId}`);
+      const kindSet = input.kinds ? new Set(input.kinds) : undefined;
+      return parent.childIds
+        .map((id) => catalog.nodes[id])
+        .filter((node): node is KnowledgeCatalogNode => node !== undefined)
+        .filter((node) => !kindSet || kindSet.has(node.kind))
+        .slice(0, input.limit ?? 200)
+        .map((node) => structuredClone(node));
+    };
+    const getResource = (input: Omit<Parameters<SchemaRagEngine['getResource']>[0], 'connectionId'>) => {
+      const node = catalog.nodes[input.resourceId];
+      if (!node) throw new Error(`Knowledge resource is not indexed: ${input.resourceId}`);
+      const relationIds = new Set(node.relationIds);
+      const applicableResourceIds = new Set([node.resourceId, ...node.ancestorIds]);
+      const knowledgeIds = new Set(
+        Object.values(catalog.bindings)
+          .filter((binding) => binding.resourceId === node.resourceId ||
+            (binding.mode === 'subtree' && applicableResourceIds.has(binding.resourceId)))
+          .map((binding) => binding.knowledgeId),
+      );
+      return {
+        node: structuredClone(node),
+        relations: Object.values(catalog.relations)
+          .filter((relation) => relationIds.has(relation.id))
+          .map((relation) => structuredClone(relation)),
+        knowledge: Object.values(catalog.knowledge)
+          .filter((item) => knowledgeIds.has(item.id))
+          .map((item) => structuredClone(item)),
+      };
+    };
+    const listTables = (input: Omit<SchemaRagListTablesRequest, 'connectionId'>) =>
+      index.documents
+        .filter(isTableDocument)
+        .filter((document) => input.schema === undefined || document.schema === input.schema)
+        .sort((left, right) => left.title.localeCompare(right.title))
+        .slice(0, input.limit ?? 200)
+        .map((document) => ({
+          id: document.id,
+          schema: document.schema,
+          table: document.table,
+          title: document.title,
+          ...(typeof document.metadata.type === 'string' ? { type: document.metadata.type } : {}),
+          ...(typeof document.metadata.columnCount === 'number'
+            ? { columnCount: document.metadata.columnCount }
+            : {}),
+        }));
+    const describeTable = (input: Omit<SchemaRagTableRef, 'connectionId'>) => {
+      const table = resolveTable(index, { connectionId, ...input });
+      const columns = index.documents
+        .filter((document) => document.kind === 'column' && document.schema === table.schema && document.table === table.table)
+        .sort((left, right) => left.title.localeCompare(right.title));
+      const relatedTables = relatedTableDocuments(index, table);
+      const sections = [
+        `## ${table.title}`,
+        table.text,
+        columns.length ? `\n### Columns\n${columns.map((column) => `- ${column.title}: ${column.text.replace(/\n/g, '; ')}`).join('\n')}` : '',
+        relatedTables.length ? `\n### Related tables\n${relatedTables.map((related) => `- ${related.title}`).join('\n')}` : '',
+      ].filter(Boolean);
+      const clipped = clipText(sections.join('\n'), input.maxChars ?? 4_000);
+      return structuredClone({ table, columns, relatedTables, text: clipped.text, truncated: clipped.truncated });
+    };
+    const getRelations = (input: Omit<SchemaRagTableRef, 'connectionId'>) => {
+      const table = resolveTable(index, { connectionId, ...input });
+      const relatedTables = relatedTableDocuments(index, table);
+      const relationDocuments = (index.graph.get(table.id) ? [...(index.graph.get(table.id) ?? [])] : [])
+        .map((id) => index.documents.find((document) => document.id === id))
+        .filter((document): document is SchemaRagDocument => document !== undefined);
+      return structuredClone({ table, relatedTables, relationDocuments });
+    };
+    const buildContext = (input: Omit<SchemaRagContextRequest, 'connectionId'>) =>
+      formatContext(input.query, search({
+        query: input.query,
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(input.explicitTables === undefined ? {} : { explicitTables: input.explicitTables }),
+        ...(input.explicitColumns === undefined ? {} : { explicitColumns: input.explicitColumns }),
+        includeRelations: true,
+      }), input.maxChars ?? 4_000);
+    const buildContextAsync = async (input: Omit<SchemaRagContextRequest, 'connectionId'>) =>
+      formatContext(input.query, await searchAsync({
+        query: input.query,
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(input.explicitTables === undefined ? {} : { explicitTables: input.explicitTables }),
+        ...(input.explicitColumns === undefined ? {} : { explicitColumns: input.explicitColumns }),
+        includeRelations: true,
+      }), input.maxChars ?? 4_000);
+    const manifest = index.manifest;
+    return Object.freeze({
+      connectionId,
+      getCatalog: () => structuredClone(catalog),
+      getIndexManifest: () => {
+        if (!manifest) throw new Error(`Schema RAG index manifest is not available for connection: ${connectionId}`);
+        return structuredClone(manifest);
+      },
+      listResources,
+      getResource,
+      listTables,
+      describeTable,
+      getRelations,
+      search,
+      searchAsync,
+      buildContext,
+      buildContextAsync,
+    });
   }
 
   hasTable(request: SchemaRagTableRef): boolean {
-    const index = this.indexes.get(request.connectionId);
+    const index = this.slots.get(request.connectionId)?.index;
     if (!index) return false;
     try {
       resolveTable(index, request);
@@ -227,15 +373,11 @@ export class SchemaRagEngine {
   }
 
   getCatalog(connectionId: string): KnowledgeCatalog {
-    return structuredClone(this.requireCatalog(connectionId));
+    return this.captureReadView(connectionId).getCatalog();
   }
 
   getIndexManifest(connectionId: string): NonNullable<SchemaRagIndex['manifest']> {
-    const manifest = this.requireIndex(connectionId).manifest;
-    if (!manifest) {
-      throw new Error(`Schema RAG index manifest is not available for connection: ${connectionId}`);
-    }
-    return structuredClone(manifest);
+    return this.captureReadView(connectionId).getIndexManifest();
   }
 
   listResources(input: {
@@ -244,18 +386,8 @@ export class SchemaRagEngine {
     kinds?: string[];
     limit?: number;
   }): KnowledgeCatalogNode[] {
-    const catalog = this.requireCatalog(input.connectionId);
-    const parentId = input.parentId ?? catalog.rootIds[0];
-    if (!parentId) return [];
-    const parent = catalog.nodes[parentId];
-    if (!parent) throw new Error(`Knowledge resource is not indexed: ${parentId}`);
-    const kindSet = input.kinds ? new Set(input.kinds) : undefined;
-    return parent.childIds
-      .map((id) => catalog.nodes[id])
-      .filter((node): node is KnowledgeCatalogNode => node !== undefined)
-      .filter((node) => !kindSet || kindSet.has(node.kind))
-      .slice(0, input.limit ?? 200)
-      .map((node) => structuredClone(node));
+    const { connectionId, ...request } = input;
+    return this.captureReadView(connectionId).listResources(request);
   }
 
   getResource(input: {
@@ -266,34 +398,12 @@ export class SchemaRagEngine {
     relations: KnowledgeCatalog['relations'][string][];
     knowledge: KnowledgeCatalog['knowledge'][string][];
   } {
-    const catalog = this.requireCatalog(input.connectionId);
-    const node = catalog.nodes[input.resourceId];
-    if (!node) throw new Error(`Knowledge resource is not indexed: ${input.resourceId}`);
-    const relationIds = new Set(node.relationIds);
-    const applicableResourceIds = new Set([node.resourceId, ...node.ancestorIds]);
-    const knowledgeIds = new Set(
-      Object.values(catalog.bindings)
-        .filter(
-          (binding) =>
-            binding.resourceId === node.resourceId ||
-            (binding.mode === 'subtree' &&
-              applicableResourceIds.has(binding.resourceId)),
-        )
-        .map((binding) => binding.knowledgeId),
-    );
-    return {
-      node: structuredClone(node),
-      relations: Object.values(catalog.relations)
-        .filter((relation) => relationIds.has(relation.id))
-        .map((relation) => structuredClone(relation)),
-      knowledge: Object.values(catalog.knowledge)
-        .filter((item) => knowledgeIds.has(item.id))
-        .map((item) => structuredClone(item)),
-    };
+    const { connectionId, ...request } = input;
+    return this.captureReadView(connectionId).getResource(request);
   }
 
   getIndexStatus(connectionId: string): SchemaRagIndexStatus {
-    const index = this.indexes.get(connectionId);
+    const index = this.slots.get(connectionId)?.index;
     const updatedAt = new Date().toISOString();
     if (!index) {
       return {
@@ -322,138 +432,90 @@ export class SchemaRagEngine {
   }
 
   listTables(request: SchemaRagListTablesRequest): SchemaRagTableSummary[] {
-    const index = this.requireIndex(request.connectionId);
-    const limit = request.limit ?? 200;
-    return index.documents
-      .filter(isTableDocument)
-      .filter((document) => request.schema === undefined || document.schema === request.schema)
-      .sort((left, right) => left.title.localeCompare(right.title))
-      .slice(0, limit)
-      .map((document) => ({
-        id: document.id,
-        schema: document.schema,
-        table: document.table,
-        title: document.title,
-        ...(typeof document.metadata.type === 'string' ? { type: document.metadata.type } : {}),
-        ...(typeof document.metadata.columnCount === 'number'
-          ? { columnCount: document.metadata.columnCount }
-          : {}),
-      }));
+    const { connectionId, ...input } = request;
+    return this.captureReadView(connectionId).listTables(input);
   }
 
   describeTable(request: SchemaRagTableRef): SchemaRagTableDescription {
-    const index = this.requireIndex(request.connectionId);
-    const table = resolveTable(index, request);
-    const columns = index.documents
-      .filter(
-        (document) =>
-          document.kind === 'column' &&
-          document.schema === table.schema &&
-          document.table === table.table,
-      )
-      .sort((left, right) => left.title.localeCompare(right.title));
-    const relatedTables = relatedTableDocuments(index, table);
-    const sections = [
-      `## ${table.title}`,
-      table.text,
-      columns.length
-        ? `\n### Columns\n${columns.map((column) => `- ${column.title}: ${column.text.replace(/\n/g, '; ')}`).join('\n')}`
-        : '',
-      relatedTables.length
-        ? `\n### Related tables\n${relatedTables.map((related) => `- ${related.title}`).join('\n')}`
-        : '',
-    ].filter(Boolean);
-    const clipped = clipText(sections.join('\n'), request.maxChars ?? 4_000);
-    return {
-      table,
-      columns,
-      relatedTables,
-      text: clipped.text,
-      truncated: clipped.truncated,
-    };
+    const { connectionId, ...input } = request;
+    return this.captureReadView(connectionId).describeTable(input);
   }
 
   getRelations(request: SchemaRagTableRef): SchemaRagRelationsResult {
-    const index = this.requireIndex(request.connectionId);
-    const table = resolveTable(index, request);
-    const relatedTables = relatedTableDocuments(index, table);
-    const relationDocuments = (
-      index.graph.get(table.id) ? [...(index.graph.get(table.id) ?? [])] : []
-    )
-      .map((id) => index.documents.find((document) => document.id === id))
-      .filter((document): document is SchemaRagDocument => document !== undefined);
-    return { table, relatedTables, relationDocuments };
+    const { connectionId, ...input } = request;
+    return this.captureReadView(connectionId).getRelations(input);
   }
 
   search(request: SchemaRagSearchRequest): SchemaRagSearchResult[] {
-    const index = this.requireIndex(request.connectionId);
-    return searchSchemaRagIndex(index, request);
+    const { connectionId, ...input } = request;
+    return this.captureReadView(connectionId).search(input);
   }
 
   async searchAsync(request: SchemaRagSearchRequest): Promise<SchemaRagSearchResult[]> {
-    const index = this.requireIndex(request.connectionId);
-    const profile = this.profiles.get(request.connectionId) ?? this.defaultProfile;
-    return searchSchemaRagIndexAsync({
-      index,
-      request,
-      profile,
-      ...(this.embeddingAdapter === undefined
-        ? {}
-        : { embeddingAdapter: this.embeddingAdapter }),
-      ...(this.rerankAdapter === undefined
-        ? {}
-        : { rerankAdapter: this.rerankAdapter }),
-    });
+    const { connectionId, ...input } = request;
+    return await this.captureReadView(connectionId).searchAsync(input);
   }
 
   buildContext(request: SchemaRagContextRequest): SchemaRagContext {
-    const results = this.search({
-      connectionId: request.connectionId,
-      query: request.query,
-      ...(request.limit === undefined ? {} : { limit: request.limit }),
-      ...(request.explicitTables === undefined ? {} : { explicitTables: request.explicitTables }),
-      ...(request.explicitColumns === undefined
-        ? {}
-        : { explicitColumns: request.explicitColumns }),
-      includeRelations: true,
-    });
-    return formatContext(request.query, results, request.maxChars ?? 4_000);
+    const { connectionId, ...input } = request;
+    return this.captureReadView(connectionId).buildContext(input);
   }
 
   async buildContextAsync(request: SchemaRagContextRequest): Promise<SchemaRagContext> {
-    const results = await this.searchAsync({
-      connectionId: request.connectionId,
-      query: request.query,
-      ...(request.limit === undefined ? {} : { limit: request.limit }),
-      ...(request.explicitTables === undefined
-        ? {}
-        : { explicitTables: request.explicitTables }),
-      ...(request.explicitColumns === undefined
-        ? {}
-        : { explicitColumns: request.explicitColumns }),
-      includeRelations: true,
-    });
-    return formatContext(request.query, results, request.maxChars ?? 4_000);
+    const { connectionId, ...input } = request;
+    return await this.captureReadView(connectionId).buildContextAsync(input);
   }
 
   private requireIndex(connectionId: string): SchemaRagIndex {
-    const index = this.indexes.get(connectionId);
-    if (!index) {
+    return this.requireSlot(connectionId).index;
+  }
+
+  private requireSlot(connectionId: string): SchemaRagSlot {
+    const slot = this.slots.get(connectionId);
+    if (!slot) {
       throw new Error(`Schema RAG index is not available for connection: ${connectionId}`);
     }
-    return index;
+    return slot;
   }
 
-  private requireCatalog(connectionId: string): KnowledgeCatalog {
-    const catalog = this.requireIndex(connectionId).catalog;
-    if (!catalog) {
-      throw new Error(`Knowledge catalog is not available for connection: ${connectionId}`);
+  private reserveEpoch(connectionId: string): number {
+    const epoch = Math.max(
+      this.epochs.get(connectionId) ?? 0,
+      this.slots.get(connectionId)?.revision ?? 0,
+    ) + 1;
+    this.epochs.set(connectionId, epoch);
+    return epoch;
+  }
+
+  private isCurrentEpoch(connectionId: string, epoch: number): boolean {
+    return this.epochs.get(connectionId) === epoch;
+  }
+
+  private publish(
+    connectionId: string,
+    epoch: number,
+    candidate: Omit<SchemaRagSlot, 'revision'>,
+  ): SchemaRagIndex {
+    // A candidate belongs to its builder; the live slot receives a distinct object graph.
+    // Readers retain this one graph until their bound view is released by GC.
+    const ownedIndex = structuredClone(candidate.index);
+    this.slots.set(connectionId, { ...candidate, index: ownedIndex, revision: epoch });
+    return structuredClone(ownedIndex);
+  }
+
+  private assertSynchronousWriteAllowed(profile: SchemaRagRetrievalProfile | undefined): void {
+    const resolved = normalizeRetrievalProfile(profile ?? this.defaultProfile);
+    if (resolved.embedding) {
+      throw new Error(
+        `Schema RAG retrieval profile ${resolved.id} requires asynchronous indexing because it configures embeddings.`,
+      );
     }
-    return catalog;
   }
 
-  private async buildVectors(index: SchemaRagIndex): Promise<SchemaRagIndex> {
-    const profile = this.profiles.get(index.connectionId)!;
+  private async buildVectors(
+    index: SchemaRagIndex,
+    profile: SchemaRagRetrievalProfile,
+  ): Promise<SchemaRagIndex> {
     if (!profile.embedding) return index;
     if (!this.embeddingAdapter) {
       throw new Error(
@@ -498,6 +560,13 @@ function formatContext(
     };
 }
 
+function requireSlotCatalog(slot: SchemaRagSlot): KnowledgeCatalog {
+  if (!slot.index.catalog) {
+    throw new Error(`Knowledge catalog is not available for connection: ${slot.index.connectionId}`);
+  }
+  return slot.index.catalog;
+}
+
 function assertRestoredIndex(index: SchemaRagIndex): void {
   if (!index.connectionId.trim()) {
     throw new Error('Schema RAG restored index requires a connection id.');
@@ -506,6 +575,9 @@ function assertRestoredIndex(index: SchemaRagIndex): void {
     if (document.connectionId !== index.connectionId) {
       throw new Error(`Schema RAG document ${document.id} belongs to a different connection.`);
     }
+  }
+  if (index.retrievalProfile?.embedding && index.vectors === undefined) {
+    throw new Error('Schema RAG restored index configures embeddings but does not contain vectors.');
   }
 }
 

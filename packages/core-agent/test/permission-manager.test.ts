@@ -2,179 +2,106 @@ import { describe, expect, it } from 'vitest';
 import {
   PermissionManager,
   decideAutomaticPermission,
-  type AgentMode,
-  type ToolDangerLevel,
+  type AgentToolPermissionFacts,
 } from '../src/index.js';
+import { preparedToolIntent } from './permission-audit-fixture.js';
 
-describe('decideAutomaticPermission', () => {
-  it('implements the product read/edit/full ladder independently of tool danger labels', () => {
-    const readTool = {
-      dangerLevel: 'high' as const,
-      readonly: false,
-      requiredPermission: 'read' as const,
-    };
-    const editTool = {
-      dangerLevel: 'safe' as const,
-      readonly: true,
-      requiredPermission: 'edit' as const,
-    };
-    const fullTool = {
-      dangerLevel: 'medium' as const,
-      readonly: false,
-      requiredPermission: 'full' as const,
-    };
-
-    expect(decideAutomaticPermission('read', readTool)).toBe('allow');
-    expect(decideAutomaticPermission('read', editTool)).toBe('ask');
-    expect(decideAutomaticPermission('read', fullTool)).toBe('ask');
-    expect(decideAutomaticPermission('edit', readTool)).toBe('allow');
-    expect(decideAutomaticPermission('edit', editTool)).toBe('allow');
-    expect(decideAutomaticPermission('edit', fullTool)).toBe('ask');
-    expect(decideAutomaticPermission('full', readTool)).toBe('allow');
-    expect(decideAutomaticPermission('full', editTool)).toBe('allow');
-    expect(decideAutomaticPermission('full', fullTool)).toBe('allow');
-  });
-
-  it('keeps a stable mode and danger-level matrix for runtime tool decisions', () => {
-    const cases: Array<{
-      mode: AgentMode;
-      dangerLevel: ToolDangerLevel;
-      readonly?: boolean;
-      decision: 'allow' | 'deny' | 'ask';
-    }> = [
-      { mode: 'read', dangerLevel: 'safe', decision: 'allow' },
-      { mode: 'read', dangerLevel: 'medium', readonly: true, decision: 'allow' },
-      { mode: 'read', dangerLevel: 'medium', readonly: false, decision: 'ask' },
-      { mode: 'read', dangerLevel: 'high', decision: 'ask' },
-      { mode: 'read', dangerLevel: 'critical', decision: 'ask' },
-      { mode: 'edit', dangerLevel: 'safe', decision: 'allow' },
-      { mode: 'edit', dangerLevel: 'medium', decision: 'allow' },
-      { mode: 'edit', dangerLevel: 'high', decision: 'ask' },
-      { mode: 'edit', dangerLevel: 'critical', decision: 'ask' },
-      { mode: 'full', dangerLevel: 'safe', decision: 'allow' },
-      { mode: 'full', dangerLevel: 'medium', decision: 'allow' },
-      { mode: 'full', dangerLevel: 'high', decision: 'allow' },
-      { mode: 'full', dangerLevel: 'critical', decision: 'allow' },
-    ];
-
-    for (const item of cases) {
-      expect(
-        decideAutomaticPermission(item.mode, {
-          dangerLevel: item.dangerLevel,
-          ...(item.readonly === undefined ? {} : { readonly: item.readonly }),
-        }),
-        `${item.mode} ${item.dangerLevel} readonly=${String(item.readonly)}`,
-      ).toBe(item.decision);
-    }
-  });
-
-  it('allows safe tools in every access level', () => {
-    expect(decideAutomaticPermission('read', { dangerLevel: 'safe', readonly: true })).toBe(
-      'allow',
-    );
-    expect(decideAutomaticPermission('edit', { dangerLevel: 'safe' })).toBe('allow');
-    expect(decideAutomaticPermission('full', { dangerLevel: 'safe' })).toBe('allow');
-  });
-
-  it('asks once before using a write-capable tool above the selected level', () => {
-    expect(decideAutomaticPermission('read', { dangerLevel: 'medium', readonly: false })).toBe(
-      'ask',
-    );
-    expect(decideAutomaticPermission('edit', { dangerLevel: 'high' })).toBe('ask');
-  });
-
-  it('allows every declared permission in full mode', () => {
-    expect(decideAutomaticPermission('full', { dangerLevel: 'critical' })).toBe('allow');
-  });
-});
+function facts(overrides: Partial<AgentToolPermissionFacts> = {}): AgentToolPermissionFacts {
+  return {
+    toolName: 'workspace.write',
+    dangerLevel: 'safe',
+    readonly: false,
+    access: 'write',
+    recoveryClass: 'idempotent',
+    actions: ['write'],
+    paths: [],
+    hosts: [],
+    network: false,
+    externalWrite: false,
+    destructive: false,
+    credentials: false,
+    admin: false,
+    unknownRisk: false,
+    resolvedAddresses: [],
+    targets: [],
+    ...overrides,
+  };
+}
 
 describe('PermissionManager', () => {
-  it('turns an operation above the selected access level into a one-time approval request', async () => {
-    const requests: string[] = [];
-    const manager = new PermissionManager((request) => {
-      requests.push(`${request.mode}:${request.tool.requiredPermission}:${request.toolCall.id}`);
-      return {
-        approved: true,
-        requestId: 'permission-dialog-1',
-        approvedBy: 'user',
-      };
-    });
-    const result = await manager.checkDetailed({
-      mode: 'read',
-      tool: {
-        name: 'sql_execute',
-        description: '',
-        inputSchema: { type: 'object' },
-        dangerLevel: 'high',
-        requiredPermission: 'edit',
-      },
-      toolCall: {
-        id: 'call-update',
-        name: 'sql_execute',
-        arguments: { sql: "UPDATE orders SET status = 'paid' WHERE id = 1" },
-      },
-    });
+  it('asks in default mode for external writes and network access', () => {
+    expect(decideAutomaticPermission('default', facts({ externalWrite: true }))).toBe('ask');
+    expect(
+      decideAutomaticPermission('default', facts({ network: true, actions: ['network'] })),
+    ).toBe('ask');
+  });
 
-    expect(requests).toEqual(['read:edit:call-update']);
-    expect(result).toMatchObject({
-      decision: 'allow',
-      source: 'approval-provider',
-      approvalRequestId: 'permission-dialog-1',
-      approvedBy: 'user',
+  it('asks in auto mode only for risky facts', () => {
+    expect(decideAutomaticPermission('auto', facts({ externalWrite: true }))).toBe('allow');
+    expect(decideAutomaticPermission('auto', facts({ dangerLevel: 'high' }))).toBe('ask');
+    expect(
+      decideAutomaticPermission('auto', facts({ destructive: true, actions: ['delete'] })),
+    ).toBe('ask');
+  });
+
+  it('automatically allows built-in decisions in full-access mode', () => {
+    expect(
+      decideAutomaticPermission('full-access', facts({ dangerLevel: 'critical', admin: true })),
+    ).toBe('allow');
+  });
+
+  it('uses the strictest matching enterprise rule: deny then ask then allow', () => {
+    const manager = new PermissionManager({
+      rules: [
+        { id: 'allow-workspace', decision: 'allow', tools: ['workspace.*'] },
+        { id: 'ask-write', decision: 'ask', actions: ['write'] },
+        { id: 'deny-production', decision: 'deny', paths: ['*/production/*'] },
+      ],
+    });
+    const evaluation = manager.evaluate(
+      'full-access',
+      facts({ paths: ['/srv/production/app.ts'] }),
+    );
+    expect(evaluation.decision).toBe('deny');
+    expect(evaluation.matchedRuleIds).toEqual(['allow-workspace', 'ask-write', 'deny-production']);
+    expect(manager.evaluate('full-access', facts()).decision).toBe('ask');
+    expect(
+      new PermissionManager({
+        rules: [{ id: 'allow-only', decision: 'allow', tools: ['workspace.*'] }],
+      }).evaluate('default', facts()).decision,
+    ).toBe('allow');
+  });
+
+  it('publishes replacement rules and their revision atomically for later evaluations', () => {
+    const manager = new PermissionManager({ revision: 'policy:v1' });
+    expect(manager.evaluate('full-access', facts()).decision).toBe('allow');
+    expect(manager.evaluate('full-access', facts()).policyRevision).toBe('policy:v1');
+
+    manager.replacePolicy({
+      revision: 'policy:v2',
+      rules: [{ id: 'deny-write', decision: 'deny', actions: ['write'] }],
+    });
+    expect(manager.evaluate('full-access', facts())).toMatchObject({
+      decision: 'deny',
+      policyRevision: 'policy:v2',
+      matchedRuleIds: ['deny-write'],
     });
   });
 
-  it('distinguishes automatic allow from approval-provider allow', async () => {
-    const automatic = await new PermissionManager().checkDetailed({
-      mode: 'full',
-      tool: {
-        name: 'execute_sql',
-        description: '',
-        inputSchema: { type: 'object' },
-        dangerLevel: 'high',
-      },
-      toolCall: { id: 'call_auto', name: 'execute_sql', arguments: {} },
+  it('treats an explicitly empty selector as matching nothing', () => {
+    const manager = new PermissionManager({
+      rules: [{ id: 'empty-tools', decision: 'deny', tools: [] }],
     });
-    expect(automatic).toEqual({ decision: 'allow', source: 'automatic' });
-
-    const approved = await new PermissionManager(() => true).checkDetailed({
-      mode: 'read',
-      tool: {
-        name: 'execute_sql',
-        description: '',
-        inputSchema: { type: 'object' },
-        dangerLevel: 'high',
-      },
-      toolCall: { id: 'call_approved', name: 'execute_sql', arguments: {} },
-    });
-    expect(approved).toEqual({ decision: 'allow', source: 'approval-provider' });
+    expect(manager.evaluate('full-access', facts()).decision).toBe('allow');
+    expect(manager.evaluate('full-access', facts()).matchedRuleIds).toEqual([]);
   });
 
-  it('preserves structured approval provenance from the provider', async () => {
-    const approved = await new PermissionManager(() => ({
-      approved: true,
-      requestId: 'approval_1',
-      approvedAt: '2026-07-10T01:00:00.000Z',
-      approvedBy: 'tester',
-      reason: '业务确认',
-    })).checkDetailed({
-      mode: 'read',
-      tool: {
-        name: 'execute_sql',
-        description: '',
-        inputSchema: { type: 'object' },
-        dangerLevel: 'high',
-      },
-      toolCall: { id: 'call_approved', name: 'execute_sql', arguments: {} },
+  it('uses the prepared invocation permission facts at the unique policy boundary', () => {
+    const { intent } = preparedToolIntent({
+      toolName: 'plain_write',
+      recoveryClass: 'idempotent',
     });
-
-    expect(approved).toEqual({
-      decision: 'allow',
-      source: 'approval-provider',
-      approvalRequestId: 'approval_1',
-      approvedAt: '2026-07-10T01:00:00.000Z',
-      approvedBy: 'tester',
-      reason: '业务确认',
-    });
+    expect(intent.permission.actions).toEqual(['write']);
+    expect(intent.permission.access).toBe('write');
   });
 });

@@ -29,13 +29,13 @@ import {
   UserActivityProjectionAccumulator,
 } from './session-projection.js';
 import type {
-  AgentContextCheckpoint,
-  AgentMessage,
-  AgentRunRecord,
-  AgentSession,
-  AgentSubagentRecord,
-  AgentUserPreference,
-} from '../types.js';
+  LegacyAgentContextCheckpoint as AgentContextCheckpoint,
+  LegacyAgentMessage as AgentMessage,
+  LegacyAgentRunRecord as AgentRunRecord,
+  LegacyAgentSession as AgentSession,
+  LegacyAgentSubagentRecord as AgentSubagentRecord,
+  LegacyAgentUserPreference as AgentUserPreference,
+} from './legacy-import-types.js';
 import {
   createLegacyMigrationWriter,
   type LegacyMigrationWriter,
@@ -979,9 +979,9 @@ function* streamLegacySessionBundles(
         session: {
           id, projectKey: `legacy-source:${sourceDigest}`,
           projectRoot: `legacy-source://${sourceDigest}`,
-          title: 'Legacy import', userId: null, mode: 'read', messages: [],
+          title: 'Legacy import', userId: null, mode: 'default', messages: [],
           record: {
-            id, title: 'Legacy import', mode: 'read', messages: [],
+            id, title: 'Legacy import', mode: 'default', messages: [],
             tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, aborted: false,
           },
           archived: false, createdAt: new Date(0).toISOString(),
@@ -1836,7 +1836,9 @@ async function captureImportedEventPrefixes(
 }
 
 function normalizeLegacyMode(mode: string): AgentSession['mode'] {
-  return mode === 'edit' || mode === 'full' ? mode : 'read';
+  if (mode === 'auto' || mode === 'full-access') return mode;
+  if (mode === 'full') return 'full-access';
+  return 'default';
 }
 
 function normalizeLegacySubagentStatus(status: string): AgentSubagentRecord['status'] {

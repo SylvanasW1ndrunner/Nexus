@@ -73,7 +73,7 @@ export class ProcessRuntime {
   private readonly runtimeId = randomUUID();
   private readonly spoolDirectory: string;
   private readonly executor: SandboxExecutor;
-  private readonly policy: ProcessGlobalPolicy;
+  private policy: ProcessGlobalPolicy;
   private readonly environment: NodeJS.ProcessEnv;
   private readonly now: () => Date;
   private readonly createProcessId: () => string;
@@ -135,6 +135,12 @@ export class ProcessRuntime {
 
   preparationLimits(): ProcessRuntimeLimits { return { ...this.limits }; }
   recoveryDiagnostics(): readonly string[] { return [...this.recoveryIssues]; }
+
+  /** Atomically applies the global enterprise execution policy for future prepare/revalidate calls. */
+  updateGlobalPolicy(policy: Readonly<Pick<ProcessGlobalPolicy, 'revision' | 'mode' | 'requireSandbox'>>): void {
+    if (typeof policy.revision !== 'string' || !policy.revision.trim() || policy.revision.length > 128 || !['default', 'auto', 'full-access'].includes(policy.mode) || policy.requireSandbox !== undefined && typeof policy.requireSandbox !== 'boolean') throw new TypeError('Invalid global process policy update.');
+    this.policy = Object.freeze({ ...this.policy, revision: policy.revision, mode: policy.mode, ...(policy.requireSandbox === undefined ? {} : { requireSandbox: policy.requireSandbox }) });
+  }
 
   /** Host startup hook; no recovered PID is ever rebound to a controllable child. */
   async recover(): Promise<readonly { processId: string; owner: ProcessOwner; status: ProcessRuntimeStatus }[]> {

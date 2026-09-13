@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PreparedToolIntent, ToolExecuteContext, ToolPrepareContext } from '@dbagent/core-agent';
-import { CapabilityCommandRuntime, PathExecutableDiscovery, ProcessRuntime, prepareProcessPath, type CapabilityCommandInput, type ExecutableLaunchDescriptor, type ProcessArgvPolicyInput, type ProcessRuntimeOptions } from '../src/index.js';
+import { CapabilityCommandRuntime, PathExecutableDiscovery, ProcessRuntime, createProcessTargetRevalidator, prepareProcessPath, type CapabilityCommandInput, type ExecutableLaunchDescriptor, type ProcessArgvPolicyInput, type ProcessRuntimeOptions } from '../src/index.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { await Promise.allSettled(cleanups.splice(0).map(cleanup => cleanup())); });
@@ -29,7 +29,8 @@ describe('Capability command Host port', () => {
     const f = await fixture();
     const args = ['space value', '中文路径', '"quoted"', "'single'", '& echo INJECTED > side-effect', '$(whoami)', '`x`', 'line\nbreak\tend'];
     const intent = await f.port.prepare(f.input(['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', '--', ...args]), f.context);
-    expect(intent).toMatchObject({ runPolicy: f.context.runPolicy, targetIdentity: { kind: 'process-exec', plan: { launch: { kind: 'argv', argv: expect.any(Array) }, boundary: { mode: 'full-access', policyRevision: 'actual-run-policy.v3' } } } });
+    const arrayMatcher: unknown = expect.any(Array);
+    expect(intent).toMatchObject({ runPolicy: f.context.runPolicy, targetIdentity: { kind: 'process-exec', plan: { launch: { kind: 'argv', argv: arrayMatcher }, boundary: { mode: 'full-access', policyRevision: 'actual-run-policy.v3' } } } });
     const result = await f.port.execute(intent.input, f.execution(intent)) as { spool: { stdout: { text: string } }; process: { exitCode: number; treeStopped: boolean; treeStopProof: string } };
     expect(JSON.parse(result.spool.stdout.text)).toEqual(args);
     expect(result.process).toMatchObject({ exitCode: 0, treeStopProof: process.platform === 'win32' ? 'unverified' : 'verified', treeStopped: process.platform !== 'win32' });
@@ -48,11 +49,38 @@ describe('Capability command Host port', () => {
     await expect(f.port.execute(intent.input, f.execution(intent, { authorization: { ...current, approvalId: 'approved' } }))).resolves.toMatchObject({ status: 'ok', executionBoundary: { enforcement: 'native' } });
   });
 
+  it('keeps externally executed network reads readonly while scheduling them exclusively', async () => {
+    const f = await fixture();
+    const intent = await f.port.prepare({
+      ...f.input(['-e', 'process.exit(0)']),
+      requested: { ...requested, network: true },
+      hostTargets: ['api.example.test'],
+      permission: { access: 'external', recoveryClass: 'read', dangerLevel: 'medium', actions: ['read', 'network'] },
+    }, f.context);
+    expect(intent).toMatchObject({ access: 'external', recoveryClass: 'read', concurrency: 'exclusive', permission: { readonly: true, network: true } });
+  });
+
   it('returns unavailable under enterprise requireSandbox without spawning', async () => {
     const f = await fixture({ globalPolicy: { revision: 'host-policy.v1', mode: 'full-access', requireSandbox: true } });
     const intent = await f.port.prepare(f.input(['-e', 'process.exit(0)']), f.context);
     await expect(f.port.execute(intent.input, f.execution(intent))).resolves.toMatchObject({ status: 'unavailable', reason: 'required_sandbox_unavailable' });
     await expect(access(join(f.root, '.spool'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('atomically applies a hot-reloaded global sandbox requirement and invalidates older plans', async () => {
+    const f = await fixture();
+    const before = await f.port.prepare(f.input(['-e', 'process.exit(0)']), f.context);
+    f.runtime.updateGlobalPolicy({ revision: 'host-policy.v2', mode: 'full-access', requireSandbox: true });
+    await expect(f.port.execute(before.input, f.execution(before))).rejects.toMatchObject({ fact: { code: 'target_changed' } });
+    const after = await f.port.prepare(f.input(['-e', 'process.exit(0)']), f.context);
+    expect(after.targetIdentity).toMatchObject({ plan: { hostPolicyRevision: 'host-policy.v2', boundary: { decision: 'unavailable' } } });
+  });
+
+  it('ignores prepared targets owned by another Tool domain', async () => {
+    const f = await fixture();
+    const revalidate = createProcessTargetRevalidator(f.runtime);
+    const foreign = { targetIdentity: { kind: 'file', path: join(f.root, 'data.json') } } as unknown as PreparedToolIntent;
+    await expect(revalidate(foreign, f.execution(foreign))).resolves.toBeUndefined();
   });
 
   it('checks real file targets again and never performs the action after replacement', async () => {
@@ -66,7 +94,7 @@ describe('Capability command Host port', () => {
   });
 
   it('keeps legacy shell policy unchanged and fails argv closed until its own hook is configured', async () => {
-    const allowCommand = vi.fn((_command: string) => true);
+    const allowCommand = vi.fn(() => true);
     const f = await fixture({ globalPolicy: { revision: 'host.v2', mode: 'default', allowCommand } });
     await f.runtime.prepareExecution({ hostId: 'local', cwd: f.root, command: 'echo ordinary', requested });
     expect(allowCommand).toHaveBeenLastCalledWith('echo ordinary');
@@ -103,7 +131,7 @@ describe('Capability command Host port', () => {
   });
 
   it('admits literal credential-shaped argv and streams their output without rewriting it', async () => {
-    const allowArgv = vi.fn((_input: ProcessArgvPolicyInput) => true);
+    const allowArgv = vi.fn(() => true);
     const f = await fixture({ globalPolicy: { mode: 'full-access', revision: 'literal-argv.v1', allowArgv } });
     const literal = ['--token', 'fixture-value', 'https://user:pass@example.test/path'];
     const intent = await f.port.prepare(f.input(['-e', 'process.stdout.write(process.argv.slice(1).join("\\n"))', '--', ...literal]), f.context);
@@ -218,6 +246,7 @@ describe('static PATH discovery', () => {
     const discovery = new PathExecutableDiscovery({ PATH: resolve('../../node_modules/.bin') + ';' + dirname(process.execPath) });
     const found = await discovery.discover('tsc'); if (found.status !== 'available') throw new Error('Installed workspace TypeScript unavailable.');
     const intent = await f.port.prepare(f.input(['--version'], found.launch), f.context);
-    await expect(f.port.execute(intent.input, f.execution(intent))).resolves.toMatchObject({ status: 'ok', spool: { stdout: { text: expect.stringMatching(/^Version \d/u) } } });
+    const versionMatcher: unknown = expect.stringMatching(/^Version \d/u);
+    await expect(f.port.execute(intent.input, f.execution(intent))).resolves.toMatchObject({ status: 'ok', spool: { stdout: { text: versionMatcher } } });
   });
 });

@@ -6,15 +6,19 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
+import { executionPermissionAudit, preparedToolIntent } from './permission-audit-fixture.js';
 import {
   PermissionManager,
   RunEventCommitter,
   SqliteAgentJournal,
   ToolRegistry,
-  createAgentToolResultEnvelope,
 } from '../src/index.js';
-import { validatedAttemptFixture } from './validated-attempt-fixture.js';
+import {
+  validatedAttemptFixture,
+  validatedParallelReadAttemptFixture,
+} from './validated-attempt-fixture.js';
 import { openToolLifecycleCommitter } from '../src/internal/tool-lifecycle-authority.js';
+import { resolveViteNodeEntry } from './fixtures/vite-node-entry.js';
 
 const temporaryDirectories: string[] = [];
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -33,17 +37,42 @@ async function runtimeModule() {
 }
 
 describe('Tool outcome recovery', () => {
+  it('runs two different Invocations exactly once across two synchronized child processes', async () => {
+    const fixture = await createParallelWindowProcessFixture();
+    const readyA = join(fixture.directory, 'parallel-a.ready');
+    const readyB = join(fixture.directory, 'parallel-b.ready');
+    const release = join(fixture.directory, 'parallel.release');
+    const childA = spawnParallelWindowWorker(fixture, readyA, release);
+    const childB = spawnParallelWindowWorker(fixture, readyB, release);
+    await Promise.all([waitForPath(readyA), waitForPath(readyB)]);
+
+    await writeFile(release, 'go', 'utf8');
+    const exits = await Promise.all([waitForExit(childA), waitForExit(childB)]);
+    expect(exits).toEqual([0, 0]);
+    expect(await readParallelHandlerCalls(fixture.counterPath)).toEqual(
+      fixture.invocationIds.map((invocationId) => ({ invocationId, calls: 1 }))
+        .sort((left, right) => left.invocationId.localeCompare(right.invocationId)),
+    );
+    const reopened = new SqliteAgentJournal({ filePath: fixture.journalPath });
+    expect(await reopened.countEvents('tool.started', 'project-a')).toBe(2);
+    expect(await reopened.countEvents('tool.succeeded', 'project-a')).toBe(2);
+    expect(await reopened.countEvents('tool.observed', 'project-a')).toBe(2);
+    expect((await reopened.listInvocations(fixture.runId)).every(
+      ({ state }) => state === 'observed',
+    )).toBe(true);
+  }, 20_000);
+
   it.each([
     ['after-started-before-handler', 'idempotent', 1, 'succeeded'],
-    ['after-external-effect-before-terminal', 'non_idempotent', 1, 'outcome_unknown'],
+    ['after-external-recoveryClass-before-terminal', 'non_idempotent', 1, 'unknown'],
     ['after-terminal-before-observation', 'non_idempotent', 1, 'succeeded'],
   ] as const)('survives a real child-process crash at %s', async (
     cut,
-    effect,
+    recoveryClass,
     expectedCounter,
     expectedOutcome,
   ) => {
-    const fixture = await createRecoveryFixture({ effect, leaseTtlMs: 60_000 });
+    const fixture = await createRecoveryFixture({ recoveryClass, leaseTtlMs: 60_000 });
     await fixture.runtime.resolve();
     const child = spawnCrashWorker(fixture, cut);
     expect(await waitForExit(child)).not.toBe(0);
@@ -51,11 +80,13 @@ describe('Tool outcome recovery', () => {
     const reopenedJournal = new SqliteAgentJournal({ filePath: fixture.journalPath });
     const recovered = await fixture.takeoverRuntime({ journal: reopenedJournal });
     const observation = await recovered.recover(fixture.invocationId);
-
+    if (observation === undefined) throw new Error('Expected recovered observation.');
     expect(await readCounter(fixture.counterPath)).toBe(expectedCounter);
     expect(observation.outcome).toBe(expectedOutcome);
     if (expectedOutcome === 'succeeded') {
-      expect(observation.modelProjection).toEqual({ counter: expectedCounter });
+      expect(observation.modelProjection).toMatchObject({
+        status: 'ok', preview: JSON.stringify({ counter: expectedCounter }),
+      });
     }
     expect(await reopenedJournal.countEvents('tool.started', 'project-a')).toBe(
       cut === 'after-started-before-handler' ? 2 : 1,
@@ -63,16 +94,16 @@ describe('Tool outcome recovery', () => {
     expect(await reopenedJournal.countEvents('tool.observed', 'project-a')).toBe(1);
     expect(
       await reopenedJournal.countEvents(
-        expectedOutcome === 'outcome_unknown' ? 'tool.outcome_unknown' : 'tool.succeeded',
+        expectedOutcome === 'unknown' ? 'tool.unknown' : 'tool.succeeded',
         'project-a',
       ),
     ).toBe(1);
   }, 20_000);
 
   it('retries an idempotent Tool with the same persisted idempotency key after restart', async () => {
-    const fixture = await createRecoveryFixture({ effect: 'idempotent' });
+    const fixture = await createRecoveryFixture({ recoveryClass: 'idempotent' });
     await fixture.runtime.resolve();
-    const child = spawnCrashWorker(fixture, 'after-external-effect-before-terminal');
+    const child = spawnCrashWorker(fixture, 'after-external-recoveryClass-before-terminal');
     expect(await waitForExit(child)).not.toBe(0);
 
     const started = await fixture.journal.getInvocation(fixture.invocationId);
@@ -93,7 +124,7 @@ describe('Tool outcome recovery', () => {
     const effectCommitted = new Promise<void>((resolve) => { signalEffect = resolve; });
     let sawLeaseAbort = false;
     const fixture = await createRecoveryFixture({
-      effect: 'non_idempotent', leaseTtlMs: 50, leasePollIntervalMs: 5,
+      recoveryClass: 'non_idempotent', leaseTtlMs: 50, leasePollIntervalMs: 5,
       now: () => new Date(clock).toISOString(),
       afterCounter: async (signal) => {
         signalEffect();
@@ -117,12 +148,13 @@ describe('Tool outcome recovery', () => {
     });
     const recovered = await fixture.newRuntime({ lease: takeover });
     const observation = await recovered.recover(fixture.invocationId);
+    if (observation === undefined) throw new Error('Expected recovered observation.');
     await expect(staleExecution).rejects.toMatchObject({ code: 'LEASE_LOST' });
 
     expect(sawLeaseAbort).toBe(true);
-    expect(observation.outcome).toBe('outcome_unknown');
+    expect(observation.outcome).toBe('unknown');
     expect(await readCounter(fixture.counterPath)).toBe(1);
-    expect(await fixture.journal.countEvents('tool.outcome_unknown', 'project-a')).toBe(1);
+    expect(await fixture.journal.countEvents('tool.unknown', 'project-a')).toBe(1);
     expect(await fixture.journal.countEvents('tool.succeeded', 'project-a')).toBe(0);
     expect(await fixture.journal.countEvents('tool.observed', 'project-a')).toBe(1);
   });
@@ -134,7 +166,7 @@ describe('Tool outcome recovery', () => {
     let handlerPass = 0;
     let sawLeaseAbort = false;
     const fixture = await createRecoveryFixture({
-      effect: 'idempotent', leaseTtlMs: 50, leasePollIntervalMs: 5,
+      recoveryClass: 'idempotent', leaseTtlMs: 50, leasePollIntervalMs: 5,
       now: () => new Date(clock).toISOString(),
       afterCounter: async (signal) => {
         handlerPass += 1;
@@ -181,7 +213,7 @@ describe('Tool outcome recovery', () => {
     const handlerRelease = new Promise<void>((resolve) => { releaseHandler = resolve; });
     let sawLeaseAbort = false;
     const fixture = await createRecoveryFixture({
-      effect: 'idempotent', leaseTtlMs: 50, leasePollIntervalMs: 5,
+      recoveryClass: 'idempotent', leaseTtlMs: 50, leasePollIntervalMs: 5,
       now: () => new Date(clock).toISOString(),
       afterCounter: async (signal) => {
         signalEffect();
@@ -223,10 +255,10 @@ describe('Tool outcome recovery', () => {
 
   it.each(['read', 'idempotent', 'transactional'] as const)(
     'commits one Journal recovery claim before two Runtime instances replay a %s Handler',
-    async (effect) => {
+    async (recoveryClass) => {
       let clock = Date.now();
       const fixture = await createRecoveryFixture({
-        effect,
+        recoveryClass,
         now: () => new Date(clock).toISOString(),
         leaseTtlMs: 100,
         handlerDelayMs: 50,
@@ -249,7 +281,7 @@ describe('Tool outcome recovery', () => {
       ]);
 
       expect(observations).toHaveLength(2);
-      expect(observations.every(({ outcome }) => outcome === 'succeeded')).toBe(true);
+      expect(observations.every((observation) => observation?.outcome === 'succeeded')).toBe(true);
       expect(fixture.handlerCalls()).toBe(1);
       expect(await fixture.journal.countEvents('tool.started', fixture.projectId)).toBe(2);
       expect(await fixture.journal.countEvents('tool.succeeded', fixture.projectId)).toBe(1);
@@ -260,10 +292,10 @@ describe('Tool outcome recovery', () => {
 
   it.each(['read', 'idempotent', 'transactional'] as const)(
     'lets one of two real recovery processes claim and replay a %s Handler',
-    async (effect) => {
+    async (recoveryClass) => {
       let clock = Date.now();
       const fixture = await createRecoveryFixture({
-        effect,
+        recoveryClass,
         now: () => new Date(clock).toISOString(),
         leaseTtlMs: 100,
       });
@@ -276,10 +308,10 @@ describe('Tool outcome recovery', () => {
         ownerId: 'process-recovery-owner',
         ttlMs: 60_000,
       });
-      const releasePath = join(fixture.directory, `release-${effect}`);
+      const releasePath = join(fixture.directory, `release-${recoveryClass}`);
       const readyPaths = [
-        join(fixture.directory, `ready-${effect}-a`),
-        join(fixture.directory, `ready-${effect}-b`),
+        join(fixture.directory, `ready-${recoveryClass}-a`),
+        join(fixture.directory, `ready-${recoveryClass}-b`),
       ];
       const children = readyPaths.map((readyPath) => spawnRecoveryRaceWorker(
         fixture,
@@ -301,9 +333,9 @@ describe('Tool outcome recovery', () => {
   );
 
   it('requires an exact single-use retry permit for a risky equivalent action', async () => {
-    const fixture = await createRecoveryFixture({ effect: 'non_idempotent' });
+    const fixture = await createRecoveryFixture({ recoveryClass: 'non_idempotent' });
     await fixture.runtime.resolve();
-    const child = spawnCrashWorker(fixture, 'after-external-effect-before-terminal');
+    const child = spawnCrashWorker(fixture, 'after-external-recoveryClass-before-terminal');
     expect(await waitForExit(child)).not.toBe(0);
     const activeRuntime = await fixture.takeoverRuntime();
     await activeRuntime.recover(fixture.invocationId);
@@ -311,27 +343,27 @@ describe('Tool outcome recovery', () => {
 
     await expect(activeRuntime.authorizeRiskyRetry({
       commandId: 'risk-permit-wrong-revision', invocationId: fixture.invocationId,
-      toolRevision: `${unknown?.toolRevision ?? ''}-changed`, effect: 'non_idempotent',
-      normalizedArgumentsDigest: unknown?.normalizedArgumentsDigest ?? '',
+      toolRevision: `${unknown?.toolRevision ?? ''}-changed`, recoveryClass: 'non_idempotent',
+      intentDigest: unknown?.intentDigest ?? '',
       reason: 'must not bind another revision',
     })).rejects.toMatchObject({ code: 'INVOCATION_CONFLICT' });
     await expect(activeRuntime.authorizeRiskyRetry({
       commandId: 'risk-permit-wrong-digest', invocationId: fixture.invocationId,
-      toolRevision: unknown?.toolRevision ?? '', effect: 'non_idempotent',
-      normalizedArgumentsDigest: 'f'.repeat(64),
+      toolRevision: unknown?.toolRevision ?? '', recoveryClass: 'non_idempotent',
+      intentDigest: 'f'.repeat(64),
       reason: 'must not bind another digest',
     })).rejects.toMatchObject({ code: 'INVOCATION_CONFLICT' });
 
     const permitted = await activeRuntime.authorizeRiskyRetry({
       commandId: 'risk-permit', invocationId: fixture.invocationId,
-      toolRevision: unknown?.toolRevision ?? '', effect: 'non_idempotent',
-      normalizedArgumentsDigest: unknown?.normalizedArgumentsDigest ?? '',
+      toolRevision: unknown?.toolRevision ?? '', recoveryClass: 'non_idempotent',
+      intentDigest: unknown?.intentDigest ?? '',
       reason: 'user accepted duplicate-effect risk',
     });
     const replay = await activeRuntime.authorizeRiskyRetry({
       commandId: 'risk-permit', invocationId: fixture.invocationId,
-      toolRevision: unknown?.toolRevision ?? '', effect: 'non_idempotent',
-      normalizedArgumentsDigest: unknown?.normalizedArgumentsDigest ?? '',
+      toolRevision: unknown?.toolRevision ?? '', recoveryClass: 'non_idempotent',
+      intentDigest: unknown?.intentDigest ?? '',
       reason: 'user accepted duplicate-effect risk',
     });
     expect(replay).toEqual(permitted);
@@ -363,21 +395,21 @@ describe('Tool outcome recovery', () => {
   }, 20_000);
 
   it('keeps unknown-predecessor and retry-permit lookup indexed at run-history scale', async () => {
-    const fixture = await createRecoveryFixture({ effect: 'non_idempotent' });
+    const fixture = await createRecoveryFixture({ recoveryClass: 'non_idempotent' });
     await fixture.runtime.resolve();
-    const child = spawnCrashWorker(fixture, 'after-external-effect-before-terminal');
+    const child = spawnCrashWorker(fixture, 'after-external-recoveryClass-before-terminal');
     expect(await waitForExit(child)).not.toBe(0);
     const activeRuntime = await fixture.takeoverRuntime();
     await activeRuntime.recover(fixture.invocationId);
     const unknown = await fixture.journal.getInvocation(fixture.invocationId);
     if (
-      unknown?.toolRevision === undefined || unknown.effect !== 'non_idempotent' ||
-      unknown.normalizedArgumentsDigest === undefined
+      unknown?.toolRevision === undefined || unknown.recoveryClass !== 'non_idempotent' ||
+      unknown.intentDigest === undefined
     ) throw new Error('Missing unknown outcome binding.');
     const permit = await activeRuntime.authorizeRiskyRetry({
       commandId: 'scale-retry-permit', invocationId: unknown.invocationId,
-      toolRevision: unknown.toolRevision, effect: unknown.effect,
-      normalizedArgumentsDigest: unknown.normalizedArgumentsDigest,
+      toolRevision: unknown.toolRevision, recoveryClass: unknown.recoveryClass,
+      intentDigest: unknown.intentDigest,
       reason: 'scale fixture permit',
     });
 
@@ -400,7 +432,7 @@ describe('Tool outcome recovery', () => {
           actionOrdinal: index + 1_000,
           state: 'observed',
           revision: 2,
-          normalizedArgumentsDigest: index.toString(16).padStart(64, '0'),
+          intentDigest: index.toString(16).padStart(64, '0'),
           terminal: { kind: 'succeeded', summary: 'noise', resultRefs: [],
             occurredAt: unknown.updatedAt },
           observation: { observationId: `scale-observation-${index}`, invocationId,
@@ -422,13 +454,13 @@ describe('Tool outcome recovery', () => {
          WHERE project_id = ? AND run_id = ? AND name = ? AND invocation_id <> ?
            AND state = 'observed'
            AND json_extract(payload_json, '$.toolRevision') = ?
-           AND json_extract(payload_json, '$.effect') = ?
-           AND json_extract(payload_json, '$.normalizedArgumentsDigest') = ?
-           AND json_extract(payload_json, '$.terminal.kind') = 'outcome_unknown'
+           AND json_extract(payload_json, '$.recoveryClass') = ?
+           AND json_extract(payload_json, '$.intentDigest') = ?
+           AND json_extract(payload_json, '$.terminal.kind') = 'unknown'
          ORDER BY updated_at DESC LIMIT 1`,
       ).all(
         unknown.projectId, unknown.runId, unknown.name, 'next-invocation',
-        unknown.toolRevision, unknown.effect, unknown.normalizedArgumentsDigest,
+        unknown.toolRevision, unknown.recoveryClass, unknown.intentDigest,
       ) as unknown as Array<{ detail: string }>;
       const permitPlan = database.prepare(
         `EXPLAIN QUERY PLAN SELECT 1 AS present FROM agent_invocations
@@ -457,22 +489,22 @@ describe('Tool outcome recovery', () => {
   }, 20_000);
 
   it('resolves an unknown outcome once with exact binding and replays the decision durably', async () => {
-    const fixture = await createRecoveryFixture({ effect: 'non_idempotent' });
+    const fixture = await createRecoveryFixture({ recoveryClass: 'non_idempotent' });
     await fixture.runtime.resolve();
-    const child = spawnCrashWorker(fixture, 'after-external-effect-before-terminal');
+    const child = spawnCrashWorker(fixture, 'after-external-recoveryClass-before-terminal');
     expect(await waitForExit(child)).not.toBe(0);
     const recovered = await fixture.takeoverRuntime();
     await recovered.recover(fixture.invocationId);
     const unknown = await fixture.journal.getInvocation(fixture.invocationId);
     if (
       unknown?.canonicalToolId === undefined || unknown.toolRevision === undefined ||
-      unknown.effect === undefined || unknown.normalizedArgumentsDigest === undefined ||
+      unknown.recoveryClass === undefined || unknown.intentDigest === undefined ||
       unknown.proposedRevision === undefined
     ) throw new Error('Missing unknown Invocation binding');
     const decision = {
       commandId: 'resolve-unknown', invocationId: unknown.invocationId,
       canonicalToolId: unknown.canonicalToolId, toolRevision: unknown.toolRevision,
-      effect: unknown.effect, normalizedArgumentsDigest: unknown.normalizedArgumentsDigest,
+      recoveryClass: unknown.recoveryClass, intentDigest: unknown.intentDigest,
       proposedRevision: unknown.proposedRevision, outcome: 'succeeded' as const,
       summary: 'Operator verified the external effect.',
     };
@@ -504,16 +536,95 @@ describe('Tool outcome recovery', () => {
   }, 20_000);
 });
 
-type RecoveryEffect = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
+type RecoveryClass = 'read' | 'idempotent' | 'transactional' | 'non_idempotent';
 
 type RecoveryFixtureOptions = {
-  effect: RecoveryEffect;
+  recoveryClass: RecoveryClass;
   leaseTtlMs?: number;
   now?: () => string;
   afterCounter?: (signal: AbortSignal) => Promise<void>;
   handlerDelayMs?: number;
   leasePollIntervalMs?: number;
 };
+
+async function createParallelWindowProcessFixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'dbagent-parallel-window-'));
+  temporaryDirectories.push(directory);
+  const journalPath = join(directory, 'state.db');
+  const counterPath = join(directory, 'parallel-counter.db');
+  initializeParallelCounter(counterPath);
+  const journal = new SqliteAgentJournal({ filePath: journalPath });
+  const created = await journal.createRun({
+    projectId: 'project-a', sessionId: 'session-a', clientRequestId: 'parallel-window', input: 'go',
+  });
+  const lease = await journal.acquireRunLease({
+    projectId: 'project-a', runId: created.runId, ownerId: 'parallel-owner', ttlMs: 60_000,
+  });
+  const leaseRef = leaseReference(lease);
+  await journal.startRun({
+    projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+    commandId: 'parallel-start-run', lease: leaseRef, expectedRunRevision: 1,
+  });
+  await journal.startTurn({
+    projectId: 'project-a', sessionId: 'session-a', runId: created.runId, turnId: 'turn-a',
+    commandId: 'parallel-start-turn', lease: leaseRef, expectedRunRevision: 2,
+  });
+  const committed = await new RunEventCommitter(journal).commitValidatedAttempt({
+    projectId: 'project-a', sessionId: 'session-a', runId: created.runId, turnId: 'turn-a',
+    commandId: 'parallel-commit-turn', lease: leaseRef, expectedRunRevision: 3,
+    expectedTurnRevision: 1, billingMode: 'byok',
+    attempt: await validatedParallelReadAttemptFixture('parallel-process-attempt'),
+  });
+  const registry = new ToolRegistry();
+  registry.registerInvocation({
+    name: 'query_database', description: 'parallel process read fixture', dangerLevel: 'safe',
+    readonly: true, source: 'unknown', access: 'read', recoveryClass: 'read',
+    toolRevision: 'query_database@1', handlerRevision: 'query_database@parallel-window-1',
+    intentRevision: 'prepared-tool-intent.v1',
+    permission: { actions: ['read'] }, exposure: 'direct',
+    limits: { timeoutMs: 10_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+    outputSchema: { type: 'object' },
+    failurePolicy: { onUnknown: { failureKind: 'unknown', retryable: false } },
+    execution: { concurrency: 'read', timeoutMs: 10_000 },
+    inputSchema: {
+      type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'],
+    },
+  }, {
+    revision: { toolName: 'query_database', toolRevision: 'query_database@1', handlerRevision: 'query_database@parallel-window-1', intentRevision: 'prepared-tool-intent.v1' },
+    prepare: (preparedInput, context) => ({
+      ...preparedToolIntent({ toolName: 'query_database', toolRevision: 'query_database@1', handlerRevision: 'query_database@parallel-window-1' }).intent,
+      input: structuredClone(preparedInput),
+      toolRevision: context.toolRevision,
+      handlerRevision: context.handlerRevision,
+      intentRevision: context.intentRevision,
+      generation: context.generation,
+      targetIdentity: null,
+      limits: context.limits,
+    }),
+    execute: () => { throw new Error('Parent fixture must never execute a Handler.'); },
+  });
+  const snapshot = registry.captureSnapshot();
+  const allowedTools = snapshot.llmTools().map(({ name }) => {
+    const revision = snapshot.invocationRevision(name);
+    if (revision === undefined) throw new Error(`Missing Invocation revision for ${name}.`);
+    return { name, revision };
+  });
+  const { ToolInvocationRuntime } = await runtimeModule();
+  const runtime = new ToolInvocationRuntime({
+    journal, registry: snapshot, allowedTools, permissionManager: new PermissionManager(),
+    binding: {
+      projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
+      turnId: 'turn-a', lease, mode: 'full-access',
+    },
+    maxConcurrency: 2,
+  });
+  await runtime.resolve();
+  return {
+    directory, journalPath, counterPath, journal, runId: created.runId,
+    projectId: 'project-a', sessionId: 'session-a', turnId: 'turn-a', lease,
+    invocationIds: committed.invocations.map(({ invocationId }) => invocationId),
+  };
+}
 
 async function createRecoveryFixture(options: RecoveryFixtureOptions) {
   const directory = await mkdtemp(join(tmpdir(), 'dbagent-outcome-recovery-'));
@@ -544,7 +655,7 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
   const committed = await new RunEventCommitter(journal).commitValidatedAttempt({
     projectId: 'project-a', sessionId: 'session-a', runId: created.runId, turnId: 'turn-a',
     commandId: 'commit-turn-a', lease: leaseRef, expectedRunRevision: 3,
-    expectedTurnRevision: 1, attempt: await validatedAttemptFixture('recovery-attempt'),
+    expectedTurnRevision: 1, billingMode: 'byok', attempt: await validatedAttemptFixture('recovery-attempt'),
   });
   const invocationId = committed.invocations[0]?.invocationId ?? '';
 
@@ -555,57 +666,78 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
       context: { idempotencyKey: string; signal: AbortSignal },
     ) => {
       handlerCalls += 1;
-      incrementCounter(counterPath, context.idempotencyKey, options.effect === 'idempotent');
+      incrementCounter(counterPath, context.idempotencyKey, options.recoveryClass === 'idempotent');
       if (options.handlerDelayMs !== undefined) {
         await new Promise((resolve) => setTimeout(resolve, options.handlerDelayMs));
       }
       await options.afterCounter?.(context.signal);
-      return createAgentToolResultEnvelope({
-        modelProjection: { counter: await readCounter(counterPath) },
-        durableSummary: { counter: await readCounter(counterPath) },
-      });
+      return { counter: await readCounter(counterPath) };
     };
     registry.registerInvocation({
       name: 'query_database', description: 'persistent counter fixture', dangerLevel: 'safe',
-      readonly: options.effect === 'read', effect: options.effect,
-      handlerRevision: 'query_database@1', requiredPermission: 'read',
+      readonly: options.recoveryClass === 'read', source: 'unknown',
+      access: options.recoveryClass === 'read' ? 'read' : 'write', recoveryClass: options.recoveryClass,
+      toolRevision: 'query_database@1', handlerRevision: 'query_database-handler@1',
+      intentRevision: 'prepared-tool-intent.v1', permission: { actions: ['read'] },
       exposure: 'direct', execution: {
-        concurrency: options.effect === 'read' ? 'read' : 'write', timeoutMs: 10_000,
+        concurrency: options.recoveryClass === 'read' ? 'read' : 'write', timeoutMs: 10_000,
       },
+      limits: { timeoutMs: 10_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+      outputSchema: { type: 'object' },
+      failurePolicy: { onUnknown: { failureKind: 'unknown', retryable: false } },
       inputSchema: {
         type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'],
       },
     }, {
+      revision: { toolName: 'query_database', toolRevision: 'query_database@1', handlerRevision: 'query_database-handler@1', intentRevision: 'prepared-tool-intent.v1' },
+      prepare: (preparedInput, context) => ({
+        ...preparedToolIntent({ toolName: 'query_database', toolRevision: 'query_database@1', handlerRevision: 'query_database-handler@1', recoveryClass: options.recoveryClass }).intent,
+        input: structuredClone(preparedInput), toolRevision: context.toolRevision,
+        handlerRevision: context.handlerRevision, intentRevision: context.intentRevision,
+        generation: context.generation, limits: context.limits,
+      }),
       execute: counterHandler,
-      ...(options.effect === 'transactional' ? { recover: counterHandler } : {}),
+      ...(options.recoveryClass === 'transactional' ? { recover: counterHandler } : {}),
     });
     registry.registerInvocation({
       name: 'read_result', description: 'unused fixture Tool', dangerLevel: 'safe', readonly: true,
-      effect: 'read', handlerRevision: 'read_result@1',
-      requiredPermission: 'read', exposure: 'direct',
-      execution: { concurrency: 'read' },
+      source: 'unknown', access: 'read', recoveryClass: 'read',
+      toolRevision: 'read_result@1', handlerRevision: 'read_result-handler@1', intentRevision: 'prepared-tool-intent.v1',
+      permission: { actions: ['read'] }, exposure: 'direct',
+      limits: { timeoutMs: 10_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+      outputSchema: { type: 'object' }, failurePolicy: { onUnknown: { failureKind: 'unknown', retryable: false } },
+      execution: { concurrency: 'read', timeoutMs: 10_000 },
       inputSchema: {
         type: 'object', properties: { resultRef: { type: 'string' } }, required: ['resultRef'],
       },
-    }, { execute: () => createAgentToolResultEnvelope({
-      modelProjection: { skipped: true }, durableSummary: { skipped: true },
-    }) });
+    }, {
+      revision: { toolName: 'read_result', toolRevision: 'read_result@1', handlerRevision: 'read_result-handler@1', intentRevision: 'prepared-tool-intent.v1' },
+      prepare: () => preparedToolIntent({ toolName: 'read_result', toolRevision: 'read_result@1', handlerRevision: 'read_result-handler@1' }).intent,
+      execute: () => ({ skipped: true }),
+    });
     return registry;
   };
   let handlerCalls = 0;
   let activeLease = lease;
   let takeoverOrdinal = 0;
   const snapshot = createRegistry().captureSnapshot();
+  const allowedTools = snapshot.llmTools().map(({ name }) => {
+    const revision = snapshot.invocationRevision(name);
+    if (revision === undefined) throw new Error(`Missing Invocation revision for ${name}.`);
+    return { name, revision };
+  });
   const { ToolInvocationRuntime } = await runtimeModule();
   const runtimeOptions = (overrides: {
     journal?: SqliteAgentJournal; lease?: typeof lease; turnId?: string;
   } = {}) => ({
     journal: overrides.journal ?? journal, registry: snapshot,
+    allowedTools,
+    revalidateTarget: () => undefined,
     permissionManager: new PermissionManager(),
     binding: {
       projectId: 'project-a', sessionId: 'session-a', runId: created.runId,
       turnId: overrides.turnId ?? 'turn-a', lease: overrides.lease ?? activeLease,
-      mode: 'full' as const,
+      mode: 'full-access' as const,
     },
     ...(options.leasePollIntervalMs === undefined
       ? {}
@@ -649,7 +781,7 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
       projectId: 'project-a', sessionId: 'session-a', runId: created.runId, turnId,
       commandId: `commit-${turnId}`, lease: leaseReference(activeLease),
       expectedRunRevision: started.revision,
-      expectedTurnRevision: 1, attempt: await validatedAttemptFixture(attemptId),
+      expectedTurnRevision: 1, billingMode: 'byok', attempt: await validatedAttemptFixture(attemptId),
     });
     return result.invocations[0] ?? (() => { throw new Error('Missing retry Invocation'); })();
   };
@@ -657,7 +789,7 @@ async function createRecoveryFixture(options: RecoveryFixtureOptions) {
   return {
     directory, journalPath, counterPath, journal, runId: created.runId, turnId: 'turn-a',
     sessionId: 'session-a', projectId: 'project-a', lease, runtime, invocationId,
-    effect: options.effect, newRuntime, takeoverRuntime, commitEquivalentNextTurn,
+    recoveryClass: options.recoveryClass, newRuntime, takeoverRuntime, commitEquivalentNextTurn,
     handlerCalls: () => handlerCalls,
   };
 }
@@ -695,19 +827,18 @@ async function commitStartedForRecovery(
     lease: { ownerId: fixture.lease.ownerId, fencingToken: fixture.lease.fencingToken },
     expectedRunRevision: run.revision,
     expectedInvocationRevision: invocation.revision,
+    intentDigest: invocation.intentDigest ?? '',
     idempotencyKey: `test-idempotency:${fixture.invocationId}`,
     attempt: 1,
+    permissionAudit: executionPermissionAudit(fixture.recoveryClass),
   });
 }
 
 function spawnCrashWorker(
   fixture: Awaited<ReturnType<typeof createRecoveryFixture>>,
-  cut: 'after-started-before-handler' | 'after-external-effect-before-terminal' | 'after-terminal-before-observation',
+  cut: 'after-started-before-handler' | 'after-external-recoveryClass-before-terminal' | 'after-terminal-before-observation',
 ) {
-  const viteNode = join(
-    repositoryRoot, 'node_modules', '.pnpm', 'vite-node@2.1.9_@types+node@22.19.20',
-    'node_modules', 'vite-node', 'vite-node.mjs',
-  );
+  const viteNode = resolveViteNodeEntry();
   const worker = join(
     packageRoot, 'test', 'fixtures', 'tool-runtime-crash-worker.ts',
   );
@@ -719,7 +850,7 @@ function spawnCrashWorker(
         journalPath: fixture.journalPath, counterPath: fixture.counterPath,
         projectId: fixture.projectId, sessionId: fixture.sessionId, runId: fixture.runId,
         turnId: fixture.turnId, invocationId: fixture.invocationId, lease: fixture.lease,
-        effect: fixture.effect, cut,
+        recoveryClass: fixture.recoveryClass, cut,
       }),
     },
   });
@@ -731,10 +862,7 @@ function spawnRecoveryRaceWorker(
   readyPath: string,
   releasePath: string,
 ) {
-  const viteNode = join(
-    repositoryRoot, 'node_modules', '.pnpm', 'vite-node@2.1.9_@types+node@22.19.20',
-    'node_modules', 'vite-node', 'vite-node.mjs',
-  );
+  const viteNode = resolveViteNodeEntry();
   const worker = join(
     packageRoot, 'test', 'fixtures',
     'tool-recovery-race-worker.ts',
@@ -754,7 +882,34 @@ function spawnRecoveryRaceWorker(
         turnId: fixture.turnId,
         invocationId: fixture.invocationId,
         lease,
-        effect: fixture.effect,
+        recoveryClass: fixture.recoveryClass,
+      }),
+    },
+  });
+}
+
+function spawnParallelWindowWorker(
+  fixture: Awaited<ReturnType<typeof createParallelWindowProcessFixture>>,
+  readyPath: string,
+  releasePath: string,
+) {
+  const viteNode = resolveViteNodeEntry();
+  const worker = join(packageRoot, 'test', 'fixtures', 'tool-parallel-window-worker.ts');
+  return spawn(process.execPath, [viteNode, worker], {
+    cwd: repositoryRoot,
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      DBAGENT_TOOL_PARALLEL_WINDOW_INPUT: JSON.stringify({
+        journalPath: fixture.journalPath,
+        counterPath: fixture.counterPath,
+        readyPath,
+        releasePath,
+        projectId: fixture.projectId,
+        sessionId: fixture.sessionId,
+        runId: fixture.runId,
+        turnId: fixture.turnId,
+        lease: fixture.lease,
       }),
     },
   });
@@ -771,6 +926,19 @@ function initializeCounter(path: string): void {
       );
       CREATE TABLE IF NOT EXISTS handler_calls (
         call_id TEXT PRIMARY KEY
+      );`);
+  } finally {
+    database.close();
+  }
+}
+
+function initializeParallelCounter(path: string): void {
+  const database = new DatabaseSync(path);
+  try {
+    database.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+      CREATE TABLE parallel_handler_calls (
+        call_id TEXT PRIMARY KEY,
+        invocation_id TEXT NOT NULL
       );`);
   } finally {
     database.close();
@@ -810,6 +978,24 @@ async function readHandlerCalls(path: string): Promise<number> {
       (database.prepare('SELECT COUNT(*) AS count FROM handler_calls').get() as { count: number })
         .count,
     );
+  } finally {
+    database.close();
+  }
+}
+
+async function readParallelHandlerCalls(
+  path: string,
+): Promise<Array<{ invocationId: string; calls: number }>> {
+  await Promise.resolve();
+  const database = new DatabaseSync(path, { readOnly: true });
+  try {
+    return (database.prepare(
+      `SELECT invocation_id, COUNT(*) AS calls
+       FROM parallel_handler_calls GROUP BY invocation_id ORDER BY invocation_id`,
+    ).all() as unknown as Array<{ invocation_id: string; calls: number }>).map((row) => ({
+      invocationId: row.invocation_id,
+      calls: Number(row.calls),
+    }));
   } finally {
     database.close();
   }

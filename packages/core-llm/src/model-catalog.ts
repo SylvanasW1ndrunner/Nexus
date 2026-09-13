@@ -1,10 +1,16 @@
 import bundledCatalog from './model_prices_and_context_window.json' with { type: 'json' };
-import type { LlmModelPricing } from './model-registry.js';
 import type {
   LlmGenerationParameterSupport,
   LlmModelMetadata,
   LlmProviderCapabilities,
 } from './types.js';
+
+export type LlmModelPricing = {
+  currency: 'CNY' | 'USD';
+  inputPerMillionTokens: number;
+  outputPerMillionTokens: number;
+  cachedInputPerMillionTokens?: number;
+};
 
 export type ModelCatalogBooleanCapabilities = {
   toolCalling?: boolean;
@@ -36,16 +42,17 @@ export type ModelCatalogSnapshot = {
     url: string;
     generatedAt: string;
   };
+  models: Record<string, ModelCatalogEntry>;
   providers: Record<
     string,
     {
+      api?: string;
       models: Record<string, ModelCatalogEntry>;
     }
   >;
 };
 
 export type ResolvedModelCatalogMetadata = {
-  canonicalModel: string;
   generatedAt: string;
   metadata: LlmModelMetadata;
   pricing?: LlmModelPricing;
@@ -59,15 +66,11 @@ export function resolveModelCatalogMetadata(input: {
   catalog?: ModelCatalogSnapshot;
   providerId: string;
   model: string;
-  canonicalModel?: string;
 }): ResolvedModelCatalogMetadata | undefined {
   const catalog = input.catalog ?? DEFAULT_MODEL_CATALOG;
-  const canonical = input.canonicalModel?.trim();
-  let target = canonical
-    ? parseCanonicalModel(canonical)
-    : { providerId: input.providerId.trim(), model: input.model.trim() };
+  let target = { providerId: input.providerId.trim(), model: input.model.trim() };
   let entry = catalog.providers[target.providerId]?.models[target.model];
-  if (!entry && !canonical) {
+  if (!entry) {
     const matches = Object.entries(catalog.providers)
       .filter(([, provider]) => provider.models[input.model.trim()] !== undefined)
       .map(([providerId, provider]) => ({
@@ -114,7 +117,6 @@ export function resolveModelCatalogMetadata(input: {
   };
   const pricing = catalogPricing(entry.cost);
   return {
-    canonicalModel: `${target.providerId}/${target.model}`,
     generatedAt: catalog.source.generatedAt,
     metadata,
     ...(pricing === undefined ? {} : { pricing }),
@@ -129,32 +131,49 @@ export function validateModelCatalogSnapshot(value: unknown): ModelCatalogSnapsh
     value.source.name !== 'models.dev' ||
     typeof value.source.url !== 'string' ||
     typeof value.source.generatedAt !== 'string' ||
+    !isRecord(value.models) ||
     !isRecord(value.providers)
   ) {
     throw new Error('Invalid models.dev catalog snapshot source.');
   }
+  validateCatalogModels(value.models, 'base');
   for (const [providerId, provider] of Object.entries(value.providers)) {
     if (!providerId || !isRecord(provider) || !isRecord(provider.models)) {
       throw new Error(`Invalid models.dev provider entry: ${providerId || '<empty>'}.`);
     }
-    for (const [modelId, entry] of Object.entries(provider.models)) {
-      if (!modelId || !isRecord(entry) || typeof entry.name !== 'string' || !entry.name.trim()) {
-        throw new Error(`Invalid models.dev model entry: ${providerId}/${modelId || '<empty>'}.`);
-      }
-    }
+    if (provider.api !== undefined) validateCatalogApi(provider.api, providerId);
+    validateCatalogModels(provider.models, providerId);
   }
   return structuredClone(value) as ModelCatalogSnapshot;
 }
 
-function parseCanonicalModel(value: string): { providerId: string; model: string } {
-  const separator = value.indexOf('/');
-  if (separator <= 0 || separator === value.length - 1) {
-    throw new Error('canonicalModel must use the form provider/model.');
+function validateCatalogModels(models: Record<string, unknown>, namespace: string): void {
+  for (const [modelId, entry] of Object.entries(models)) {
+    if (!modelId || !isRecord(entry) || typeof entry.name !== 'string' || !entry.name.trim()) {
+      throw new Error(`Invalid models.dev model entry: ${namespace}/${modelId || '<empty>'}.`);
+    }
   }
-  return {
-    providerId: value.slice(0, separator),
-    model: value.slice(separator + 1),
-  };
+}
+
+function validateCatalogApi(value: unknown, providerId: string): void {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`Invalid models.dev provider API: ${providerId}.`);
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`Invalid models.dev provider API: ${providerId}.`);
+  }
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(`Invalid models.dev provider API: ${providerId}.`);
+  }
 }
 
 function booleanCapability(

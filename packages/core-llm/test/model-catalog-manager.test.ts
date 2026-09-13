@@ -63,6 +63,127 @@ describe('LlmModelCatalogManager', () => {
     });
   });
 
+  it('preserves metadata for uninspected models while inspecting another model', async () => {
+    const manager = await createManager();
+    const connection = createLlmConnection({ endpoint: 'https://relay.example/v1' });
+    const route = resolution(connection.id, 'openai-compatible', ['model-a', 'model-b']);
+    const provider = new CatalogProvider(['model-a', 'model-b'], {
+      'model-a': metadata('model-a', 4_096, 'unsupported'),
+      'model-b': metadata('model-b', 8_192, 'supported'),
+    });
+
+    await manager.refresh({ connection, resolution: route, provider, inspectModelIds: ['model-a'] });
+    await manager.refresh({ connection, resolution: route, provider, inspectModelIds: ['model-b'] });
+
+    expect(manager.resolve(connection.id, 'model-a')).toMatchObject({
+      contextTokens: { value: 4_096, source: 'endpoint' },
+      generationParameters: { seed: { value: 'unsupported', source: 'endpoint' } },
+    });
+    expect(manager.resolve(connection.id, 'model-b')).toMatchObject({
+      contextTokens: { value: 8_192, source: 'endpoint' },
+    });
+  });
+
+  it('preserves inspected metadata through a manager restart and removes absent models', async () => {
+    const directory = await tempDirectory();
+    const store = new LlmModelCatalogStore(directory);
+    const connection = createLlmConnection({ endpoint: 'https://relay.example/v1' });
+    const both = resolution(connection.id, 'openai-compatible', ['model-a', 'model-b']);
+    await new LlmModelCatalogManager({ store }).refresh({
+      connection,
+      resolution: both,
+      provider: new CatalogProvider(['model-a', 'model-b'], {
+        'model-a': metadata('model-a', 4_096, 'unsupported'),
+      }),
+      inspectModelIds: ['model-a'],
+    });
+
+    const restarted = new LlmModelCatalogManager({ store });
+    await restarted.refresh({
+      connection,
+      resolution: resolution(connection.id, 'openai-compatible', ['model-a']),
+      provider: new CatalogProvider(['model-a']),
+    });
+
+    expect(restarted.resolve(connection.id, 'model-a')).toMatchObject({
+      contextTokens: { value: 4_096, source: 'endpoint' },
+    });
+    expect(restarted.resolve(connection.id, 'model-b')).toBeUndefined();
+  });
+
+  it('replaces explicitly refreshed metadata even when support is downgraded to unknown', async () => {
+    const manager = await createManager();
+    const connection = createLlmConnection({ endpoint: 'https://relay.example/v1' });
+    const route = resolution(connection.id, 'openai-compatible', ['model-a']);
+    await manager.refresh({
+      connection,
+      resolution: route,
+      provider: new CatalogProvider(['model-a'], {
+        'model-a': metadata('model-a', 4_096, 'unsupported'),
+      }),
+      inspectModelIds: ['model-a'],
+    });
+    await manager.refresh({
+      connection,
+      resolution: route,
+      provider: new CatalogProvider(['model-a'], {
+        'model-a': { model: 'model-a', source: 'provider-api', capabilities: {} },
+      }),
+      inspectModelIds: ['model-a'],
+    });
+
+    expect(manager.resolve(connection.id, 'model-a')).toMatchObject({
+      contextTokens: { value: null },
+      generationParameters: { seed: { value: null } },
+    });
+  });
+
+  it('never carries cached metadata across connections', async () => {
+    const directory = await tempDirectory();
+    const store = new LlmModelCatalogStore(directory);
+    const manager = new LlmModelCatalogManager({ store });
+    const first = createLlmConnection({ endpoint: 'https://relay-a.example/v1' });
+    const second = createLlmConnection({ endpoint: 'https://relay-b.example/v1' });
+    await manager.refresh({
+      connection: first,
+      resolution: resolution(first.id, 'openai-compatible', ['shared']),
+      provider: new CatalogProvider(['shared'], { shared: metadata('shared', 4_096, 'unsupported') }),
+      inspectModelIds: ['shared'],
+    });
+    await manager.refresh({
+      connection: second,
+      resolution: resolution(second.id, 'openai-compatible', ['shared']),
+      provider: new CatalogProvider(['shared']),
+    });
+
+    expect(manager.resolve(second.id, 'shared')).toMatchObject({
+      contextTokens: { value: null },
+      generationParameters: { seed: { value: null } },
+    });
+  });
+
+  it('serializes concurrent partial inspection per connection without losing either update', async () => {
+    const manager = await createManager();
+    const connection = createLlmConnection({ endpoint: 'https://relay.example/v1' });
+    const route = resolution(connection.id, 'openai-compatible', ['model-a', 'model-b']);
+    const provider = new DelayedCatalogProvider(
+      ['model-a', 'model-b'],
+      {
+        'model-a': metadata('model-a', 4_096, 'unsupported'),
+        'model-b': metadata('model-b', 8_192, 'supported'),
+      },
+      { 'model-a': 20, 'model-b': 1 },
+    );
+
+    await Promise.all([
+      manager.refresh({ connection, resolution: route, provider, inspectModelIds: ['model-a'] }),
+      manager.refresh({ connection, resolution: route, provider, inspectModelIds: ['model-b'] }),
+    ]);
+
+    expect(manager.resolve(connection.id, 'model-a')?.contextTokens.value).toBe(4_096);
+    expect(manager.resolve(connection.id, 'model-b')?.contextTokens.value).toBe(8_192);
+  });
+
   it('falls back to an explicitly stale cache when online refresh fails', async () => {
     let now = Date.parse('2026-08-07T00:00:00.000Z');
     const directory = await tempDirectory();
@@ -169,6 +290,21 @@ class FailingCatalogProvider extends CatalogProvider {
   }
 }
 
+class DelayedCatalogProvider extends CatalogProvider {
+  constructor(
+    catalog: string[],
+    metadataByModel: Record<string, LlmModelMetadata>,
+    private readonly delays: Readonly<Record<string, number>>,
+  ) {
+    super(catalog, metadataByModel);
+  }
+
+  override async getModelMetadata(model: string): Promise<LlmModelMetadata> {
+    await new Promise((resolve) => setTimeout(resolve, this.delays[model] ?? 0));
+    return await super.getModelMetadata(model);
+  }
+}
+
 async function createManager(): Promise<LlmModelCatalogManager> {
   return new LlmModelCatalogManager({ store: new LlmModelCatalogStore(await tempDirectory()) });
 }
@@ -194,5 +330,19 @@ function resolution(
     models,
     revision: 'route-revision',
     evidence: [],
+  };
+}
+
+function metadata(
+  model: string,
+  contextTokens: number,
+  seed: 'supported' | 'unsupported',
+): LlmModelMetadata {
+  return {
+    model,
+    source: 'provider-api',
+    capabilities: { chat: 'supported' },
+    contextTokens,
+    generationParameters: { seed },
   };
 }

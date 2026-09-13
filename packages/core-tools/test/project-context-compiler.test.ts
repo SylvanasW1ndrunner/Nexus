@@ -13,7 +13,7 @@ afterEach(async () => {
 });
 
 describe('project context compiler', () => {
-  it('deterministically compiles project guidance, technology and capability metadata', async () => {
+  it('deterministically compiles stable project guidance and technology metadata', async () => {
     const root = await temporaryProject();
     await mkdir(join(root, '.schemanaut'), { recursive: true });
     await mkdir(join(root, 'services', 'cleaner'), { recursive: true });
@@ -35,21 +35,13 @@ describe('project context compiler', () => {
     await writeFile(join(root, 'clean.py'), 'print("ok")\n', 'utf8');
     await writeFile(join(root, '.env'), 'API_KEY=must-not-enter-project-context\n', 'utf8');
 
-    const compilation = await compileProjectContext({
-      rootPath: root,
-      databases: [{ kind: 'postgresql', label: 'orders-primary', version: '16' }],
-      mcpServers: [{ id: 'kubernetes', status: 'ready', transport: 'stdio' }],
-      skills: [{ name: 'inspect-kafka', description: '检查事件流。', scope: 'project' }],
-    });
+    const compilation = await compileProjectContext({ rootPath: root });
 
     expect(compilation.modelContext).toMatchObject({
       technologies: {
         languages: ['python', 'typescript'],
         packageManagers: ['pnpm', 'python'],
       },
-      databases: [{ kind: 'postgresql', label: 'orders-primary', version: '16' }],
-      mcpServers: [{ id: 'kubernetes', status: 'ready', transport: 'stdio' }],
-      skills: [{ name: 'inspect-kafka', description: '检查事件流。', scope: 'project' }],
     });
     expect(compilation.modelContext.instructions.map((item) => item.path)).toEqual([
       '.schemanaut/AGENT.md',
@@ -60,6 +52,10 @@ describe('project context compiler', () => {
     expect(compilation.compiledInstructions).toContain('path="services/cleaner"');
     expect(compilation.compiledInstructions).not.toContain('must-not-enter-project-context');
     expect(compilation.compiledInstructions).not.toContain(compilation.fingerprint);
+    expect(compilation.compiledInstructions).not.toContain('<project_skills>');
+    expect(compilation.compiledInstructions).not.toContain('<active_capabilities>');
+    expect(compilation.compiledInstructions).not.toContain('<mcp_servers>');
+    expect(compilation.compiledInstructions).not.toContain('database_capabilities');
   });
 
   it('changes the internal fingerprint when a relevant instruction changes', async () => {

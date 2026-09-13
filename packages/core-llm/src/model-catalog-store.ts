@@ -3,13 +3,14 @@ import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LlmModelMetadata } from './types.js';
 
-const CACHE_SCHEMA_VERSION = 1 as const;
+/** V2 safely invalidates prior cache schema entries. */
+const CACHE_SCHEMA_VERSION = 2 as const;
 const MAX_CACHED_MODELS = 100_000;
 const MAX_CACHE_BYTES = 32 * 1_024 * 1_024;
 
 export type LlmModelCatalogCacheKey = {
   connectionId: string;
-  credentialScope: string;
+  credentialRevision: string;
   pluginId: string;
   pluginVersion: string;
 };
@@ -202,9 +203,10 @@ function keyDigest(key: LlmModelCatalogCacheKey): string {
   return createHash('sha256')
     .update(JSON.stringify([
       key.connectionId,
-      key.credentialScope,
+      key.credentialRevision,
       key.pluginId,
       key.pluginVersion,
+      CACHE_SCHEMA_VERSION,
     ]))
     .digest('hex');
 }

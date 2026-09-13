@@ -180,16 +180,36 @@ describe('SkillRegistry scopes and progressive disclosure', () => {
     expect(registry.inspect('same-name')?.sourceId).toBe('second');
   });
 
-  it('loads a large body only after activation', async () => {
+  it('never commits a stale disk snapshot when sources change during refresh', async () => {
     const root = await temporaryDirectory();
-    await writeSkill(root, 'large-body', '用于验证渐进披露。', 'x'.repeat(2 * 1_024 * 1_024 + 1));
+    const previous = join(root, 'previous');
+    const current = join(root, 'current');
+    await writeSkill(previous, 'previous-skill', '旧来源。', 'old');
+    await writeSkill(current, 'current-skill', '新来源。', 'new');
+    const registry = new SkillRegistry({
+      sources: [{ scope: 'project', path: previous, id: 'previous' }],
+    });
+
+    const refresh = registry.refresh();
+    registry.setSources([{ scope: 'project', path: current, id: 'current' }]);
+    await refresh;
+
+    expect(registry.inspect('previous-skill')).toBeUndefined();
+    expect(registry.inspect('current-skill')).toMatchObject({ sourceId: 'current' });
+  });
+
+  it('isolates a SKILL.md that cannot be frozen within the per-file limit', async () => {
+    const root = await temporaryDirectory();
+    await writeSkill(root, 'large-body', '用于验证渐进披露。', 'x'.repeat(4 * 1_024 * 1_024 + 1));
     const registry = new SkillRegistry({
       sources: [{ scope: 'project', path: root }],
     });
 
     const result = await registry.refresh();
-    expect(result.skills.map(({ name }) => name)).toEqual(['large-body']);
-    await expect(registry.load('large-body')).rejects.toThrow('byte limit');
+    expect(result.skills).toEqual([]);
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0]?.code).toBe('file-too-large');
+    expect(result.issues[0]?.message).toContain('per-file');
   });
 
   it('reads Tier-3 resources on demand and rejects path escape', async () => {

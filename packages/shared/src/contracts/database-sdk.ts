@@ -15,8 +15,6 @@ export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'er
 
 export type QueryRiskLevel = 'safe' | 'caution' | 'dangerous' | 'blocked';
 
-export type UsageMode = 'byok' | 'managed';
-
 export type DbColumnValue =
   | string
   | number

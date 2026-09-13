@@ -1,14 +1,14 @@
 import { assertPortableValue, type PortableValue } from '@dbagent/shared';
 import type {
-  AgentMessage,
-  AgentRunRecord,
-  AgentRunRecordStatus,
-  AgentSession,
-} from '../types.js';
+  LegacyAgentMessage as AgentMessage,
+  LegacyAgentRunRecord as AgentRunRecord,
+  LegacyAgentRunRecordStatus as AgentRunRecordStatus,
+  LegacyAgentSession as AgentSession,
+} from './legacy-import-types.js';
 import type { AgentEvent, AgentEventType } from '../events/agent-event.js';
 import {
   AGENT_EVENT_SCHEMA_REGISTRY,
-  validateAndRedactEventPayload,
+  validateAndSnapshotEventPayload,
 } from '../events/event-schema-registry.js';
 
 export type ProjectionErrorCode =
@@ -136,13 +136,20 @@ export const EVENT_TO_ACTIVITY = Object.freeze(
     'run.interrupted': { kind: 'status', phase: 'failed' },
     model_delta_batch: { kind: 'model-preview', phase: 'progress' },
     model_attempt_discarded: { kind: 'model-preview', phase: 'discarded' },
-    'tool.proposed': { kind: 'tool', phase: 'started' },
+    'tool.prepared': { kind: 'tool', phase: 'started' },
     'tool.approval_requested': { kind: 'approval', phase: 'waiting' },
+    'tool.authorized': { kind: 'approval', phase: 'succeeded' },
+    'tool.denied': { kind: 'approval', phase: 'succeeded' },
     'tool.progress': { kind: 'tool', phase: 'progress' },
+    'tool.hook_rejected': { kind: 'tool', phase: 'failed' },
+    'tool.hook_warning': { kind: 'tool', phase: 'progress' },
     'tool.succeeded': { kind: 'result', phase: 'succeeded' },
     'tool.failed': { kind: 'result', phase: 'failed' },
+    'tool.timed_out': { kind: 'result', phase: 'failed' },
+    'tool.unsupported_revision': { kind: 'result', phase: 'failed' },
+    'tool.waiting_for_user': { kind: 'tool', phase: 'waiting' },
     'tool.cancelled': { kind: 'result', phase: 'failed' },
-    'tool.outcome_unknown': { kind: 'result', phase: 'waiting' },
+    'tool.unknown': { kind: 'result', phase: 'waiting' },
     'artifact.created': { kind: 'artifact', phase: 'succeeded' },
     'artifact.expired': { kind: 'artifact', phase: 'failed' },
     'artifact.deleted': { kind: 'artifact', phase: 'failed' },
@@ -172,6 +179,38 @@ export class UserActivityProjector {
     }
     return accumulator.finish();
   }
+}
+
+/**
+ * Projects one event that has already been read from the Journal's exact
+ * Project/Session/Run scope. This is the cursor-resume boundary: callers do
+ * not need to replay causal history merely to render events after a validated
+ * source sequence. Raw model internals and non-user-facing facts remain
+ * filtered by EVENT_TO_ACTIVITY.
+ */
+export function projectTrustedRunUserActivity(
+  event: AgentEvent,
+  options: Readonly<{ finalText?: string }> = {},
+): UserActivityEvent | undefined {
+  const descriptor = userActivityDescriptor(event);
+  if (descriptor === undefined || isLegacyCarrierIdentityEvent(event)) return undefined;
+  const schema = AGENT_EVENT_SCHEMA_REGISTRY[event.type];
+  if (event.schemaVersion !== schema.schemaVersion) {
+    throw new ProjectionError('SCHEMA_INVALID', 'Projection input was not upcast to current schema.');
+  }
+  try {
+    validateAndSnapshotEventPayload(event.type, event.payload);
+  } catch (error) {
+    throw new ProjectionError(
+      'SCHEMA_INVALID',
+      `Projection payload is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return toUserActivity(
+    event,
+    descriptor,
+    event.type === 'run.completed' ? options.finalText : undefined,
+  );
 }
 
 export class AuditProjector {
@@ -216,6 +255,8 @@ export class ProjectionEventValidator {
   readonly #attempts = new Map<string, AttemptScope>();
   readonly #invocations = new Map<string, InvocationScope>();
   readonly #finalText = new Map<string, { runId: string; turnId: string; text: string }>();
+  readonly #pendingSubagents = new Map<string, Set<string>>();
+  readonly #terminalRuns = new Set<string>();
   #previousSequence = 0;
 
   constructor(
@@ -243,7 +284,7 @@ export class ProjectionEventValidator {
       throw new ProjectionError('SCHEMA_INVALID', 'Projection input was not upcast to current schema.');
     }
     try {
-      validateAndRedactEventPayload(event.type, event.payload);
+      validateAndSnapshotEventPayload(event.type, event.payload);
     } catch (error) {
       throw new ProjectionError(
         'SCHEMA_INVALID',
@@ -286,6 +327,7 @@ export class ProjectionEventValidator {
     this.#validateTurnAttemptInvocation(event);
     if (event.type === 'run.completed') this.resolveFinalText(event);
     if (!this.#trustedJournal) this.#events.set(event.eventId, scopeOf(event));
+    this.#observeSubagentLifecycle(event);
   }
 
   run(runId: string): RunScope | undefined { return this.#runs.get(runId); }
@@ -302,10 +344,14 @@ export class ProjectionEventValidator {
   }
 
   resolveFinalText(event: Extract<AgentEvent, { type: 'run.completed' }>): string {
-    const parsed = /^turn:([^:]+):text:(\d+)$/u.exec(event.payload.finalContentRef);
-    const resolved = parsed === null ? undefined : this.#finalText.get(event.payload.finalContentRef);
-    if (parsed === null || resolved === undefined || resolved.runId !== event.runId ||
-      resolved.turnId !== parsed[1]) {
+    const blockRef = /^turn:([^:]+):text:(\d+)$/u.exec(event.payload.finalContentRef);
+    const contentRef = /^turn:([^:]+):content$/u.exec(event.payload.finalContentRef);
+    const referencedTurnId = blockRef?.[1] ?? contentRef?.[1];
+    const resolved = referencedTurnId === undefined
+      ? undefined
+      : this.#finalText.get(event.payload.finalContentRef);
+    if (referencedTurnId === undefined || resolved === undefined || resolved.runId !== event.runId ||
+      resolved.turnId !== referencedTurnId) {
       throw new ProjectionError('CAUSALITY_INVALID', 'Run finalContentRef does not resolve exactly.');
     }
     return resolved.text;
@@ -320,23 +366,50 @@ export class ProjectionEventValidator {
       run: this.#runs.get(event.runId),
       finalText: event.type === 'run.completed' ? this.resolveFinalText(event) : undefined,
     };
-    this.#runs.delete(event.runId);
+    if ((this.#pendingSubagents.get(event.runId)?.size ?? 0) > 0) {
+      this.#terminalRuns.add(event.runId);
+      return snapshot;
+    }
+    this.#releaseRun(event.runId);
+    return snapshot;
+  }
+
+  #releaseRun(runId: string): void {
+    this.#runs.delete(runId);
     for (const [key, scope] of this.#events) {
-      if (scope.runId === event.runId) this.#events.delete(key);
+      if (scope.runId === runId) this.#events.delete(key);
     }
     for (const [key, scope] of this.#turns) {
-      if (scope.runId === event.runId) this.#turns.delete(key);
+      if (scope.runId === runId) this.#turns.delete(key);
     }
     for (const [key, scope] of this.#attempts) {
-      if (scope.runId === event.runId) this.#attempts.delete(key);
+      if (scope.runId === runId) this.#attempts.delete(key);
     }
     for (const [key, scope] of this.#invocations) {
-      if (scope.runId === event.runId) this.#invocations.delete(key);
+      if (scope.runId === runId) this.#invocations.delete(key);
     }
     for (const [key, scope] of this.#finalText) {
-      if (scope.runId === event.runId) this.#finalText.delete(key);
+      if (scope.runId === runId) this.#finalText.delete(key);
     }
-    return snapshot;
+    this.#pendingSubagents.delete(runId);
+    this.#terminalRuns.delete(runId);
+  }
+
+  #observeSubagentLifecycle(event: AgentEvent): void {
+    if (event.type === 'subagent.started') {
+      const pending = this.#pendingSubagents.get(event.runId) ?? new Set<string>();
+      pending.add(event.payload.subagentId);
+      this.#pendingSubagents.set(event.runId, pending);
+      return;
+    }
+    if (event.type !== 'subagent.completed' && event.type !== 'subagent.failed' &&
+      event.type !== 'subagent.cancelled') return;
+    const pending = this.#pendingSubagents.get(event.runId);
+    pending?.delete(event.payload.subagentId);
+    if (pending !== undefined && pending.size === 0) this.#pendingSubagents.delete(event.runId);
+    if (this.#terminalRuns.has(event.runId) && (pending?.size ?? 0) === 0) {
+      this.#releaseRun(event.runId);
+    }
   }
 
   #validateTurnAttemptInvocation(event: AgentEvent): void {
@@ -379,6 +452,11 @@ export class ProjectionEventValidator {
               runId: event.runId, turnId: event.turnId!, text: block.text,
             });
           }
+        });
+        this.#finalText.set(`turn:${event.turnId}:content`, {
+          runId: event.runId,
+          turnId: event.turnId,
+          text: committedText(event),
         });
       } else {
         const attempt = this.#attempts.get(event.attemptId);
@@ -607,11 +685,29 @@ export class UserActivityProjectionAccumulator {
   }
 
   accept(event: AgentEvent): boolean {
+    const isTargetSession = event.sessionId === this.#options.sessionId;
+    const isOutputCandidate = isTargetSession && event.sequence > this.#options.afterSequence;
+    const carrierIdentity = isTargetSession && isLegacyCarrierIdentityEvent(event);
+    const descriptor = !isOutputCandidate
+      ? undefined
+      : event.type === 'legacy.imported'
+        ? legacyActivityDescriptor(event.payload.entityType)
+        : this.#legacyCarrierRuns.has(event.runId) || carrierIdentity ||
+            (event.type === 'tool.prepared' && 'validationError' in event.payload)
+          ? undefined
+          : userActivityDescriptor(event);
+    const retainedItemCount = carrierIdentity
+      ? this.#items.reduce((count, item) => count + Number(item.runId !== event.runId), 0)
+      : this.#items.length;
+    // Reject before advancing the causal validator. A streaming consumer may drain and retry
+    // this exact event without duplicating state or violating source-sequence monotonicity.
+    if (descriptor !== undefined && retainedItemCount >= this.#options.limit) return false;
+
     this.#validator.accept(event);
     const terminal = event.sessionId === this.#options.sessionId
       ? this.#validator.releaseTerminal(event)
       : undefined;
-    if (event.sessionId === this.#options.sessionId && isLegacyCarrierIdentityEvent(event)) {
+    if (carrierIdentity) {
       this.#legacyCarrierRuns.add(event.runId);
       removeWhere(this.#items, (item) => item.runId === event.runId);
     }
@@ -621,13 +717,7 @@ export class UserActivityProjectionAccumulator {
       }
       return true;
     }
-    const descriptor = event.type === 'legacy.imported'
-      ? legacyActivityDescriptor(event.payload.entityType)
-      : this.#legacyCarrierRuns.has(event.runId)
-        ? undefined
-        : EVENT_TO_ACTIVITY[event.type as keyof typeof EVENT_TO_ACTIVITY];
     if (descriptor !== undefined) {
-      if (this.#items.length >= this.#options.limit) return false;
       const finalText = event.type === 'run.completed'
         ? terminal?.finalText ?? this.#validator.resolveFinalText(event)
         : undefined;
@@ -643,6 +733,13 @@ export class UserActivityProjectionAccumulator {
 
   finish(): ProjectionPage<UserActivityEvent> {
     return { items: [...this.#items], nextSourceSequence: this.#cursor };
+  }
+
+  /** Emits the current page while retaining causal validation state for the next page. */
+  drain(): ProjectionPage<UserActivityEvent> {
+    const page = this.finish();
+    this.#items.splice(0, this.#items.length);
+    return page;
   }
 }
 
@@ -761,21 +858,72 @@ function toUserActivity(
         summary: 'Tentative model output was discarded.',
         replaceKey: event.attemptId ?? `preview:${event.runId}`,
       };
-    case 'tool.proposed':
+    case 'tool.prepared':
       return {
         ...base,
-        summary: `Tool proposed: ${event.payload.name}`,
-        detail: { name: event.payload.name },
+        summary: event.payload.actionSummary,
+        detail: { actionSummary: event.payload.actionSummary },
       };
     case 'tool.approval_requested':
-      return { ...base, summary: event.payload.summary };
+      return {
+        ...base,
+        summary: event.payload.summary,
+        detail: {
+          approvalId: event.payload.approval.approvalId,
+          actionSummary: event.payload.summary,
+        },
+        replaceKey: `approval:${event.payload.approval.approvalId}`,
+      };
+    case 'tool.authorized':
+    case 'tool.denied': {
+      if (event.payload.decision === undefined) {
+        throw new ProjectionError('SCHEMA_INVALID', 'Approval decision metadata is missing.');
+      }
+      const actionSummary = event.payload.actionSummary ??
+        (event.type === 'tool.authorized' ? 'Tool invocation approved.' : 'Tool invocation denied.');
+      return {
+        ...base,
+        summary: actionSummary,
+        detail: {
+          approvalId: event.payload.approvalId,
+          actionSummary,
+          decision: event.payload.decision.status === 'approved' ? 'approve' : 'deny',
+        },
+        replaceKey: `approval:${event.payload.approvalId}`,
+      };
+    }
     case 'tool.progress':
+    case 'tool.hook_rejected':
+    case 'tool.hook_warning':
       return { ...base, summary: event.payload.summary };
     case 'tool.succeeded':
     case 'tool.failed':
     case 'tool.cancelled':
-    case 'tool.outcome_unknown':
-      return { ...base, summary: event.payload.summary };
+    case 'tool.timed_out':
+    case 'tool.unsupported_revision':
+      return {
+        ...base,
+        summary: event.payload.summary,
+        evidenceRefs: [...event.payload.evidenceRefs],
+      };
+    case 'tool.waiting_for_user':
+      return {
+        ...base,
+        summary: `Waiting for the user to answer question ${event.payload.questionId} (revision ${event.payload.questionRevision}).`,
+        detail: { questionId: event.payload.questionId, questionRevision: event.payload.questionRevision },
+      };
+    case 'tool.unknown': {
+      if (event.invocationId === undefined) {
+        throw new ProjectionError(
+          'CAUSALITY_INVALID', 'Unknown Tool outcome is missing its Invocation identity.',
+        );
+      }
+      return {
+        ...base,
+        summary: event.payload.summary,
+        detail: { invocationId: event.invocationId },
+      };
+    }
     case 'artifact.created':
       return {
         ...base,
@@ -970,6 +1118,30 @@ function previewText(blocks: PortableValue[]): string {
       return record.type === 'text' && typeof record.text === 'string' ? [record.text] : [];
     })
     .join('');
+}
+
+function userActivityDescriptor(event: AgentEvent): ActivityDescriptor | undefined {
+  const descriptor = EVENT_TO_ACTIVITY[event.type as keyof typeof EVENT_TO_ACTIVITY];
+  if (
+    (event.type === 'tool.authorized' || event.type === 'tool.denied') &&
+    event.payload.decision === undefined
+  ) {
+    // Automatic policy authorization/denial is Tool lifecycle state, not a
+    // user approval decision. Only an explicit human decision closes a
+    // previously emitted approval activity.
+    return undefined;
+  }
+  if (
+    descriptor !== undefined &&
+    event.type === 'model_delta_batch' &&
+    previewText(event.payload.blocks).trim().length === 0
+  ) {
+    // Reasoning summaries, provider-opaque state and Tool-call drafts are durable replay
+    // material, not user-facing execution progress. Omitting the event also prevents an
+    // empty model preview from breaking strict HTTP/SSE activity validation.
+    return undefined;
+  }
+  return descriptor;
 }
 
 function publicInputText(content: PortableValue): string | undefined {

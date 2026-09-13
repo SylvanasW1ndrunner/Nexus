@@ -1,224 +1,207 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import type { AgentRunOptions, AgentRunResult } from '@dbagent/core-agent';
-import { runAgentBehaviorEvaluationSuite, type AgentEvalSuiteAgent } from '../src/index.js';
+import { describe, expect, it } from 'vitest';
+import type { AuditProjectionEvent } from '@dbagent/core-agent';
+import {
+  runAgentEvaluationSuite,
+  type AgentEvalCaseExecution,
+  type AgentEvalSuiteAgent,
+} from '../src/index.js';
 
-const tempDirs: string[] = [];
+const SCHEMA_EVIDENCE = 'schemanaut-evidence:v1:artifact_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const QUERY_EVIDENCE = 'schemanaut-evidence:v1:artifact_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+const OTHER_EVIDENCE = 'schemanaut-evidence:v1:artifact_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
 
-afterEach(async () => {
-  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
-});
-
-describe('runAgentBehaviorEvaluationSuite', () => {
-  it('runs business Agent cases, evaluates tool evidence, and persists a redacted report', async () => {
-    const apiKey = ['sk', 'eval-runner-secret-123456'].join('-');
-    const agent = recordingAgent([
-      runResult({
-        finalText: `paid_search GMV 已生成，密钥 ${apiKey} 不应进入报告。`,
-        toolExecutions: [
-          {
-            toolCallId: 'schema_1',
-            toolName: 'search_schema',
-            status: 'success',
-            durationMs: 1,
-            argumentPreview: `{"query":"GMV","apiKey":"${apiKey}"}`,
-            resultPreview: 'public.orders analytics.campaign_spend',
-          },
-          {
-            toolCallId: 'query_1',
-            toolName: 'query_database',
-            status: 'success',
-            durationMs: 2,
-            argumentPreview: '{"sql":"select * from analytics.traffic_sessions"}',
-            resultPreview: '{"rows":[{"utm_source":"paid_search"}]}',
-          },
-        ],
+describe('runAgentEvaluationSuite', () => {
+  it('evaluates an exact Run result against Audit facts, not a second Agent loop', async () => {
+    const agent = recordingAgent([execution('completed', [
+      event(1, 'turn.started', {}),
+      event(2, 'tool.proposed', {
+        invocationId: 'invoke-schema', callId: 'call-schema', actionOrdinal: 0,
+        name: 'search_schema', arguments: { query: 'GMV' },
+      }, { invocationId: 'invoke-schema' }),
+      event(3, 'tool.succeeded', {
+        summary: 'Schema found.', resultRefs: [SCHEMA_EVIDENCE],
+      }, { invocationId: 'invoke-schema' }),
+      event(4, 'run.completed', {
+        finalContentRef: 'turn:turn-1:content', deliveryStatus: 'verified',
+        evidenceRefs: [SCHEMA_EVIDENCE],
       }),
-    ]);
-    const reportStorePath = join(await tempDir(), 'reports.json');
+    ], 'paid_search GMV is ready.', [SCHEMA_EVIDENCE])]);
 
-    const output = await runAgentBehaviorEvaluationSuite({
+    const output = await runAgentEvaluationSuite({
       agent,
-      reportStorePath,
-      generatedAt: '2026-07-02T00:00:00.000Z',
-      suiteSource: { kind: 'imported', path: 'evals/ecommerce.json' },
-      baseRun: {
-        providerId: 'fake',
-        model: 'fake-model',
-        mode: 'read',
-        maxIterations: 5,
-      },
+      generatedAt: '2026-09-04T00:00:00.000Z',
+      baseConfiguration: { mode: 'default', allowedTools: ['search_schema'] },
       suite: {
-        suiteId: 'agent-rag-ecommerce',
-        suiteName: 'Agent/RAG 电商业务验收',
+        suiteId: 'schema-eval',
+        suiteName: 'Schema retrieval',
         environment: 'integration',
-        notes: ['报告必须脱敏。'],
-        cases: [
-          {
-            case: {
-              id: 'EVAL-001',
-              userTask: '按渠道统计 GMV 和 ROI',
-              expectedStatus: 'done',
-              toolExpectations: [
-                {
-                  toolName: 'search_schema',
-                  status: 'success',
-                  argumentIncludes: ['GMV'],
-                  resultIncludes: ['public.orders'],
-                },
-                {
-                  toolName: 'query_database',
-                  status: 'success',
-                  argumentIncludes: ['analytics.traffic_sessions'],
-                  resultIncludes: ['paid_search'],
-                },
-              ],
-              finalTextIncludes: ['paid_search'],
-            },
-            run: { maxToolExecutionMs: 10_000 },
+        cases: [{
+          expectation: {
+            id: 'EVAL-001', userTask: 'Find the GMV source.', expectedStatus: 'completed',
+            requiredToolCalls: ['search_schema'],
+            requiredToolStatuses: [{ toolName: 'search_schema', status: 'success' }],
+            toolExpectations: [{
+              toolName: 'search_schema', status: 'success', minCalls: 1, maxCalls: 1,
+              argumentIncludes: ['GMV'], resultIncludes: ['Schema found'],
+            }],
+            finalTextIncludes: ['paid_search'], minTurns: 1, maxTurns: 1,
           },
-        ],
+          configuration: { allowedTools: ['search_schema'] },
+        }],
       },
     });
 
-    expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 1, failedCases: 0 });
-    expect(output.savedReport).toMatchObject({
-      suiteId: 'agent-rag-ecommerce',
-      suiteName: 'Agent/RAG 电商业务验收',
-      passRate: 1,
+    expect(output.summary).toEqual({ totalCases: 1, passedCases: 1, failedCases: 0, passRate: 1 });
+    expect(output.report).toMatchObject({
+      schemaVersion: 1, generatedAt: '2026-09-04T00:00:00.000Z', environment: 'integration',
     });
-    expect(agent.calls).toMatchObject([
-      {
-        providerId: 'fake',
-        model: 'fake-model',
-        mode: 'read',
-        maxIterations: 5,
-        maxToolExecutionMs: 10_000,
-        userMessage: '按渠道统计 GMV 和 ROI',
-      },
-    ]);
-    const combined = output.report.files.map((file) => file.content).join('\n');
-    expect(combined).toContain('Tool Details');
-    expect(combined).toContain('evals/ecommerce.json');
-    expect(combined).toContain('sk-[REDACTED]');
-    expect(combined).not.toContain(apiKey);
-    expect(output.report.suiteSource).toEqual({
-      kind: 'imported',
-      path: 'evals/ecommerce.json',
+    expect(output.caseResults[0]?.observed).toMatchObject({
+      turnCount: 1,
+      tools: [{ toolName: 'search_schema', status: 'success', evidenceRefs: [SCHEMA_EVIDENCE] }],
     });
-    expect(
-      JSON.parse(output.report.files.find((file) => file.path === 'manifest.json')!.content),
-    ).toMatchObject({
-      suiteSource: { kind: 'imported', path: 'evals/ecommerce.json' },
-    });
+    expect(agent.calls).toEqual([{
+      caseId: 'EVAL-001', userTask: 'Find the GMV source.',
+      configuration: { mode: 'default', allowedTools: ['search_schema'] },
+    }]);
   });
 
-  it('stops on the first failed case when requested', async () => {
+  it('stops only after a failed evidence-backed case when requested', async () => {
     const agent = recordingAgent([
-      runResult({
-        finalText: '没有调用工具。',
-        toolExecutions: [],
-      }),
-      runResult({
-        finalText: '第二个用例不应运行。',
-      }),
+      execution('completed', [event(1, 'run.completed', {
+        finalContentRef: 'turn:turn-1:content', deliveryStatus: 'not-required', evidenceRefs: [],
+      })], 'No tool was needed.'),
+      execution('completed', [event(1, 'run.completed', {
+        finalContentRef: 'turn:turn-2:content', deliveryStatus: 'not-required', evidenceRefs: [],
+      })], 'The second case must not run.'),
     ]);
 
-    const output = await runAgentBehaviorEvaluationSuite({
+    const output = await runAgentEvaluationSuite({
       agent,
       stopOnFirstFailure: true,
-      baseRun: {
-        providerId: 'fake',
-        model: 'fake-model',
-        mode: 'read',
-      },
       suite: {
-        suiteId: 'agent-rag-stop',
-        suiteName: 'Agent/RAG 失败停止验收',
-        cases: [
-          {
-            case: {
-              id: 'FAIL-001',
-              userTask: '必须查询数据库',
-              expectedStatus: 'done',
-              requiredToolCalls: ['query_database'],
-            },
-          },
-          {
-            case: {
-              id: 'FAIL-002',
-              userTask: '第二个任务',
-              expectedStatus: 'done',
-            },
-          },
+        suiteId: 'stop', suiteName: 'stop', cases: [
+          { expectation: {
+            id: 'FAIL-001', userTask: 'Must use the database.', requiredToolCalls: ['query_database'],
+          } },
+          { expectation: { id: 'FAIL-002', userTask: 'Second task.' } },
         ],
       },
     });
 
-    expect(output.summary).toMatchObject({ totalCases: 1, passedCases: 0, failedCases: 1 });
-    expect(output.caseResults.map((item) => item.caseId)).toEqual(['FAIL-001']);
+    expect(output.summary).toEqual({ totalCases: 1, passedCases: 0, failedCases: 1, passRate: 0 });
+    expect(output.caseResults[0]?.failures).toContain('Required Tool query_database was not proposed.');
     expect(agent.calls).toHaveLength(1);
   });
 
-  it('rejects empty suites before calling the Agent', async () => {
-    const agent = recordingAgent([]);
+  it('rejects audit input that crosses an evaluated Run boundary', async () => {
+    const agent = recordingAgent([execution('completed', [event(1, 'run.completed', {
+      finalContentRef: 'turn:turn-1:content', deliveryStatus: 'not-required', evidenceRefs: [],
+    }, { runId: 'another-run' })], 'Done.')]);
 
-    await expect(
-      runAgentBehaviorEvaluationSuite({
-        agent,
-        baseRun: {
-          providerId: 'fake',
-          model: 'fake-model',
-        },
-        suite: {
-          suiteId: 'empty',
-          suiteName: '空套件',
-          cases: [],
-        },
+    await expect(runAgentEvaluationSuite({
+      agent,
+      suite: { suiteId: 'bad', suiteName: 'bad', cases: [{ expectation: {
+        id: 'BAD-001', userTask: 'Bad audit.',
+      } }] },
+    })).rejects.toThrow('Agent eval audit crossed the evaluated Run or Session boundary.');
+  });
+
+  it('matches arguments and result summaries independently with an explicit case rule', async () => {
+    const agent = recordingAgent([execution('completed', [
+      event(1, 'tool.proposed', {
+        invocationId: 'invoke-query', callId: 'call-query', actionOrdinal: 0,
+        name: 'query_database', arguments: { sql: 'SELECT * FROM SALES' },
+      }, { invocationId: 'invoke-query' }),
+      event(2, 'tool.succeeded', {
+        summary: 'Paid_Search returned.', resultRefs: [QUERY_EVIDENCE],
+      }, { invocationId: 'invoke-query' }),
+      event(3, 'run.completed', {
+        finalContentRef: 'turn:turn-1:content', deliveryStatus: 'verified',
+        evidenceRefs: [QUERY_EVIDENCE],
       }),
-    ).rejects.toThrow('Agent eval suite must contain at least one case.');
+    ], 'Done.', [QUERY_EVIDENCE])]);
+
+    const output = await runAgentEvaluationSuite({
+      agent,
+      suite: { suiteId: 'case', suiteName: 'case', cases: [{ expectation: {
+        id: 'CASE-001', userTask: 'Query sales.', toolExpectations: [{
+          toolName: 'query_database', caseSensitive: false,
+          argumentIncludes: ['select * from sales'], resultIncludes: ['paid_search'],
+          resultExcludes: ['select * from sales'],
+        }],
+      } }] },
+    });
+
+    expect(output.caseResults[0]?.passed).toBe(true);
+  });
+
+  it('rejects an execution whose public result cites different evidence than the journal completion', async () => {
+    const agent = recordingAgent([execution('completed', [event(1, 'run.completed', {
+      finalContentRef: 'turn:turn-1:content', deliveryStatus: 'verified', evidenceRefs: [SCHEMA_EVIDENCE],
+    })], 'Done.', [OTHER_EVIDENCE])]);
+
+    await expect(runAgentEvaluationSuite({
+      agent,
+      suite: { suiteId: 'evidence', suiteName: 'evidence', cases: [{ expectation: {
+        id: 'EVIDENCE-001', userTask: 'Check evidence.',
+      } }] },
+    })).rejects.toThrow('Agent eval result evidence does not match the committed Run completion fact.');
+  });
+
+  it('rejects an empty suite before invoking the evaluator port', async () => {
+    const agent = recordingAgent([]);
+    await expect(runAgentEvaluationSuite({
+      agent,
+      suite: { suiteId: 'empty', suiteName: 'empty', cases: [] },
+    })).rejects.toThrow('Agent eval suite must contain at least one case.');
     expect(agent.calls).toEqual([]);
   });
 });
 
 function recordingAgent(
-  script: AgentRunResult[],
-): AgentEvalSuiteAgent & { calls: AgentRunOptions[] } {
-  const calls: AgentRunOptions[] = [];
+  script: AgentEvalCaseExecution[],
+): AgentEvalSuiteAgent & { calls: Array<Parameters<AgentEvalSuiteAgent['run']>[0]> } {
+  const calls: Array<Parameters<AgentEvalSuiteAgent['run']>[0]> = [];
   return {
     calls,
-    run(options) {
-      calls.push(options);
+    run(input) {
+      calls.push(input);
       const next = script.shift();
-      if (!next) throw new Error('No scripted Agent result left.');
+      if (next === undefined) throw new Error('No scripted Agent result left.');
       return Promise.resolve(next);
     },
   };
 }
 
-function runResult(overrides: Partial<AgentRunResult>): AgentRunResult {
+function execution(
+  status: AgentEvalCaseExecution['result']['status'],
+  audit: AuditProjectionEvent[],
+  finalText: string,
+  evidenceRefs: readonly string[] = [],
+): AgentEvalCaseExecution {
   return {
-    status: 'done',
-    session: {
-      id: 'session_eval_suite',
-      title: 'eval suite',
-      mode: 'read',
-      messages: [],
-      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      aborted: false,
+    result: {
+      runId: 'run-eval', sessionId: 'session-eval', status, finalText, evidenceRefs,
     },
-    finalText: '',
-    iterations: 1,
-    toolExecutions: [],
-    ...overrides,
-    runId: overrides.runId ?? 'run-eval-suite',
+    audit,
   };
 }
 
-async function tempDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'dbagent-agent-eval-suite-'));
-  tempDirs.push(dir);
-  return dir;
+function event(
+  sourceSequence: number,
+  type: AuditProjectionEvent['type'],
+  payload: unknown,
+  identity: Partial<Pick<AuditProjectionEvent, 'runId' | 'sessionId' | 'invocationId'>> = {},
+): AuditProjectionEvent {
+  return {
+    sourceSequence,
+    eventId: `event-${sourceSequence}`,
+    projectId: 'project-eval',
+    sessionId: identity.sessionId ?? 'session-eval',
+    runId: identity.runId ?? 'run-eval',
+    type,
+    occurredAt: `2026-09-04T00:00:0${sourceSequence}.000Z`,
+    payload: payload as AuditProjectionEvent['payload'],
+    ...(identity.invocationId === undefined ? {} : { invocationId: identity.invocationId }),
+  };
 }

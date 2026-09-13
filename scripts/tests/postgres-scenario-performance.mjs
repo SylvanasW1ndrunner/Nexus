@@ -8,6 +8,11 @@ import {
   DatabaseAccessRuntime,
   PostgresConnector,
 } from '../../packages/core-db/dist/index.js';
+import {
+  averageDurableMeasurements,
+  buildPostgresScenarioMetrics,
+  readCompleteResultPages,
+} from '../lib/postgres-performance-metrics.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(join(root, 'packages', 'core-db', 'package.json'));
@@ -50,14 +55,17 @@ const client = new Client({
   statement_timeout: positiveInteger(process.env.DBAGENT_SCENARIO_STATEMENT_TIMEOUT_MS, 15_000),
 });
 const connectors = new ConnectorRegistry();
-connectors.register(new PostgresConnector());
+let activeRuntimeConnectorTimings;
+connectors.register(instrumentRuntimeConnector(new PostgresConnector()));
+const durableReferenceConnector = new PostgresConnector();
 const runtime = new DatabaseAccessRuntime({
   connectors,
   maxAuditEvents: iterations * 16,
 });
 const profileId = `postgres-scenario-performance-${process.pid}`;
+const durableReferenceProfileId = `postgres-scenario-durable-reference-${process.pid}`;
 const timestamp = new Date().toISOString();
-runtime.createProfile({
+const profile = {
   id: profileId,
   name: 'PostgreSQL scenario performance',
   connectorId: 'postgres-native',
@@ -83,7 +91,17 @@ runtime.createProfile({
   pool: { min: 1, max: 2 },
   createdAt: timestamp,
   updatedAt: timestamp,
-});
+};
+const durableReferenceProfile = {
+  ...profile,
+  id: durableReferenceProfileId,
+  name: 'PostgreSQL durable connector reference',
+};
+const durableReferenceContext = {
+  profile: durableReferenceProfile,
+  credential: { username: databaseConfig.user, password: databaseConfig.password },
+};
+runtime.createProfile(profile);
 
 async function main() {
   await client.connect();
@@ -91,6 +109,7 @@ async function main() {
     username: databaseConfig.user,
     password: databaseConfig.password,
   });
+  await durableReferenceConnector.connect(durableReferenceContext);
   try {
     const postgresVersion = (
       await client.query("select current_setting('server_version') as server_version")
@@ -159,6 +178,9 @@ async function main() {
         sql: SCIENCE_RESULT_PAGE_QUERY,
         validate(result) {
           assert(result.rowCount === 2_000, '大结果页必须返回 2000 行');
+          if (result.pageCount !== undefined) {
+            assert(result.pageCount === 2, '大结果必须按 1000 行公共分页合同读取 2 页');
+          }
         },
       }),
     );
@@ -176,8 +198,13 @@ async function main() {
       configuration: {
         warmupDurationMs,
         measuredIterations: iterations,
-        comparedPaths: ['pg.Client.query', 'DatabaseAccessRuntime + PostgresConnector'],
-        gate: 'SchemaNaut P95 minus direct pg P95',
+        comparedPaths: [
+          'pg.Client.query',
+          'PostgresConnector durable submit + complete cursor paging + release',
+          'DatabaseAccessRuntime + PostgresConnector end-to-end',
+        ],
+        gate: 'paired outer DatabaseAccessRuntime time minus the same in-call connector boundary P95',
+        pairing: 'mirrored ABBA durable runs; exact platform timing brackets each runtime connector call',
         platformOverheadP95ThresholdMs: overheadThresholdMs,
         scenarioFilter: [...scenarioFilter],
       },
@@ -195,6 +222,7 @@ async function main() {
         scenarios: scenarios.map((scenario) => ({
           name: scenario.name,
           directPgP95Ms: scenario.directPg.p95Ms,
+          durableReferenceP95Ms: scenario.durableReference.p95Ms,
           schemanautP95Ms: scenario.schemanaut.p95Ms,
           platformOverheadP95Ms: scenario.platformOverheadP95Ms,
           thresholdMs: scenario.platformOverheadP95ThresholdMs,
@@ -204,6 +232,7 @@ async function main() {
     );
     if (!report.passed) process.exitCode = 1;
   } finally {
+    await durableReferenceConnector.disconnect(durableReferenceContext).catch(() => undefined);
     await runtime.disconnect(profileId).catch(() => undefined);
     await client.end();
   }
@@ -213,56 +242,81 @@ async function benchmarkScenario({ name, sql, validate }) {
   const warmupStarted = performance.now();
   let warmupIterations = 0;
   while (performance.now() - warmupStarted < warmupDurationMs) {
-    if (warmupIterations % 2 === 0) {
-      validate(await runDirect(sql));
-      validate(await runThroughSchemaNaut(sql));
-    } else {
-      validate(await runThroughSchemaNaut(sql));
-      validate(await runDirect(sql));
+    for (const path of rotatedPaths(warmupIterations)) {
+      validate(await runPath(path, sql));
     }
     warmupIterations += 1;
   }
 
   const directPgSamplesMs = [];
+  const durableReferenceSamplesMs = [];
   const schemanautSamplesMs = [];
-  const pairedOverheadSamplesMs = [];
+  const exactPlatformOverheadSamplesMs = [];
+  const schemanautPhasesMs = { submit: [], page: [], release: [] };
+  const durableReferencePhasesMs = { submit: [], page: [], release: [] };
+  const paginationSamples = { durableReference: [], schemanaut: [] };
   for (let index = 0; index < iterations; index += 1) {
-    const directFirst = index % 2 === 0;
-    const first = directFirst
-      ? await measure(() => runDirect(sql))
-      : await measure(() => runThroughSchemaNaut(sql));
-    const second = directFirst
-      ? await measure(() => runThroughSchemaNaut(sql))
-      : await measure(() => runDirect(sql));
-    const direct = directFirst ? first : second;
-    const schemanaut = directFirst ? second : first;
+    const direct = await measure(() => runDirect(sql));
+    const order = index % 2 === 0
+      ? ['durableReference', 'schemanaut', 'schemanaut', 'durableReference']
+      : ['schemanaut', 'durableReference', 'durableReference', 'schemanaut'];
+    const mirrored = [];
+    for (const path of order) mirrored.push(await measure(() => runPath(path, sql)));
+    const durableReference = averageDurableMeasurements(
+      mirrored[order.indexOf('durableReference')],
+      mirrored[order.lastIndexOf('durableReference')],
+    );
+    const schemanaut = averageDurableMeasurements(
+      mirrored[order.indexOf('schemanaut')],
+      mirrored[order.lastIndexOf('schemanaut')],
+    );
     validate(direct.result);
-    validate(schemanaut.result);
+    for (const measurement of mirrored) validate(measurement.result);
     directPgSamplesMs.push(round(direct.durationMs));
+    durableReferenceSamplesMs.push(round(durableReference.durationMs));
     schemanautSamplesMs.push(round(schemanaut.durationMs));
-    pairedOverheadSamplesMs.push(round(schemanaut.durationMs - direct.durationMs));
+    const firstSchemaNaut = mirrored[order.indexOf('schemanaut')].result;
+    const secondSchemaNaut = mirrored[order.lastIndexOf('schemanaut')].result;
+    exactPlatformOverheadSamplesMs.push(round(
+      (firstSchemaNaut.exactPlatformOverheadMs + secondSchemaNaut.exactPlatformOverheadMs) / 2,
+    ));
+    recordPhases(durableReferencePhasesMs, durableReference.result.phases);
+    recordPhases(schemanautPhasesMs, schemanaut.result.phases);
+    paginationSamples.durableReference.push(durableReference.result.pageCount);
+    paginationSamples.schemanaut.push(schemanaut.result.pageCount);
   }
 
-  const directPg = summarize(directPgSamplesMs);
-  const schemanaut = summarize(schemanautSamplesMs);
-  const platformOverheadP95Ms = round(schemanaut.p95Ms - directPg.p95Ms);
   return {
     name,
     warmupIterations,
     warmupElapsedMs: round(performance.now() - warmupStarted),
     measuredIterations: iterations,
-    directPg,
-    schemanaut,
-    platformOverheadP95Ms,
-    pairedOverhead: summarize(pairedOverheadSamplesMs),
-    platformOverheadP95ThresholdMs: overheadThresholdMs,
-    rawSamples: {
+    ...buildPostgresScenarioMetrics({
       directPgMs: directPgSamplesMs,
-      schemanautMs: schemanautSamplesMs,
-      pairedOverheadMs: pairedOverheadSamplesMs,
+      durableReferenceMs: durableReferenceSamplesMs,
+      schemanautEndToEndMs: schemanautSamplesMs,
+      exactPlatformOverheadMs: exactPlatformOverheadSamplesMs,
+      durableReferencePhasesMs,
+      schemanautPhasesMs,
+      platformOverheadP95ThresholdMs: overheadThresholdMs,
+    }),
+    pagination: {
+      publicPageLimit: 1_000,
+      rawPageCounts: paginationSamples,
     },
-    passed: platformOverheadP95Ms <= overheadThresholdMs,
   };
+}
+
+function rotatedPaths(index) {
+  const paths = ['direct', 'durableReference', 'schemanaut'];
+  const offset = index % paths.length;
+  return [...paths.slice(offset), ...paths.slice(0, offset)];
+}
+
+function runPath(path, sql) {
+  if (path === 'direct') return runDirect(sql);
+  if (path === 'durableReference') return runThroughDurableReference(sql);
+  return runThroughSchemaNaut(sql);
 }
 
 async function runDirect(sql) {
@@ -274,40 +328,107 @@ async function runDirect(sql) {
 }
 
 async function runThroughSchemaNaut(sql) {
-  const job = await runtime.submit({
-    profileId,
-    sql,
-    executionMode: 'sync',
-    rowLimit: 10_000,
-    authorization: { permissionMode: 'read' },
-  });
-  assert(job.state === 'succeeded' && job.result, `SchemaNaut query failed for ${profileId}`);
+  const connectorPhases = { submit: 0, page: 0, release: 0 };
+  activeRuntimeConnectorTimings = connectorPhases;
   try {
-    const batch = await runtime.readResult(job.result.id, { limit: 10_000 });
-    assert(batch.complete, 'SchemaNaut benchmark result did not fit in one 10000-row page');
-    return {
-      rowCount: job.result.rowCount ?? batch.rows.length,
-      rows: batch.rows,
-    };
+    const result = await runDurablePath(
+      () => runtime.submit({
+        profileId,
+        sql,
+        executionMode: 'sync',
+        rowLimit: 10_000,
+        authorization: { authorizedClass: 'query' },
+      }),
+      (handleId, request) => runtime.readResult(handleId, request),
+      (handleId) => runtime.releaseResult(handleId),
+      profileId,
+    );
+    result.exactPlatformOverheadMs = round(
+      result.phases.submit + result.phases.page + result.phases.release -
+      connectorPhases.submit - connectorPhases.page - connectorPhases.release,
+    );
+    return result;
   } finally {
-    await runtime.releaseResult(job.result.id);
+    activeRuntimeConnectorTimings = undefined;
   }
+}
+
+async function runThroughDurableReference(sql) {
+  return runDurablePath(
+    () => durableReferenceConnector.submit(durableReferenceContext, {
+      profileId: durableReferenceProfileId,
+      sql,
+      executionMode: 'sync',
+      rowLimit: 10_000,
+      authorization: { authorizedClass: 'query' },
+    }),
+    (handleId, request) => durableReferenceConnector.readResult(
+      durableReferenceContext,
+      handleId,
+      request,
+    ),
+    (handleId) => durableReferenceConnector.releaseResult(durableReferenceContext, handleId),
+    durableReferenceProfileId,
+  );
+}
+
+async function runDurablePath(submit, readPage, release, identity) {
+  const submitted = await measure(submit);
+  const job = submitted.result;
+  assert(job.state === 'succeeded' && job.result, `Durable query failed for ${identity}`);
+  let paged;
+  let released;
+  try {
+    paged = await measure(() => readCompleteResultPages({
+      handleId: job.result.id,
+      pageLimit: 1_000,
+      readPage: (request) => readPage(job.result.id, request),
+    }));
+  } finally {
+    released = await measure(() => release(job.result.id));
+  }
+  return {
+    rowCount: job.result.rowCount ?? paged.result.rowCount,
+    rows: paged.result.rows,
+    pageCount: paged.result.pageCount,
+    phases: {
+      submit: round(submitted.durationMs),
+      page: round(paged.durationMs),
+      release: round(released.durationMs),
+    },
+  };
+}
+
+function recordPhases(target, phases) {
+  for (const name of Object.keys(target)) target[name].push(phases[name]);
+}
+
+function instrumentRuntimeConnector(connector) {
+  const phaseByMethod = { submit: 'submit', readResult: 'page', releaseResult: 'release' };
+  return new Proxy(connector, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      const phase = phaseByMethod[property];
+      if (!phase) return value.bind(target);
+      return async (...args) => {
+        const started = performance.now();
+        try {
+          return await value.apply(target, args);
+        } finally {
+          if (activeRuntimeConnectorTimings) {
+            activeRuntimeConnectorTimings[phase] += performance.now() - started;
+          }
+        }
+      };
+    },
+  });
 }
 
 async function measure(operation) {
   const started = performance.now();
   const result = await operation();
   return { durationMs: performance.now() - started, result };
-}
-
-function summarize(samples) {
-  const sorted = [...samples].sort((left, right) => left - right);
-  return {
-    p50Ms: round(percentile(sorted, 0.5)),
-    p95Ms: round(percentile(sorted, 0.95)),
-    maxMs: round(sorted.at(-1) ?? 0),
-    minMs: round(sorted[0] ?? 0),
-  };
 }
 
 async function readScale() {
@@ -324,12 +445,6 @@ async function readScale() {
       ) as science_partitions
   `);
   return result.rows[0];
-}
-
-function percentile(values, ratio) {
-  if (values.length === 0) return 0;
-  const rank = Math.max(0, Math.ceil(values.length * ratio) - 1);
-  return values[Math.min(rank, values.length - 1)];
 }
 
 function round(value) {

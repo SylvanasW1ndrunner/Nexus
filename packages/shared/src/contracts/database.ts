@@ -64,10 +64,7 @@ export type CredentialReference = {
   expiresAt?: string;
 };
 
-/**
- * Short-lived credential material. It is accepted only at a connector
- * boundary and must never be persisted or returned from public APIs.
- */
+/** Short-lived credential material accepted at a connector boundary. */
 export type DatabaseCredential = {
   username?: string;
   password?: string;
@@ -95,7 +92,7 @@ export type ConnectionProfile = {
   engine: DatabaseEngine;
   endpoints: DatabaseEndpoint[];
   credentialRef?: CredentialReference;
-  /** Non-secret account/user name. Secret material stays in CredentialReference. */
+  /** Account/user name associated with this connection. */
   principal?: string;
   purpose: ConnectionPurpose;
   readOnly: boolean;
@@ -197,6 +194,8 @@ export type SqlDialectDescriptor = {
 };
 
 export type QueryExecutionMode = 'sync' | 'async' | 'auto';
+/** Database-internal SQL risk classification; unrelated to Agent access modes. */
+export type SqlOperationClass = 'query' | 'mutation' | 'schema-admin';
 export type QueryJobState =
   | 'submitted'
   | 'queued'
@@ -211,7 +210,8 @@ export type QueryAuthorization = {
   actorId?: string;
   policyId?: string;
   approvalId?: string;
-  permissionMode?: 'read' | 'edit' | 'full';
+  /** Highest SQL operation class authorized for this submission. */
+  authorizedClass?: SqlOperationClass;
 };
 
 export type QuerySubmission = {

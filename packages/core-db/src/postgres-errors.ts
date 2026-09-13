@@ -128,6 +128,18 @@ export function classifyPostgresRuntimeError(error: unknown): AppError {
     };
   }
 
+  // SQLSTATE class 42 is resolved by PostgreSQL during statement parsing or
+  // name resolution. The server has definitively rejected the statement, so
+  // this is a correctable SQL input error rather than an uncertain execution.
+  if (code?.startsWith('42')) {
+    return {
+      code: 'VALIDATION_ERROR',
+      message: 'PostgreSQL rejected invalid SQL.',
+      detail: message,
+      retryable: false,
+    };
+  }
+
   return {
     code: 'QUERY_FAILED',
     message: 'PostgreSQL query failed.',

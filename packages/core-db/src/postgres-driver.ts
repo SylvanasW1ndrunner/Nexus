@@ -40,6 +40,14 @@ import type {
 type SafePgQueryResult = PgQueryResult<QueryResultRow>;
 const DEFAULT_QUERY_ROW_LIMIT = 10_000;
 const MAX_QUERY_ROW_LIMIT = 100_000;
+const DEFAULT_RESULT_BATCH_SIZE = 1_000;
+const MAX_RESULT_BATCH_SIZE = 10_000;
+
+class ResultBatchObserverFailure extends Error {
+  constructor(readonly original: unknown) {
+    super('The query result batch consumer failed.', { cause: original });
+  }
+}
 
 export type PostgresServerInfo = {
   database: string;
@@ -84,7 +92,56 @@ type ActivePostgresTransaction = {
   connection: SavedConnection;
 };
 
-export class PostgresDriver implements IDatabaseDriver {
+/**
+ * PostgreSQL-specific port consumed by PostgresConnector. It deliberately
+ * excludes driver implementation state and unrelated inspection helpers.
+ */
+export interface PostgresConnectorDriver {
+  test(config: DatabaseConnectionConfig): Promise<Result<{ latencyMs: number }>>;
+  connect(config: DatabaseConnectionConfig): Promise<Result<SavedConnection>>;
+  disconnect(connectionId: string): Promise<Result<void>>;
+  execute(
+    request: QueryRequest,
+    connection: SavedConnection,
+    observer?: QueryExecutionObserver,
+  ): Promise<Result<QueryExecutionResult>>;
+  cancel(
+    request: QueryCancelResponse,
+    connection: SavedConnection,
+  ): Promise<Result<QueryCancelResponse>>;
+  serverInfo(connectionId: string): Promise<Result<PostgresServerInfo>>;
+  discoverCatalog(
+    connectionId: string,
+    input: { offset: number; limit: number },
+  ): Promise<Result<PostgresCatalogPage>>;
+  runtimeSnapshot(connectionId: string): Promise<Result<PostgresRuntimeSnapshot>>;
+  terminateBackend(connectionId: string, backendPid: number): Promise<Result<boolean>>;
+  maintainTable(
+    connectionId: string,
+    input: { operation: 'analyze' | 'vacuum'; schema: string; table: string },
+  ): Promise<Result<{ elapsedMs: number }>>;
+  beginTransaction(
+    connection: SavedConnection,
+    input: {
+      profileId: string;
+      sessionId: string;
+      isolationLevel?: TransactionIsolationLevel;
+      readOnly?: boolean;
+    },
+  ): Promise<Result<DatabaseTransaction>>;
+  executeInTransaction(
+    transactionId: string,
+    request: QueryRequest,
+    observer?: QueryExecutionObserver,
+    options?: { enforceReadOnly?: boolean },
+  ): Promise<Result<QueryExecutionResult>>;
+  createSavepoint(transactionId: string, name: string): Promise<Result<DatabaseTransaction>>;
+  rollbackToSavepoint(transactionId: string, name: string): Promise<Result<DatabaseTransaction>>;
+  commitTransaction(transactionId: string): Promise<Result<DatabaseTransaction>>;
+  rollbackTransaction(transactionId: string): Promise<Result<DatabaseTransaction>>;
+}
+
+export class PostgresDriver implements IDatabaseDriver, PostgresConnectorDriver {
   readonly capabilities = {
     engine: 'postgres' as const,
     supportsTransactions: true,
@@ -95,6 +152,7 @@ export class PostgresDriver implements IDatabaseDriver {
   private readonly pools = new Map<string, PgPool>();
   private readonly cancelPools = new Map<string, PgPool>();
   private readonly configs = new Map<string, DatabaseConnectionConfig>();
+  private readonly sessionTimeZones = new Map<string, string>();
   private readonly transactions = new Map<string, ActivePostgresTransaction>();
   private readonly poolErrors = new Map<string, AppError>();
   private readonly observedClients = new WeakSet<PgPoolClient>();
@@ -134,9 +192,24 @@ export class PostgresDriver implements IDatabaseDriver {
     cancelPool.on('error', (error) => {
       this.poolErrors.set(config.id!, classifyPostgresConnectionError(error));
     });
+    let sessionTimeZone: string;
+    try {
+      const result = await pool.query<{ session_time_zone: string }>(
+        "select current_setting('TimeZone') as session_time_zone",
+      );
+      const observedTimeZone = result.rows[0]?.session_time_zone;
+      if (!observedTimeZone) {
+        throw new Error('PostgreSQL did not return its session timezone.');
+      }
+      sessionTimeZone = observedTimeZone;
+    } catch (error) {
+      await Promise.allSettled([pool.end(), cancelPool.end()]);
+      return err(classifyPostgresConnectionError(error));
+    }
     this.pools.set(config.id, pool);
     this.cancelPools.set(config.id, cancelPool);
     this.configs.set(config.id, { ...config });
+    this.sessionTimeZones.set(config.id, sessionTimeZone);
     return ok({
       id: config.id,
       name: config.name,
@@ -175,6 +248,7 @@ export class PostgresDriver implements IDatabaseDriver {
       this.cancelPools.delete(connectionId);
     }
     this.configs.delete(connectionId);
+    this.sessionTimeZones.delete(connectionId);
     this.poolErrors.delete(connectionId);
     return ok(undefined);
   }
@@ -283,6 +357,7 @@ export class PostgresDriver implements IDatabaseDriver {
                 rowLimit,
                 queryTimeout.data,
                 connection.readOnly,
+                observer,
               ),
             }
           : safety.requiresConfirmation || transactionMode.data === 'rollback'
@@ -320,9 +395,11 @@ export class PostgresDriver implements IDatabaseDriver {
           queryId,
           rowLimit,
           execution.transaction,
+          this.sessionTimeZones.get(connection.id),
         ),
       );
     } catch (error) {
+      if (error instanceof ResultBatchObserverFailure) throw error.original;
       return err(classifyPostgresRuntimeError(error));
     } finally {
       stopAbortCancellation?.();
@@ -1229,6 +1306,7 @@ export class PostgresDriver implements IDatabaseDriver {
               request.params,
               rowLimit,
               queryTimeout.data,
+              observer,
             )
           : normalizePgResults(
               await executeWithLocalTimeout(
@@ -1239,9 +1317,20 @@ export class PostgresDriver implements IDatabaseDriver {
               ),
             );
       active.transaction = { ...active.transaction, state: 'active' };
-      return ok(toQueryExecutionResult(results, safety, started, queryId, rowLimit));
+      return ok(
+        toQueryExecutionResult(
+          results,
+          safety,
+          started,
+          queryId,
+          rowLimit,
+          undefined,
+          this.sessionTimeZones.get(active.connection.id),
+        ),
+      );
     } catch (error) {
       active.transaction = { ...active.transaction, state: 'failed' };
+      if (error instanceof ResultBatchObserverFailure) throw error.original;
       return err(classifyPostgresRuntimeError(error));
     } finally {
       stopAbortCancellation?.();
@@ -1462,18 +1551,25 @@ async function executePagedRead(
   rowLimit: number,
   timeoutMs: number | undefined,
   readOnly: boolean,
+  observer?: QueryExecutionObserver,
 ): Promise<SafePgQueryResult[]> {
   const cursorName = `schemanaut_cursor_${randomUUID().replace(/-/g, '')}`;
-  const fetchCount = rowLimit + 1;
-  if (!params || params.length === 0) {
-    return executeBatchedPagedRead(
+  if (observer?.onResultBatch) {
+    return executeStreamingPagedRead(
       client,
       sql,
+      params,
       cursorName,
-      fetchCount,
+      rowLimit,
       timeoutMs,
       readOnly,
+      observer,
+      true,
     );
+  }
+  const fetchCount = rowLimit + 1;
+  if (!params || params.length === 0) {
+    return executeBatchedPagedRead(client, sql, cursorName, fetchCount, timeoutMs, readOnly);
   }
   try {
     await client.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
@@ -1568,8 +1664,22 @@ async function executePagedReadInActiveTransaction(
   params: unknown[] | undefined,
   rowLimit: number,
   timeoutMs: number | undefined,
+  observer?: QueryExecutionObserver,
 ): Promise<SafePgQueryResult[]> {
   const cursorName = `schemanaut_cursor_${randomUUID().replace(/-/g, '')}`;
+  if (observer?.onResultBatch) {
+    return executeStreamingPagedRead(
+      client,
+      sql,
+      params,
+      cursorName,
+      rowLimit,
+      timeoutMs,
+      false,
+      observer,
+      false,
+    );
+  }
   const fetchCount = rowLimit + 1;
   try {
     await setLocalStatementTimeout(client, timeoutMs);
@@ -1592,6 +1702,87 @@ async function executePagedReadInActiveTransaction(
       await client.query(`CLOSE ${cursorName}`);
     } catch {
       // The transaction may already be aborted; the caller handles recovery.
+    }
+    throw error;
+  }
+}
+
+async function executeStreamingPagedRead(
+  client: PgPoolClient,
+  sql: string,
+  params: unknown[] | undefined,
+  cursorName: string,
+  rowLimit: number,
+  timeoutMs: number | undefined,
+  readOnly: boolean,
+  observer: QueryExecutionObserver,
+  ownsTransaction: boolean,
+): Promise<SafePgQueryResult[]> {
+  const batchSize = normalizeResultBatchSize(observer.resultBatchSize);
+  let cursorDeclared = false;
+  try {
+    if (ownsTransaction) await client.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
+    await setLocalStatementTimeout(client, timeoutMs);
+    await executeTimedQuery(
+      client,
+      `DECLARE ${cursorName} NO SCROLL CURSOR FOR ${sql}`,
+      params,
+      timeoutMs,
+    );
+    cursorDeclared = true;
+    let ordinal = 0;
+    let rowCount = 0;
+    const previewRows: QueryResultRow[] = [];
+    let template: SafePgQueryResult | undefined;
+    while (true) {
+      const fetched = normalizePgResults(await executeTimedQuery(
+        client,
+        `FETCH FORWARD ${batchSize} FROM ${cursorName}`,
+        undefined,
+        timeoutMs,
+      ))[0];
+      if (!fetched) throw new Error('PostgreSQL cursor did not return a FETCH result.');
+      template ??= fetched;
+      if (previewRows.length < rowLimit) {
+        previewRows.push(...fetched.rows.slice(0, rowLimit - previewRows.length));
+      }
+      rowCount += fetched.rows.length;
+      if (fetched.rows.length > 0) {
+        try {
+          await observer.onResultBatch?.({
+            columns: fetched.fields.map((field) => ({
+              name: field.name,
+              dataType: String(field.dataTypeID),
+            })),
+            rows: fetched.rows,
+            ordinal,
+          });
+        } catch (error) {
+          throw new ResultBatchObserverFailure(error);
+        }
+        ordinal += 1;
+      }
+      if (fetched.rows.length < batchSize) break;
+    }
+    await client.query(`CLOSE ${cursorName}`);
+    cursorDeclared = false;
+    if (ownsTransaction) await client.query('COMMIT');
+    const result = template ?? emptyPgResult();
+    return [{ ...result, rows: previewRows, rowCount }];
+  } catch (error) {
+    if (cursorDeclared && !ownsTransaction) {
+      try {
+        await client.query(`CLOSE ${cursorName}`);
+      } catch {
+        // The surrounding transaction can already be aborted.
+      }
+    }
+    if (ownsTransaction) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Preserve the primary query or result-consumer error.
+      }
     }
     throw error;
   }
@@ -1792,6 +1983,7 @@ function toQueryExecutionResult(
   queryId: string,
   rowLimit: number,
   transaction?: QueryTransactionReport,
+  sessionTimeZone?: string,
 ): QueryExecutionResult {
   const resultSets = results.map((result, index) => toQueryResultSet(result, index, rowLimit));
   const primary =
@@ -1807,6 +1999,7 @@ function toQueryExecutionResult(
     queryId,
     columns: primary.columns,
     rows: primary.rows,
+    ...(sessionTimeZone === undefined ? {} : { sessionTimeZone }),
     rowCount: primary.rowCount,
     returnedRowCount,
     rowLimit: primaryRowLimit,
@@ -1827,7 +2020,7 @@ function toQueryResultSet(
   rowLimit: number,
 ): QueryResultSet {
   const sourceRowCount = result.rowCount ?? result.rows.length;
-  const truncated = result.rows.length > rowLimit;
+  const truncated = result.fields.length > 0 && sourceRowCount > Math.min(result.rows.length, rowLimit);
   const hasMore = truncated;
   const rows = truncated ? result.rows.slice(0, rowLimit) : result.rows;
   return {
@@ -1877,6 +2070,11 @@ function normalizeQueryRowLimit(limit: number | undefined): number {
   if (floored < 1) return 1;
   if (floored > MAX_QUERY_ROW_LIMIT) return MAX_QUERY_ROW_LIMIT;
   return floored;
+}
+
+function normalizeResultBatchSize(size: number | undefined): number {
+  if (size === undefined || !Number.isFinite(size)) return DEFAULT_RESULT_BATCH_SIZE;
+  return Math.min(Math.max(Math.floor(size), 1), MAX_RESULT_BATCH_SIZE);
 }
 
 function inactiveConnection<T>(): Result<T> {

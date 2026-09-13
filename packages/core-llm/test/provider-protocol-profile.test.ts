@@ -11,12 +11,12 @@ describe('provider protocol profiles', () => {
       protocol: 'openai-compatible',
       source: 'provider-declaration',
       capabilities: {
-        nativeDeferredTools: 'supported',
+        namespaceTools: 'supported',
         parallelToolCalls: 'supported',
       },
     });
 
-    expect(profile.capabilities.nativeDeferredTools).toBe('supported');
+    expect(profile.capabilities.namespaceTools).toBe('supported');
     expect(profile.capabilities.parallelToolCalls).toBe('supported');
     expect(profile.capabilities.toolReferences).toBe('unknown');
   });
@@ -34,7 +34,7 @@ describe('provider protocol profiles', () => {
       resolveLlmProviderProtocolProfile({
         protocol: 'custom-proxy',
         source: 'user-declaration',
-        capabilities: { nativeDeferredTools: 'yes' as never },
+        capabilities: { toolReferences: 'yes' as never },
       }),
     ).toThrow('Invalid LLM provider protocol capability status');
   });
@@ -47,7 +47,7 @@ describe('provider protocol profiles', () => {
       baseUrl: 'https://proxy.invalid/v1',
     });
 
-    expect(provider.protocolProfile.capabilities.nativeDeferredTools).toBe('unknown');
+    expect(provider.protocolProfile.capabilities.namespaceTools).toBe('unknown');
     expect(provider.protocolProfile.capabilities.toolReferences).toBe('unknown');
   });
 
@@ -60,11 +60,11 @@ describe('provider protocol profiles', () => {
       protocolProfile: {
         protocol: 'openai-responses-compatible',
         source: 'user-declaration',
-        capabilities: { nativeDeferredTools: 'supported' },
+        capabilities: { structuredToolResults: 'supported' },
       },
     });
 
-    expect(provider.protocolProfile.capabilities.nativeDeferredTools).toBe('supported');
+    expect(provider.protocolProfile.capabilities.structuredToolResults).toBe('supported');
     expect(provider.protocolProfile.capabilities.namespaceTools).toBe('unknown');
   });
 });

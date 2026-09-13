@@ -1,10 +1,29 @@
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import type * as FileSystemPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { TableDetail } from '@dbagent/shared';
 import { SchemaRagEngine, SchemaRagSnapshotStore } from '../src/index.js';
 import { column } from './schema-fixtures.js';
+
+const writeGate = vi.hoisted(() => ({
+  beforeTemporaryWrite: undefined as undefined | ((file: string) => Promise<void>),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof FileSystemPromises>();
+  return {
+    ...actual,
+    writeFile: async (...args: unknown[]) => {
+      const file = args[0];
+      if (typeof file === 'string' && file.endsWith('.tmp')) {
+        await writeGate.beforeTemporaryWrite?.(file);
+      }
+      return await (actual.writeFile as (...values: unknown[]) => Promise<void>)(...args);
+    },
+  };
+});
 
 describe('SchemaRagSnapshotStore', () => {
   it('round-trips a connection-level schema index through the real file system', async () => {
@@ -104,6 +123,47 @@ describe('SchemaRagSnapshotStore', () => {
 
     await expect(store.load('conn_a')).resolves.toBeUndefined();
     await expect(store.load('conn_b')).resolves.toBeDefined();
+  });
+
+  it('serializes direct saves from separate Store instances to the same target', async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), 'dbagent-rag-save-lane-'));
+    const firstStore = new SchemaRagSnapshotStore({ rootDir });
+    const secondStore = new SchemaRagSnapshotStore({ rootDir });
+    const engine = new SchemaRagEngine();
+    const firstIndex = engine.index({ connectionId: 'shared', tables: [fixtureTables()[0]!] });
+    const secondIndex = engine.index({ connectionId: 'shared', tables: [fixtureTables()[1]!] });
+    let releaseFirstWrite: (() => void) | undefined;
+    let firstWriteStarted: (() => void) | undefined;
+    const firstWrite = new Promise<void>((resolve) => {
+      firstWriteStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let temporaryWrites = 0;
+    writeGate.beforeTemporaryWrite = async () => {
+      temporaryWrites += 1;
+      if (temporaryWrites === 1) {
+        firstWriteStarted?.();
+        await release;
+      }
+    };
+
+    try {
+      const first = firstStore.save(firstIndex);
+      await firstWrite;
+      const second = secondStore.save(secondIndex);
+      await Promise.resolve();
+      expect(temporaryWrites).toBe(1);
+      releaseFirstWrite?.();
+      await Promise.all([first, second]);
+    } finally {
+      writeGate.beforeTemporaryWrite = undefined;
+    }
+
+    const restored = await firstStore.load('shared');
+    expect(restored?.documents.some((document) => document.id === 'table:public.orders')).toBe(true);
+    expect(restored?.documents.some((document) => document.id === 'table:public.users')).toBe(false);
   });
 
   it('lists snapshot summaries for startup diagnostics without loading every index into memory', async () => {

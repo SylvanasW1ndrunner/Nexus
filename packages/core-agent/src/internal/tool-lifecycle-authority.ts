@@ -2,6 +2,8 @@ import type {
   ToolInvocationCommitResult,
   ToolInvocationJournalCommand,
 } from '../events/agent-journal.js';
+import type { PreparedToolArtifactCommit } from './prepared-tool-artifact-authority.js';
+import type { RuntimeCommand } from '../kernel/runtime-command.js';
 
 /**
  * Package-private authority for writing Tool Invocation lifecycle facts.
@@ -11,14 +13,20 @@ import type {
  * the committer. Only the unified Tool Runtime imports this internal module.
  */
 export type ToolLifecycleCommitter = Readonly<{
-  commit(command: ToolInvocationJournalCommand): Promise<ToolInvocationCommitResult>;
+  commit(
+    command: ToolInvocationJournalCommand,
+    options?: Readonly<{
+      preparedArtifacts?: readonly PreparedToolArtifactCommit[];
+      runtimeCommand?: RuntimeCommand;
+    }>,
+  ): Promise<ToolInvocationCommitResult>;
 }>;
 
 const lifecycleCommitters = new WeakMap<object, ToolLifecycleCommitter>();
 
 export function bindToolLifecycleCommitter(
   journal: object,
-  commit: (command: ToolInvocationJournalCommand) => Promise<ToolInvocationCommitResult>,
+  commit: ToolLifecycleCommitter['commit'],
 ): void {
   if (lifecycleCommitters.has(journal)) {
     throw new TypeError('Tool lifecycle authority is already bound to this Journal.');

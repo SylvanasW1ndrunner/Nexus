@@ -57,7 +57,7 @@ const query = {
   batchSize: 250,
   authorization: {
     actorId: 'benchmark-user',
-    permissionMode: 'read',
+    authorizedClass: 'query',
   },
   labels: { workload: 'contract-benchmark' },
 };

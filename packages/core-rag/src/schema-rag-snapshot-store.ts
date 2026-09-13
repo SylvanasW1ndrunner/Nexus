@@ -1,4 +1,5 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { verifyKnowledgeCatalog } from './merkle-catalog.js';
 import type {
@@ -11,6 +12,8 @@ import type {
 } from './types.js';
 
 const SNAPSHOT_VERSION = 2;
+/** Shared across Store instances so same-process writers have one order per target file. */
+const snapshotSaveLanes = new Map<string, Promise<void>>();
 
 type PersistedSchemaRagSnapshot = {
   version: number;
@@ -92,9 +95,13 @@ export class SchemaRagSnapshotStore {
   }
 
   async save(index: SchemaRagIndex): Promise<void> {
-    await mkdir(this.rootDir, { recursive: true });
     const target = this.snapshotPath(index.connectionId);
-    const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    return await this.inSaveLane(target, () => this.saveCurrent(index, target));
+  }
+
+  private async saveCurrent(index: SchemaRagIndex, target: string): Promise<void> {
+    await mkdir(this.rootDir, { recursive: true });
+    const temp = `${target}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
     const snapshot: PersistedSchemaRagSnapshot = {
       version: SNAPSHOT_VERSION,
       connectionId: index.connectionId,
@@ -113,6 +120,23 @@ export class SchemaRagSnapshotStore {
 
     await writeFile(temp, `${JSON.stringify(snapshot)}\n`, 'utf8');
     await rename(temp, target);
+  }
+
+  private async inSaveLane<T>(target: string, work: () => Promise<T>): Promise<T> {
+    const previous = snapshotSaveLanes.get(target) ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lane = previous.catch(() => undefined).then(() => hold);
+    snapshotSaveLanes.set(target, lane);
+    await previous.catch(() => undefined);
+    try {
+      return await work();
+    } finally {
+      release?.();
+      if (snapshotSaveLanes.get(target) === lane) snapshotSaveLanes.delete(target);
+    }
   }
 
   async load(connectionId: string): Promise<SchemaRagIndex | undefined> {

@@ -23,7 +23,7 @@ import {
   type LlmStreamLimitOptions,
   type LlmStreamLimits,
 } from './stream-safety.js';
-import { assertNoTextualToolInvocation, coalesceSystemMessages } from './tool-protocol.js';
+import { coalesceSystemMessages } from './protocol/system-message-coalescing.js';
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -129,15 +129,7 @@ export class OllamaProvider implements LlmProvider {
       buildOllamaPayload(request, false),
       request.signal,
     );
-    const response = parseOllamaResponse(raw, sequence);
-    assertNoTextualToolInvocation({
-      text: response.text,
-      toolCalls: response.toolCalls,
-      toolsRequested: Boolean(request.tools?.length),
-      toolNames: request.tools?.map((tool) => tool.name) ?? [],
-      protocol: 'Ollama native chat',
-    });
-    return response;
+    return parseOllamaResponse(raw, sequence);
   }
 
   async *stream(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent> {
@@ -231,13 +223,6 @@ export class OllamaProvider implements LlmProvider {
       ...(model === undefined ? {} : { model }),
       ...(finishReason === undefined ? {} : { finishReason }),
     };
-    assertNoTextualToolInvocation({
-      text: response.text,
-      toolCalls: response.toolCalls,
-      toolsRequested: Boolean(request.tools?.length),
-      toolNames: request.tools?.map((tool) => tool.name) ?? [],
-      protocol: 'Ollama native chat',
-    });
     yield {
       type: 'finish',
       response,

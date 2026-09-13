@@ -7,12 +7,18 @@ const scriptPath = fileURLToPath(
   new URL('../run-context-compaction-live-test.mjs', import.meta.url),
 );
 
-test('context compaction live command binds its Session to the Runtime Project', async () => {
+test('context compaction live command exercises the canonical lifecycle without legacy Session APIs', async () => {
   const source = await readFile(scriptPath, 'utf8');
-  assert.match(source, /projectDirectory:\s*temporaryDirectory/);
-  assert.match(
-    source,
-    /agentProjectReference\(createAgentProjectContext\(temporaryDirectory\)\)/,
-  );
-  assert.match(source, /createAgentSession\(\{[\s\S]*project,/);
+  assert.match(source, /ContextLifecycle/);
+  assert.match(source, /ModelExecutionGateway/);
+  assert.match(source, /prepareModelSessionBundle/);
+  assert.match(source, /TEST_SILICONFLOW_API_KEY/);
+  assert.match(source, /Live summary quality only/);
+
+  assert.doesNotMatch(source, /loadEnvFile/);
+  assert.doesNotMatch(source, /DBAGENT_/);
+  assert.doesNotMatch(source, /compactAgentSession/);
+  assert.doesNotMatch(source, /runtime\.sessions/);
+  assert.doesNotMatch(source, /createAgentSession/);
+  assert.doesNotMatch(source, /agentContextCheckpoints/);
 });

@@ -16,7 +16,8 @@ import {
 import type { FileHandle } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -26,8 +27,11 @@ import {
 } from '../src/artifacts/project-artifact-store.js';
 import type { AgentEvent } from '../src/events/agent-event.js';
 import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
+import { resolveViteNodeEntry } from './fixtures/vite-node-entry.js';
 
 const temporaryDirectories: string[] = [];
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const repositoryRoot = dirname(dirname(packageRoot));
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
   DatabaseSync: new (path: string) => NodeDatabaseSync;
 };
@@ -114,6 +118,89 @@ describe('ProjectArtifactStore', () => {
         },
       },
     ]);
+  });
+
+  it('opens complete Artifact bytes for the owning Run without exposing a storage path', async () => {
+    const fixture = await createFixture();
+    const content = Buffer.from('complete owner-scoped artifact bytes');
+    const staged = await fixture.store.stage({
+      mediaType: 'application/x-ndjson',
+      source: chunks(content),
+      owner: {
+        hostId: 'host-a', projectId: 'project-a', sessionId: 'session-a',
+        runId: fixture.runId, invocationId: 'artifact-open-invocation',
+      },
+    });
+    const committed = await fixture.store.commit({
+      staged, journal: fixture.context('artifact-open-content'), summary: 'complete content fixture',
+    });
+    if (committed.contentRef === undefined) throw new Error('Committed Artifact content reference is required.');
+
+    const opened = await fixture.store.openContent({
+      contentRef: committed.contentRef,
+      access: { hostId: 'host-a', projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId },
+    });
+
+    expect(Object.keys(opened).sort()).toEqual([
+      'byteSize', 'checksum', 'contentRef', 'contentType', 'stream',
+    ]);
+    expect(opened).toMatchObject({
+      contentRef: committed.contentRef,
+      contentType: 'application/x-ndjson',
+      byteSize: content.byteLength,
+      checksum: sha256(content),
+    });
+    expect(await readStream(opened.stream)).toEqual(content);
+  });
+
+  it('rejects opening complete Artifact bytes from another Run', async () => {
+    const fixture = await createFixture();
+    const other = await createRunContext(fixture.journal, 'artifact-open-other-run', 'session-a');
+    const staged = await fixture.store.stage({
+      mediaType: 'application/octet-stream',
+      source: chunks(Buffer.from('private Run content')),
+      owner: {
+        hostId: 'host-a', projectId: 'project-a', sessionId: 'session-a',
+        runId: fixture.runId, invocationId: 'artifact-open-private-invocation',
+      },
+    });
+    const committed = await fixture.store.commit({
+      staged, journal: fixture.context('artifact-open-cross-run'), summary: 'private content fixture',
+    });
+    if (committed.contentRef === undefined) throw new Error('Committed Artifact content reference is required.');
+
+    await expect(fixture.store.openContent({
+      contentRef: committed.contentRef,
+      access: {
+        hostId: 'host-a', projectId: 'project-a', sessionId: 'session-a', runId: other.runId,
+      },
+    })).rejects.toMatchObject({ code: 'forbidden' });
+  });
+
+  it('rejects an invalid deadline before opening owner-scoped Artifact content', async () => {
+    const fixture = await createFixture();
+    const staged = await fixture.store.stage({
+      mediaType: 'text/plain',
+      source: chunks(Buffer.from('deadline validation fixture')),
+      owner: {
+        hostId: 'host-a', projectId: 'project-a', sessionId: 'session-a',
+        runId: fixture.runId, invocationId: 'artifact-open-deadline-invocation',
+      },
+    });
+    const committed = await fixture.store.commit({
+      staged, journal: fixture.context('artifact-open-invalid-deadline'), summary: 'deadline fixture',
+    });
+    if (committed.contentRef === undefined) throw new Error('Committed Artifact content reference is required.');
+    const access = {
+      hostId: 'host-a', projectId: 'project-a', sessionId: 'session-a', runId: fixture.runId,
+    };
+
+    await expect(fixture.store.openContent({
+      contentRef: committed.contentRef, access, deadline: 'not-an-iso-deadline',
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(fixture.store.readContent({
+      contentRef: committed.contentRef, access, mode: 'byte', limit: 1, deadline: 'not-an-iso-deadline',
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
 
   it('is idempotent under concurrent commit and recovers Journal-before-promotion crashes', async () => {
@@ -250,7 +337,9 @@ describe('ProjectArtifactStore', () => {
         await writeFile(objectPath, replacement);
       },
     });
-    expect(await readStream(await replacingStore.open(committed))).toEqual(original);
+    await expect(readStream(await replacingStore.open(committed))).rejects.toMatchObject({
+      code: 'CORRUPT',
+    });
     expect(replaced).toBe(true);
     await expect(fixture.store.open(committed)).rejects.toMatchObject({ code: 'CORRUPT' });
 
@@ -534,7 +623,7 @@ describe('ProjectArtifactStore', () => {
     });
     expect(await atSixteen.collectGarbage(new Date('2026-08-09T16:00:00.000Z')))
       .toMatchObject({ committedObjectsDeleted: 1, bytesDeleted: content.byteLength });
-    await expect(atSixteen.open(second)).rejects.toMatchObject({ code: 'EXPIRED' });
+    await expect(atSixteen.open(second)).rejects.toMatchObject({ code: 'CORRUPT' });
 
     const facts = (await fixture.journal.readProject('project-a', 0, 100))
       .filter((event): event is Extract<AgentEvent, { type: 'artifact.created' }> =>
@@ -634,7 +723,7 @@ describe('ProjectArtifactStore', () => {
       byteSize: null,
       mediaType: fact.payload.mediaType,
       availability: 'legacy-unavailable',
-    })).rejects.toMatchObject({ code: 'LEGACY_UNAVAILABLE' });
+    })).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('rejects cross-project, conflicting, corrupt, expired and deleted handles with typed errors', async () => {
@@ -953,10 +1042,10 @@ async function createFixture() {
   };
 }
 
-async function createRunContext(journal: SqliteAgentJournal, suffix: string) {
+async function createRunContext(journal: SqliteAgentJournal, suffix: string, sessionId = `session-${suffix}`) {
   const created = await journal.createRun({
     projectId: 'project-a',
-    sessionId: `session-${suffix}`,
+    sessionId,
     clientRequestId: suffix,
     input: { text: suffix },
   });
@@ -965,13 +1054,13 @@ async function createRunContext(journal: SqliteAgentJournal, suffix: string) {
   });
   const leaseRef = { ownerId: lease.ownerId, fencingToken: lease.fencingToken };
   await journal.startRun({
-    projectId: 'project-a', sessionId: `session-${suffix}`, runId: created.runId,
+    projectId: 'project-a', sessionId, runId: created.runId,
     commandId: `start-${suffix}`, lease: leaseRef, expectedRunRevision: 1,
   });
   return {
     runId: created.runId,
     context: (commandId: string): ArtifactJournalContext => ({
-      sessionId: `session-${suffix}`,
+      sessionId,
       runId: created.runId,
       commandId,
       lease: leaseRef,
@@ -986,20 +1075,10 @@ function spawnArtifactWorker(
   operationInput?: unknown,
   commitBarrier = false,
 ) {
-  const viteNode = join(
-    process.cwd(),
-    'node_modules',
-    '.pnpm',
-    'vite-node@2.1.9_@types+node@22.19.20',
-    'node_modules',
-    'vite-node',
-    'vite-node.mjs',
-  );
-  const helper = join(
-    process.cwd(), 'packages', 'core-agent', 'test', 'fixtures', 'artifact-mutation-worker.ts',
-  );
+  const viteNode = resolveViteNodeEntry();
+  const helper = join(packageRoot, 'test', 'fixtures', 'artifact-mutation-worker.ts');
   return spawn(process.execPath, [viteNode, helper], {
-    cwd: process.cwd(),
+    cwd: repositoryRoot,
     env: {
       ...process.env,
       DBAGENT_ARTIFACT_CHILD_PROJECT: projectDir,

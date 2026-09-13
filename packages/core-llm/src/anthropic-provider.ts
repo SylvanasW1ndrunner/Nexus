@@ -15,7 +15,6 @@ import {
   type LlmUsage,
 } from './types.js';
 import { resolveLlmProviderProtocolProfile } from './provider-protocol-profile.js';
-import { redactKnownSecrets, sanitizeKnownSecretError } from './known-secret-sanitizer.js';
 import {
   addStreamBytes,
   assertToolCallCapacity,
@@ -26,7 +25,6 @@ import {
   type LlmStreamLimitOptions,
   type LlmStreamLimits,
 } from './stream-safety.js';
-import { assertNoTextualToolInvocation } from './tool-protocol.js';
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -93,7 +91,7 @@ export class AnthropicProvider implements LlmProvider {
     maxOutputTokens: 'supported',
     seed: 'unsupported',
     stop: 'supported',
-    reasoningEffort: 'unknown',
+    reasoningEffort: 'unsupported',
   };
 
   private readonly apiKey: string;
@@ -129,15 +127,7 @@ export class AnthropicProvider implements LlmProvider {
 
   async chat(request: LlmChatRequest): Promise<LlmChatResponse> {
     const response = await this.request(buildAnthropicPayload(request, false), request.signal);
-    const parsed = parseAnthropicResponse(response);
-    assertNoTextualToolInvocation({
-      text: parsed.text,
-      toolCalls: parsed.toolCalls,
-      toolsRequested: Boolean(request.tools?.length),
-      toolNames: request.tools?.map((tool) => tool.name) ?? [],
-      protocol: 'Anthropic Messages',
-    });
-    return parsed;
+    return parseAnthropicResponse(response);
   }
 
   async *stream(request: LlmChatRequest): AsyncIterable<LlmChatStreamEvent> {
@@ -232,20 +222,16 @@ export class AnthropicProvider implements LlmProvider {
           const error = event.error as { message?: string } | undefined;
           throw new LlmProviderError(
             'LLM_PROVIDER_ERROR',
-            redactKnownSecrets(error?.message ?? 'Anthropic stream returned an error.', [
-              this.apiKey,
-            ]),
+            error?.message ?? 'Anthropic stream returned an error.',
             true,
           );
         }
       }
     } catch (error) {
-      if (error instanceof LlmProviderError) throw sanitizeKnownSecretError(error, [this.apiKey]);
+      if (error instanceof LlmProviderError) throw error;
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        redactKnownSecrets(error instanceof Error ? error.message : 'Anthropic stream failed.', [
-          this.apiKey,
-        ]),
+        error instanceof Error ? error.message : 'Anthropic stream failed.',
         true,
       );
     } finally {
@@ -261,13 +247,6 @@ export class AnthropicProvider implements LlmProvider {
       ...(responseModel === undefined ? {} : { model: responseModel }),
       ...(finishReason === undefined ? {} : { finishReason }),
     };
-    assertNoTextualToolInvocation({
-      text: final.text,
-      toolCalls: final.toolCalls,
-      toolsRequested: Boolean(request.tools?.length),
-      toolNames: request.tools?.map((tool) => tool.name) ?? [],
-      protocol: 'Anthropic Messages',
-    });
     yield {
       type: 'finish',
       response: final,
@@ -307,9 +286,7 @@ export class AnthropicProvider implements LlmProvider {
       return {
         available: false,
         latencyMs: performance.now() - startedAt,
-        detail: redactKnownSecrets(error instanceof Error ? error.message : String(error), [
-          this.apiKey,
-        ]),
+        detail: error instanceof Error ? error.message : String(error),
       };
     }
   }
@@ -323,7 +300,7 @@ export class AnthropicProvider implements LlmProvider {
       const body = parseJson(
         await readLimitedResponseText(response, this.maxResponseBytes),
       ) as AnthropicMessageResponse;
-      if (!response.ok) throw anthropicHttpError(response.status, body, this.apiKey);
+      if (!response.ok) throw anthropicHttpError(response.status, body);
       if (!body || typeof body !== 'object')
         throw new LlmProviderError(
           'LLM_BAD_RESPONSE',
@@ -359,7 +336,7 @@ export class AnthropicProvider implements LlmProvider {
       const body = parseJson(
         await readLimitedResponseText(response, this.maxResponseBytes),
       ) as AnthropicModelsResponse;
-      if (!response.ok) throw anthropicHttpError(response.status, body, this.apiKey);
+      if (!response.ok) throw anthropicHttpError(response.status, body);
       if (!body || typeof body !== 'object') {
         throw new LlmProviderError(
           'LLM_BAD_RESPONSE',
@@ -383,13 +360,10 @@ export class AnthropicProvider implements LlmProvider {
           true,
         );
       }
-      if (error instanceof LlmProviderError) throw sanitizeKnownSecretError(error, [this.apiKey]);
+      if (error instanceof LlmProviderError) throw error;
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        redactKnownSecrets(
-          error instanceof Error ? error.message : 'Anthropic model discovery failed.',
-          [this.apiKey],
-        ),
+        error instanceof Error ? error.message : 'Anthropic model discovery failed.',
         true,
       );
     } finally {
@@ -408,7 +382,6 @@ export class AnthropicProvider implements LlmProvider {
         throw anthropicHttpError(
           result.response.status,
           parseJson(await readLimitedResponseText(result.response, this.maxResponseBytes)),
-          this.apiKey,
         );
       } finally {
         result.cleanup();
@@ -462,13 +435,10 @@ export class AnthropicProvider implements LlmProvider {
           true,
         );
       }
-      if (error instanceof LlmProviderError) throw sanitizeKnownSecretError(error, [this.apiKey]);
+      if (error instanceof LlmProviderError) throw error;
       throw new LlmProviderError(
         'LLM_NETWORK_ERROR',
-        redactKnownSecrets(
-          error instanceof Error ? error.message : 'Anthropic network request failed.',
-          [this.apiKey],
-        ),
+        error instanceof Error ? error.message : 'Anthropic network request failed.',
         true,
       );
     }
@@ -598,13 +568,13 @@ function parseJson(value: string): unknown {
   }
 }
 
-function anthropicHttpError(status: number, body: unknown, secret: string): LlmProviderError {
+function anthropicHttpError(status: number, body: unknown): LlmProviderError {
   const rawMessage =
     body && typeof body === 'object' && 'error' in body
       ? ((body as { error?: { message?: string } }).error?.message ??
         `Anthropic returned HTTP ${status}.`)
       : `Anthropic returned HTTP ${status}.`;
-  const message = redactKnownSecrets(rawMessage, [secret]);
+  const message = rawMessage;
   if (status === 401 || status === 403)
     return new LlmProviderError('LLM_AUTH_FAILED', message, false, status);
   if (status === 408 || status === 429)

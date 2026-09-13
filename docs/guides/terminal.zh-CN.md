@@ -29,8 +29,20 @@ Server。模型选择属于 Session。
 | /doctor | 检查全局配置、模型、Skill 与 MCP。 |
 | /compact、/cancel、/trace | 控制活跃 Run。 |
 
-## 授权与责任
+## 准备浏览器自动化会话
 
+Browser Automation v1 使用本机 CDP 连接，而不是 Claude 浏览器扩展。请自行以本机端口
+`9222` 的远程调试模式启动 Chrome 或 Edge，并使用专用浏览器 Profile；较新的 Chrome 版本
+可能要求远程调试使用非默认的 user-data directory。请在该 Profile 中登录需要使用的网站，并在
+重试浏览器任务前保持浏览器运行。
+
+SchemaNaut 只会连接 `http://127.0.0.1:9222`，并始终新建自己的 `about:blank` 标签页。它
+只复用该 Profile 的登录态，不会附着或接管已有标签页，也不能自动附着到未以远程调试模式启动的
+普通浏览器会话。未来可由扩展或原生 bridge 替换本机 CDP 准备方式，但面向 Agent 的 browser
+session/page 合同保持不变。
+
+
+## 授权与责任
 default 对互联网访问和工作区外编辑要求批准；auto 只对静态声明的高风险动作和组织规则要求批准；
 full-access 不会自动拦截动作等待批准。不存在项目级覆盖。
 
@@ -40,6 +52,6 @@ SchemaNaut 不脱敏配置视图、命令参数、命令输出或 Provider 错�
 
 BrowserSession Host Port/浏览器连接器复用用户在 SchemaNaut 外已登录的现有浏览器会话，只对 Cookie 值作狭义
 API 隔离。该产品合同中 Agent 只获得不透明的 browser session/page 引用；面向 Agent 的 schema 不接受 Cookie、
-API Header 或 Authorization，Cookie/Set-Cookie 不会进入 prepared intent、结果或 Journal。它不检查网页正文、
+API Header 或 Authorization，浏览器协议和会话中的 Cookie/Set-Cookie 字段和值不会进入 prepared intent、结果或 Journal。它不检查网页正文、
 外部命令输出或用户 browser_test 代码输出。当前 CLI 没有内嵌 Chromium；外部 Playwright 仅作无登录截图/测试后端
-或用户维护的测试配置，不保证共享登录态。基础 web_fetch 无状态；web_search API 凭据仍只允许 HTTPS。
+或用户维护的测试配置，不保证共享登录态。

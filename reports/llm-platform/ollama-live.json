@@ -1,0 +1,183 @@
+{
+  "kind": "ollama-user-acceptance",
+  "status": "passed",
+  "generatedAt": "2026-09-03T23:51:16.516Z",
+  "endpoint": "http://127.0.0.1:11434",
+  "diagnostics": {
+    "catalogModel": {
+      "id": "qwen2.5-coder:14b",
+      "roles": {
+        "generation": {
+          "value": true,
+          "source": "provider-plugin"
+        },
+        "embedding": {
+          "value": false,
+          "source": "provider-plugin"
+        },
+        "rerank": {
+          "value": false,
+          "source": "provider-plugin"
+        },
+        "vision": {
+          "value": false,
+          "source": "provider-plugin"
+        }
+      },
+      "capabilities": {
+        "chat": {
+          "value": "supported",
+          "source": "provider-plugin"
+        },
+        "streaming": {
+          "value": "supported",
+          "source": "provider-plugin"
+        },
+        "toolCalling": {
+          "value": null,
+          "source": "unknown"
+        },
+        "structuredOutput": {
+          "value": null,
+          "source": "unknown"
+        },
+        "reasoning": {
+          "value": null,
+          "source": "unknown"
+        },
+        "vision": {
+          "value": null,
+          "source": "unknown"
+        },
+        "embeddings": {
+          "value": null,
+          "source": "unknown"
+        },
+        "rerank": {
+          "value": "unsupported",
+          "source": "provider-plugin"
+        }
+      }
+    },
+    "discoveredModels": [
+      {
+        "id": "qwen2.5-coder:14b",
+        "roles": {
+          "generation": {
+            "value": true,
+            "source": "provider-plugin"
+          },
+          "embedding": {
+            "value": false,
+            "source": "provider-plugin"
+          },
+          "rerank": {
+            "value": false,
+            "source": "provider-plugin"
+          },
+          "vision": {
+            "value": false,
+            "source": "provider-plugin"
+          }
+        },
+        "capabilities": {
+          "chat": {
+            "value": "supported",
+            "source": "provider-plugin"
+          },
+          "streaming": {
+            "value": "supported",
+            "source": "provider-plugin"
+          },
+          "toolCalling": {
+            "value": null,
+            "source": "unknown"
+          },
+          "structuredOutput": {
+            "value": null,
+            "source": "unknown"
+          },
+          "reasoning": {
+            "value": null,
+            "source": "unknown"
+          },
+          "vision": {
+            "value": null,
+            "source": "unknown"
+          },
+          "embeddings": {
+            "value": null,
+            "source": "unknown"
+          },
+          "rerank": {
+            "value": "unsupported",
+            "source": "provider-plugin"
+          }
+        }
+      }
+    ]
+  },
+  "connection": {
+    "id": "llm_c903fc226615b7e9b919",
+    "pluginId": "ollama-native",
+    "protocol": "ollama-chat",
+    "discoveryLatencyMs": 36.18
+  },
+  "model": {
+    "id": "qwen2.5-coder:14b",
+    "contextTokens": {
+      "value": 32768,
+      "source": "endpoint",
+      "observedAt": "2026-09-03T23:51:16.594Z"
+    },
+    "maxInputTokens": {
+      "value": null,
+      "source": "unknown"
+    },
+    "maxOutputTokens": {
+      "value": null,
+      "source": "unknown"
+    },
+    "toolCalling": {
+      "value": "supported",
+      "source": "endpoint",
+      "observedAt": "2026-09-03T23:51:16.594Z"
+    }
+  },
+  "basic": {
+    "latencyMs": 20433.33,
+    "nonEmpty": true,
+    "usage": {
+      "promptTokens": 40,
+      "completionTokens": 13,
+      "totalTokens": 53
+    }
+  },
+  "stream": {
+    "firstEventMs": 157.78,
+    "firstVisibleTextMs": 157.78,
+    "totalLatencyMs": 157.87,
+    "nonEmpty": true
+  },
+  "tool": {
+    "advertised": "supported",
+    "blocking": false,
+    "attempted": true,
+    "passed": false,
+    "classification": "endpoint-model-returned-text-instead-of-native-tool-call",
+    "runtimeSafetyPassed": true,
+    "latencyMs": 785.12,
+    "response": {
+      "toolCallCount": 0,
+      "toolNames": [],
+      "textPreview": "{\n  \"name\": \"lookup_metric\",\n  \"arguments\": {\n    \"name\": \"orders\"\n  }\n}"
+    },
+    "error": {
+      "message": "模型没有返回预期的结构化 Tool Call。"
+    }
+  },
+  "settingsContract": {
+    "onlyEndpointAndName": true,
+    "containsProtocolOrModelFacts": false
+  }
+}

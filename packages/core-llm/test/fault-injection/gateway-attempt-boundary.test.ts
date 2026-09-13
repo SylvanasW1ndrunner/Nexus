@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/require-await, require-yield -- deterministic async transport scripts exercise real gateway scheduling. */
 import { describe, expect, it } from 'vitest';
 import {
   ModelClientError,
@@ -66,13 +65,13 @@ describe('ModelExecutionGateway attempt boundary', () => {
   it('discards a partial attempt before retrying and commits only one validated attempt', async () => {
     const client = new ScriptedModelClient([
       streamResponse(async function* () {
-        yield chatDelta('partial');
+        yield await Promise.resolve(chatDelta('partial'));
         throw new ModelClientError('STREAM_DISCONNECTED', 'socket closed', {
           retryable: true,
         });
       }),
       streamResponse(async function* () {
-        yield chatDelta('final', 'stop');
+        yield await Promise.resolve(chatDelta('final', 'stop'));
       }),
     ]);
     const result = await gateway().executeAttempt(session(client), request(), { maxRetries: 1 });
@@ -115,8 +114,9 @@ describe('ModelExecutionGateway attempt boundary', () => {
       random: () => 1,
       clock: {
         now: () => 1_000,
-        sleep: async (milliseconds) => {
+        sleep: (milliseconds) => {
           sleeps.push(milliseconds);
+          return Promise.resolve();
         },
       },
     });
@@ -145,7 +145,10 @@ describe('ModelExecutionGateway attempt boundary', () => {
 
     await gateway({
       random: () => 0,
-      clock: { now: () => 5_000, sleep: async (milliseconds) => { sleeps.push(milliseconds); } },
+      clock: { now: () => 5_000, sleep: (milliseconds) => {
+        sleeps.push(milliseconds);
+        return Promise.resolve();
+      } },
     }).executeAttempt(session(client), request(), {
       maxRetries: 2,
       retry: { baseDelayMs: 100, maxDelayMs: 1_000, jitterRatio: 0.2 },
@@ -168,7 +171,7 @@ describe('ModelExecutionGateway attempt boundary', () => {
     await gateway({
       clock: {
         now: () => Date.parse('Wed, 21 Oct 2015 07:27:58 GMT'),
-        sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+        sleep: (milliseconds) => { sleeps.push(milliseconds); return Promise.resolve(); },
       },
     }).executeAttempt(session(client), request(), {
       maxRetries: 1,
@@ -358,12 +361,12 @@ describe('ModelExecutionGateway attempt boundary', () => {
       apiKey: 'test-key',
       baseUrl: 'https://provider.test/v1',
       maxRetries: 3,
-      fetch: async () => {
+      fetch: () => {
         fetchCalls += 1;
-        return new Response(JSON.stringify({ error: { message: 'busy' } }), {
+        return Promise.resolve(new Response(JSON.stringify({ error: { message: 'busy' } }), {
           status: 503,
           headers: { 'content-type': 'application/json' },
-        });
+        }));
       },
     });
 
@@ -393,7 +396,7 @@ function gateway(overrides: ConstructorParameters<typeof ModelExecutionGateway>[
   let attempt = 0;
   return new ModelExecutionGateway({
     createAttemptId: () => `attempt-${++attempt}`,
-    clock: { now: Date.now, sleep: async () => undefined },
+    clock: { now: Date.now, sleep: () => Promise.resolve() },
     random: () => 0.5,
     ...overrides,
   });
@@ -469,7 +472,7 @@ function hangingConnectClient(): ModelClient {
 }
 
 async function* hangingStream(): AsyncIterable<unknown> {
-  await new Promise<void>(() => undefined);
+  yield await new Promise<never>(() => undefined);
 }
 
 async function* firstThenHang(): AsyncIterable<unknown> {

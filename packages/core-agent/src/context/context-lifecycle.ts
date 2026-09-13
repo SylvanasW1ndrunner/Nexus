@@ -1,8 +1,8 @@
 import type {
   CanonicalModelRequest,
   ModelAttemptExecution,
+  ModelAttemptLifecycleObserver,
   ModelAttemptOptions,
-  ModelContentBlock,
   ModelMessage,
   ModelSession,
   ModelSessionBundle,
@@ -101,6 +101,7 @@ export interface ContextModelGateway {
 export type ContextLifecycleOptions = Readonly<{
   gateway: ContextModelGateway;
   session: ModelSession | ModelSessionBundle;
+  observer?: ModelAttemptLifecycleObserver;
 }>;
 
 export type CompactContextInput = Readonly<{
@@ -116,23 +117,27 @@ export type ContextCompactionResult = Readonly<{
   committedThroughSequence: number;
   summary: string;
   attemptId: string;
+  routeId: string;
+  usage?: ModelAttemptExecution['attempt']['usage'];
 }>;
 
 /** One compaction call; retry/fallback remains exclusively inside the Gateway. */
 export class ContextLifecycle {
   readonly #gateway: ContextModelGateway;
   readonly #session: ModelSession | ModelSessionBundle;
+  readonly #observer: ModelAttemptLifecycleObserver | undefined;
 
   constructor(options: ContextLifecycleOptions) {
     this.#gateway = options.gateway;
     this.#session = options.session;
+    this.#observer = options.observer;
   }
 
   async compact(input: CompactContextInput): Promise<ContextCompactionResult> {
     if (
       typeof input.decisionId !== 'string' || input.decisionId.trim() === '' ||
       !Number.isSafeInteger(input.committedThroughSequence) ||
-      input.committedThroughSequence < 0 || !Array.isArray(input.messages)
+      input.committedThroughSequence < 0 || !isArrayValue(input.messages)
     ) {
       throw new ContextLifecycleError(
         'CONTEXT_DECISION_INVALID',
@@ -154,7 +159,7 @@ export class ContextLifecycle {
         },
         ...input.messages.map((message) => ({
           role: message.role,
-          content: message.content.map((block: ModelContentBlock) => structuredClone(block)),
+          content: message.content.map((block) => structuredClone(block)),
         })),
       ],
     };
@@ -163,6 +168,7 @@ export class ContextLifecycle {
       execution = await this.#gateway.executeAttempt(this.#session, request, {
         purpose: 'context-compaction',
         toolsEnabled: false,
+        ...(this.#observer === undefined ? {} : { observer: this.#observer }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
     } catch (error) {
@@ -189,6 +195,10 @@ export class ContextLifecycle {
       committedThroughSequence: input.committedThroughSequence,
       summary,
       attemptId: execution.attempt.attemptId,
+      routeId: execution.session.route.routeId,
+      ...(execution.attempt.usage === undefined
+        ? {}
+        : { usage: structuredClone(execution.attempt.usage) }),
     });
   }
 }
@@ -219,6 +229,107 @@ export type BoundedContextReadResult = Readonly<{
   truncated: boolean;
 }>;
 
+export type SequencedContextItem = Readonly<{ sequence: number }>;
+
+export type ReadBoundedContextItemsInput<T extends SequencedContextItem> = Readonly<{
+  readPage: (input: Readonly<{
+    afterSequence: number;
+    throughSequence: number;
+    limit: number;
+  }>) => Promise<readonly T[]>;
+  afterSequence: number;
+  throughSequence: number;
+  pageSize: number;
+  maxItems: number;
+}>;
+
+export type ReadBoundedContextItemsResult<T extends SequencedContextItem> = Readonly<{
+  items: readonly T[];
+  nextSequence: number;
+  truncated: boolean;
+}>;
+
+/** Generic bounded source-sequence traversal used by the production Session context projector. */
+export async function readBoundedContextItems<T extends SequencedContextItem>(
+  input: ReadBoundedContextItemsInput<T>,
+): Promise<ReadBoundedContextItemsResult<T>> {
+  if (
+    !Number.isSafeInteger(input.afterSequence) || input.afterSequence < 0 ||
+    !Number.isSafeInteger(input.throughSequence) || input.throughSequence < input.afterSequence ||
+    !Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 1_000 ||
+    !Number.isSafeInteger(input.maxItems) || input.maxItems < 1 || input.maxItems > 10_000
+  ) {
+    throw new ContextLifecycleError('CONTEXT_HISTORY_INVALID', 'Context cursor bounds are invalid.');
+  }
+  const items: T[] = [];
+  let cursor = input.afterSequence;
+  let exhausted = false;
+  while (cursor < input.throughSequence && items.length < input.maxItems) {
+    const limit = Math.min(input.pageSize, input.maxItems - items.length);
+    const page = await input.readPage({
+      afterSequence: cursor,
+      throughSequence: input.throughSequence,
+      limit,
+    });
+    if (!isArrayValue(page) || page.length > limit) {
+      throw new ContextLifecycleError(
+        'CONTEXT_HISTORY_INVALID', 'Context reader returned an invalid or oversized page.',
+      );
+    }
+    if (page.length === 0) {
+      exhausted = true;
+      break;
+    }
+    for (const item of page) {
+      if (
+        !Number.isSafeInteger(item.sequence) || item.sequence <= cursor ||
+        item.sequence > input.throughSequence
+      ) {
+        throw new ContextLifecycleError(
+          'CONTEXT_HISTORY_INVALID',
+          'Context reader returned a non-monotonic or out-of-bound item.',
+        );
+      }
+      cursor = item.sequence;
+      items.push(item);
+    }
+    if (page.length < limit) {
+      exhausted = true;
+      break;
+    }
+  }
+  if (!exhausted && cursor < input.throughSequence && items.length === input.maxItems) {
+    const probe = await input.readPage({
+      afterSequence: cursor,
+      throughSequence: input.throughSequence,
+      limit: 1,
+    });
+    if (!isArrayValue(probe) || probe.length > 1) {
+      throw new ContextLifecycleError(
+        'CONTEXT_HISTORY_INVALID', 'Context reader returned an invalid lookahead page.',
+      );
+    }
+    if (probe.length === 0) {
+      exhausted = true;
+    } else {
+      const [item] = probe;
+      if (
+        item === undefined || !Number.isSafeInteger(item.sequence) ||
+        item.sequence <= cursor || item.sequence > input.throughSequence
+      ) {
+        throw new ContextLifecycleError(
+          'CONTEXT_HISTORY_INVALID', 'Context reader returned an invalid lookahead item.',
+        );
+      }
+    }
+  }
+  return Object.freeze({
+    items: Object.freeze(items),
+    nextSequence: exhausted ? input.throughSequence : cursor,
+    truncated: !exhausted && cursor < input.throughSequence,
+  });
+}
+
 /** Bounded Run-scoped cursor traversal; it never materializes whole Session history. */
 export async function readBoundedCommittedContext(
   input: BoundedContextReadInput,
@@ -241,7 +352,7 @@ export async function readBoundedCommittedContext(
       throughSequence: input.throughSequence,
       limit,
     });
-    if (!Array.isArray(page) || page.length > limit) {
+    if (!isArrayValue(page) || page.length > limit) {
       throw new ContextLifecycleError(
         'CONTEXT_HISTORY_INVALID',
         'Context reader returned an invalid or oversized page.',
@@ -270,6 +381,10 @@ export async function readBoundedCommittedContext(
     nextSequence: cursor,
     truncated: cursor < input.throughSequence,
   });
+}
+
+function isArrayValue(value: unknown): boolean {
+  return Array.isArray(value);
 }
 
 function validateDecisionInput(input: ContextDecisionInput): void {

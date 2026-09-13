@@ -16,9 +16,8 @@ export type SkillDirectorySource = {
 };
 
 /**
- * Standard Agent Skills frontmatter. `allowed-tools` is represented as
- * `preapprovedTools` to preserve its ecosystem meaning: it is a hint about
- * tools that may be pre-approved, not a runtime tool allowlist.
+ * Standard Agent Skills frontmatter. SchemaNaut treats `allowed-tools` as a
+ * runtime allowlist for the activated Skill. It never grants approval.
  */
 export type SkillFrontmatter = {
   name: string;
@@ -26,13 +25,22 @@ export type SkillFrontmatter = {
   license?: string;
   compatibility?: string;
   metadata: Readonly<Record<string, string>>;
-  preapprovedTools: readonly string[];
+  allowedTools?: readonly string[];
   /**
    * Unknown top-level fields are retained for round-trip diagnostics only.
    * SchemaNaut never assigns behavior to them.
    */
   extensions: Readonly<Record<string, unknown>>;
 };
+
+export type SkillCapabilityRequirement = {
+  capabilityId: string;
+};
+
+export type SkillCapabilityResolver = (
+  requirements: readonly SkillCapabilityRequirement[],
+  descriptor: SkillDescriptor,
+) => boolean;
 
 /**
  * Tier-1 progressive-disclosure entry. This is the only shape that should be
@@ -54,7 +62,36 @@ export type SkillDescriptor = SkillCatalogEntry &
     bundleRoot: string;
     sourceOrder: number;
     modifiedAtMs?: number;
+    /** SHA-256 of the complete UTF-8 SKILL.md bytes. */
+    contentDigest: string;
+    /** Portable identity used to reload exactly this captured revision. */
+    revisionRef: SkillRevisionRef;
   };
+
+export type SkillRevisionRef = Readonly<{
+  schemaVersion: 1;
+  revisionId: string;
+  scope: SkillScope;
+  sourceId: string;
+  sourcePath: string;
+  bundleRoot: string;
+  sourceOrder: number;
+  name: string;
+  contentDigest: string;
+  bundleDigest: string;
+}>;
+
+export type SkillResourceManifestEntry = Readonly<{
+  path: string;
+  contentDigest: string;
+  byteSize: number;
+}>;
+
+export type SkillRevisionManifest = Readonly<{
+  schemaVersion: 1;
+  revisionRef: SkillRevisionRef;
+  resources: readonly SkillResourceManifestEntry[];
+}>;
 
 /**
  * Tier-2 activated Skill. The Markdown body is loaded only on activation.
@@ -73,6 +110,12 @@ export type SkillOverlay = {
    */
   sourcePath?: string;
 };
+
+export type SkillBundleLimits = Readonly<{
+  maxFiles?: number;
+  maxFileBytes?: number;
+  maxTotalBytes?: number;
+}>;
 
 export type SkillIssueCode =
   | 'directory-unavailable'
@@ -97,7 +140,7 @@ export type SkillConflictEntry = SkillCatalogEntry & {
 };
 
 /**
- * SDK/developer diagnostic. This shape is not part of the model catalog.
+ * Host/developer diagnostic. This shape is not part of the model catalog.
  */
 export type SkillConflict = {
   name: string;
@@ -135,10 +178,20 @@ export type ActivatedSkillInvocation = SkillInvocation & {
 export type SkillRegistryOptions = {
   sources?: readonly SkillDirectorySource[];
   sessionOverlay?: readonly SkillOverlay[];
+  /**
+   * Generic host-owned availability resolver. The Skills package parses
+   * requirements but never assigns meaning to a capability identifier.
+   */
+  capabilityResolver?: SkillCapabilityResolver;
+  /** Optional durable content-addressed cache used for restart recovery. */
+  revisionCachePath?: string;
+  bundleLimits?: SkillBundleLimits;
 };
 
 export type SkillListOptions = {
   scope?: SkillScope;
+  /** Override used when a caller must evaluate one immutable host snapshot. */
+  capabilityResolver?: SkillCapabilityResolver;
 };
 
 export type SkillSearchOptions = SkillListOptions & {

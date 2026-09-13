@@ -1,16 +1,49 @@
+import { createHash } from 'node:crypto';
 import type { PortableValue } from '@dbagent/shared';
+import {
+  EVIDENCE_REFERENCE_REVISION,
+  MAX_AGENT_EVIDENCE_REFS,
+  normalizeAgentEvidenceRefs,
+  type EvidenceReferenceResolver,
+  type RuntimeEvidenceReferenceRecord,
+} from '../evidence-reference.js';
+import type { ContentAccessScope } from '../artifacts/content-reference.js';
+import type { AgentToolCompletionEvidence } from '../types.js';
 
 export type DeliveryStatus = 'not-required' | 'verified' | 'unverified';
 
+export type DeliveryEvidenceSelection =
+  | 'explicit'
+  | 'latest-delivery-ready'
+  | 'latest-observation'
+  | 'none';
+
+export type DeliveryToolEvidenceSnapshot = Readonly<{
+  evidenceRevision: number;
+  observationId: string;
+  invocationId: string;
+  summary: string;
+  evidenceRefs: readonly string[];
+  completionEvidence?: AgentToolCompletionEvidence;
+  modelProjection?: PortableValue;
+}>;
+
 export type DeliveryEvidenceSnapshot = Readonly<{
-  schemaVersion: 1;
+  schemaVersion: 2;
   revision: number;
   finalContentRef: string;
+  /** Bounded semantic content resolved from finalContentRef, never a provider wire payload. */
+  finalText: string;
+  finalTextDigest: string;
   evidenceRefs: readonly string[];
+  selection: DeliveryEvidenceSelection;
+  /** Only the Tool evidence selected for this delivery, never the complete Run history. */
+  toolEvidence: readonly DeliveryToolEvidenceSnapshot[];
 }>;
 
 export type DeliveryVerifierDecision =
   | Readonly<{ status: 'accepted' }>
+  /** Bounded semantic feedback for the next Model turn. */
   | Readonly<{ status: 'revise'; observation: PortableValue }>
   | Readonly<{ status: 'indeterminate'; reason: string }>;
 
@@ -56,6 +89,7 @@ export type DeliveryEvaluation =
 export type DeliveryVerificationErrorCode =
   | 'DELIVERY_UNVERIFIED'
   | 'EVIDENCE_SNAPSHOT_INVALID'
+  | 'EVIDENCE_REFERENCE_INVALID'
   | 'VERIFIER_CONTRACT_INVALID'
   | 'VERIFIER_FAILED';
 
@@ -75,6 +109,55 @@ export type EvaluateDeliveryInput = Readonly<{
   verifier?: DeliveryVerifier;
   priorDecisions?: readonly PersistedDeliveryDecision[];
 }>;
+
+export type ValidateDeliveryEvidenceReferencesInput = Readonly<{
+  evidence: DeliveryEvidenceSnapshot;
+  resolver: EvidenceReferenceResolver;
+  access: ContentAccessScope;
+  expectedRevision?: string;
+  resolverContext?: Readonly<{ signal?: AbortSignal; deadline?: string; pinUntil?: string }>;
+}>;
+
+/**
+ * Resolves every opaque Runtime evidence reference before a verifier receives
+ * the snapshot. URI shape alone is never accepted as proof of existence.
+ */
+export async function validateDeliveryEvidenceReferences(
+  input: ValidateDeliveryEvidenceReferencesInput,
+): Promise<readonly RuntimeEvidenceReferenceRecord[]> {
+  const refs = normalizeAgentEvidenceRefs(input.evidence.evidenceRefs);
+  const records: RuntimeEvidenceReferenceRecord[] = [];
+  for (const evidenceRef of refs) {
+    const resolution = await input.resolver.resolveEvidenceReference(
+      evidenceRef,
+      input.access,
+      input.expectedRevision ?? EVIDENCE_REFERENCE_REVISION,
+      input.resolverContext,
+    );
+    if (resolution.status !== 'valid') {
+      throw new DeliveryVerificationError(
+        'EVIDENCE_REFERENCE_INVALID',
+        `Delivery evidence reference is ${resolution.status.replaceAll('_', ' ')}.`,
+      );
+    }
+    if (
+      resolution.record.evidenceRef !== evidenceRef ||
+      resolution.record.revision !== (input.expectedRevision ?? EVIDENCE_REFERENCE_REVISION) ||
+      resolution.record.owner.hostId !== input.access.hostId ||
+      resolution.record.owner.sessionId !== input.access.sessionId ||
+      resolution.record.owner.runId !== input.access.runId ||
+      (resolution.record.owner.projectId !== undefined &&
+        resolution.record.owner.projectId !== input.access.projectId)
+    ) {
+      throw new DeliveryVerificationError(
+        'EVIDENCE_REFERENCE_INVALID',
+        'Delivery evidence reference is not bound to this delivery owner and revision.',
+      );
+    }
+    records.push(resolution.record);
+  }
+  return Object.freeze(records);
+}
 
 /**
  * Runs one versioned synchronous verifier against a deeply immutable evidence
@@ -163,25 +246,119 @@ export function evaluateDelivery(input: EvaluateDeliveryInput): DeliveryEvaluati
   });
 }
 
+/** Validates the stable identity and synchronous contract of a verifier. */
+export function assertDeliveryVerifier(verifier: DeliveryVerifier): void {
+  validateVerifier(verifier);
+}
+
 function immutableEvidence(value: DeliveryEvidenceSnapshot): DeliveryEvidenceSnapshot {
   if (
-    value === null || typeof value !== 'object' || value.schemaVersion !== 1 ||
+    value === null || typeof value !== 'object' || value.schemaVersion !== 2 ||
     !Number.isSafeInteger(value.revision) || value.revision < 0 ||
     typeof value.finalContentRef !== 'string' || value.finalContentRef.trim() === '' ||
-    value.finalContentRef.length > 4_096 || !Array.isArray(value.evidenceRefs) ||
-    value.evidenceRefs.length > 1_000 || value.evidenceRefs.some((ref) =>
-      typeof ref !== 'string' || ref.trim() === '' || ref.length > 4_096)
+    value.finalContentRef.length > 4_096 ||
+    typeof value.finalText !== 'string' || value.finalText.trim() === '' ||
+    value.finalText.length > 65_536 ||
+    value.finalTextDigest !== sha256Text(value.finalText) ||
+    !isDeliveryEvidenceSelection(value.selection) ||
+    !isArrayValue(value.toolEvidence) ||
+    value.toolEvidence.length > MAX_AGENT_EVIDENCE_REFS
   ) {
     throw new DeliveryVerificationError(
       'EVIDENCE_SNAPSHOT_INVALID',
       'Delivery evidence snapshot is invalid or exceeds its bounded contract.',
     );
   }
+  let evidenceRefs: string[];
+  try {
+    evidenceRefs = normalizeAgentEvidenceRefs(value.evidenceRefs);
+  } catch (error) {
+    throw new DeliveryVerificationError(
+      'EVIDENCE_SNAPSHOT_INVALID',
+      'Delivery evidence snapshot contains invalid references.',
+      error,
+    );
+  }
+  const toolEvidence = value.toolEvidence.map((item) => immutableToolEvidence(item, value.revision));
+  if (
+    (value.selection === 'none' && (toolEvidence.length > 0 || evidenceRefs.length > 0)) ||
+    (value.selection !== 'none' && toolEvidence.length === 0) ||
+    !sameReferenceSet(
+      evidenceRefs,
+      toolEvidence.flatMap((item) => item.evidenceRefs),
+    )
+  ) {
+    throw new DeliveryVerificationError(
+      'EVIDENCE_SNAPSHOT_INVALID',
+      'Delivery evidence selection is not causally bound to its Tool evidence.',
+    );
+  }
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: value.revision,
     finalContentRef: value.finalContentRef,
-    evidenceRefs: Object.freeze([...value.evidenceRefs]),
+    finalText: value.finalText,
+    finalTextDigest: value.finalTextDigest,
+    evidenceRefs: Object.freeze(evidenceRefs),
+    selection: value.selection,
+    toolEvidence: Object.freeze(toolEvidence),
+  });
+}
+
+function immutableToolEvidence(
+  value: DeliveryToolEvidenceSnapshot,
+  snapshotRevision: number,
+): DeliveryToolEvidenceSnapshot {
+  if (
+    value === null || typeof value !== 'object' ||
+    !Number.isSafeInteger(value.evidenceRevision) || value.evidenceRevision < 0 ||
+    value.evidenceRevision > snapshotRevision ||
+    !boundedText(value.observationId, 512) || !boundedText(value.invocationId, 512) ||
+    !boundedText(value.summary, 4_096)
+  ) {
+    throw new DeliveryVerificationError(
+      'EVIDENCE_SNAPSHOT_INVALID',
+      'Delivery Tool evidence is malformed or belongs to a future revision.',
+    );
+  }
+  let evidenceRefs: string[];
+  try {
+    evidenceRefs = normalizeAgentEvidenceRefs(value.evidenceRefs);
+    if (value.modelProjection !== undefined) {
+      assertPortableBounded(value.modelProjection, 0, new Set<object>());
+      if (Buffer.byteLength(JSON.stringify(value.modelProjection), 'utf8') > 65_536) {
+        throw invalidVerifierDecision();
+      }
+    }
+    if (value.completionEvidence !== undefined) {
+      assertPortableBounded(value.completionEvidence, 0, new Set<object>());
+      if (Buffer.byteLength(JSON.stringify(value.completionEvidence), 'utf8') > 8_192) {
+        throw invalidVerifierDecision();
+      }
+    }
+  } catch (error) {
+    throw new DeliveryVerificationError(
+      'EVIDENCE_SNAPSHOT_INVALID',
+      'Delivery Tool evidence exceeds its bounded semantic contract.',
+      error,
+    );
+  }
+  return Object.freeze({
+    evidenceRevision: value.evidenceRevision,
+    observationId: value.observationId,
+    invocationId: value.invocationId,
+    summary: value.summary,
+    evidenceRefs: Object.freeze(evidenceRefs),
+    ...(value.completionEvidence === undefined
+      ? {}
+      : {
+          completionEvidence: deepFreezePortable(
+            structuredClone(value.completionEvidence) as PortableValue,
+          ) as AgentToolCompletionEvidence,
+        }),
+    ...(value.modelProjection === undefined
+      ? {}
+      : { modelProjection: deepFreezePortable(structuredClone(value.modelProjection)) }),
   });
 }
 
@@ -220,6 +397,9 @@ function immutableDecision(value: unknown): DeliveryVerifierDecision {
     record.observation !== undefined
   ) {
     assertPortableBounded(record.observation, 0, new Set<object>());
+    if (Buffer.byteLength(JSON.stringify(record.observation), 'utf8') > 64 * 1024) {
+      throw invalidVerifierDecision();
+    }
     return Object.freeze({
       status: 'revise',
       observation: deepFreezePortable(structuredClone(record.observation as PortableValue)),
@@ -245,7 +425,7 @@ function assertPortableBounded(value: unknown, depth: number, seen: Set<object>)
     if (value.length > 1_000) throw invalidVerifierDecision();
     for (const item of value) assertPortableBounded(item, depth + 1, seen);
   } else {
-    const prototype = Object.getPrototypeOf(value);
+    const prototype: unknown = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) throw invalidVerifierDecision();
     const entries = Object.entries(value);
     if (entries.length > 1_000) throw invalidVerifierDecision();
@@ -273,6 +453,29 @@ function exactKeys(record: Record<string, unknown>, keys: readonly string[]): bo
   const actual = Object.keys(record).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isArrayValue(value: unknown): boolean {
+  return Array.isArray(value);
+}
+
+function isDeliveryEvidenceSelection(value: unknown): value is DeliveryEvidenceSelection {
+  return value === 'explicit' || value === 'latest-delivery-ready' ||
+    value === 'latest-observation' || value === 'none';
+}
+
+function boundedText(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.trim() !== '' && value.length <= maxLength;
+}
+
+function sameReferenceSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((item) => rightSet.has(item));
+}
+
+function sha256Text(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {

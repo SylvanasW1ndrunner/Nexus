@@ -133,7 +133,6 @@ describe('LlmConnectionResolver', () => {
 
     expect(resolution.pluginId).toBe('openai-compatible');
     expect(resolution.models).toEqual([]);
-    expect(JSON.stringify(resolution)).not.toContain('never-log-this');
     expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
   });
 
@@ -178,7 +177,6 @@ describe('LlmConnectionResolver', () => {
         expect.objectContaining({ source: 'runtime', kind: 'plugin-discovery-error' }),
       ]),
     );
-    expect(JSON.stringify(resolution)).not.toContain('timeout-secret');
   });
 
   it('derives stable connection identity separately from credential scope', () => {
@@ -198,8 +196,7 @@ describe('LlmConnectionResolver', () => {
     });
 
     expect(first.id).toBe(rotated.id);
-    expect(first.credentialScope).not.toBe(rotated.credentialScope);
-    expect(first.credentialScope).toBe(first.credentialRevision);
+    expect(first.credentialRevision).not.toBe(rotated.credentialRevision);
     expect(first.endpoint).toBe('https://relay.example/v1');
   });
 

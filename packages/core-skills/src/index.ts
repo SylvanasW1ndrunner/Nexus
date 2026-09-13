@@ -4,3 +4,4 @@ export * from './skill-registry.js';
 export * from './skill-search.js';
 export * from './system-skills.js';
 export * from './types.js';
+export * from './capability-requirements.js';

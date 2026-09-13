@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { appendLlmEndpointPath, type LlmConnection } from './llm-connection.js';
-import { redactKnownSecrets } from './known-secret-sanitizer.js';
 import type {
   LlmConnectionResolution,
   LlmFetch,
@@ -183,18 +182,14 @@ export class LlmConnectionResolver {
       validateDiscovery(discovery);
       return { ok: true, candidate, discovery };
     } catch (error) {
-      const secrets = [connection.apiKey, ...Object.values(connection.headers)];
-      const redacted = redactKnownSecrets(
-        error instanceof Error ? error.message : 'Provider discovery failed.',
-        secrets,
-      );
+      const detail = error instanceof Error ? error.message : 'Provider discovery failed.';
       return {
         ok: false,
         candidate,
         evidence: {
           source: 'runtime',
           kind: 'plugin-discovery-error',
-          summary: `${candidate.plugin.manifest.name} discovery ${timedOut ? 'timed out' : 'failed'}${redacted ? `: ${redacted}` : '.'}`,
+          summary: `${candidate.plugin.manifest.name} discovery ${timedOut ? 'timed out' : 'failed'}${detail ? `: ${detail}` : '.'}`,
         },
       };
     } finally {

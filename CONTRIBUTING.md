@@ -4,7 +4,7 @@
 
 ## English
 
-Thank you for helping build an open database-agent runtime.
+Thank you for helping build an open, general-purpose Agent runtime and its optional Capabilities.
 
 ### Before you start
 
@@ -22,30 +22,31 @@ pnpm lint
 pnpm test
 ```
 
-For AI SQL changes, also run:
+For database Capability changes, also run:
 
 ```bash
-pnpm test:ai-sql
-pnpm test:ai-sql:performance
+pnpm test:database-capability
+pnpm test:database-capability:performance
 ```
 
-For package changes:
+For terminal entry changes:
 
 ```bash
-pnpm test:npm-package:functional
+pnpm build:terminal
+pnpm test:terminal
 ```
 
 Tests requiring a real model or PostgreSQL instance are opt-in because they may use paid tokens or local services.
 
 ### Pull requests
 
-Keep each pull request focused, explain user-visible behavior and compatibility impact, add functional tests for behavior changes, and update both English and Chinese public documentation when the SDK changes.
+Keep each pull request focused, explain user-visible behavior and compatibility impact, add functional tests for behavior changes, and update both English and Chinese public documentation when terminal behavior changes.
 
 Unless explicitly stated otherwise, contributions intentionally submitted to this repository are licensed under Apache License 2.0.
 
 ## 中文
 
-感谢你参与构建开放的数据库 Agent 运行时。
+感谢你参与构建开放的通用 Agent 运行时及其可选 Capability。
 
 ### 开始之前
 
@@ -63,23 +64,24 @@ pnpm lint
 pnpm test
 ```
 
-修改 AI SQL 时还需运行：
+修改数据库 Capability 时还需运行：
 
 ```bash
-pnpm test:ai-sql
-pnpm test:ai-sql:performance
+pnpm test:database-capability
+pnpm test:database-capability:performance
 ```
 
-修改安装包时运行：
+修改终端入口时运行：
 
 ```bash
-pnpm test:npm-package:functional
+pnpm build:terminal
+pnpm test:terminal
 ```
 
 真实模型或 PostgreSQL 测试可能消耗付费 Token 或依赖本地服务，因此默认不自动执行。
 
 ### Pull Request
 
-每个 PR 应聚焦单一目标，说明用户可见行为和兼容性影响，为行为变更补充功能测试；SDK 变化必须同步更新中英文公开文档。
+每个 PR 应聚焦单一目标，说明用户可见行为和兼容性影响，为行为变更补充功能测试；终端行为变化必须同步更新中英文公开文档。
 
 除非另有明确说明，向本仓库主动提交的贡献采用 Apache License 2.0。

@@ -37,7 +37,7 @@ function profile(overrides: Partial<ConnectionProfile> = {}): ConnectionProfile 
 }
 
 describe('database public contracts', () => {
-  it('accepts credential references and rejects embedded credential material', () => {
+  it('accepts connection profiles with arbitrary portable connection content', () => {
     expect(() => assertConnectionProfile(profile())).not.toThrow();
     expect(() =>
       assertConnectionProfile(
@@ -52,35 +52,24 @@ describe('database public contracts', () => {
         }),
       ),
     ).not.toThrow();
-    expect(
-      captureContractFailure(() =>
-        assertConnectionProfile({
-          ...profile(),
-          password: 'do-not-return',
-        }),
-      ).issues[0],
-    ).toMatchObject({ code: 'SECRET_MATERIAL' });
+    expect(() => assertConnectionProfile({
+      ...profile(),
+      password: 'do-not-return',
+    })).not.toThrow();
     expect(() => assertConnectionProfile(profile({ endpoints: [] }))).toThrowError(
       ContractValidationError,
     );
-    expect(
-      captureContractFailure(() =>
-        assertConnectionProfile(
-          profile({
-            endpoints: [
-              {
-                transport: 'http',
-                baseUrl: 'https://warehouse.example.com',
-                headers: { Authorization: 'Bearer do-not-return-1234567890' },
-              },
-            ],
-          }),
-        ),
-      ).issues[0],
-    ).toMatchObject({
-      code: 'SECRET_MATERIAL',
-      path: '$.endpoints[0].headers.Authorization',
-    });
+    expect(() => assertConnectionProfile(
+      profile({
+        endpoints: [
+          {
+            transport: 'http',
+            baseUrl: 'https://warehouse.example.com',
+            headers: { Authorization: 'Bearer do-not-return-1234567890' },
+          },
+        ],
+      }),
+    )).not.toThrow();
   });
 
   it('validates an optional resource scope on connection profiles', () => {
@@ -120,7 +109,7 @@ describe('database public contracts', () => {
         authorization: {
           actorId: 'operator-1',
           approvalId: 'approval-1',
-          permissionMode: 'read',
+          authorizedClass: 'query',
         },
       }),
     ).not.toThrow();
@@ -134,7 +123,20 @@ describe('database public contracts', () => {
     }
   });
 
-  it('keeps stable database error semantics and strips secret-bearing errors', () => {
+  it('accepts only database operation classes in query authorization', () => {
+    expect(() => assertQuerySubmission({
+      profileId: 'profile-1',
+      sql: 'select 1',
+      authorization: { authorizedClass: 'schema-admin' },
+    })).not.toThrow();
+    expect(() => assertQuerySubmission({
+      profileId: 'profile-1',
+      sql: 'select 1',
+      authorization: { authorizedClass: 'full' },
+    })).toThrowError(ContractValidationError);
+  });
+
+  it('keeps stable database error semantics with bounded raw messages', () => {
     expect(() =>
       assertDatabaseAccessError({
         code: 'QUERY_TIMEOUT',
@@ -155,26 +157,12 @@ describe('database public contracts', () => {
         outcome: 'unknown',
       }),
     ).toThrowError(ContractValidationError);
-    expect(
-      captureContractFailure(() =>
-        assertDatabaseAccessError({
-          code: 'QUERY_FAILED',
-          category: 'provider',
-          message: 'postgres://admin:do-not-return@localhost/app',
-          retryable: false,
-          outcome: 'unknown',
-        }),
-      ).issues[0],
-    ).toMatchObject({ code: 'SECRET_MATERIAL' });
+    expect(() => assertDatabaseAccessError({
+      code: 'QUERY_FAILED',
+      category: 'provider',
+      message: 'postgres://admin:do-not-return@localhost/app',
+      retryable: false,
+      outcome: 'unknown',
+    })).not.toThrow();
   });
 });
-
-function captureContractFailure(operation: () => void): ContractValidationError {
-  try {
-    operation();
-  } catch (error) {
-    if (error instanceof ContractValidationError) return error;
-    throw error;
-  }
-  throw new Error('Expected ContractValidationError');
-}

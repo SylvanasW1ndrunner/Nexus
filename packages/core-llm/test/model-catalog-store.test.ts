@@ -34,10 +34,10 @@ describe('LlmModelCatalogStore', () => {
     expect((await readdir(store.directory)).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
-  it('isolates credential scopes and plugin versions without serializing credentials', async () => {
+  it('isolates credential revisions and plugin versions without serializing credentials', async () => {
     const store = new LlmModelCatalogStore(await directory());
-    const first = cacheKey({ credentialScope: 'scope-a' });
-    const second = cacheKey({ credentialScope: 'scope-b' });
+    const first = cacheKey({ credentialRevision: 'revision-a' });
+    const second = cacheKey({ credentialRevision: 'revision-b' });
     await store.write(first, {
       fetchedAt: '2026-08-07T00:00:00.000Z',
       ttlMs: 60_000,
@@ -90,7 +90,7 @@ async function directory(): Promise<string> {
 function cacheKey(overrides: Partial<LlmModelCatalogCacheKey> = {}): LlmModelCatalogCacheKey {
   return {
     connectionId: 'connection-a',
-    credentialScope: 'scope-a',
+    credentialRevision: 'revision-a',
     pluginId: 'openai-compatible',
     pluginVersion: '1.0.0',
     ...overrides,

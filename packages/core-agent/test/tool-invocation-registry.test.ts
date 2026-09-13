@@ -1,12 +1,123 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BASE_TOOL_MANIFEST,
   ToolCatalogSnapshot,
   ToolRegistry,
-  createAgentToolResultEnvelope,
 } from '../src/index.js';
 import { resolveInvocationHandler } from '../src/internal/tool-invocation-authority.js';
+import { invocationContribution as fixtureContribution } from './fixtures/invocation-contribution.js';
 
 describe('invocation-only Tool registry boundary', () => {
+  it('reports the current complete baseline size when publication is incomplete', () => {
+    const registry = new ToolRegistry();
+    expect(() => registry.publishBaselineInvocations([])).toThrow(
+      `Baseline publication requires all ${BASE_TOOL_MANIFEST.length} Tool contributions.`,
+    );
+  });
+
+  it('checks the private output envelope boundary even after the same input schema was validated', () => {
+    const registry = new ToolRegistry();
+    const schema = { type: 'object', description: 'schemanaut.agent-tool-result.v1' };
+    const input = fixtureContribution('cached_input_schema');
+    registry.registerInvocation({ ...input.definition, inputSchema: schema }, input.runtime);
+
+    const output = fixtureContribution('cached_output_schema');
+    expect(() => registry.registerInvocation({
+      ...output.definition,
+      outputSchema: { ...schema },
+    }, output.runtime)).toThrow('Tool output schemas cannot declare the Runtime private result envelope.');
+    expect(registry.list().map(({ name }) => name)).toEqual(['cached_input_schema']);
+  });
+
+  it('cannot seed the schema cache with different descriptor and property-read values', () => {
+    const registry = new ToolRegistry();
+    const invalidSchema = { type: 'invalid-schema-type', description: 'proxy-cache-seed' };
+    const divergentSchema = new Proxy(invalidSchema, {
+      get(target, key): unknown {
+        return key === 'type' ? 'object' : Reflect.get(target, key);
+      },
+    });
+    const seed = fixtureContribution('proxy_cache_seed');
+    expect(() => registry.registerInvocation({
+      ...seed.definition,
+      inputSchema: divergentSchema,
+    }, seed.runtime)).toThrow();
+
+    const ordinary = fixtureContribution('ordinary_invalid_schema');
+    expect(() => registry.registerInvocation({
+      ...ordinary.definition,
+      inputSchema: { ...invalidSchema },
+    }, ordinary.runtime)).toThrow();
+    expect(registry.list()).toEqual([]);
+  });
+
+  it('atomically replaces one owner with revisioned Invocation Tool generations', () => {
+    const registry = new ToolRegistry();
+    const events: string[][] = [];
+    registry.subscribe((event) => {
+      if (event.kind === 'owner-replaced') events.push([
+        ...event.added.map((name) => `add:${name}`),
+        ...event.updated.map((name) => `update:${name}`),
+        ...event.removed.map((name) => `remove:${name}`),
+      ]);
+    });
+    registry.replaceOwnerInvocations('module:fixture:primary', [
+      invocationContribution('read_alpha', 'alpha@1', 'v1'),
+      invocationContribution('read_beta', 'beta@1', 'v1'),
+    ]);
+    const first = registry.captureSnapshot();
+
+    registry.replaceOwnerInvocations('module:fixture:primary', [
+      invocationContribution('read_alpha', 'alpha@2', 'v2'),
+      invocationContribution('read_gamma', 'gamma@1', 'v1'),
+    ]);
+    const second = registry.captureSnapshot();
+    try {
+      expect(first.list().map(({ name }) => name).sort()).toEqual(['read_alpha', 'read_beta']);
+      expect(first.invocationRevision('read_alpha')).toContain('alpha@1');
+      expect(first.get('read_alpha')?.descriptor.handlerRevision).toBe('alpha@1');
+      expect(second.list().map(({ name }) => name).sort()).toEqual(['read_alpha', 'read_gamma']);
+      expect(second.invocationRevision('read_alpha')).toContain('alpha@2');
+      expect(second.get('read_alpha')?.descriptor.handlerRevision).toBe('alpha@2');
+      expect(resolveInvocationHandler(second, 'read_beta')).toBeUndefined();
+    } finally {
+      first.release();
+      second.release();
+    }
+    expect(events).toEqual([
+      ['add:read_alpha', 'add:read_beta'],
+      ['add:read_gamma', 'update:read_alpha', 'remove:read_beta'],
+    ]);
+  });
+
+  it('publishes no owner mutation when one Invocation contribution is invalid', () => {
+    const registry = new ToolRegistry();
+    registry.replaceOwnerInvocations('module:fixture:primary', [
+      invocationContribution('stable_tool', 'stable@1', 'v1'),
+    ]);
+    const beforeRevision = registry.catalogRevision;
+
+    expect(() => registry.replaceOwnerInvocations('module:fixture:primary', [
+      invocationContribution('replacement_tool', 'replacement@1', 'v2'),
+      {
+        definition: {
+          ...invocationContribution('invalid_tool', 'invalid@1', 'v2').definition,
+          handlerRevision: '',
+        },
+        runtime: fixtureContribution('invalid_tool').runtime,
+      },
+    ])).toThrow(/handlerRevision/i);
+
+    const snapshot = registry.captureSnapshot();
+    try {
+      expect(registry.catalogRevision).toBe(beforeRevision);
+      expect(snapshot.list().map(({ name }) => name)).toEqual(['stable_tool']);
+      expect(snapshot.invocationRevision('stable_tool')).toContain('stable@1');
+    } finally {
+      snapshot.release();
+    }
+  });
+
   it('rejects cyclic, accessor-backed, undefined and invalid revision metadata before fingerprinting', () => {
     const cyclic: Record<string, unknown> = { type: 'object' };
     cyclic.self = cyclic;
@@ -32,11 +143,11 @@ describe('invocation-only Tool registry boundary', () => {
     for (const [index, invalid] of cases.entries()) {
       const registry = new ToolRegistry();
       expect(() => registry.registerInvocation({
+        ...fixtureContribution(`invalid_${index}`, {}).definition,
         name: `invalid_${index}`, description: 'invalid fixture', dangerLevel: 'safe',
-        readonly: true, effect: 'read', handlerRevision: invalid.handlerRevision,
-        requiredPermission: 'read', exposure: 'direct', execution: { concurrency: 'read' },
+        handlerRevision: invalid.handlerRevision,
         inputSchema: invalid.schema,
-      }, { execute: () => ({ ok: true }) })).toThrow();
+      }, fixtureContribution(`invalid_${index}`, {}).runtime)).toThrow();
       expect(registry.list()).toEqual([]);
     }
     expect(getterCalls).toBe(0);
@@ -44,25 +155,18 @@ describe('invocation-only Tool registry boundary', () => {
 
   it('captures an immutable Handler revision without retaining the raw Handler publicly', () => {
     const registry = new ToolRegistry();
-    const execute = () => createAgentToolResultEnvelope({
-      modelProjection: { ok: true }, durableSummary: { ok: true },
-    });
-    registry.registerInvocation({
-      name: 'runtime_only', description: 'runtime-only fixture', dangerLevel: 'safe',
-      readonly: true, effect: 'read', handlerRevision: 'runtime_only@1',
-      requiredPermission: 'read', exposure: 'direct',
-      execution: { concurrency: 'read' }, inputSchema: { type: 'object' },
-    }, { execute });
+    const contribution = fixtureContribution('runtime_only', { ok: true }, { exposure: 'direct' });
+    const execute = contribution.runtime.execute;
+    registry.registerInvocation(contribution.definition, contribution.runtime);
     const snapshot = registry.captureSnapshot();
 
     expect(containsReference(registry, execute)).toBe(false);
     expect(containsReference(snapshot, execute)).toBe(false);
     expect('getInvocationRuntime' in snapshot).toBe(false);
     expect(snapshot.get('runtime_only')?.descriptor).toMatchObject({
-      flatName: 'runtime_only', effect: 'read',
+      flatName: 'runtime_only', recoveryClass: 'read', access: 'read',
     });
-    expect(() => registry.getRuntime('runtime_only')?.handler({}, {} as never))
-      .toThrow(/ToolInvocationRuntime/u);
+    expect('getRuntime' in registry).toBe(false);
     registry.unregister('runtime_only');
     snapshot.release();
   });
@@ -71,118 +175,16 @@ describe('invocation-only Tool registry boundary', () => {
     const registry = new ToolRegistry();
     const snapshots: ReturnType<ToolRegistry['captureSnapshot']>[] = [];
     registry.subscribe(() => snapshots.push(registry.captureSnapshot()));
-    const execute = () => createAgentToolResultEnvelope({
-      modelProjection: { ok: true }, durableSummary: { ok: true },
-    });
-
-    registry.registerInvocation({
-      name: 'atomic_runtime', description: 'atomic fixture', dangerLevel: 'safe',
-      readonly: true, effect: 'read', handlerRevision: 'atomic_runtime@1',
-      requiredPermission: 'read', exposure: 'direct',
-      execution: { concurrency: 'read' }, inputSchema: { type: 'object' },
-    }, { execute });
+    const contribution = fixtureContribution('atomic_runtime', { ok: true }, { exposure: 'direct' });
+    const execute = contribution.runtime.execute;
+    registry.registerInvocation(contribution.definition, contribution.runtime);
 
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]?.get('atomic_runtime')?.descriptor).toMatchObject({
-      flatName: 'atomic_runtime', effect: 'read',
+      flatName: 'atomic_runtime', recoveryClass: 'read', access: 'read',
     });
     expect(containsReference(snapshots[0], execute)).toBe(false);
     snapshots.forEach((snapshot) => snapshot.release());
-  });
-
-  it('keeps one Invocation generation when lifecycle retain re-enters unregister/register', async () => {
-    const registry = new ToolRegistry();
-    const lifecycleReleases: string[] = [];
-    let replaceDuringRetain = true;
-    registry.replaceOwnerTools('lifecycle-owner', [{
-      definition: legacyDefinition('lifecycle_trigger', 'trigger-v1'),
-      handler: () => ({ trigger: true }),
-    }], {
-      snapshotLifecycle: {
-        retain: () => {
-          if (replaceDuringRetain) {
-            replaceDuringRetain = false;
-            expect(registry.unregister('generation_probe')).toBe(true);
-            registerInvocationGeneration(registry, 'v2');
-          }
-          return () => lifecycleReleases.push('trigger');
-        },
-      },
-    });
-    registerInvocationGeneration(registry, 'v1');
-
-    const oldSnapshot = registry.captureSnapshot();
-    const newSnapshot = registry.captureSnapshot();
-    try {
-      expect(oldSnapshot.get('generation_probe')?.descriptor.description).toBe('generation-v1');
-      expect(oldSnapshot.toolRevision('generation_probe')).toBe(1);
-      expect(oldSnapshot.invocationRevision('generation_probe')).toContain('generation_probe@v1');
-      expect(await invokeSnapshotHandler(oldSnapshot, 'generation_probe')).toMatchObject({
-        modelProjection: { generation: 'v1' },
-      });
-
-      expect(newSnapshot.get('generation_probe')?.descriptor.description).toBe('generation-v2');
-      expect(newSnapshot.toolRevision('generation_probe')).toBe(2);
-      expect(newSnapshot.invocationRevision('generation_probe')).toContain('generation_probe@v2');
-      expect(await invokeSnapshotHandler(newSnapshot, 'generation_probe')).toMatchObject({
-        modelProjection: { generation: 'v2' },
-      });
-    } finally {
-      oldSnapshot.release();
-      newSnapshot.release();
-    }
-    expect(lifecycleReleases).toEqual(['trigger', 'trigger']);
-  });
-
-  it('keeps descriptor, revision, Handler and lifecycle in one replaceOwnerTools generation', async () => {
-    const registry = new ToolRegistry();
-    const retained: string[] = [];
-    const released: string[] = [];
-    let replaceDuringRetain = true;
-    const lifecycle = (generation: string) => ({
-      retain: () => {
-        retained.push(generation);
-        return () => released.push(generation);
-      },
-    });
-    registry.replaceOwnerTools('trigger-owner', [{
-      definition: legacyDefinition('owner_trigger', 'trigger-v1'),
-      handler: () => ({ trigger: true }),
-    }], {
-      snapshotLifecycle: {
-        retain: () => {
-          retained.push('trigger');
-          if (replaceDuringRetain) {
-            replaceDuringRetain = false;
-            registry.replaceOwnerTools('replaceable-owner', [{
-              definition: legacyDefinition('replaceable_tool', 'owned-v2'),
-              handler: () => ({ generation: 'v2' }),
-            }], { snapshotLifecycle: lifecycle('v2') });
-          }
-          return () => released.push('trigger');
-        },
-      },
-    });
-    registry.replaceOwnerTools('replaceable-owner', [{
-      definition: legacyDefinition('replaceable_tool', 'owned-v1'),
-      handler: () => ({ generation: 'v1' }),
-    }], { snapshotLifecycle: lifecycle('v1') });
-
-    const oldSnapshot = registry.captureSnapshot();
-    expect(oldSnapshot.get('replaceable_tool')?.descriptor.description).toBe('owned-v1');
-    expect(oldSnapshot.toolRevision('replaceable_tool')).toBe(1);
-    expect(await invokeLegacyHandler(oldSnapshot, 'replaceable_tool')).toEqual({ generation: 'v1' });
-    expect(retained).toEqual(['trigger', 'v1']);
-
-    const newSnapshot = registry.captureSnapshot();
-    expect(newSnapshot.get('replaceable_tool')?.descriptor.description).toBe('owned-v2');
-    expect(newSnapshot.toolRevision('replaceable_tool')).toBe(2);
-    expect(await invokeLegacyHandler(newSnapshot, 'replaceable_tool')).toEqual({ generation: 'v2' });
-    expect(retained).toEqual(['trigger', 'v1', 'trigger', 'v2']);
-
-    oldSnapshot.release();
-    newSnapshot.release();
-    expect(released).toEqual(['v1', 'trigger', 'v2', 'trigger']);
   });
 
   it('releases every acquired lifecycle and preserves retain plus cleanup failures', () => {
@@ -291,58 +293,27 @@ describe('invocation-only Tool registry boundary', () => {
   });
 });
 
-function legacyDefinition(name: string, description: string) {
-  return {
-    name,
-    description,
-    dangerLevel: 'safe' as const,
-    readonly: true,
-    requiredPermission: 'read' as const,
-    exposure: 'direct' as const,
-    execution: { concurrency: 'read' as const },
-    inputSchema: { type: 'object' },
-  };
-}
-
 function registerLifecycleTool(
   registry: ToolRegistry,
   ownerId: string,
   name: string,
   snapshotLifecycle: { retain(): () => void },
 ): void {
-  registry.replaceOwnerTools(ownerId, [{
-    definition: legacyDefinition(name, name),
-    handler: () => ({ name }),
+  const contribution = fixtureContribution(name, { name }, {
+    handlerRevision: name,
+    exposure: 'direct',
+  });
+  registry.replaceOwnerInvocations(ownerId, [{
+    definition: {
+      ...contribution.definition,
+      description: name,
+    },
+    runtime: contribution.runtime,
   }], { snapshotLifecycle });
 }
 
-function registerInvocationGeneration(registry: ToolRegistry, generation: 'v1' | 'v2'): void {
-  registry.registerInvocation({
-    name: 'generation_probe', description: `generation-${generation}`, dangerLevel: 'safe',
-    readonly: true, effect: 'read', handlerRevision: `generation_probe@${generation}`,
-    requiredPermission: 'read', exposure: 'direct',
-    execution: { concurrency: 'read' }, inputSchema: { type: 'object' },
-  }, {
-    execute: () => createAgentToolResultEnvelope({
-      modelProjection: { generation }, durableSummary: { generation },
-    }),
-  });
-}
-
-async function invokeSnapshotHandler(snapshot: ToolCatalogSnapshot, name: string): Promise<unknown> {
-  const runtime = resolveInvocationHandler(snapshot, name);
-  if (runtime === undefined) throw new Error(`Missing Invocation Handler: ${name}`);
-  return await runtime.execute({}, {
-    projectId: 'project-a', sessionId: 'session-a', runId: 'run-a', turnId: 'turn-a',
-    invocationId: 'invocation-a', idempotencyKey: 'idempotency-a', fencingToken: 1,
-    signal: new AbortController().signal,
-  });
-}
-
-async function invokeLegacyHandler(snapshot: ToolCatalogSnapshot, name: string): Promise<unknown> {
-  const runtime = snapshot.getRuntime(name);
-  if (runtime === undefined) throw new Error(`Missing legacy Handler: ${name}`);
-  return await runtime.handler({}, {} as never);
+function invocationContribution(name: string, handlerRevision: string, generation: string) {
+  return fixtureContribution(name, { generation }, { handlerRevision, exposure: 'direct' });
 }
 
 function containsReference(root: unknown, target: unknown, seen = new Set<unknown>()): boolean {

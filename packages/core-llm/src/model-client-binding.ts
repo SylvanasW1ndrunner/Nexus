@@ -15,7 +15,8 @@ export type ModelClientBindingMetadata = Readonly<{
 export type ModelClientBindingErrorCode =
   | 'MODEL_CLIENT_BINDING_REQUIRED'
   | 'MODEL_CLIENT_BINDING_MISMATCH'
-  | 'MODEL_SESSION_NOT_PERSISTABLE';
+  | 'MODEL_SESSION_NOT_PERSISTABLE'
+  | 'MODEL_ROUTE_ENCODING_INVALID';
 
 export class ModelClientBindingError extends Error {
   constructor(
