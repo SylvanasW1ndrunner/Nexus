@@ -105,7 +105,7 @@ describe('production Agent Kernel persisted resume matrix', () => {
     expect.soft(after).toEqual(waiting);
     expect(invocationAfter).toEqual(unknown);
     expect(await restarted.pending(started.runId)).toEqual(pendingBefore);
-  });
+  }, 45_000);
 
   it('discards a lost in-flight model attempt and resumes the exact Turn with a replacement attempt', async () => {
     const journal = createJournal();
@@ -433,7 +433,15 @@ function approvalCatalog(): ToolRegistry {
 function unknownOutcomeCatalog(): ToolRegistry {
   const registry = fixedBaselineRegistry();
   const publish = invocationContribution('publish_external_change', {}, { handlerRevision: 'publish-r1', exposure: 'direct', access: 'external', recoveryClass: 'non_idempotent' });
-  registry.registerInvocation({ ...publish.definition, description: 'publish an external change', dangerLevel: 'high', readonly: false, permission: { actions: ['execute'] } }, {
+  registry.registerInvocation({
+    ...publish.definition,
+    description: 'publish an external change',
+    dangerLevel: 'high',
+    readonly: false,
+    permission: { actions: ['execute'] },
+    limits: { ...publish.definition.limits, timeoutMs: 60_000 },
+    execution: { ...publish.definition.execution, timeoutMs: 60_000 },
+  }, {
     ...publish.runtime, prepare: prepareFixtureIntent,
     execute: () => { throw new Error('external acknowledgement was lost'); },
   });

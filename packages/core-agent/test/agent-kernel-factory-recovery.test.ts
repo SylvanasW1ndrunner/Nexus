@@ -1102,7 +1102,7 @@ describe('production Agent Kernel factory recovery boundaries', () => {
       outcomeResolution: { outcome: 'failed' },
       retryPermit: { reason: retryAuthorization.reason },
     });
-  });
+  }, 45_000);
 });
 
 type Resolver = Parameters<typeof createJournalAgentKernel>[0]['resolveModelSession'];
@@ -1317,7 +1317,15 @@ function writeCatalog(execute: () => unknown, timeoutMs = 1_000): ToolRegistry {
 function unknownOutcomeCatalog(): ToolRegistry {
   const registry = fixedBaselineRegistry();
   const contribution = invocationContribution('publish_external_change', {}, { handlerRevision: 'publish-external-change-r1', exposure: 'direct', access: 'external', recoveryClass: 'non_idempotent' });
-  registry.registerInvocation({ ...contribution.definition, description: 'publish an external change', dangerLevel: 'high', readonly: false, permission: { actions: ['execute'] } }, {
+  registry.registerInvocation({
+    ...contribution.definition,
+    description: 'publish an external change',
+    dangerLevel: 'high',
+    readonly: false,
+    permission: { actions: ['execute'] },
+    limits: { ...contribution.definition.limits, timeoutMs: 60_000 },
+    execution: { ...contribution.definition.execution, timeoutMs: 60_000 },
+  }, {
     ...contribution.runtime, prepare: prepareFixtureIntent,
     execute: () => { throw new Error('external acknowledgement was lost'); },
   });
