@@ -40,11 +40,11 @@
 - Consumes: the current 14-base-Tool, eight-Capability, global-config and CLI-only product contracts.
 - Produces: one unambiguous Alpha 3 release story and a historical marker for the superseded July audit.
 
-- [ ] **Step 1:** Move the completed `Unreleased` entries into a dated `0.1.0-alpha.3` section, retain an empty `Unreleased` heading, and list the current Alpha limitations without rewriting the historical Alpha 2 entry.
-- [ ] **Step 2:** Add `npm install --global @nwlworkshop/schemanaut@next` as the public Alpha installation path in both READMEs, while keeping source checkout instructions as the contributor/development path.
-- [ ] **Step 3:** Add a 2026-09-13 Alpha 3 closure section to `docs/engineering/verification.md` that records the current deterministic counts, the successful isolated package smoke path, the failed churn-ML live evidence, and the external tests not repeated in this metadata-only closure.
-- [ ] **Step 4:** Add a prominent superseded/historical notice to each 2026-07 pre-release audit document without rewriting its historical evidence.
-- [ ] **Step 5:** Link this spec and plan from `docs/engineering/README.md` and run a focused text scan for contradictory current-version claims.
+- [x] **Step 1:** Move the completed `Unreleased` entries into a dated `0.1.0-alpha.3` section, retain an empty `Unreleased` heading, and list the current Alpha limitations without rewriting the historical Alpha 2 entry.
+- [x] **Step 2:** Add `npm install --global @nwlworkshop/schemanaut@next` as the public Alpha installation path in both READMEs, while keeping source checkout instructions as the contributor/development path.
+- [x] **Step 3:** Add a 2026-09-13 Alpha 3 closure section to `docs/engineering/verification.md` that records the current deterministic counts, the successful isolated package smoke path, the failed churn-ML live evidence, and the external tests not repeated in this metadata-only closure.
+- [x] **Step 4:** Add a prominent superseded/historical notice to each 2026-07 pre-release audit document without rewriting its historical evidence.
+- [x] **Step 5:** Link this spec and plan from `docs/engineering/README.md` and run a focused text scan for contradictory current-version claims.
 
 ### Task 2: Align release metadata and repository hygiene
 
@@ -72,11 +72,11 @@
 - Consumes: Alpha 3 identity established by Task 1.
 - Produces: one package version across every workspace and a release provenance that ignores unrelated local artifacts.
 
-- [ ] **Step 1:** Change every current workspace and root version from `0.1.0-alpha.2` to `0.1.0-alpha.3` without changing package names, dependency ranges, private flags, CLI name, or npm tag.
-- [ ] **Step 2:** Change `NPM_PACKAGE_VERSION` and package-contract expectations to `0.1.0-alpha.3`.
-- [ ] **Step 2a:** Add the Alpha 3 spec and plan to `PUBLIC_DOCUMENT_FILES` because the already-public engineering index links to them; preserve the transitive public Markdown closure.
-- [ ] **Step 3:** Ignore `.codex_work/`, `output/`, `HANDOFF-*.md`, root `state.db` and nested `state.db` runtime files; retain the existing files on disk and verify they cannot enter the candidate.
-- [ ] **Step 4:** Run version-consistency, package-contract and `git diff --check` checks.
+- [x] **Step 1:** Change every current workspace and root version from `0.1.0-alpha.2` to `0.1.0-alpha.3` without changing package names, dependency ranges, private flags, CLI name, or npm tag.
+- [x] **Step 2:** Change `NPM_PACKAGE_VERSION` and package-contract expectations to `0.1.0-alpha.3`.
+- [x] **Step 2a:** Add the Alpha 3 spec and plan to `PUBLIC_DOCUMENT_FILES` because the already-public engineering index links to them; preserve the transitive public Markdown closure.
+- [x] **Step 3:** Ignore `.codex_work/`, `output/`, `HANDOFF-*.md`, root `state.db` and nested `state.db` runtime files; retain the existing files on disk and verify they cannot enter the candidate.
+- [x] **Step 4:** Run version-consistency, package-contract and `git diff --check` checks.
 
 ### Task 3: Audit and commit the accumulated product baseline
 
@@ -88,10 +88,10 @@
 - Consumes: Tasks 1-2 and the previously implemented Agent/Capability baseline.
 - Produces: a Git commit that exactly owns the source used for Alpha 3 packaging.
 
-- [ ] **Step 1:** Inspect all untracked and deleted paths by category and confirm that only product files are staged.
-- [ ] **Step 2:** Run the repository credential-pattern hygiene check without printing credential values; classify synthetic test fixtures separately from real findings.
-- [ ] **Step 3:** Review the staged stat and staged path list, then commit with message `release: prepare SchemaNaut 0.1.0-alpha.3`.
-- [ ] **Step 4:** Confirm `git status --porcelain` is empty and capture the resulting commit SHA.
+- [x] **Step 1:** Inspect all untracked and deleted paths by category and confirm that only product files are staged.
+- [x] **Step 2:** Run the repository credential-pattern hygiene check without printing credential values; classify synthetic test fixtures separately from real findings.
+- [x] **Step 3:** Review the staged stat and staged path list, then commit with message `release: prepare SchemaNaut 0.1.0-alpha.3`.
+- [x] **Step 4:** Confirm `git status --porcelain` is empty and capture the resulting commit SHA.
 
 ### Task 4: Build and verify the clean Alpha 3 candidate
 
@@ -102,10 +102,10 @@
 - Consumes: the clean Alpha 3 commit from Task 3.
 - Produces: tarball, checksum, provenance and isolated-install evidence bound to that commit.
 
-- [ ] **Step 1:** Run `corepack pnpm typecheck`, `corepack pnpm lint`, forced full workspace tests, script contracts, Capability runtime tests and npm package contracts.
-- [ ] **Step 2:** Run `corepack pnpm release:local` serially.
-- [ ] **Step 3:** Verify the installed CLI `--help`, `init`, `skills`, `sessions` and interactive exit smoke results from the release command.
-- [ ] **Step 4:** Assert the provenance version is `0.1.0-alpha.3`, `sourceControl.commit` equals `git rev-parse HEAD`, `sourceControl.dirty` is `false`, and the checksum matches the tarball.
+- [x] **Step 1:** Run `corepack pnpm typecheck`, `corepack pnpm lint`, forced full workspace tests, script contracts, Capability runtime tests and npm package contracts.
+- [x] **Step 2:** Run `corepack pnpm release:local` serially.
+- [x] **Step 3:** Verify the installed CLI `--help`, `init`, `skills`, `sessions` and interactive exit smoke results from the release command.
+- [x] **Step 4:** Assert the provenance version is `0.1.0-alpha.3`, `sourceControl.commit` equals `git rev-parse HEAD`, `sourceControl.dirty` is `false`, and the checksum matches the tarball.
 
 ### Task 5: Final release review and branch handoff
 

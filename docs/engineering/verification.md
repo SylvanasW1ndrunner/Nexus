@@ -62,9 +62,10 @@ provenance 校验，并在全新临时目录中安装候选后验证 `--help`、
 
 ## 2026-09-13 Alpha 3 发布收口验证
 
-本节记录本次 metadata-only 收口新产生的确定性证据，并在存在差异时取代上节的旧状态；不重复付费真实模型测试。当前 pre-bump 产物仍是
-CLI-only 的 `@nwlworkshop/schemanaut@0.1.0-alpha.2`。最终 Alpha 3 tarball 将从干净提交重新生成，且尚未
-发布到 npm Registry。
+本节记录本次发布收口新产生的确定性证据，并在存在差异时取代上节的旧状态；不重复付费真实模型测试。
+CLI-only 的 `@nwlworkshop/schemanaut@0.1.0-alpha.3` 候选已经从干净提交生成，并在全新临时目录中完成安装
+与 CLI 冒烟。候选文件位于 `release/SchemaNaut-v0.1.0-alpha.3/schemanaut-v0.1.0-alpha.3.tgz`；确切提交、
+SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未发布到 npm Registry。
 
 ### 确定性门禁
 
@@ -80,4 +81,4 @@ CLI-only 的 `@nwlworkshop/schemanaut@0.1.0-alpha.2`。最终 Alpha 3 tarball �
 
 - 既有真实模型证据显示：代码修复、动态 Git、电商数据库分析和长结果数据库分析已通过；churn-ML 失败，因为
   Run 是 `interrupted`。
-- 付费模型、外部 PostgreSQL、浏览器、容器和 Forge 均未在本次 metadata-only 收口中重跑。
+- 付费模型、外部 PostgreSQL、浏览器、容器和 Forge 均未在本次发布收口中重跑。
