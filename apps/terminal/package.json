@@ -1,18 +1,26 @@
 {
-  "name": "@dbagent/core-resource",
+  "name": "@dbagent/terminal",
   "version": "0.1.0-alpha.3",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "files": ["dist", "package.json"],
+  "bin": {
+    "schemanaut": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
   "scripts": {
     "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "start": "node dist/cli.js"
   },
   "dependencies": {
+    "@dbagent/agent-host": "workspace:*",
+    "@dbagent/core-agent": "workspace:*",
+    "@dbagent/core-llm": "workspace:*",
     "@dbagent/shared": "workspace:*"
   },
   "devDependencies": {

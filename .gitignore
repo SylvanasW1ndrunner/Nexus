@@ -14,3 +14,12 @@ apps/*/release/
 *.tsbuildinfo
 data/
 tmp/
+.schemanaut/
+**/.schemanaut/
+state.writer-gate.db
+**/state.writer-gate.db
+.codex_work/
+output/
+HANDOFF-*.md
+state.db
+**/state.db

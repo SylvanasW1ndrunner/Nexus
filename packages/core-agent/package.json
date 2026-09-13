@@ -1,6 +1,6 @@
 {
   "name": "@dbagent/core-agent",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.3",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -17,13 +17,11 @@
     "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --pool=forks --maxWorkers=1 --minWorkers=1 --testTimeout=20000",
     "test:journal": "vitest run test/agent-journal*.test.ts test/run-ingress-idempotency.test.ts test/model-turn-commit.test.ts --pool=forks"
   },
   "dependencies": {
     "@dbagent/core-llm": "workspace:*",
-    "@dbagent/core-rag": "workspace:*",
-    "@dbagent/core-usage": "workspace:*",
     "@dbagent/shared": "workspace:*",
     "ajv": "8.20.0"
   },

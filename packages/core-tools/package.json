@@ -1,6 +1,6 @@
 {
   "name": "@dbagent/core-tools",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.3",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -17,8 +17,6 @@
   },
   "dependencies": {
     "@dbagent/core-agent": "workspace:*",
-    "@dbagent/core-db": "workspace:*",
-    "@dbagent/core-rag": "workspace:*",
     "@dbagent/core-skills": "workspace:*",
     "@dbagent/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0"

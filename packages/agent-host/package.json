@@ -1,0 +1,33 @@
+{
+  "name": "@dbagent/agent-host",
+  "version": "0.1.0-alpha.3",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "node ../../scripts/clean-path.mjs dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run --passWithNoTests --pool=forks --maxWorkers=1 --minWorkers=1 --testTimeout=20000"
+  },
+  "dependencies": {
+    "@dbagent/core-agent": "workspace:*",
+    "@dbagent/core-llm": "workspace:*",
+    "@dbagent/core-resource": "workspace:*",
+    "@dbagent/core-skills": "workspace:*",
+    "@dbagent/core-tools": "workspace:*",
+    "@dbagent/core-usage": "workspace:*",
+    "@dbagent/database-capability": "workspace:*",
+    "@dbagent/first-party-capabilities": "workspace:*",
+    "@dbagent/shared": "workspace:*",
+    "ajv": "8.20.0",
+    "smol-toml": "1.8.0"
+  },
+  "devDependencies": {
+    "@dbagent/core-db": "workspace:*",
+    "pg": "^8.21.0",
+    "vitest": "^2.1.8"
+  },
+  "description": "Private Agent composition and configuration for the terminal application."
+}

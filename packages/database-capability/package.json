@@ -1,5 +1,5 @@
 {
-  "name": "@dbagent/shared",
+  "name": "@dbagent/database-capability",
   "version": "0.1.0-alpha.3",
   "private": true,
   "type": "module",
@@ -12,7 +12,15 @@
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests"
   },
-  "devDependencies": {
-    "vitest": "^2.1.8"
-  }
+  "dependencies": {
+    "@dbagent/core-agent": "workspace:*",
+    "@dbagent/core-db": "workspace:*",
+    "@dbagent/core-llm": "workspace:*",
+    "@dbagent/core-rag": "workspace:*",
+    "@dbagent/core-resource": "workspace:*",
+    "@dbagent/core-skills": "workspace:*",
+    "@dbagent/core-tools": "workspace:*",
+    "@dbagent/shared": "workspace:*"
+  },
+  "devDependencies": { "vitest": "^2.1.8" }
 }
