@@ -19,8 +19,10 @@ SchemaNaut 的重要变更都会记录在这里。
 
 - Capability configuration is no longer a product settings surface. External CLI, browser, database, and provider state is discovered where it already lives; unavailable capabilities return actionable diagnostics.
 - Global `config.toml` is the only permission and model configuration document; project settings are limited to MCP declarations. Authorization uses `default`, `auto`, and `full-access`, with optional enterprise sandbox enforcement.
+- Global permission configuration now enforces the Runtime's 128-rule limit during schema validation, so accepted enterprise policy files cannot fail later during activation.
 - Capability 不再提供产品内配置面；外部 CLI、浏览器、数据库和 Provider 状态从其原有位置发现，不可用时返回可操作诊断。
 - 全局 `config.toml` 是权限与模型配置的唯一文档；项目设置只保留 MCP 声明。授权采用 `default`、`auto`、`full-access`，并可启用企业 sandbox 要求。
+- 全局权限配置会在 Schema 校验阶段执行 Runtime 的 128 条规则上限，避免企业策略文件先通过校验、后在启用时失败。
 
 ### Browser boundary / 浏览器边界
 

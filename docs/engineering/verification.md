@@ -71,7 +71,8 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 
 - `corepack pnpm typecheck`：25/25 Turbo task 通过。
 - `corepack pnpm lint`：13/13 workspace package 通过。
-- 强制未缓存的 `corepack pnpm exec turbo test --concurrency=1 --force`：26/26 Turbo task 通过，共 1,828 项通过、25 项按环境合同跳过。
+- 强制未缓存的 `corepack pnpm exec turbo test --concurrency=1 --force`：26/26 Turbo task 通过，共 1,829 项通过、25 项按环境合同跳过。
+- 全局企业权限规则边界：128 条配置通过，129 条在 Schema 校验阶段拒绝，与 Runtime 上限一致。
 - `corepack pnpm test:script-contracts`：43/43 项通过。
 - `corepack pnpm test:capability-runtime`：106/106 项通过。
 - `corepack pnpm test:npm-package:contracts`：11/11 项通过。
