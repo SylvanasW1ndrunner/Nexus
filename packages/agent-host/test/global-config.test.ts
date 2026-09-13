@@ -184,6 +184,18 @@ describe('GlobalConfigStore', () => {
     );
   });
 
+  it('accepts 128 permission rules and rejects a 129th rule at schema validation', async () => {
+    const path = await temporaryConfig();
+    await writeFile(path, permissionRulesConfig(128), 'utf8');
+    const accepted = await new GlobalConfigStore({ path }).load();
+    expect(accepted.settings.permissions.rules).toHaveLength(128);
+
+    await writeFile(path, permissionRulesConfig(129), 'utf8');
+    await expect(new GlobalConfigStore({ path }).load()).rejects.toBeInstanceOf(
+      GlobalConfigValidationError,
+    );
+  });
+
   it('reconciles an edit made before subscription and recovers after an invalid edit', async () => {
     const path = await temporaryConfig();
     const store = new GlobalConfigStore({ path });
@@ -221,4 +233,11 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
     if (Date.now() >= deadline) throw new Error('Timed out waiting for config watcher.');
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+function permissionRulesConfig(count: number): string {
+  return `version = 1\n${Array.from(
+    { length: count },
+    (_, index) => `\n[[permissions.rules]]\nid = "rule-${index + 1}"\ndecision = "deny"\n`,
+  ).join('')}`;
 }
