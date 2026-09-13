@@ -104,7 +104,7 @@ describe('Skill snapshot revision contract', () => {
     expect(descriptor?.contentDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(descriptor?.revisionRef).toEqual(
       expect.objectContaining({
-        sourcePath: documentPath,
+        sourcePath: await realpath(documentPath),
         contentDigest: descriptor?.contentDigest,
       }),
     );

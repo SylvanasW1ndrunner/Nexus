@@ -91,7 +91,8 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 - 既有真实模型证据显示：代码修复、动态 Git、电商数据库分析和长结果数据库分析已通过；churn-ML 失败，因为
   Run 是 `interrupted`。
 - 付费模型、外部 PostgreSQL、浏览器、容器和 Forge 均未在本次发布收口中重跑。
-- 首次 GitHub Actions 发布复验（run `34757899868`）已触发，并暴露三个发布环境合同缺口：Windows
-  Node 22 文件设备号差异、Linux 缺少系统 `rg`、PostgreSQL 报告仍依赖已删除的旧占位测试。当前候选已分别
-  改为 Windows 稳定文件身份判定、随 npm 包分发搜索运行时，以及由三组真实 PostgreSQL 集成测试生成并校验
-  同次运行报告；最终状态以修复提交推送后的最新 Actions 运行结果为准。
+- 前两次 GitHub Actions 发布复验（runs `34757899868`、`34761714006`）先后暴露发布环境合同缺口：Windows
+  Node 22 文件设备号差异、Linux 缺少系统 `rg`、PostgreSQL 报告仍依赖已删除的旧占位测试，以及确定性测试
+  夹具错误依赖 Windows 短路径与 `.cmd`。当前候选已分别改为 Windows 稳定文件身份判定、随 npm 包分发搜索
+  运行时、由三组真实 PostgreSQL 集成测试生成并校验同次运行报告，以及使用规范路径和跨平台受控 CLI 的封闭
+  测试夹具；最终状态以修复提交推送后的最新 Actions 运行结果为准。

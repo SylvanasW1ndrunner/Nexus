@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   readdir,
   rm,
   writeFile,
@@ -19,6 +20,7 @@ const captureGate = vi.hoisted(() => ({
   triggered: false,
   zeroDevicePath: '',
   shiftedInodePath: '',
+  shiftedInodeHits: 0,
 }));
 
 vi.mock('node:fs/promises', async () => {
@@ -37,7 +39,18 @@ vi.mock('node:fs/promises', async () => {
       );
       if (path === captureGate.zeroDevicePath) return statWithIdentity(information, { dev: 0 });
       if (path === captureGate.shiftedInodePath) {
-        return statWithIdentity(information, { dev: 0, ino: 0 });
+        captureGate.shiftedInodeHits += 1;
+        return statWithIdentity(information, {
+          dev: 0,
+          ino:
+            typeof information.ino === 'bigint'
+              ? information.ino === 0n
+                ? 1n
+                : 0n
+              : information.ino === 0
+                ? 1
+                : 0,
+        });
       }
       return information;
     },
@@ -55,6 +68,7 @@ afterEach(async () => {
   captureGate.triggered = false;
   captureGate.zeroDevicePath = '';
   captureGate.shiftedInodePath = '';
+  captureGate.shiftedInodeHits = 0;
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -69,7 +83,7 @@ describe('Skill bundle atomic capture', () => {
       const root = await temporaryDirectory();
       const bundleRoot = join(root, 'atomic-skill');
       await writeBundleVersion(bundleRoot, 1);
-      captureGate.zeroDevicePath = comparablePath(join(bundleRoot, 'SKILL.md'));
+      captureGate.zeroDevicePath = await canonicalComparablePath(join(bundleRoot, 'SKILL.md'));
 
       const registry = new SkillRegistry({
         sources: [{ scope: 'project', path: root }],
@@ -95,7 +109,7 @@ describe('Skill bundle atomic capture', () => {
       });
       await first.refresh();
       const revisionRef = first.inspect('atomic-skill')!.revisionRef;
-      captureGate.zeroDevicePath = comparablePath(
+      captureGate.zeroDevicePath = await canonicalComparablePath(
         join(cacheRoot, 'manifests', `${revisionRef.revisionId}.json`),
       );
 
@@ -113,13 +127,14 @@ describe('Skill bundle atomic capture', () => {
       const root = await temporaryDirectory();
       const bundleRoot = join(root, 'atomic-skill');
       await writeBundleVersion(bundleRoot, 1);
-      captureGate.shiftedInodePath = comparablePath(join(bundleRoot, 'SKILL.md'));
+      captureGate.shiftedInodePath = await canonicalComparablePath(join(bundleRoot, 'SKILL.md'));
       const registry = new SkillRegistry({
         sources: [{ scope: 'project', path: root }],
       });
 
       const result = await registry.refresh();
 
+      expect(captureGate.shiftedInodeHits).toBeGreaterThan(0);
       expect(result.skills).toEqual([]);
       expect(result.issues).toHaveLength(1);
       expect(result.issues[0]?.message).toContain('changed before capturing resource');
@@ -137,7 +152,7 @@ describe('Skill bundle atomic capture', () => {
     const reached = new Promise<void>((resolve) => {
       signalReached = resolve;
     });
-    captureGate.beforeStatPath = comparablePath(join(bundleRoot, 'z-marker.txt'));
+    captureGate.beforeStatPath = await canonicalComparablePath(join(bundleRoot, 'z-marker.txt'));
     captureGate.reached = signalReached;
     captureGate.release = new Promise<void>((resolve) => {
       signalRelease = resolve;
@@ -241,6 +256,10 @@ function versionOf(content: string): number {
 
 function comparablePath(path: string): string {
   return path.replace(/\\/gu, '/').toLowerCase();
+}
+
+async function canonicalComparablePath(path: string): Promise<string> {
+  return comparablePath(await realpath(path));
 }
 
 function statWithIdentity<T extends { dev: number | bigint; ino: number | bigint }>(

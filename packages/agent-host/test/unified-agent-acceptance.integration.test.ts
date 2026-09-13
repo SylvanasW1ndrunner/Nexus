@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { LlmChatRequest, LlmChatResponse, LlmProvider } from '@dbagent/core-llm';
 import { SqliteAgentJournal } from '@dbagent/core-agent';
@@ -87,6 +87,13 @@ describe('unified deterministic Agent acceptance entrypoint', () => {
       if (selectedIds.includes('cap.git-workflow')) expect(await readFile(join(root, 'git-target.txt'), 'utf8')).toBe('staged by acceptance\n');
       if (selectedIds.includes('cap.data-notebook-profile-run')) expect(await readFile(join(root, 'data.json'), 'utf8')).toContain('rows');
       if (selectedIds.includes('cap.browser-artifact')) expect(browser.calls).toContain('screenshot');
+      if (selectedIds.some(id => controlledCommandScenarios.has(id))) {
+        const calls = parseControlledCalls(await readFile(join(root, 'controlled-cli.jsonl'), 'utf8'));
+        if (selectedIds.includes('cap.forge-provider-choice')) expect(calls).toContainEqual(['repo', 'view', '--json', 'nameWithOwner,url,viewerPermission']);
+        if (selectedIds.includes('cap.container-risk-gate')) expect(calls).toContainEqual(['exec', 'acceptance', 'echo', 'ok']);
+        if (selectedIds.includes('cap.language-diagnostics-format')) expect(calls).toContainEqual(['--noEmit', '--pretty', 'false']);
+        if (selectedIds.includes('cap.documents-extract-convert')) expect(calls).toContainEqual(['sample.pdf', '-']);
+      }
     } finally { await runtime.close(); }
   }, 300_000);
 });
@@ -302,10 +309,19 @@ async function controlledExecutableDiscovery(root: string): Promise<{ discover(n
   await mkdir(bin, { recursive: true });
   await mkdir(packageDirectory, { recursive: true });
   const script = join(packageDirectory, 'index.mjs');
-  await writeFile(script, "import { appendFile } from 'node:fs/promises'; const args=process.argv.slice(2); await appendFile('controlled-cli.jsonl', JSON.stringify(args)+'\\n'); console.log(args.includes('--json') ? '{}' : 'controlled command completed');", 'utf8');
-  const shim = '@SETLOCAL\r\n@IF EXIST "%~dp0\\node.exe" (\r\n  "%~dp0\\node.exe"  "%~dp0\\..\\fixture-cli\\index.mjs" %*\r\n) ELSE (\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  node  "%~dp0\\..\\fixture-cli\\index.mjs" %*\r\n)\r\n';
-  for (const name of ['gh', 'docker', 'tsc', 'pdftotext']) await writeFile(join(bin, `${name}.cmd`), shim, 'utf8');
-  const fixtures = new PathExecutableDiscovery({ PATH: `${bin};${dirname(process.execPath)}` });
+  const source = "import { appendFile } from 'node:fs/promises'; const args=process.argv.slice(2); await appendFile('controlled-cli.jsonl', JSON.stringify(args)+'\\n'); console.log(args.includes('--json') ? '{}' : 'controlled command completed');";
+  await writeFile(script, source, 'utf8');
+  const windowsShim = '@SETLOCAL\r\n@IF EXIST "%~dp0\\node.exe" (\r\n  "%~dp0\\node.exe"  "%~dp0\\..\\fixture-cli\\index.mjs" %*\r\n) ELSE (\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  node  "%~dp0\\..\\fixture-cli\\index.mjs" %*\r\n)\r\n';
+  for (const name of ['gh', 'docker', 'tsc', 'pdftotext']) {
+    if (process.platform === 'win32') {
+      await writeFile(join(bin, `${name}.cmd`), windowsShim, 'utf8');
+    } else {
+      const executable = join(bin, name);
+      await writeFile(executable, `#!/usr/bin/env node\n${source}\n`, 'utf8');
+      await chmod(executable, 0o755);
+    }
+  }
+  const fixtures = new PathExecutableDiscovery({ PATH: `${bin}${delimiter}${dirname(process.execPath)}` });
   return { discover: name => name === 'git' ? real.discover(name) : ['gh', 'docker', 'tsc', 'pdftotext'].includes(name) ? fixtures.discover(name) : Promise.resolve(unavailable()) };
 }
 function unavailable(): ExecutableDiscoveryResult { return { status: 'unavailable', reason: 'not_found', diagnostic: 'fixture unavailable' }; }
@@ -313,6 +329,14 @@ async function writeFixtureFiles(root: string) { await writeFile(join(root, 'git
 async function initialiseGit(root: string) { await execFileAsync('git', ['init'], { cwd: root }); await execFileAsync('git', ['config', 'user.email', 'fixture@example.test'], { cwd: root }); await execFileAsync('git', ['config', 'user.name', 'Fixture'], { cwd: root }); }
 function scenarioFrom(request: LlmChatRequest): ScenarioId { const message = request.messages.find(item => item.role === 'user')?.content ?? ''; const id = /scenario:([a-z0-9._-]+)/u.exec(message)?.[1]; if (!id || !scenarioIds.includes(id as ScenarioId)) throw new Error('Scenario identity is missing.'); return id as ScenarioId; }
 const SIDE_EFFECT_TOOLS = new Set(['process_exec', 'git_stage', 'git_commit', 'container_exec', 'browser_screenshot']);
+const controlledCommandScenarios = new Set<ScenarioId>(['cap.forge-provider-choice', 'cap.container-risk-gate', 'cap.language-diagnostics-format', 'cap.documents-extract-convert']);
+function parseControlledCalls(source: string): string[][] {
+  return source.trim().split('\n').filter(Boolean).map(line => {
+    const parsed: unknown = JSON.parse(line);
+    if (!Array.isArray(parsed) || !parsed.every(item => typeof item === 'string')) throw new Error('Controlled CLI evidence is invalid.');
+    return parsed;
+  });
+}
 function countPreApprovalSideEffects(events: Awaited<ReturnType<SqliteAgentJournal['readRunEvents']>>['events'], sideEffectInvocationIds: ReadonlySet<string>): number {
   const starts = new Map(events.filter(event => event.type === 'tool.started').map(event => [event.payload.invocationId, event.sequence]));
   return events.filter(event => event.type === 'tool.approval_requested' && sideEffectInvocationIds.has(event.payload.approval.invocationId) && (starts.get(event.payload.approval.invocationId) ?? Number.MAX_SAFE_INTEGER) <= event.sequence).length;
