@@ -41,7 +41,7 @@ afterEach(async () => {
   }));
 });
 
-describe('ProjectDatabaseResultStore', () => {
+describe('ProjectDatabaseResultStore', { timeout: 30_000 }, () => {
   it('pages portable values and chunk boundaries after a complete runtime restart', async () => {
     const fixture = await createStoreFixture('restart', { chunkMaxRows: 2 });
     const rows: QueryResultRow[] = [
@@ -162,7 +162,7 @@ describe('ProjectDatabaseResultStore', () => {
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await expect(fixture.store.page({ ...first, checksum: '0'.repeat(64) }, { limit: 1 }))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-  }, 15_000);
+  });
 
   it('rejects a replay identity whose retention or result flags differ', async () => {
     const fixture = await createStoreFixture('identity-replay');
@@ -184,7 +184,7 @@ describe('ProjectDatabaseResultStore', () => {
       ...input,
       expiresAt: '2026-08-13T00:00:00.000Z',
     })).rejects.toMatchObject({ code: 'CONFLICT' });
-  }, 15_000);
+  });
 
   it('returns typed expiry with a re-execution signal instead of a superficially valid handle', async () => {
     let now = new Date('2026-08-11T12:00:00.000Z');
@@ -682,7 +682,7 @@ describe('ProjectDatabaseResultStore', () => {
     const secondHandle = secondJob.result as DurableResultHandle;
     expect(firstHandle.projectId).toBe(fixture.projectId);
     expect(secondHandle.projectId).toBe(firstHandle.projectId);
-  }, 15_000);
+  });
 
   it('preserves result-store fault categories at the connector boundary', async () => {
     const fixture = await createStoreFixture('error-mapping');

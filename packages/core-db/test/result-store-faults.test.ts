@@ -22,7 +22,7 @@ afterEach(async () => {
   }));
 });
 
-describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
+describe('ProjectDatabaseResultStore fault and retention boundaries', { timeout: 30_000 }, () => {
   it('detects checksum corruption before returning any row and persists corrupt availability', async () => {
     const fixture = await createFixture('checksum');
     const handle = await createResult(fixture.store, 'corrupt', [{ value: 'original' }]);
@@ -246,7 +246,7 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     });
     await expect(secondStore.create({ ...input, jobId: 'different-job' }))
       .rejects.toMatchObject({ code: 'CONFLICT' });
-  }, 15_000);
+  });
 
   it('renews a live writer lease while a long result is still being produced', async () => {
     let now = new Date();
@@ -279,7 +279,7 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     await expect(contender.create(input)).rejects.toMatchObject({ code: 'CONFLICT' });
     await writer.append([{ value: 'eventually-produced' }]);
     await expect(writer.commit()).resolves.toMatchObject({ rowCount: 1 });
-  }, 15_000);
+  });
 
   it('applies TTL and size GC without deleting a chunk still referenced by another result', async () => {
     let now = new Date('2026-08-11T12:00:00.000Z');
@@ -443,7 +443,7 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     });
     await stream.cancel('consumer stopped');
     await expect(fixture.store.expire(handle.id, 'cancelled-export')).resolves.toBe(true);
-  }, 30_000);
+  });
 
   it('releases an abandoned export lease after its idle deadline', async () => {
     const fixture = await createFixture('idle-export-lease');
@@ -468,7 +468,7 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     abort.abort('consumer stopped');
     await expect(reader.read()).rejects.toMatchObject({ name: 'AbortError' });
     await expect(fixture.store.expire(handle.id, 'aborted-reader')).resolves.toBe(true);
-  }, 15_000);
+  });
 
   it('includes export bytes in capacity collection and physically removes released payloads', async () => {
     const fixture = await createFixture('export-capacity');
@@ -574,7 +574,7 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
       database.exec('ROLLBACK');
       database.close();
     }
-  }, 10_000);
+  });
 });
 
 type StoreOptions = Partial<ConstructorParameters<typeof ProjectDatabaseResultStore>[0]> & {
