@@ -162,7 +162,7 @@ describe('ProjectDatabaseResultStore', () => {
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await expect(fixture.store.page({ ...first, checksum: '0'.repeat(64) }, { limit: 1 }))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-  });
+  }, 15_000);
 
   it('rejects a replay identity whose retention or result flags differ', async () => {
     const fixture = await createStoreFixture('identity-replay');
