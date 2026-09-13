@@ -168,6 +168,9 @@ export function createRipgrepWorkspaceSearchBackend(options: RipgrepWorkspaceSea
         const copyFile = async (entry: ValidatedEntry): Promise<boolean> => {
           const record = entry.identity as Record<string, PortableValue>;
           if (record.type !== 'file') return true;
+          if (typeof record.canonicalPath !== 'string') {
+            throw expectedToolError('precondition', 'Workspace search file identity has no canonical path.');
+          }
           if (scannedFiles >= request.maxFiles) { baseReasons.add('file_limit'); return false; }
           const size = Number(record.sizeBytes);
           if (scannedBytes + size > request.maxScanBytes) { baseReasons.add('byte_limit'); return false; }
@@ -177,14 +180,18 @@ export function createRipgrepWorkspaceSearchBackend(options: RipgrepWorkspaceSea
           await revalidateEntries([validation[0]!, entry], request.signal, deadlineAt);
           handle = await open(entry.path, 'r').catch((error) => { throw mapFilesystemError(error); });
           try {
-            const opened = portableIdentity(entry.path, await handle.stat({ bigint: true }));
+            const opened = portableIdentity(record.canonicalPath, await handle.stat({ bigint: true }));
             if (!samePortableIdentity(opened, entry.identity)) throw expectedToolError('conflict', 'target_changed: search file changed before snapshot.');
             const capture = await captureSnapshot(handle, target, size, deadlineAt, request.signal, () => { cleanupFailed = true; });
-            if (!samePortableIdentity(portableIdentity(entry.path, await handle.stat({ bigint: true })), entry.identity)) {
+            if (!samePortableIdentity(portableIdentity(record.canonicalPath, await handle.stat({ bigint: true })), entry.identity)) {
               throw expectedToolError('conflict', 'target_changed: search file changed while snapshotting.');
             }
             await revalidateEntries([entry], request.signal, deadlineAt);
-            files.set(relative(snapshotDirectory, target).replace(/\\/gu, '/'), { path: entry.path, identity: opened, digest: capture.digest });
+            files.set(relative(snapshotDirectory, target).replace(/\\/gu, '/'), {
+              path: record.canonicalPath,
+              identity: opened,
+              digest: capture.digest,
+            });
             scannedFiles += 1; scannedBytes += capture.bytes;
           } finally { await handle.close().catch(() => { cleanupFailed = true; }); handle = undefined; }
           return true;
