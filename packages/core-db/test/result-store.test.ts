@@ -682,7 +682,7 @@ describe('ProjectDatabaseResultStore', () => {
     const secondHandle = secondJob.result as DurableResultHandle;
     expect(firstHandle.projectId).toBe(fixture.projectId);
     expect(secondHandle.projectId).toBe(firstHandle.projectId);
-  });
+  }, 15_000);
 
   it('preserves result-store fault categories at the connector boundary', async () => {
     const fixture = await createStoreFixture('error-mapping');

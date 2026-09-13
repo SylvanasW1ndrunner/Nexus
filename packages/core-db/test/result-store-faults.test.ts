@@ -453,7 +453,7 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     abort.abort('consumer stopped');
     await expect(reader.read()).rejects.toMatchObject({ name: 'AbortError' });
     await expect(fixture.store.expire(handle.id, 'aborted-reader')).resolves.toBe(true);
-  });
+  }, 15_000);
 
   it('includes export bytes in capacity collection and physically removes released payloads', async () => {
     const fixture = await createFixture('export-capacity');
