@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { access, open, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { canonicalizeProspectivePath } from './filesystem-identity.js';
 
 export type ExecutableFileIdentity = Readonly<{ path: string; dev: string; ino: string; size: string; mtimeNs: string; ctimeNs: string }>;
 /** Serializable launch identity. Every file is checked again immediately before spawn. */
@@ -127,9 +128,9 @@ async function readNodeShim(path: string): Promise<{ entry: string; nodePath: st
     if (lines[cursor] === '@IF NOT DEFINED NODE_PATH (') {
       const first = /^@SET "NODE_PATH=([^"%&|<>^`\r\n]+)"$/u.exec(lines[cursor + 1] ?? '');
       if (!first || lines[cursor + 2] !== ') ELSE (' || lines[cursor + 3] !== '@SET "NODE_PATH=' + first[1] + ';%NODE_PATH%"' || lines[cursor + 4] !== ')') throw new Error('Unsupported module path wrapper.');
-      nodePath = first[1]!.split(';');
+      nodePath = await Promise.all(first[1]!.split(';').map(directory => canonicalizeProspectivePath(directory)));
       if (nodePath.length > 64) throw new Error('Module paths exceed their bound.');
-      for (const directory of nodePath) { safePath(directory); assertWithin(modules, resolve(directory)); }
+      for (const directory of nodePath) { safePath(directory); assertWithin(modules, directory); }
       cursor += 5;
     }
     const thenEntry = /^"%~dp0\\node\.exe"\s+"%~dp0\\([^"%]+)" %\*$/u.exec(lines[cursor + 1] ?? '');

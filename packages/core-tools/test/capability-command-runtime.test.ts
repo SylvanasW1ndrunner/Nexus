@@ -1,4 +1,4 @@
-import { access, copyFile, mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -88,7 +88,7 @@ describe('Capability command Host port', () => {
     const path = join(f.root, 'target.txt');
     await writeFile(path, 'original');
     const intent = await f.port.prepare({ ...f.input(['-e', 'process.exit(0)']), pathTargets: [await prepareProcessPath(path, f.root)] }, f.context);
-    expect(intent.permission.paths).toContain(path);
+    expect(intent.permission.paths).toContain(await realpath(path));
     await rename(path, path + '.old'); await writeFile(path, 'replacement');
     await expect(f.port.execute(intent.input, f.execution(intent))).rejects.toMatchObject({ fact: { code: 'target_changed' } });
   });

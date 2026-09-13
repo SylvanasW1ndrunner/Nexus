@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import type { mkdir as nodeMkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -53,6 +53,22 @@ afterEach(async () => {
 });
 
 describe('result materialization', () => {
+  it('uses one canonical root when explicit Runtime and project paths have different spellings', async () => {
+    const root = await temporaryDirectory();
+    const canonicalRoot = await realpath(root);
+    const store = new ResultMaterializationStore({
+      projectRoot: canonicalRoot,
+      rootDirectory: join(root, 'explicit-runtime'),
+    });
+
+    expect(store.rootDirectory).toBe(join(canonicalRoot, 'explicit-runtime'));
+    await expect(store.initialize(() => true)).resolves.toEqual({
+      retainedRuns: 0,
+      removedRuns: 0,
+      pendingRuns: 0,
+    });
+  });
+
   it('materializes owner-scoped bytes at a project-relative Run path', async () => {
     const root = await temporaryDirectory();
     const bytes = new Uint8Array([0, 255, 10, 13, 42]);

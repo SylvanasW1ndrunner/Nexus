@@ -1,9 +1,10 @@
 import { lstat, opendir, realpath } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { expectedToolError, ToolExecutionError } from '@dbagent/core-agent';
 import type { PortableValue } from '@dbagent/shared';
 import type { WorkspaceDirectoryBackend, WorkspaceDirectoryEntry } from './workspace-tools.js';
+import { sameCanonicalPath, sameFileSystemIdentity } from './filesystem-identity.js';
 
 export type ValidatedEntry = Readonly<{ path: string; identity: PortableValue }>;
 
@@ -11,10 +12,13 @@ export type ValidatedEntry = Readonly<{ path: string; identity: PortableValue }>
 export async function inspectValidatedEntry(path: string): Promise<PortableValue> {
   try {
   const before = await lstat(path, { bigint: true });
-  if (before.isSymbolicLink() || resolve(await realpath(path)) !== resolve(path)) changed();
+  if (before.isSymbolicLink()) changed();
+  const canonicalPath = await realpath(path);
+  const canonical = await lstat(canonicalPath, { bigint: true });
+  if (!sameFileSystemIdentity(before, canonical)) changed();
   const after = await lstat(path, { bigint: true });
-  if (before.dev !== after.dev || before.ino !== after.ino || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) changed();
-  return { kind: 'filesystem-entry', canonicalPath: path, type: after.isDirectory() ? 'directory' : after.isFile() ? 'file' : 'other',
+  if (!sameFileSystemIdentity(before, after) || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) changed();
+  return { kind: 'filesystem-entry', canonicalPath, type: after.isDirectory() ? 'directory' : after.isFile() ? 'file' : 'other',
     device: String(after.dev), inode: String(after.ino), sizeBytes: Number(after.size), mtimeMs: Number(after.mtimeMs),
     mtimeNs: String(after.mtimeNs), ctimeNs: String(after.ctimeNs) };
   } catch (error) {
@@ -23,15 +27,25 @@ export async function inspectValidatedEntry(path: string): Promise<PortableValue
   }
 }
 
-export function validatedIdentityKey(identity: PortableValue): string {
-  const record = identity as Record<string, PortableValue>;
-  return JSON.stringify(['kind', 'canonicalPath', 'type', 'device', 'inode', 'sizeBytes', 'mtimeNs', 'ctimeNs'].map((key) => record[key]));
+export function sameValidatedIdentity(left: PortableValue, right: PortableValue): boolean {
+  const leftRecord = left as Record<string, PortableValue>;
+  const rightRecord = right as Record<string, PortableValue>;
+  return leftRecord.kind === 'filesystem-entry' && rightRecord.kind === 'filesystem-entry' &&
+    typeof leftRecord.canonicalPath === 'string' && typeof rightRecord.canonicalPath === 'string' &&
+    sameCanonicalPath(leftRecord.canonicalPath, rightRecord.canonicalPath) && leftRecord.type === rightRecord.type &&
+    typeof leftRecord.device === 'string' && typeof leftRecord.inode === 'string' &&
+    typeof rightRecord.device === 'string' && typeof rightRecord.inode === 'string' &&
+    sameFileSystemIdentity(
+      { dev: leftRecord.device, ino: leftRecord.inode },
+      { dev: rightRecord.device, ino: rightRecord.inode },
+    ) && leftRecord.sizeBytes === rightRecord.sizeBytes && leftRecord.mtimeNs === rightRecord.mtimeNs &&
+    leftRecord.ctimeNs === rightRecord.ctimeNs;
 }
 
 export async function revalidateEntries(entries: readonly ValidatedEntry[], signal: AbortSignal, deadlineAt: number): Promise<void> {
   for (const entry of entries) {
     check(signal, deadlineAt);
-    if (validatedIdentityKey(await inspectValidatedEntry(entry.path)) !== validatedIdentityKey(entry.identity)) changed();
+    if (!sameValidatedIdentity(await inspectValidatedEntry(entry.path), entry.identity)) changed();
   }
 }
 
@@ -49,7 +63,7 @@ export async function walkValidatedDirectory(root: string, options: Readonly<{
     try {
       for await (const child of directory) {
         check(options.signal, options.deadlineAt);
-        if (validatedIdentityKey(await inspectValidatedEntry(path)) !== validatedIdentityKey(identity)) changed();
+        if (!sameValidatedIdentity(await inspectValidatedEntry(path), identity)) changed();
         const childPath = join(path, child.name);
         const entry = { path: childPath, identity: await inspectValidatedEntry(childPath) };
         entries.push(entry); scanned += 1;
@@ -64,7 +78,7 @@ export async function walkValidatedDirectory(root: string, options: Readonly<{
         }
       }
     } finally { await directory.close().catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ERR_DIR_CLOSED') throw error; }); }
-    if (validatedIdentityKey(await inspectValidatedEntry(path)) !== validatedIdentityKey(identity)) changed();
+    if (!sameValidatedIdentity(await inspectValidatedEntry(path), identity)) changed();
   };
   await visitDirectory(root, 1);
   await revalidateEntries(entries, options.signal, options.deadlineAt);
@@ -79,7 +93,7 @@ export function createPortableWorkspaceDirectoryBackend(): WorkspaceDirectoryBac
     protocol: 'validated-directory-page.v1' as const,
     async revalidate(path, identity, signal) {
       check(signal, Date.now() + 30_000);
-      return validatedIdentityKey(await inspectValidatedEntry(path)) === validatedIdentityKey(identity);
+      return sameValidatedIdentity(await inspectValidatedEntry(path), identity);
     },
     async list(input) {
       const deadlineAt = Date.now() + input.timeoutMs;
@@ -90,7 +104,7 @@ export function createPortableWorkspaceDirectoryBackend(): WorkspaceDirectoryBac
         if (match === null) throw expectedToolError('invalid_cursor', 'Invalid directory cursor.');
         id = match[1]!; offset = Number(match[2]);
         const cached = snapshots.get(id);
-        if (cached === undefined || cached.owner !== input.ownerKey || validatedIdentityKey(cached.root.identity) !== validatedIdentityKey(input.identity)) {
+        if (cached === undefined || cached.owner !== input.ownerKey || !sameValidatedIdentity(cached.root.identity, input.identity)) {
           throw expectedToolError('invalid_cursor', 'Directory cursor expired or belongs to another owner/snapshot.');
         }
         snapshot = cached;

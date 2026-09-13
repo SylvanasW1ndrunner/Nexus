@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { expectedToolError } from '@dbagent/core-agent';
 import type { PortableValue } from '@dbagent/shared';
-import { inspectValidatedEntry, revalidateEntries, walkValidatedDirectory, type ValidatedEntry } from './workspace-directory-portable-adapter.js';
+import { inspectValidatedEntry, revalidateEntries, sameValidatedIdentity, walkValidatedDirectory, type ValidatedEntry } from './workspace-directory-portable-adapter.js';
 
 const CURSOR_TTL_MS = 5 * 60_000;
 const MAX_CAPTURED_MATCHES = 1_001;
@@ -77,7 +77,7 @@ type CapturedResultSet = Readonly<{
   createdAt: number;
   expiresAt: number;
   ownerKey: string;
-  targetIdentityKey: string;
+  targetIdentity: PortableValue;
   retainedBytes: number;
   matches: readonly WorkspaceSearchMatch[];
   scannedFiles: number;
@@ -139,7 +139,7 @@ export function createRipgrepWorkspaceSearchBackend(options: RipgrepWorkspaceSea
         if (captured === undefined || captured.expiresAt <= Date.now()) {
           throw expectedToolError('invalid_argument', 'The workspace search cursor expired.');
         }
-        if (captured.ownerKey !== request.ownerKey || captured.targetIdentityKey !== identityKey(request.targetIdentity)) {
+        if (captured.ownerKey !== request.ownerKey || !samePortableIdentity(captured.targetIdentity, request.targetIdentity)) {
           throw expectedToolError('invalid_argument', 'The workspace search cursor belongs to another owner or target snapshot.');
         }
         await revalidateEntries(captured.validation, request.signal, Date.now() + request.timeoutMs);
@@ -226,7 +226,7 @@ export function createRipgrepWorkspaceSearchBackend(options: RipgrepWorkspaceSea
           createdAt: Date.now(),
           expiresAt: Date.now() + CURSOR_TTL_MS,
           ownerKey: request.ownerKey,
-          targetIdentityKey: identityKey(before),
+          targetIdentity: before,
           retainedBytes: retainedBytes(matches) + Buffer.byteLength(JSON.stringify(validation), 'utf8'),
           matches: Object.freeze(matches),
           scannedFiles,
@@ -432,11 +432,7 @@ function portableIdentity(path: string, info: BigIntStats): PortableValue {
 }
 
 function samePortableIdentity(left: PortableValue, right: PortableValue): boolean {
-  if (!isRecord(left) || !isRecord(right)) return false;
-  const leftRecord = left as Record<string, unknown>; const rightRecord = right as Record<string, unknown>;
-  return leftRecord.kind === 'filesystem-entry' && rightRecord.kind === 'filesystem-entry' &&
-    leftRecord.type === rightRecord.type && leftRecord.device === rightRecord.device && leftRecord.inode === rightRecord.inode &&
-    leftRecord.sizeBytes === rightRecord.sizeBytes && leftRecord.mtimeNs === rightRecord.mtimeNs && leftRecord.ctimeNs === rightRecord.ctimeNs;
+  return sameValidatedIdentity(left, right);
 }
 
 function backendCursor(id: string, offset: number): string { return `rgset:${id}:${offset}`; }
@@ -463,15 +459,6 @@ function reserveResultSet(sets: Map<string, CapturedResultSet>, ownerKey: string
   }
 }
 function retainedBytes(matches: readonly WorkspaceSearchMatch[]): number { return Buffer.byteLength(JSON.stringify(matches), 'utf8'); }
-function identityKey(value: PortableValue): string {
-  const record = value as Record<string, PortableValue>;
-  // Prepared identities also carry backendRevision. Hash exactly the filesystem
-  // snapshot fields on both sides; revision is already bound by the outer cursor.
-  const identity = Object.fromEntries(['kind', 'canonicalPath', 'type', 'device', 'inode', 'sizeBytes', 'mtimeMs', 'mtimeNs', 'ctimeNs']
-    .map((key) => [key, record[key] ?? null])) as Record<string, PortableValue>;
-  return createHash('sha256').update(canonicalPortable(identity)).digest('hex');
-}
-
 function awaitWithin<T>(actual: Promise<T>, timeoutMs: number, signal: AbortSignal, controller: AbortController): Promise<T> {
   const deadlineAt = Date.now() + timeoutMs;
   return new Promise<T>((resolve, reject) => {
@@ -495,12 +482,6 @@ function awaitWithin<T>(actual: Promise<T>, timeoutMs: number, signal: AbortSign
       } else finish(() => resolve(value));
     }, (error: unknown) => finish(() => reject(error instanceof Error ? error : new Error('Workspace search failed.'))));
   });
-}
-function canonicalPortable(value: PortableValue): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalPortable).join(',')}]`;
-  const record = value as Record<string, PortableValue>;
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalPortable(record[key]!)}`).join(',')}}`;
 }
 function timedOutResult(scannedFiles: number, scannedBytes: number): WorkspaceSearchResult {
   return Object.freeze({ status: 'ok', matches: [], scannedFiles, scannedBytes, truncated: true, truncationReasons: ['time_limit'] });

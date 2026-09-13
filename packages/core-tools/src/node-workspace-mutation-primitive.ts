@@ -19,6 +19,7 @@ import type {
   WorkspaceMutationSnapshot,
   WorkspaceParentMutationFence,
 } from './workspace-mutation-adapter.js';
+import { sameFileSystemIdentity } from './filesystem-identity.js';
 
 const MAX_MUTATION_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_STREAM_MUTATION_FILE_BYTES = 64 * 1024 * 1024;
@@ -46,7 +47,7 @@ export function createNodeWorkspaceMutationPrimitive(): WorkspaceMutationPrimiti
       const leftIdentity = parseIdentity(left);
       const rightIdentity = parseIdentity(right);
       return leftIdentity !== undefined && rightIdentity !== undefined &&
-        leftIdentity.device === rightIdentity.device && leftIdentity.inode === rightIdentity.inode;
+        sameIdentityValue(leftIdentity, rightIdentity);
     },
     async bind(input) {
       throwIfAborted(input.signal);
@@ -437,11 +438,14 @@ function ensureRegularFile(stats: BigIntStats): void {
 }
 
 function sameEntryStats(left: BigIntStats, right: BigIntStats): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
+  return sameFileSystemIdentity(left, right);
 }
 
 function sameIdentityValue(left: EntryIdentity, right: EntryIdentity): boolean {
-  return left.device === right.device && left.inode === right.inode;
+  return sameFileSystemIdentity(
+    { dev: left.device, ino: left.inode },
+    { dev: right.device, ino: right.inode },
+  );
 }
 
 function isJournalPhase(value: unknown): value is WorkspaceMutationJournal['phase'] {

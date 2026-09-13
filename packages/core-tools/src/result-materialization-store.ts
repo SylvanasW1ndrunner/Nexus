@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, realpathSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import {
   link,
   lstat,
@@ -19,6 +19,12 @@ import {
   type ContentAccessScope,
   type OpenedContent,
 } from '@dbagent/core-agent';
+import {
+  canonicalRealpathSync,
+  canonicalizeProspectiveEntrySync,
+  sameCanonicalPath,
+  sameFileSystemIdentity,
+} from './filesystem-identity.js';
 
 export const RESULT_FILE_MAX_BYTES = 64 * 1024 * 1024;
 const MANIFEST_NAME = 'manifest.json';
@@ -89,8 +95,8 @@ export class ResultMaterializationStore {
   #rootGuard: MaterializationRootGuard | undefined;
 
   constructor(options: ResultMaterializationStoreOptions) {
-    this.projectRoot = realpathSync(resolve(options.projectRoot));
-    this.rootDirectory = resolve(
+    this.projectRoot = canonicalRealpathSync(options.projectRoot);
+    this.rootDirectory = canonicalizeProspectiveEntrySync(
       options.rootDirectory ?? join(this.projectRoot, '.schemanaut', 'runtime', 'materialized'),
     );
     assertContained(this.projectRoot, this.rootDirectory);
@@ -477,7 +483,7 @@ async function verifyEntry(runPath: string, entry: ManifestEntry): Promise<boole
       sizeBytes += bytes.byteLength;
     }
     const after = await stat(path);
-    return before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
+    return sameFileSystemIdentity(before, after) && before.size === after.size &&
       sizeBytes === entry.sizeBytes && hash.digest('hex') === entry.checksum;
   } catch {
     return false;
@@ -556,9 +562,14 @@ function containedChild(parent: string, name: string): string {
 
 function assertContained(parent: string, child: string): void {
   const rel = relative(resolve(parent), resolve(child));
-  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+  if (!isStrictChild(rel)) {
     throw new TypeError('Runtime materialization root must stay inside the project root.');
   }
+}
+
+function isStrictChild(relativePath: string): boolean {
+  return relativePath !== '' && relativePath !== '..' && !relativePath.startsWith(`..${sep}`) &&
+    !isAbsolute(relativePath);
 }
 
 async function ensureMaterializationRoot(
@@ -609,15 +620,17 @@ async function ensureMaterializationRoot(
 async function assertRootGuardCurrent(guard: MaterializationRootGuard): Promise<void> {
   for (const expected of guard.directories) {
     const current = await lstat(expected.path);
-    if (current.isSymbolicLink() || !current.isDirectory() ||
-      current.dev !== expected.device || current.ino !== expected.inode) {
+    if (current.isSymbolicLink() || !current.isDirectory() || !sameFileSystemIdentity(
+      current,
+      { dev: expected.device, ino: expected.inode },
+    )) {
       throw expectedToolError(
         'precondition',
         'Runtime materialization directories changed after initialization.',
       );
     }
   }
-  if (await realpath(guard.canonicalRoot) !== guard.canonicalRoot) {
+  if (!sameCanonicalPath(await realpath(guard.canonicalRoot), guard.canonicalRoot)) {
     throw expectedToolError(
       'precondition',
       'Runtime materialization root changed after initialization.',

@@ -71,7 +71,8 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 
 - `corepack pnpm typecheck`：25/25 Turbo task 通过。
 - `corepack pnpm lint`：13/13 workspace package 通过。
-- 强制未缓存的 `corepack pnpm exec turbo test --concurrency=1 --force`：26/26 Turbo task 通过，共 1,829 项通过、25 项按环境合同跳过。
+- `corepack pnpm test`：26/26 Turbo task 通过，共 1,838 项通过、23 项按环境合同跳过；其中 Core Tools
+  179 项、Core Agent 704 项、Core DB 211 项、Agent Host 59 项。
 - 全局企业权限规则边界：128 条配置通过，129 条在 Schema 校验阶段拒绝，与 Runtime 上限一致。
 - `corepack pnpm test:script-contracts`：45/45 项通过。
 - `corepack pnpm test:capability-runtime`：106/106 项通过。
@@ -91,9 +92,9 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 - 既有真实模型证据显示：代码修复、动态 Git、电商数据库分析和长结果数据库分析已通过；churn-ML 失败，因为
   Run 是 `interrupted`。
 - 付费模型、外部 PostgreSQL、浏览器、容器和 Forge 均未在本次发布收口中重跑。
-- 前十二次 GitHub Actions 发布复验（runs `34757899868`、`34761714006`、`34763736333`、`34764907067`、
+- 前十三次 GitHub Actions 发布复验（runs `34757899868`、`34761714006`、`34763736333`、`34764907067`、
   `34767085788`、`34768751691`、`34770047563`、`34770517148`、`34772944987`、`34773360220`、
-  `34774169435`、`34774552168`）
+  `34774169435`、`34774552168`、`34775106060`）
   先后暴露发布环境合同
   缺口：Windows Node 22 文件设备号差异、Linux 缺少系统 `rg`、PostgreSQL 报告依赖已删除的旧占位测试、
   确定性测试夹具依赖 Windows 短路径与 `.cmd`、慢速 Windows 文件 I/O 下的测试同步与预算不足，以及 Linux
@@ -128,4 +129,9 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
   GC 合同耗时 5.3 秒；它们仍只有 timeout，未发生产品断言失败，GC 后的 `ENOTEMPTY` 是超时后清理与未完成 I/O
   重叠的次生结果。这组证据表明 hosted Windows 磁盘延迟存在显著随机波动，不能继续按用例穷举预算。因此仅将
   两份真实 SQLite、对象文件、租约、GC 与崩溃恢复测试套件统一定义为 30 秒 durability 上限；Core DB 其余测试
-  和全仓轻量测试仍使用默认 5 秒，也不引入平台条件分支。
+  和全仓轻量测试仍使用默认 5 秒，也不引入平台条件分支。第十三次运行确认 Core DB 211 项和 Core Agent
+  704 项均已通过，并暴露 Core Tools 在 Windows runner 的两项同源可移植性缺口：`RUNNER~1` 短路径与
+  `realpath` 长路径被用于同一边界比较，以及同一文件的 path stat 与 handle stat 之间可能只有一侧报告
+  `dev=0`。当前候选统一使用 native canonical path，并从已存在祖先规范化尚未创建的 Runtime/`NODE_PATH`
+  尾段；文件身份仍严格比较 inode、类型、大小和时间，仅在 win32 且任一 device 为零时把 device 视为不可用。
+  Symlink、junction、越界路径和不同 inode 的替换仍被拒绝。最终状态以最新 Actions 运行结果为准。

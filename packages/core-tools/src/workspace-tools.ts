@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { realpathSync, type BigIntStats } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import { open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -28,6 +28,7 @@ import {
 } from './workspace-mutation-adapter.js';
 import { createLinuxWorkspaceDirectoryBackend } from './workspace-directory-linux-adapter.js';
 import { createPortableWorkspaceDirectoryBackend } from './workspace-directory-portable-adapter.js';
+import { canonicalRealpathSync, sameFileSystemIdentity } from './filesystem-identity.js';
 
 const MAX_PATH_CHARS = 4_096;
 const DEFAULT_LIST_ENTRIES = 500;
@@ -575,7 +576,7 @@ class WorkspaceBoundary {
   readonly rootPath: string;
 
   constructor(rootPath: string) {
-    this.rootPath = realpathSync(resolve(rootPath));
+    this.rootPath = canonicalRealpathSync(rootPath);
   }
 
   async existing(input: string): Promise<string> {
@@ -801,7 +802,10 @@ function assertSameIdentity(current: EntryIdentity, expected: EntryIdentity): vo
 }
 
 function sameIdentity(left: EntryIdentity, right: EntryIdentity): boolean {
-  return left.device === right.device && left.inode === right.inode && left.type === right.type && left.sizeBytes === right.sizeBytes &&
+  return sameFileSystemIdentity(
+    { dev: left.device, ino: left.inode },
+    { dev: right.device, ino: right.inode },
+  ) && left.type === right.type && left.sizeBytes === right.sizeBytes &&
     left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
