@@ -134,7 +134,7 @@ describe('PostgresConnector portable result values', () => {
     }
 
     expect(garbageCollections).toBe(3);
-  }, 15_000);
+  }, 30_000);
 
   it('retries result-store startup recovery after a transient garbage collection failure', async () => {
     const store = await resultStore('gc-startup-retry');

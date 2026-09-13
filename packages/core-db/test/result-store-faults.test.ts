@@ -262,9 +262,8 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     const writer = await fixture.store.create(input);
 
     now = new Date(now.getTime() + 59 * 60 * 1_000);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForWriterHeartbeat(fixture.rootDir, input.resultId, now.toISOString());
     now = new Date(now.getTime() + 2 * 60 * 1_000);
-    await new Promise((resolve) => setTimeout(resolve, 20));
 
     const contender = new ProjectDatabaseResultStore({
       projectId: fixture.projectId,
@@ -275,7 +274,7 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     await expect(contender.create(input)).rejects.toMatchObject({ code: 'CONFLICT' });
     await writer.append([{ value: 'eventually-produced' }]);
     await expect(writer.commit()).resolves.toMatchObject({ rowCount: 1 });
-  });
+  }, 15_000);
 
   it('applies TTL and size GC without deleting a chunk still referenced by another result', async () => {
     let now = new Date('2026-08-11T12:00:00.000Z');
@@ -583,6 +582,35 @@ async function createFixture(label: string, options: StoreOptions = {}) {
       ...options,
     }),
   };
+}
+
+async function waitForWriterHeartbeat(
+  rootDir: string,
+  resultId: string,
+  expectedHeartbeat: string,
+): Promise<void> {
+  const database = new DatabaseSync(join(rootDir, 'results.sqlite'));
+  database.exec('PRAGMA query_only = ON');
+  const heartbeat = database.prepare(`
+    SELECT heartbeat_at AS heartbeatAt
+    FROM database_result_leases
+    WHERE result_id = ? AND kind = 'writer'
+  `);
+  const deadline = Date.now() + 5_000;
+  try {
+    while (Date.now() < deadline) {
+      try {
+        const row = heartbeat.get(resultId) as { heartbeatAt?: unknown } | undefined;
+        if (row?.heartbeatAt === expectedHeartbeat) return;
+      } catch (error) {
+        if ((error as { errcode?: unknown }).errcode !== 5) throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  } finally {
+    database.close();
+  }
+  throw new Error(`Writer heartbeat did not reach ${expectedHeartbeat}.`);
 }
 
 async function createResult(

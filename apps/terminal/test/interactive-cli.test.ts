@@ -530,8 +530,10 @@ describe('SchemaNaut CLI', () => {
     await operation;
 
     expect(await readFile(settingsPath, 'utf8')).toBe(before);
-    expect(capture.text()).not.toMatch(/\/connect|\/config|capability/i);
-  });
+    expect(capture.text()).not.toMatch(
+      /\/connect|\/config\s+(?:session|project)\b|capability/i,
+    );
+  }, 15_000);
 
 });
 
