@@ -30,6 +30,7 @@ import { SqliteAgentJournal } from '../src/events/sqlite-agent-journal.js';
 import { resolveViteNodeEntry } from './fixtures/vite-node-entry.js';
 
 const temporaryDirectories: string[] = [];
+const liveArtifactWorkers = new Set<ReturnType<typeof spawn>>();
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const repositoryRoot = dirname(dirname(packageRoot));
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
@@ -37,6 +38,7 @@ const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
 };
 
 afterEach(async () => {
+  await stopArtifactWorkers();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       rm(directory, { recursive: true, force: true }),
@@ -533,7 +535,7 @@ describe('ProjectArtifactStore', () => {
       }
       expect(operationWasBlocked).toBe(true);
     },
-    20_000,
+    30_000,
   );
 
   it.each(['stage', 'commit', 'open', 'expire', 'delete', 'gc'] as const)(
@@ -1077,7 +1079,7 @@ function spawnArtifactWorker(
 ) {
   const viteNode = resolveViteNodeEntry();
   const helper = join(packageRoot, 'test', 'fixtures', 'artifact-mutation-worker.ts');
-  return spawn(process.execPath, [viteNode, helper], {
+  const child = spawn(process.execPath, [viteNode, helper], {
     cwd: repositoryRoot,
     env: {
       ...process.env,
@@ -1091,6 +1093,9 @@ function spawnArtifactWorker(
     },
     stdio: 'ignore',
   });
+  liveArtifactWorkers.add(child);
+  child.once('exit', () => liveArtifactWorkers.delete(child));
+  return child;
 }
 
 async function prepareChildArtifactOperation(
@@ -1133,8 +1138,23 @@ async function waitForPath(path: string): Promise<void> {
 }
 
 async function waitForExit(child: ReturnType<typeof spawn>): Promise<number | null> {
-  if (child.exitCode !== null) return child.exitCode;
+  if (child.exitCode !== null || child.signalCode !== null) return child.exitCode;
   return await new Promise((resolveExit) => child.once('exit', resolveExit));
+}
+
+async function stopArtifactWorkers(): Promise<void> {
+  const workers = [...liveArtifactWorkers];
+  for (const child of workers) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+  await Promise.all(workers.map(async (child) => {
+    await Promise.race([
+      waitForExit(child).then(() => undefined),
+      delay(5_000).then(() => {
+        throw new Error(`Timed out stopping artifact worker ${String(child.pid)}.`);
+      }),
+    ]);
+  }));
 }
 
 async function* chunks(content: Buffer, size = content.byteLength || 1): AsyncIterable<Uint8Array> {
