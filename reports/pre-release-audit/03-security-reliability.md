@@ -1,5 +1,7 @@
 # SchemaNaut 发布前安全与可靠性审计（最终）
 
+> **历史 2026-07 审计（已退役）：** 本报告针对已退役的 SDK/Server 架构，不能作为当前发布边界；请参阅[当前验证记录](../../docs/engineering/verification.md)。
+
 审计日期：2026-07-26
 范围：Secret、Provider/Gateway、HTTP/SSE、数据库权限、Workspace/Shell、MCP、内存预算、取消/关闭、租户/Project/Session 隔离
 主状态索引：[00-traceability-matrix.md](00-traceability-matrix.md)

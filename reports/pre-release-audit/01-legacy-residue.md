@@ -1,5 +1,7 @@
 # SchemaNaut 上线前旧版本残留审计（最终）
 
+> **历史 2026-07 审计（已退役）：** 本报告针对已退役的 SDK/Server 架构，不能作为当前发布边界；请参阅[当前验证记录](../../docs/engineering/verification.md)。下文旧名称仅保留作历史证据。
+
 审计日期：2026-07-26
 判定基线：`README*`、`docs/product-functional-overview.md`、`docs/agent`、`docs/ai-sql`、`docs/foundation`、`docs/sdk`
 主状态索引：[00-traceability-matrix.md](00-traceability-matrix.md)

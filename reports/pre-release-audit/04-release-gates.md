@@ -1,5 +1,7 @@
 # SchemaNaut 发行、依赖与包边界审计（最终门禁）
 
+> **历史 2026-07 审计（已退役）：** 本报告针对已退役的 SDK/Server 架构，不能作为当前发布边界；请参阅[当前验证记录](../../docs/engineering/verification.md)。
+
 审计日期：2026-07-26
 范围：npm 包、公开导出、Secret/旧标识扫描、Checksum、版本一致性、隔离安装、真实 PostgreSQL、CI 与供应链
 主状态索引：[00-traceability-matrix.md](00-traceability-matrix.md)
