@@ -1,123 +1,25 @@
 {
-  "generatedAt": "2026-09-03T23:25:29.513Z",
-  "runId": "2026-09-03T23-24-14-847Z-042060d4-a31f-49e9-ab22-da59c4d7da7f",
-  "database": "PostgreSQL",
-  "deterministicModel": true,
-  "actualRunCount": 9,
+  "generatedAt": "2026-09-13T13:03:48.680Z",
+  "runId": "2026-09-13T13-03-05-077Z-a7b237e3-1d5d-48ce-b4cb-dcbc1ba00986",
+  "database": "dbagent_core_db_test",
+  "expectedSuiteCount": 3,
+  "actualSuiteCount": 3,
   "passed": true,
-  "runs": [
+  "suites": [
     {
-      "scenario": "ecommerce",
-      "step": "finance-query",
-      "passed": true,
-      "status": "completed",
-      "finalText": "已按月和渠道完成净收入、目标差额及客户统计；2026-01 的 wechat 渠道净收入为 150.00。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [
-        "result:result_1f37846d-d356-4a46-841a-adbf8c7e68a6"
-      ],
-      "activityCount": 14,
-      "toolActivityCount": 12
+      "testFile": "packages/core-db/test/postgres.integration.test.ts",
+      "database": "dbagent_core_db_test",
+      "passed": true
     },
     {
-      "scenario": "ecommerce",
-      "step": "read-mode-edit-denied",
-      "passed": true,
-      "status": "completed",
-      "finalText": "用户拒绝本次许可，库存没有变化。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [],
-      "activityCount": 7,
-      "toolActivityCount": 3
+      "testFile": "packages/core-db/test/postgres-connector.integration.test.ts",
+      "database": "dbagent_core_db_test",
+      "passed": true
     },
     {
-      "scenario": "ecommerce",
-      "step": "edit-mode-update",
-      "passed": true,
-      "status": "completed",
-      "finalText": "已更新预留库存。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [
-        "database-execution:90e5c33d-ed4e-42f1-84b4-405b0ead8bd9"
-      ],
-      "activityCount": 6,
-      "toolActivityCount": 4
-    },
-    {
-      "scenario": "ecommerce",
-      "step": "inventory-verification",
-      "passed": true,
-      "status": "completed",
-      "finalText": "WH-SH-01 的 EC-KEYBOARD 预留数量为 3。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [
-        "result:result_23e2b545-6e01-4544-8883-667f28a63ae6"
-      ],
-      "activityCount": 6,
-      "toolActivityCount": 4
-    },
-    {
-      "scenario": "ecommerce",
-      "step": "edit-mode-ddl-denied",
-      "passed": true,
-      "status": "completed",
-      "finalText": "用户拒绝结构变更许可，没有创建验证表。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [],
-      "activityCount": 7,
-      "toolActivityCount": 3
-    },
-    {
-      "scenario": "ecommerce",
-      "step": "full-mode-ddl",
-      "passed": true,
-      "status": "completed",
-      "finalText": "已经在完全权限下创建验证表。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [
-        "database-execution:c2c2c2a0-3157-4892-98ac-a8a84ab50d9f"
-      ],
-      "activityCount": 6,
-      "toolActivityCount": 4
-    },
-    {
-      "scenario": "traffic-cleaning",
-      "step": "json-repair-and-anomaly",
-      "passed": true,
-      "status": "completed",
-      "finalText": "10:00 有 1 条高延迟异常，10:02 的每分钟事件数超过阈值；统计已在 PostgreSQL 内完成。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [
-        "result:result_dfbc52a5-cffa-4e56-86dc-7352c6f3cf19"
-      ],
-      "activityCount": 14,
-      "toolActivityCount": 12
-    },
-    {
-      "scenario": "big-science",
-      "step": "partition-statistics",
-      "passed": true,
-      "status": "completed",
-      "finalText": "两个实验各包含 6 个样本和 12000 条观测，统计由分区表原生完成。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [
-        "result:result_97f8cf94-3330-46e7-8af8-ae99bd89f538"
-      ],
-      "activityCount": 16,
-      "toolActivityCount": 14
-    },
-    {
-      "scenario": "big-science",
-      "step": "large-bounded-result",
-      "passed": true,
-      "status": "completed",
-      "finalText": "大结果查询已完成，最多 1000 行的交互结果可单独读取或导出。",
-      "deliveryStatus": "verified",
-      "evidenceRefs": [
-        "result:result_15c4aef2-1ff1-4868-9b8d-b09029d30a68"
-      ],
-      "activityCount": 6,
-      "toolActivityCount": 4
+      "testFile": "packages/agent-host/test/database-agent-postgres.integration.test.ts",
+      "database": "dbagent_core_db_test",
+      "passed": true
     }
   ]
 }

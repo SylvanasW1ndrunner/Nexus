@@ -54,7 +54,6 @@
     "model-catalog:update": "node scripts/update-model-catalog.mjs",
     "test:llm-multi-model-live": "pnpm build:terminal && node scripts/run-multi-model-tool-live-test.mjs",
     "test:llm-ollama-live": "pnpm build:terminal && node scripts/run-ollama-connection-live-test.mjs",
-    "test:agent-multi-model-live": "pnpm build:terminal && node scripts/run-multi-model-agent-live-test.mjs",
     "build": "turbo build",
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",

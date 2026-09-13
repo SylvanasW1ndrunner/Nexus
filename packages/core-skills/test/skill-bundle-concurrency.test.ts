@@ -17,6 +17,8 @@ const captureGate = vi.hoisted(() => ({
   reached: undefined as (() => void) | undefined,
   release: undefined as Promise<void> | undefined,
   triggered: false,
+  zeroDevicePath: '',
+  shiftedInodePath: '',
 }));
 
 vi.mock('node:fs/promises', async () => {
@@ -30,9 +32,14 @@ vi.mock('node:fs/promises', async () => {
         captureGate.reached?.();
         await captureGate.release;
       }
-      return await (actual.lstat as (...arguments_: unknown[]) => ReturnType<typeof actual.lstat>)(
+      const information = await (actual.lstat as (...arguments_: unknown[]) => ReturnType<typeof actual.lstat>)(
         ...input,
       );
+      if (path === captureGate.zeroDevicePath) return statWithIdentity(information, { dev: 0 });
+      if (path === captureGate.shiftedInodePath) {
+        return statWithIdentity(information, { dev: 0, ino: 0 });
+      }
+      return information;
     },
   };
 });
@@ -46,6 +53,8 @@ afterEach(async () => {
   captureGate.reached = undefined;
   captureGate.release = undefined;
   captureGate.triggered = false;
+  captureGate.zeroDevicePath = '';
+  captureGate.shiftedInodePath = '';
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -54,6 +63,69 @@ afterEach(async () => {
 });
 
 describe('Skill bundle atomic capture', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'discovers a stable Skill when lstat has no Windows device id',
+    async () => {
+      const root = await temporaryDirectory();
+      const bundleRoot = join(root, 'atomic-skill');
+      await writeBundleVersion(bundleRoot, 1);
+      captureGate.zeroDevicePath = comparablePath(join(bundleRoot, 'SKILL.md'));
+
+      const registry = new SkillRegistry({
+        sources: [{ scope: 'project', path: root }],
+      });
+
+      await expect(registry.refresh()).resolves.toMatchObject({
+        skills: [{ name: 'atomic-skill' }],
+        issues: [],
+      });
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'reads a cached revision when lstat has no Windows device id',
+    async () => {
+      const root = await temporaryDirectory();
+      const cacheRoot = join(root, '.revision-cache');
+      const bundleRoot = join(root, 'atomic-skill');
+      await writeBundleVersion(bundleRoot, 1);
+      const first = new SkillRegistry({
+        sources: [{ scope: 'project', path: root }],
+        revisionCachePath: cacheRoot,
+      });
+      await first.refresh();
+      const revisionRef = first.inspect('atomic-skill')!.revisionRef;
+      captureGate.zeroDevicePath = comparablePath(
+        join(cacheRoot, 'manifests', `${revisionRef.revisionId}.json`),
+      );
+
+      const restarted = new SkillRegistry({ revisionCachePath: cacheRoot });
+
+      await expect(restarted.loadRevision(revisionRef)).resolves.toMatchObject({
+        instructions: 'version-1',
+      });
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'rejects a different inode even when lstat has no Windows device id',
+    async () => {
+      const root = await temporaryDirectory();
+      const bundleRoot = join(root, 'atomic-skill');
+      await writeBundleVersion(bundleRoot, 1);
+      captureGate.shiftedInodePath = comparablePath(join(bundleRoot, 'SKILL.md'));
+      const registry = new SkillRegistry({
+        sources: [{ scope: 'project', path: root }],
+      });
+
+      const result = await registry.refresh();
+
+      expect(result.skills).toEqual([]);
+      expect(result.issues).toHaveLength(1);
+      expect(result.issues[0]?.message).toContain('changed before capturing resource');
+    },
+  );
+
   it('retries the entire bundle when an already-read file changes before capture completes', async () => {
     const root = await temporaryDirectory();
     const cacheRoot = join(root, '.revision-cache');
@@ -169,4 +241,17 @@ function versionOf(content: string): number {
 
 function comparablePath(path: string): string {
   return path.replace(/\\/gu, '/').toLowerCase();
+}
+
+function statWithIdentity<T extends { dev: number | bigint; ino: number | bigint }>(
+  information: T,
+  identity: Partial<Pick<T, 'dev' | 'ino'>>,
+): T {
+  return new Proxy(information, {
+    get(target, property, receiver) {
+      if (property === 'dev' && identity.dev !== undefined) return identity.dev;
+      if (property === 'ino' && identity.ino !== undefined) return identity.ino;
+      return Reflect.get(target, property, receiver);
+    },
+  });
 }

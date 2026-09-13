@@ -19,6 +19,7 @@
     "@dbagent/core-agent": "workspace:*",
     "@dbagent/core-skills": "workspace:*",
     "@dbagent/shared": "workspace:*",
+    "@vscode/ripgrep": "1.18.0",
     "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {

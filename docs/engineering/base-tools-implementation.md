@@ -15,6 +15,10 @@
 - 始终加载的基础 Tool exposure 基线为 14 个；`result_read` 后必须依次注册
   `result_materialize` 与 `result_save`。三者都不注册跨调用 verifier，不要求自己是最后一次 Tool 调用，
   也不裁决 Run 的最终态。
+- `workspace_search` 是始终加载的基础 Tool，而非环境发现后才启用的 Capability。其默认搜索后端使用
+  `@vscode/ripgrep` 随 npm 安装提供的、当前平台选择的 `rg` 可执行文件；不会要求用户另行安装 ripgrep，
+  也不会在运行时下载二进制。Adapter 仍允许 Host/Test 注入 `executable`，且注入路径或受损安装无法启动时
+  保留 `ripgrep_not_found` 的 typed unavailable 合同。搜索保持本地、`shell:false` 和私有快照边界。
 - `result_materialize` 经 Artifact Store 的 owner-scoped 内容打开接口流式复制原始字节，单次最多 64 MiB，
   并在复制中检查字节数、摘要、deadline 和取消。它写入 Run-scoped 的
   `.schemanaut/runtime/materialized/` 临时目录：随机临时名完成校验后原子发布，同一 Run/`contentRef` 复用；

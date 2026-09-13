@@ -6,6 +6,8 @@ import { Socket } from 'node:net';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { writePostgresFunctionalReport } from './lib/postgres-functional-report.mjs';
+import { buildPostgresTestUrl } from './lib/postgres-test-url.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 if (process.argv.includes('--live-llm')) {
@@ -22,23 +24,33 @@ const command = hasLocalVitest
     : 'pnpm';
 const scenarioReportDirectory = join(root, 'reports', 'postgres-scenarios');
 const scenarioRunId = `${new Date().toISOString().replaceAll(/[:.]/g, '-')}-${randomUUID()}`;
+const testDatabase = 'dbagent_core_db_test';
 process.env.DBAGENT_TEST_RUN_ID = scenarioRunId;
 
 await resetScenarioReports();
 await assertPostgresReachable();
 await prepareDatabases();
 
-await runVitest('packages/core-db/test/postgres.integration.test.ts', {
-  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
-});
-await runVitest('packages/core-db/test/postgres-connector.integration.test.ts', {
-  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
-});
-await runVitest('packages/agent-host/test/postgres.integration.test.ts', {
-  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
-});
-await runVitest('packages/agent-host/test/postgres-scenarios.integration.test.ts', {
-  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
+const functionalTestFiles = [
+  'packages/core-db/test/postgres.integration.test.ts',
+  'packages/core-db/test/postgres-connector.integration.test.ts',
+  'packages/agent-host/test/database-agent-postgres.integration.test.ts',
+];
+const completedFunctionalTestFiles = [];
+for (const testFile of functionalTestFiles) {
+  await runVitest(testFile, {
+    DBAGENT_TEST_PG_DATABASE: testDatabase,
+    ...(testFile === 'packages/agent-host/test/database-agent-postgres.integration.test.ts'
+      ? { SCHEMANAUT_TEST_POSTGRES_URL: buildPostgresTestUrl(process.env, testDatabase) }
+      : {}),
+  });
+  completedFunctionalTestFiles.push(testFile);
+}
+await writePostgresFunctionalReport({
+  reportPath: join(scenarioReportDirectory, 'functional.json'),
+  runId: scenarioRunId,
+  database: testDatabase,
+  testFiles: completedFunctionalTestFiles,
 });
 if (process.env.DBAGENT_RUN_AGENT_LIVE === '1') {
   await runVitest('packages/agent-host/test/general-agent.live.integration.test.ts', {
@@ -46,7 +58,7 @@ if (process.env.DBAGENT_RUN_AGENT_LIVE === '1') {
   });
 }
 await runNodeScript('scripts/tests/postgres-scenario-performance-suite.mjs', {
-  DBAGENT_TEST_PG_DATABASE: 'dbagent_core_db_test',
+  DBAGENT_TEST_PG_DATABASE: testDatabase,
 });
 await writeScenarioManifest();
 
@@ -73,7 +85,10 @@ async function writeScenarioManifest() {
     functional.runId !== scenarioRunId ||
     performance.runId !== scenarioRunId ||
     functional.passed !== true ||
-    performance.passed !== true
+    performance.passed !== true ||
+    functional.actualSuiteCount !== functional.expectedSuiteCount ||
+    functional.actualSuiteCount !== functional.suites?.length ||
+    !functional.suites?.every((suite) => suite.passed === true)
   ) {
     throw new Error('Scenario reports do not belong to this successful test run.');
   }
@@ -119,7 +134,7 @@ async function writeScenarioManifest() {
   const manifest = {
     generatedAt: new Date().toISOString(),
     runId: scenarioRunId,
-    database: 'dbagent_core_db_test',
+    database: testDatabase,
     git,
     fixtures: {
       files: fixtureFiles,
@@ -129,7 +144,7 @@ async function writeScenarioManifest() {
       functional: {
         path: 'functional.json',
         sha256: sha256(functionalText),
-        runCount: functional.actualRunCount,
+        suiteCount: functional.actualSuiteCount,
         passed: functional.passed,
       },
       performance: {

@@ -1,6 +1,60 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { writePostgresFunctionalReport } from '../lib/postgres-functional-report.mjs';
+import { buildPostgresTestUrl } from '../lib/postgres-test-url.mjs';
 import { mergePostgresPerformanceReports } from '../lib/postgres-performance-report.mjs';
+
+test('builds the Agent PostgreSQL URL from test defaults and URL-encodes credentials', () => {
+  assert.equal(
+    buildPostgresTestUrl({}, 'dbagent_core_db_test'),
+    'postgres://postgres:postgres@127.0.0.1:5432/dbagent_core_db_test',
+  );
+  assert.equal(
+    buildPostgresTestUrl({
+      DBAGENT_TEST_PG_HOST: 'postgres.example.test',
+      DBAGENT_TEST_PG_PORT: '5544',
+      DBAGENT_TEST_PG_USER: 'agent:user',
+      DBAGENT_TEST_PG_PASSWORD: 'pa:ss@word',
+    }, 'dbagent_core_db_test'),
+    'postgres://agent%3Auser:pa%3Ass%40word@postgres.example.test:5544/dbagent_core_db_test',
+  );
+});
+
+test('writes an honest functional report for the three executed PostgreSQL integration suites', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'schemanaut-postgres-functional-report-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reportPath = join(directory, 'functional.json');
+  const runId = 'postgres-contract-run';
+  const testFiles = [
+    'packages/core-db/test/postgres.integration.test.ts',
+    'packages/core-db/test/postgres-connector.integration.test.ts',
+    'packages/agent-host/test/database-agent-postgres.integration.test.ts',
+  ];
+
+  await writePostgresFunctionalReport({
+    reportPath,
+    runId,
+    database: 'dbagent_core_db_test',
+    testFiles,
+  });
+
+  const report = JSON.parse(await readFile(reportPath, 'utf8'));
+  assert.equal(report.runId, runId);
+  assert.equal(report.database, 'dbagent_core_db_test');
+  assert.equal(report.expectedSuiteCount, 3);
+  assert.equal(report.actualSuiteCount, 3);
+  assert.equal(report.expectedRunCount, undefined);
+  assert.equal(report.actualRunCount, undefined);
+  assert.equal(report.passed, true);
+  assert.deepEqual(report.suites, testFiles.map((testFile) => ({
+    testFile,
+    database: 'dbagent_core_db_test',
+    passed: true,
+  })));
+});
 
 test('merges isolated scenario reports without changing their measurements', () => {
   const common = {

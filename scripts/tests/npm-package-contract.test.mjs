@@ -135,6 +135,12 @@ test('public runtime dependencies exactly match the runtime workspace dependency
   assert.deepEqual(PUBLIC_RUNTIME_DEPENDENCIES, runtimeDependencyClosure);
 });
 
+test('bundled workspace search keeps its selector in both runtime dependency boundaries', () => {
+  const coreToolsManifest = JSON.parse(readFileSync(resolve('packages/core-tools/package.json'), 'utf8'));
+  assert.equal(coreToolsManifest.dependencies['@vscode/ripgrep'], '1.18.0');
+  assert.equal(PUBLIC_RUNTIME_DEPENDENCIES['@vscode/ripgrep'], '1.18.0');
+});
+
 test('all current workspace imports are rewritten into the local distribution', () => {
   const source = RUNTIME_WORKSPACES.map(({ packageName }) => `import '${packageName}';`).join('\n');
   const dist = resolve('release-test', 'dist');
@@ -193,10 +199,11 @@ test('external import discovery reduces package subpaths to declared package roo
   const source = [
     "import { Client } from 'pg';",
     "import schema from '@modelcontextprotocol/sdk/types.js';",
+    "await import('@vscode/ripgrep');",
     "import './local.js';",
     "import 'node:path';",
   ].join('\n');
-  assert.deepEqual(externalPackageSpecifiers(source), ['@modelcontextprotocol/sdk', 'pg']);
+  assert.deepEqual(externalPackageSpecifiers(source), ['@modelcontextprotocol/sdk', '@vscode/ripgrep', 'pg']);
 });
 
 test('package allowlist rejects state, source maps, SDK, and Server files', () => {

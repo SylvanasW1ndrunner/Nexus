@@ -5,15 +5,17 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   NPM_ARCHIVE_NAME,
   NPM_PACKAGE_NAME,
@@ -95,6 +97,7 @@ try {
   runInstalledCli(['skills', '-C', projectRoot]);
   runInstalledCli(['sessions', '-C', projectRoot]);
   runInstalledCli(['-C', projectRoot], '/exit\n');
+  await verifyBundledWorkspaceSearch();
 
   process.stdout.write(
     `Verified local install: ${NPM_PACKAGE_NAME}@${NPM_PACKAGE_VERSION}\n` +
@@ -248,6 +251,78 @@ function verifyPackageImportBoundary() {
   if (result.error) throw result.error;
   if (result.status === 0 || !result.stderr.includes('ERR_PACKAGE_PATH_NOT_EXPORTED')) {
     throw new Error('Installed package does not block internal JavaScript subpath imports.');
+  }
+}
+
+async function verifyBundledWorkspaceSearch() {
+  const fixtureRoot = join(installRoot, 'bundled-workspace-search-fixture');
+  const fixtureName = 'bundled-search-fixture.txt';
+  const query = 'schemanaut-bundled-ripgrep-smoke';
+  mkdirSync(fixtureRoot, { recursive: true });
+  writeFileSync(join(fixtureRoot, fixtureName), `${query}\n`, 'utf8');
+
+  // The public package intentionally blocks subpath imports. This release-only
+  // check reaches the sealed internal runtime by absolute URL so it proves the
+  // installed dependency graph, rather than the development workspace or PATH.
+  const installedCoreTools = join(
+    installRoot,
+    'node_modules',
+    ...NPM_PACKAGE_NAME.split('/'),
+    'dist',
+    'internal',
+    'core-tools',
+    'index.js',
+  );
+  const { createWorkspaceToolGeneration } = await import(pathToFileURL(installedCoreTools).href);
+  if (typeof createWorkspaceToolGeneration !== 'function') {
+    throw new Error('Installed package does not expose the sealed workspace Tool factory.');
+  }
+
+  const generation = createWorkspaceToolGeneration({ rootPath: fixtureRoot });
+  try {
+    const contribution = generation.contributions.find(
+      ({ definition }) => definition.name === 'workspace_search',
+    );
+    if (contribution === undefined) {
+      throw new Error('Installed package does not register workspace_search.');
+    }
+    const signal = new AbortController().signal;
+    const intent = await contribution.runtime.prepare(
+      { query },
+      {
+        hostId: 'npm-package',
+        projectId: 'npm-package',
+        sessionId: 'npm-package',
+        runId: 'npm-package',
+        turnId: 'npm-package',
+        invocationId: 'npm-package-workspace-search',
+        descriptor: { flatName: contribution.definition.name },
+        toolRevision: contribution.definition.toolRevision,
+        handlerRevision: contribution.definition.handlerRevision,
+        generation: 1,
+        limits: contribution.definition.limits,
+        signal,
+      },
+    );
+    const result = await contribution.runtime.execute(intent.input, {
+      hostId: 'npm-package',
+      projectId: 'npm-package',
+      sessionId: 'npm-package',
+      runId: 'npm-package',
+      turnId: 'npm-package',
+      invocationId: 'npm-package-workspace-search',
+      intent,
+      signal,
+      deadline: new Date(Date.now() + 10_000).toISOString(),
+    });
+    if (
+      result.status !== 'ok' ||
+      !result.matches.some((match) => match.path === fixtureName && match.match === query)
+    ) {
+      throw new Error('Installed package cannot execute default bundled workspace_search.');
+    }
+  } finally {
+    await generation.drain();
   }
 }
 

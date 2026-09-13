@@ -1296,7 +1296,10 @@ function sameFileIdentity(
   left: Awaited<ReturnType<typeof lstat>>,
   right: Awaited<ReturnType<typeof lstat>>,
 ): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
+  if (left.ino !== right.ino) return false;
+  return process.platform !== 'win32' || (left.dev !== 0 && right.dev !== 0)
+    ? left.dev === right.dev
+    : true;
 }
 
 function directoryEntriesSignature(

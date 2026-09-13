@@ -73,16 +73,25 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 - `corepack pnpm lint`：13/13 workspace package 通过。
 - 强制未缓存的 `corepack pnpm exec turbo test --concurrency=1 --force`：26/26 Turbo task 通过，共 1,829 项通过、25 项按环境合同跳过。
 - 全局企业权限规则边界：128 条配置通过，129 条在 Schema 校验阶段拒绝，与 Runtime 上限一致。
-- `corepack pnpm test:script-contracts`：43/43 项通过。
+- `corepack pnpm test:script-contracts`：45/45 项通过。
 - `corepack pnpm test:capability-runtime`：106/106 项通过。
-- `corepack pnpm test:npm-package:contracts`：11/11 项通过。
-- `corepack pnpm run ci`：本地完整 `verify` 流程通过，包含 LLM、数据库访问、公共合同、资源状态、
-  Schema knowledge、上下文压缩和 Agent Runtime 七组确定性性能门禁；原始结果保存在 `reports/`。
+- `corepack pnpm test:npm-package:contracts`：12/12 项通过。
+- 本地完整 `corepack pnpm run ci` 的类型检查、Lint、全部工作区测试、脚本合同以及前三组性能门禁通过；
+  资源状态性能门禁在当前 Windows 主机降频期间超时。相同源码和基准在该主机此前为 1.15 秒，本次为
+  6.14–8.71 秒，同时整段 JavaScript 观测吞吐下降约 4–7 倍，因此未改代码或放宽阈值，最终性能结论交由
+  受控的 GitHub Actions 环境复验。
 - 隔离安装 smoke 成功验证 `--help`、`init`、`skills`、`sessions` 和交互退出。
 
 ### 真实环境证据与未重跑项
 
+- GitHub Actions Windows（Node.js 22.13.0、pnpm 9.15.4）于 2026-09-13 暴露 Skill 磁盘发现回归：
+  Node 22 在 Windows 上可为同一文件分别报告 `lstat().dev === 0` 与 `FileHandle.stat().dev !== 0`。
+  Registry 仍以相同 `ino`、mtime、size、路径和内容摘要验证稳定性；修复仅在 win32 且任一 `dev` 为
+  0 时不把该字段作为身份判据，不放宽不同 `ino` 的替换检测。
 - 既有真实模型证据显示：代码修复、动态 Git、电商数据库分析和长结果数据库分析已通过；churn-ML 失败，因为
   Run 是 `interrupted`。
 - 付费模型、外部 PostgreSQL、浏览器、容器和 Forge 均未在本次发布收口中重跑。
-- GitHub 上的 Linux、Windows 与 PostgreSQL CI 作业尚未触发；需要推送 `dev` 后由远端执行。
+- 首次 GitHub Actions 发布复验（run `34757899868`）已触发，并暴露三个发布环境合同缺口：Windows
+  Node 22 文件设备号差异、Linux 缺少系统 `rg`、PostgreSQL 报告仍依赖已删除的旧占位测试。当前候选已分别
+  改为 Windows 稳定文件身份判定、随 npm 包分发搜索运行时，以及由三组真实 PostgreSQL 集成测试生成并校验
+  同次运行报告；最终状态以修复提交推送后的最新 Actions 运行结果为准。

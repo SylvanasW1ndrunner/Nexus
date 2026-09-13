@@ -49,6 +49,7 @@ export const RUNTIME_WORKSPACES = Object.freeze([
 
 export const PUBLIC_RUNTIME_DEPENDENCIES = Object.freeze({
   '@modelcontextprotocol/sdk': '^1.29.0',
+  '@vscode/ripgrep': '1.18.0',
   ajv: '8.20.0',
   'node-sql-parser': '^5.4.0',
   pg: '^8.13.1',

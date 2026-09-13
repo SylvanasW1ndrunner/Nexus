@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { rgPath } from '@vscode/ripgrep';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createNoReplaceWorkspaceMutationAdapter } from '../src/workspace-mutation-adapter.js';
 import { createNodeWorkspaceMutationPrimitive } from '../src/node-workspace-mutation-primitive.js';
+import { createRipgrepWorkspaceSearchBackend } from '../src/workspace-search-rg-adapter.js';
 import { createWorkspaceToolGeneration } from '../src/workspace-tools.js';
 
 const directories: string[] = [];
@@ -21,15 +23,42 @@ describe('workspace prepared tools', () => {
     expect(generation.contributions.find(({ definition }) => definition.name === 'workspace_apply_patch')?.definition).toMatchObject({ access: 'destructive', recoveryClass: 'transactional' });
   });
 
-  it('returns ordinary bounded payloads for list, read, and search', async () => {
+  it('uses the bundled ripgrep runtime for ordinary bounded list, read, and search payloads', async () => {
     const root = await temporaryDirectory();
     await writeFile(join(root, 'revenue.sql'), 'SELECT sum(net_amount) FROM orders;\n', 'utf8');
+    expect((await stat(rgPath)).isFile()).toBe(true);
     const generation = createWorkspaceToolGeneration({ rootPath: root });
     await expect(execute(generation, 'workspace_list', { path: '.' })).resolves.toMatchObject({ status: 'ok', entries: [{ path: 'revenue.sql', type: 'file' }] });
     await expect(execute(generation, 'workspace_read', { path: 'revenue.sql', maxBytes: 16 })).resolves.toMatchObject({ status: 'ok', path: 'revenue.sql' });
     await expect(execute(generation, 'workspace_search', { query: 'net_amount' })).resolves.toMatchObject({ status: 'ok', matches: [{ path: 'revenue.sql', line: 1 }] });
     await expect(execute(generation, 'workspace_apply_patch', { action: 'update', path: 'revenue.sql', expectedDigest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000', edits: [{ oldText: 'orders', newText: 'paid_orders' }] })).resolves.toMatchObject({ status: 'unavailable', reason: 'conditional_mutation_backend_unavailable' });
   }, 20_000);
+
+  it('keeps the explicit unavailable contract when an injected ripgrep executable is absent', async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, 'revenue.sql'), 'SELECT sum(net_amount) FROM orders;\n', 'utf8');
+    const backend = createRipgrepWorkspaceSearchBackend({ executable: join(root, 'missing-rg') });
+    const targetIdentity = await portableIdentity(root);
+
+    await expect(backend.search({
+      targetPath: root,
+      targetIdentity,
+      relativePath: '.',
+      ownerKey: 'workspace-search-test',
+      query: 'net_amount',
+      mode: 'literal',
+      caseSensitive: false,
+      binary: 'exclude',
+      globs: [],
+      maxFiles: 10,
+      maxScanBytes: 1024 * 1024,
+      maxResults: 10,
+      maxOutputBytes: 1024 * 1024,
+      timeoutMs: 10_000,
+      signal: activeSignal(),
+    })).resolves.toMatchObject({ status: 'unavailable', reason: 'ripgrep_not_found' });
+    await expect(backend.drain()).resolves.toBeUndefined();
+  });
 
   it('rejects a stale read digest before any payload is emitted', async () => {
     const root = await temporaryDirectory();
@@ -138,6 +167,21 @@ describe('streamed workspace mutation publication', () => {
 });
 
 async function temporaryDirectory(): Promise<string> { const path = await mkdtemp(join(tmpdir(), 'nexus-workspace-')); directories.push(path); return path; }
+
+async function portableIdentity(path: string) {
+  const information = await stat(path, { bigint: true });
+  return {
+    kind: 'filesystem-entry' as const,
+    canonicalPath: path,
+    type: information.isFile() ? 'file' as const : information.isDirectory() ? 'directory' as const : 'other' as const,
+    device: information.dev.toString(),
+    inode: information.ino.toString(),
+    sizeBytes: Number(information.size),
+    mtimeMs: Number(information.mtimeMs),
+    mtimeNs: information.mtimeNs.toString(),
+    ctimeNs: information.ctimeNs.toString(),
+  };
+}
 
 function byteStream(...chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream({

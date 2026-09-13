@@ -92,7 +92,7 @@ type CapturedResultSet = Readonly<{
  * optimistic before/after identity validation, not an atomic mutation fence.
  */
 export function createRipgrepWorkspaceSearchBackend(options: RipgrepWorkspaceSearchOptions = {}): WorkspaceSearchBackend {
-  const executable = options.executable ?? 'rg';
+  const executable = options.executable;
   const resultSets = new Map<string, CapturedResultSet>();
   const activeOperations = new Set<Promise<unknown>>();
   let cleanupFailed = false;
@@ -202,7 +202,9 @@ export function createRipgrepWorkspaceSearchBackend(options: RipgrepWorkspaceSea
 
         const remainingMs = deadlineAt - Date.now();
         if (remainingMs <= 0) return timedOutResult(scannedFiles, scannedBytes);
-        const run = await runRipgrep(executable, snapshotDirectory, request.relativePath, { ...request, timeoutMs: remainingMs }, activeProcesses);
+        const resolvedExecutable = await resolveRipgrepExecutable(executable);
+        if (resolvedExecutable === undefined) return unavailable('ripgrep_not_found');
+        const run = await runRipgrep(resolvedExecutable, snapshotDirectory, request.relativePath, { ...request, timeoutMs: remainingMs }, activeProcesses);
         throwIfAborted(request.signal); throwIfDeadline(deadlineAt);
         if (run.status === 'unavailable') return unavailable(run.reason);
         const id = randomUUID();
@@ -246,6 +248,16 @@ export function createRipgrepWorkspaceSearchBackend(options: RipgrepWorkspaceSea
       });
     },
   });
+}
+
+/** Loads the npm-selected binary lazily so a missing optional platform package degrades only search. */
+async function resolveRipgrepExecutable(executable: string | undefined): Promise<string | undefined> {
+  if (executable !== undefined) return executable;
+  try {
+    return (await import('@vscode/ripgrep')).rgPath;
+  } catch {
+    return undefined;
+  }
 }
 
 async function captureSnapshot(handle: FileHandle, path: string, size: number, deadlineAt: number, signal: AbortSignal, cleanupFailed: (error: unknown) => void): Promise<{ digest: string; bytes: number }> {

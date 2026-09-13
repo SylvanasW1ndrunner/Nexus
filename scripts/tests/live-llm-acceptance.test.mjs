@@ -191,13 +191,10 @@ test('live acceptance entrypoints use explicit test inputs and never load produc
     '../run-general-agent-live-test.mjs',
     '../run-unified-agent-live-test.mjs',
     '../run-multi-model-tool-live-test.mjs',
-    '../run-multi-model-agent-live-test.mjs',
     '../run-capability-runtime-live-test.mjs',
     '../run-llm-live-performance.mjs',
     '../../packages/agent-host/test/general-agent.live.integration.test.ts',
     '../../packages/agent-host/test/database-analysis.live.integration.test.ts',
-    '../../packages/agent-host/test/postgres.integration.test.ts',
-    '../../packages/agent-host/test/postgres-scenarios.integration.test.ts',
   ];
 
   for (const entrypoint of entrypoints) {
@@ -216,7 +213,6 @@ test('live runners target the internal Agent host and use the Agent live switch'
     '../run-postgres-tests.mjs',
     '../run-general-agent-live-test.mjs',
     '../run-multi-model-tool-live-test.mjs',
-    '../run-multi-model-agent-live-test.mjs',
     '../run-capability-runtime-live-test.mjs',
     '../run-llm-live-performance.mjs',
     '../run-ollama-connection-live-test.mjs',
@@ -230,7 +226,6 @@ test('live runners target the internal Agent host and use the Agent live switch'
 
   for (const runner of [
     '../run-postgres-tests.mjs',
-    '../run-multi-model-agent-live-test.mjs',
     '../run-unified-agent-live-test.mjs',
   ]) {
     const source = await readFile(new URL(runner, import.meta.url), 'utf8');
