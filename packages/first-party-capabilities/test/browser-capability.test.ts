@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -120,7 +120,7 @@ describe('Browser capability', () => {
     if (!screenshot) throw new Error('browser_screenshot was not contributed');
     const prepared = await screenshot.runtime.prepare({ pageRef, outputPath: 'shot.png', fullPage: true }, context(screenshot));
     const result = await screenshot.runtime.execute(prepared.input, executeContext(prepared));
-    expect(result).toMatchObject({ status: 'ok', sizeBytes: 3, path: join(root, 'shot.png') });
+    expect(result).toMatchObject({ status: 'ok', sizeBytes: 3, path: join(await realpath(root), 'shot.png') });
     expect([...await readFile(join(root, 'shot.png'))]).toEqual([1, 2, 3]);
     await expect(screenshot.runtime.prepare({ pageRef, outputPath: 'shot.png' }, context(screenshot))).rejects.toThrow('already exists');
     const raced = await screenshot.runtime.prepare({ pageRef, outputPath: 'raced.png' }, context(screenshot));
@@ -139,7 +139,7 @@ describe('Browser capability', () => {
     expect(tools.map(tool => tool.definition.name)).toEqual(['browser_test']);
     const test = tools[0]!;
     await test.runtime.prepare({ testPath: 'page.spec.ts' }, context(test));
-    expect(preparedCommands[0]).toMatchObject({ argv: ['test', join(root, 'page.spec.ts')], requested: { network: true, externalWrite: true, destructive: true, credentials: false, unknownRisk: true } });
+    expect(preparedCommands[0]).toMatchObject({ argv: ['test', await realpath(join(root, 'page.spec.ts'))], requested: { network: true, externalWrite: true, destructive: true, credentials: false, unknownRisk: true } });
     expect(JSON.stringify(test.definition.inputSchema)).not.toMatch(/cookie|authorization|storage|endpoint/i);
   });
 
