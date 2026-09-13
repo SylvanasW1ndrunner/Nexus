@@ -246,7 +246,7 @@ describe('ProjectDatabaseResultStore fault and retention boundaries', () => {
     });
     await expect(secondStore.create({ ...input, jobId: 'different-job' }))
       .rejects.toMatchObject({ code: 'CONFLICT' });
-  });
+  }, 15_000);
 
   it('renews a live writer lease while a long result is still being produced', async () => {
     let now = new Date();

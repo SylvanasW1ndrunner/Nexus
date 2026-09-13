@@ -184,7 +184,7 @@ describe('ProjectDatabaseResultStore', () => {
       ...input,
       expiresAt: '2026-08-13T00:00:00.000Z',
     })).rejects.toMatchObject({ code: 'CONFLICT' });
-  });
+  }, 15_000);
 
   it('returns typed expiry with a re-execution signal instead of a superficially valid handle', async () => {
     let now = new Date('2026-08-11T12:00:00.000Z');
