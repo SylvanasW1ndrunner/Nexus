@@ -92,7 +92,8 @@ async function runRetention(retainResult: ToolResultRetentionHandler, maxArtifac
       type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'],
       additionalProperties: false,
     },
-    limits: { ...contribution.definition.limits, maxArtifactBytes },
+    limits: { ...contribution.definition.limits, timeoutMs: 10_000, maxArtifactBytes },
+    execution: { ...contribution.definition.execution, timeoutMs: 10_000 },
     completion: { role: 'deliverable', group: 'retained-result' },
   }, {
     ...contribution.runtime,
@@ -111,7 +112,17 @@ async function runRetention(retainResult: ToolResultRetentionHandler, maxArtifac
   });
   const observation = (await runtime.executeEligible())[0];
   if (observation === undefined) throw new Error('Expected retained Tool observation.');
-  return { journal, artifactStore, observation, runId: created.runId, invocationId: committed.invocations[0]!.invocationId, dispose: () => { snapshot.release(); return Promise.resolve(); } };
+  return {
+    journal,
+    artifactStore,
+    observation,
+    runId: created.runId,
+    invocationId: committed.invocations[0]!.invocationId,
+    dispose: async () => {
+      await artifactStore.drain();
+      snapshot.release();
+    },
+  };
 }
 
 function retained(body: string, identity: string) {

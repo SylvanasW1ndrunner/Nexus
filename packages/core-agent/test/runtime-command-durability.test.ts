@@ -257,7 +257,7 @@ describe('Runtime Command durable concurrency, receipts and projection bounds', 
   });
 
   it('enforces the explicit child-count boundary before committing the overflow child', async () => {
-    const fixture = await startedInvocationFixture('projection-count');
+    const fixture = await startedInvocationFixture('projection-count', 5 * 60_000);
     const application = await runtimeCommandApplication(fixture.journal);
     let revision = fixture.runRevision;
     for (let index = 0; index < MAX_RUNTIME_CHILDREN; index += 1) {
@@ -385,7 +385,7 @@ async function runtimeCommandApplication(
   return Reflect.apply(open, undefined, [journal]) as RuntimeCommandApplication;
 }
 
-async function startedInvocationFixture(label: string) {
+async function startedInvocationFixture(label: string, leaseTtlMs = 60_000) {
   const directory = await mkdtemp(join(tmpdir(), `runtime-command-durability-${label}-`));
   temporaryDirectories.push(directory);
   const filePath = join(directory, 'journal.db');
@@ -399,7 +399,7 @@ async function startedInvocationFixture(label: string) {
   const scope = { ...scopeSeed, runId: ingress.runId };
   const ownerId = `owner-${label}`;
   const lease = await journal.acquireRunLease({
-    projectId: scope.projectId, runId: scope.runId, ownerId, ttlMs: 60_000,
+    projectId: scope.projectId, runId: scope.runId, ownerId, ttlMs: leaseTtlMs,
   });
   const leaseReference = { ownerId: lease.ownerId, fencingToken: lease.fencingToken };
   const turnId = `turn-${label}`;
