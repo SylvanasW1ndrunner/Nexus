@@ -101,7 +101,7 @@ describe('result materialization', () => {
     const root = await temporaryDirectory();
     const first = new ResultMaterializationStore({ projectRoot: root });
     const second = new ResultMaterializationStore({ projectRoot: root });
-    const racedParent = join(root, '.schemanaut');
+    const racedParent = join(await realpath(root), '.schemanaut');
     let arrivals = 0;
     let release!: () => void;
     const bothArrived = new Promise<void>(resolve => { release = resolve; });
@@ -133,7 +133,7 @@ describe('result materialization', () => {
 
   it('rejects a file installed during the materialization root create race', async () => {
     const root = await temporaryDirectory();
-    const racedParent = join(root, '.schemanaut');
+    const racedParent = join(await realpath(root), '.schemanaut');
     let realEexists = 0;
     filesystem.mkdir.mockImplementation(async (...args: Parameters<typeof mkdir>) => {
       if (args[0] !== racedParent) return await filesystem.originalMkdir(...args);
@@ -155,7 +155,7 @@ describe('result materialization', () => {
 
   it('preserves a non-EEXIST mkdir failure during materialization initialization', async () => {
     const root = await temporaryDirectory();
-    const racedParent = join(root, '.schemanaut');
+    const racedParent = join(await realpath(root), '.schemanaut');
     const denied = Object.assign(new Error('mkdir denied'), { code: 'EACCES' });
     filesystem.mkdir.mockImplementation(async (...args: Parameters<typeof mkdir>) => {
       if (args[0] === racedParent) throw denied;
@@ -169,7 +169,7 @@ describe('result materialization', () => {
   it('rejects a link installed during the materialization root create race', async context => {
     const root = await temporaryDirectory();
     const external = await temporaryDirectory();
-    const racedParent = join(root, '.schemanaut');
+    const racedParent = join(await realpath(root), '.schemanaut');
     let realEexists = 0;
     let linkError: unknown;
     filesystem.mkdir.mockImplementation(async (...args: Parameters<typeof mkdir>) => {
@@ -384,7 +384,7 @@ describe('result_save', () => {
       status: 'ok',
       contentRef,
       path: 'exports/result.ndjson',
-      canonicalPath: join(root, 'exports', 'result.ndjson'),
+      canonicalPath: join(await realpath(root), 'exports', 'result.ndjson'),
       contentType: 'application/x-ndjson',
       sizeBytes: bytes.byteLength,
       digest: digest(bytes),

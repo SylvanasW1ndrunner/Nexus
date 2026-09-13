@@ -92,9 +92,9 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
 - 既有真实模型证据显示：代码修复、动态 Git、电商数据库分析和长结果数据库分析已通过；churn-ML 失败，因为
   Run 是 `interrupted`。
 - 付费模型、外部 PostgreSQL、浏览器、容器和 Forge 均未在本次发布收口中重跑。
-- 前十三次 GitHub Actions 发布复验（runs `34757899868`、`34761714006`、`34763736333`、`34764907067`、
+- 前十四次 GitHub Actions 发布复验（runs `34757899868`、`34761714006`、`34763736333`、`34764907067`、
   `34767085788`、`34768751691`、`34770047563`、`34770517148`、`34772944987`、`34773360220`、
-  `34774169435`、`34774552168`、`34775106060`）
+  `34774169435`、`34774552168`、`34775106060`、`34777446514`）
   先后暴露发布环境合同
   缺口：Windows Node 22 文件设备号差异、Linux 缺少系统 `rg`、PostgreSQL 报告依赖已删除的旧占位测试、
   确定性测试夹具依赖 Windows 短路径与 `.cmd`、慢速 Windows 文件 I/O 下的测试同步与预算不足，以及 Linux
@@ -134,4 +134,7 @@ SHA-256 和 `dirty=false` 状态由同目录 `PROVENANCE.json` 记录。尚未�
   `realpath` 长路径被用于同一边界比较，以及同一文件的 path stat 与 handle stat 之间可能只有一侧报告
   `dev=0`。当前候选统一使用 native canonical path，并从已存在祖先规范化尚未创建的 Runtime/`NODE_PATH`
   尾段；文件身份仍严格比较 inode、类型、大小和时间，仅在 win32 且任一 device 为零时把 device 视为不可用。
-  Symlink、junction、越界路径和不同 inode 的替换仍被拒绝。最终状态以最新 Actions 运行结果为准。
+  Symlink、junction、越界路径和不同 inode 的替换仍被拒绝。第十四次运行确认 Linux 全量、PostgreSQL、npm
+  候选以及 Windows 上的 Core DB、Core Agent 和主要 Core Tools 生产路径通过；剩余六项失败来自测试夹具仍以
+  原始短路径匹配规范路径，包括四处 mkdir race hook、一个持久保存结果断言和一个手工构造的搜索身份。
+  当前候选让这些测试夹具同样以 `realpath` 表达被测边界，不修改生产行为。最终状态以最新 Actions 运行结果为准。

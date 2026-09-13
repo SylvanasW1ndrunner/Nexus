@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rgPath } from '@vscode/ripgrep';
@@ -169,10 +169,11 @@ describe('streamed workspace mutation publication', () => {
 async function temporaryDirectory(): Promise<string> { const path = await mkdtemp(join(tmpdir(), 'nexus-workspace-')); directories.push(path); return path; }
 
 async function portableIdentity(path: string) {
-  const information = await stat(path, { bigint: true });
+  const canonicalPath = await realpath(path);
+  const information = await stat(canonicalPath, { bigint: true });
   return {
     kind: 'filesystem-entry' as const,
-    canonicalPath: path,
+    canonicalPath,
     type: information.isFile() ? 'file' as const : information.isDirectory() ? 'directory' as const : 'other' as const,
     device: information.dev.toString(),
     inode: information.ino.toString(),
