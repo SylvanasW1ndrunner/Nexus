@@ -349,7 +349,6 @@ describe('production Agent Kernel factory recovery boundaries', () => {
     const recoveredKernel = createJournalAgentKernel(factoryOptions({
       journal,
       resolveModelSession: () => recoverySession,
-      leaseTtlMs: 1_000,
       ownerId: 'factory-recovery-owner-2',
     }));
     await expect(recoveredKernel.advance(run.runId)).resolves.toMatchObject({ state: 'Completed' });
