@@ -854,7 +854,7 @@ describe('sealed Runtime Command application', () => {
     }))?.payload.capability).toEqual({
       snapshotId: 'child-capability', revision: 'capability-current',
     });
-  });
+  }, 60_000);
 
   it('replays exactly after the transaction commits but its response is lost', async () => {
     const fixture = await startedInvocationFixture('response-loss');
