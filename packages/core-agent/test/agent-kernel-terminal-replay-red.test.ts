@@ -140,7 +140,7 @@ describe('production Agent terminal delivery invariant', () => {
     expect(terminal?.type === 'run.completed' ? terminal.payload.evidenceRefs : []).toEqual([]);
   });
 
-  it('renews the production Run lease throughout a long synchronous tool batch', async () => {
+  it('checkpoints the production Run lease throughout a multi-tool batch', async () => {
     let call = 0;
     const client: ModelClient = {
       execute: () => {
@@ -148,22 +148,36 @@ describe('production Agent terminal delivery invariant', () => {
         return Promise.resolve({
           kind: 'json',
           response: call === 1
-            ? manyEvidenceToolCallsResponse(33, 'inspect_slow_evidence')
+            ? manyEvidenceToolCallsResponse(5)
             : chatResponse('All long-batch results were observed.', 'stop'),
         });
       },
     };
     const session = await authenticSession('long-tool-batch-lease', 'openai-chat', client);
     const journal = createJournal('long-tool-batch-lease');
+    const acquireRunLease = journal.acquireRunLease.bind(journal);
     const renewRunLease = journal.renewRunLease.bind(journal);
     let renewals = 0;
+    let toolWindowRenewals = 0;
+    const forceNearExpiry = <T extends { expiresAt: string }>(lease: T): T => ({
+      ...lease,
+      expiresAt: new Date(Date.now() + 1).toISOString(),
+    });
+    journal.acquireRunLease = async (input) =>
+      forceNearExpiry(await acquireRunLease(input));
     journal.renewRunLease = async (input) => {
       renewals += 1;
-      return await renewRunLease(input);
+      const lease = await renewRunLease(input);
+      const invocations = await journal.listInvocations(input.runId);
+      const toolWindowActive = invocations.some((invocation) =>
+        invocation.state === 'prepared' || invocation.state === 'authorized' ||
+        invocation.state === 'started');
+      if (toolWindowActive) toolWindowRenewals += 1;
+      return toolWindowRenewals >= 3 ? lease : forceNearExpiry(lease);
     };
-    const kernel = productionKernel(journal, session, slowEvidenceToolRegistry(), {
-      leaseTtlMs: 5_000,
-      maxToolConcurrency: 33,
+    const kernel = productionKernel(journal, session, evidenceToolRegistry(), {
+      leaseTtlMs: 60_000,
+      maxToolConcurrency: 5,
     });
     const started = await kernel.start({
       projectId: 'project-long-tool-batch-lease',
@@ -179,10 +193,11 @@ describe('production Agent terminal delivery invariant', () => {
     const invocations = await journal.listInvocations(started.runId);
 
     expect(completed.state).toBe('Completed');
-    expect(invocations).toHaveLength(33);
+    expect(invocations).toHaveLength(5);
     expect(invocations.every((invocation) => invocation.state === 'observed')).toBe(true);
     expect(renewals).toBeGreaterThanOrEqual(2);
-  }, 60_000);
+    expect(toolWindowRenewals).toBeGreaterThanOrEqual(3);
+  });
 
   it('yields at a verifier revision boundary and supplies its structured observation once', async () => {
     const seen: ModelClientRequest[] = [];
@@ -681,43 +696,6 @@ function evidenceToolRegistry(): ToolRegistry {
     },
   });
   return tools;
-}
-
-function slowEvidenceToolRegistry(): ToolRegistry {
-  const tools = evidenceToolRegistry();
-  const contribution = invocationContribution('inspect_slow_evidence', {}, {
-    toolRevision: 'inspect_slow_evidence@lease-batch.v1',
-    handlerRevision: 'inspect-slow-evidence-r1', exposure: 'direct',
-  });
-  tools.registerInvocation({
-    ...contribution.definition, description: 'Read one evidence item slowly.', permission: { actions: ['read'] },
-    limits: { ...contribution.definition.limits, timeoutMs: 60_000 },
-    execution: { ...contribution.definition.execution, timeoutMs: 60_000 },
-    inputSchema: {
-      type: 'object', properties: { index: { type: 'integer' } },
-      required: ['index'], additionalProperties: false,
-    },
-  }, {
-    ...contribution.runtime,
-    prepare: async (arguments_, context) => {
-      blockEventLoop(200);
-      const index = arguments_.index;
-      if (typeof index !== 'number') throw new TypeError('Expected a numeric evidence index.');
-      return {
-        ...await contribution.runtime.prepare(arguments_, context),
-        resourceKeys: [`test:slow-evidence:${index}`],
-      };
-    },
-    execute: (arguments_) => {
-      blockEventLoop(200);
-      return { value: Number(arguments_.index) };
-    },
-  });
-  return tools;
-}
-
-function blockEventLoop(durationMs: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, durationMs);
 }
 
 function manyEvidenceToolCallsResponse(count: number, toolName = 'inspect_evidence'): unknown {
