@@ -115,12 +115,12 @@ describe('production Agent Kernel real process crash recovery', () => {
       crashing.child.kill('SIGKILL');
       await waitForExit(crashing.child, 5_000);
       liveChildren.delete(crashing.child);
-      await delay(fixture.worker.leaseTtlMs + 100);
 
       const recovering = startWorker({
         ...fixture.worker,
         phase: 'recover',
         leaseTtlMs: RECOVERY_LEASE_TTL_MS,
+        now: fixture.recoveryNow,
       });
       const recoveredExit = await waitForExit(recovering.child, RECOVERY_WORKER_TIMEOUT_MS);
       liveChildren.delete(recovering.child);
@@ -216,9 +216,11 @@ async function scenarioFixture(mode: CrashMode) {
   const runPath = join(directory, 'run.json');
   const resultPath = join(directory, 'result.json');
   const errorPath = join(directory, 'worker-error.json');
-  // The crashed owner's lease stays short so takeover is observable without slowing every case.
-  // Recovery uses its own production-like lease budget; renewal timing has separate acceptance.
-  const leaseTtlMs = 2_000;
+  // Keep crash-boundary execution independent from runner scheduling. Recovery advances the
+  // Journal clock beyond this lease instead of waiting for wall-clock expiry.
+  const now = '2100-01-01T00:00:00.000Z';
+  const leaseTtlMs = 60_000;
+  const recoveryNow = new Date(Date.parse(now) + leaseTtlMs + 1).toISOString();
   return {
     mode,
     directory,
@@ -230,6 +232,7 @@ async function scenarioFixture(mode: CrashMode) {
     runPath,
     resultPath,
     errorPath,
+    recoveryNow,
     worker: {
       mode,
       journalPath,
@@ -242,6 +245,7 @@ async function scenarioFixture(mode: CrashMode) {
       projectId,
       sessionId,
       leaseTtlMs,
+      now,
     },
   };
 }
@@ -295,6 +299,7 @@ type WorkerInput = Readonly<{
   projectId: string;
   sessionId: string;
   leaseTtlMs: number;
+  now: string;
 }>;
 
 type RunningWorker = Readonly<{

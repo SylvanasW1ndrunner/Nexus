@@ -45,6 +45,7 @@ type WorkerInput = Readonly<{
   projectId: string;
   sessionId: string;
   leaseTtlMs: number;
+  now: string;
 }>;
 
 const encoded = process.env.SCHEMANAUT_KERNEL_CRASH_INPUT;
@@ -53,7 +54,10 @@ const input = JSON.parse(encoded) as WorkerInput;
 
 async function main(): Promise<void> {
   const gates = createRuntimeGates();
-  const journal = new CrashBarrierJournal({ filePath: input.journalPath }, input);
+  const journal = new CrashBarrierJournal({
+    filePath: input.journalPath,
+    now: () => input.now,
+  }, input);
   const session = await authenticModelSession(input, modelClient(input, gates));
   const tools = toolCatalog(input);
   let identity = 0;
@@ -88,6 +92,7 @@ async function main(): Promise<void> {
     } : {}),
     ownerId: `kernel-${input.phase}-${input.mode}`,
     leaseTtlMs: input.leaseTtlMs,
+    now: () => Date.parse(input.now),
     createId: () => `${input.phase}_${input.mode}_${++identity}`,
   });
 
