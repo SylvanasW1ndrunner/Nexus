@@ -45,6 +45,7 @@ export function preparedToolIntent(options: Readonly<{
   handlerRevision?: string;
   recoveryClass?: ToolRecoveryClass;
   actionSummary?: string;
+  timeoutMs?: number;
 }> = {}): Readonly<{ intent: PreparedToolIntent; intentDigest: string }> {
   const toolName = options.toolName ?? 'query_database';
   const recoveryClass = options.recoveryClass ?? 'read';
@@ -81,7 +82,7 @@ export function preparedToolIntent(options: Readonly<{
     concurrency: readonly ? 'read' : 'write',
     resourceKeys: [`fixture:${toolName}`],
     limits: {
-      timeoutMs: 1_000,
+      timeoutMs: options.timeoutMs ?? 1_000,
       maxInputBytes: 4_096,
       maxOutputBytes: 65_536,
       maxArtifactBytes: 1_048_576,

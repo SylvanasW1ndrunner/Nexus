@@ -2540,7 +2540,7 @@ describe('ToolInvocationRuntime', () => {
     expect(await fixture.journal.countEvents('tool.unknown', 'project-a')).toBe(1);
     expect(await fixture.journal.countEvents('tool.succeeded', 'project-a')).toBe(0);
     expect(fixture.readCalls()).toBe(1);
-  }, 60_000);
+  });
 
   it('uses descriptor timeout metadata and never parses an Error message to classify timeout', async () => {
     const fixture = await createFixture({ mode: 'full-access', readDelayMs: 100, readTimeoutMs: 10 });

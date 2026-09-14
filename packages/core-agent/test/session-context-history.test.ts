@@ -138,7 +138,7 @@ describe('Journal-backed Session model history', () => {
     const tools = fixedBaselineRegistry();
     const inspect = invocationContribution('inspect_after_switch', { inspected: true }, {
       toolRevision: 'inspect-after-switch@1', handlerRevision: 'inspect-after-switch@1',
-      exposure: 'direct',
+      exposure: 'direct', timeoutMs: 15_000,
     });
     tools.registerInvocation(inspect.definition, inspect.runtime);
     const switchedKernel = kernel(

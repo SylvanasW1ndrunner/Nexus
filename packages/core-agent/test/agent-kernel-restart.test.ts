@@ -28,8 +28,10 @@ describe('Agent Kernel process restart recovery', () => {
     const fixture = await preparedFixture();
     const exited = await runWorker(fixture, 'before-commit');
     expect(exited.code, exited.output).toBe(73);
-    await delay(fixture.leaseTtlMs + 50);
-    const journal = new SqliteAgentJournal({ filePath: fixture.journalPath });
+    const journal = new SqliteAgentJournal({
+      filePath: fixture.journalPath,
+      now: () => fixture.recoveryNow,
+    });
     expect(await journal.listInvocations(fixture.runId)).toEqual([]);
     expect(await journal.countEvents('tool.proposed')).toBe(0);
     const kernel = productionKernel(journal, fixture.session, 'recovery-one');
@@ -45,8 +47,10 @@ describe('Agent Kernel process restart recovery', () => {
     const fixture = await preparedFixture();
     const exited = await runWorker(fixture, 'after-commit');
     expect(exited.code, exited.output).toBe(74);
-    await delay(fixture.leaseTtlMs + 50);
-    const journal = new SqliteAgentJournal({ filePath: fixture.journalPath });
+    const journal = new SqliteAgentJournal({
+      filePath: fixture.journalPath,
+      now: () => fixture.recoveryNow,
+    });
     const committed = await journal.getKernelRunProjection(scope(fixture.runId));
     if (committed === null) throw new Error('Missing Run');
     expect(committed.state).toBe('Finalizing');
@@ -64,7 +68,10 @@ async function preparedFixture() {
   roots.push(root);
   const journalPath = join(root, 'journal.db');
   const counterPath = join(root, 'provider-calls.txt');
-  const journal = new SqliteAgentJournal({ filePath: journalPath });
+  const crashNow = '2030-01-01T00:00:00.000Z';
+  const leaseTtlMs = 250;
+  const recoveryNow = new Date(Date.parse(crashNow) + leaseTtlMs + 1).toISOString();
+  const journal = new SqliteAgentJournal({ filePath: journalPath, now: () => crashNow });
   const ingress = await journal.createRun({
     projectId: 'project-1', sessionId: 'session-1', clientRequestId: 'request-1', input: 'go',
   });
@@ -92,9 +99,8 @@ async function preparedFixture() {
     turnId: 'turn-crash', expectedTurnRevision: 1,
   });
   await controller.release();
-  const leaseTtlMs = 250;
   return {
-    journalPath, counterPath, runId: ingress.runId, session, leaseTtlMs,
+    journalPath, counterPath, runId: ingress.runId, session, leaseTtlMs, crashNow, recoveryNow,
     expectedRunRevision: ready.run.revision,
   };
 }
@@ -128,6 +134,7 @@ function runWorker(
         runId: fixture.runId,
         expectedRunRevision: fixture.expectedRunRevision,
         leaseTtlMs: fixture.leaseTtlMs,
+        now: fixture.crashNow,
         mode,
       }),
     },
@@ -164,8 +171,4 @@ function productionKernel(
     promptRevision: 'prompt-r1', settingsRevision: 'settings-r1',
     permissionPolicyRevision: 'permission-r1', ownerId, leaseTtlMs: 2_000,
   });
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

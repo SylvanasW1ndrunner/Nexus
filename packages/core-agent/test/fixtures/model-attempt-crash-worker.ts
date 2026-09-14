@@ -8,10 +8,11 @@ type Input = {
   journalPath: string; counterPath: string; runId: string;
   expectedRunRevision: number;
   leaseTtlMs: number;
+  now: string;
   mode: 'before-commit' | 'after-commit';
 };
 const input = JSON.parse(process.env.DBAGENT_MODEL_CRASH_INPUT ?? '') as Input;
-const journal = new SqliteAgentJournal({ filePath: input.journalPath });
+const journal = new SqliteAgentJournal({ filePath: input.journalPath, now: () => input.now });
 const controller = new RunController({
   journal, projectId: 'project-1', sessionId: 'session-1', runId: input.runId,
   ownerId: 'crash-worker', leaseTtlMs: input.leaseTtlMs,

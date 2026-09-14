@@ -13,6 +13,7 @@ export function invocationContribution(
     exposure?: 'direct' | 'deferred' | 'hidden' | 'disabled';
     access?: ToolAccess;
     recoveryClass?: ToolRecoveryClass;
+    timeoutMs?: number;
   }> = {},
 ): ToolInvocationContribution {
   const toolRevision = options.toolRevision ?? `${name}@1`;
@@ -21,6 +22,7 @@ export function invocationContribution(
   const access = options.access ?? (recoveryClass === 'read' ? 'read' : 'write');
   const readonly = access === 'read';
   const concurrency = readonly ? 'read' as const : 'write' as const;
+  const timeoutMs = options.timeoutMs ?? 1_000;
   return {
     definition: {
       name, description: `Fixture Tool ${name}.`,
@@ -28,13 +30,15 @@ export function invocationContribution(
       dangerLevel: readonly ? 'safe' : 'medium', readonly, source: 'unknown',
       exposure: options.exposure ?? 'deferred', access, recoveryClass,
       toolRevision, handlerRevision, intentRevision: PREPARED_TOOL_INTENT_REVISION,
-      limits: { timeoutMs: 1_000, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
-      execution: { concurrency, timeoutMs: 1_000 },
+      limits: { timeoutMs, maxInputBytes: 4_096, maxOutputBytes: 65_536, maxArtifactBytes: 1_048_576, maxDepth: 8, maxRecords: 128 },
+      execution: { concurrency, timeoutMs },
       failurePolicy: { onUnknown: { failureKind: 'unknown', retryable: false } },
     },
     runtime: {
       revision: { toolName: name, toolRevision, handlerRevision, intentRevision: PREPARED_TOOL_INTENT_REVISION },
-      prepare: () => preparedToolIntent({ toolName: name, toolRevision, handlerRevision, recoveryClass }).intent,
+      prepare: () => preparedToolIntent({
+        toolName: name, toolRevision, handlerRevision, recoveryClass, timeoutMs,
+      }).intent,
       execute: () => payload,
     },
   };

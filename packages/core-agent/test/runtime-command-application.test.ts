@@ -37,11 +37,15 @@ import { createTestModelSession } from './model-session-fixture.js';
 import { validatedAttemptFixture } from './validated-attempt-fixture.js';
 
 const temporaryDirectories: string[] = [];
+const temporaryControllers: RunController[] = [];
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
   DatabaseSync: new (path: string) => NodeDatabaseSync;
 };
 
 afterEach(async () => {
+  await Promise.all(temporaryControllers.splice(0).map(async (controller) => {
+    await controller.release();
+  }));
   await Promise.all(temporaryDirectories.splice(0).map(async (directory) => {
     await rm(directory, { recursive: true, force: true });
   }));
@@ -1137,6 +1141,7 @@ async function startedInvocationFixture(label: string) {
     leaseTtlMs: 60_000,
   });
   const lease = await controller.acquire();
+  temporaryControllers.push(controller);
   const ownerId = `owner-${label}`;
   const leaseReference = { ownerId: lease.ownerId, fencingToken: lease.fencingToken };
   const turnId = `turn-${label}`;
