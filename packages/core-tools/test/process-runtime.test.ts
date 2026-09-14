@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ProcessRuntime } from '../src/process-runtime.js';
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { await Promise.allSettled(cleanups.splice(0).map(cleanup => cleanup())); });
+afterEach(async () => { await Promise.allSettled(cleanups.splice(0).map(cleanup => cleanup())); }, 20_000);
 const signal = () => new AbortController().signal;
 const owner = { hostId: 'local', sessionId: 'session-runtime', runId: 'run-runtime' };
 
