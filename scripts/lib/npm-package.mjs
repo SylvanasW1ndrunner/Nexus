@@ -82,7 +82,7 @@ export const FORBIDDEN_PACKAGE_PATTERNS = Object.freeze([
 ]);
 
 export const ALLOWED_PACKAGE_PATTERNS = Object.freeze([
-  /^(?:package\.json|README\.md|README\.zh-CN\.md|CONTRIBUTING\.md|SECURITY\.md|LICENSE|NOTICE|THIRD_PARTY_NOTICES\.md)$/,
+  /^(?:package\.json|README\.md|README\.en\.md|CONTRIBUTING\.md|SECURITY\.md|LICENSE|NOTICE|THIRD_PARTY_NOTICES\.md)$/,
   /^docs\/.+\.md$/,
   /^dist\/.+\.(?:js|json|md)$/,
 ]);

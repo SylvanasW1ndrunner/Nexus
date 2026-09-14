@@ -1,6 +1,6 @@
 export const PUBLIC_DOCUMENT_FILES = Object.freeze([
   'README.md',
-  'README.zh-CN.md',
+  'README.en.md',
   'CONTRIBUTING.md',
   'SECURITY.md',
   'docs/README.md',

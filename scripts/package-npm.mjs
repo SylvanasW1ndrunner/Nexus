@@ -279,7 +279,7 @@ function captureSourceInputs() {
     'scripts/release-local.mjs',
     'CHANGELOG.md',
     'README.md',
-    'README.zh-CN.md',
+    'README.en.md',
     'LICENSE',
     'NOTICE',
     'THIRD_PARTY_NOTICES.md',
