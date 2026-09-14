@@ -223,7 +223,10 @@ describe('Journal-backed Session model history', () => {
     const bounded = invocationContribution(
       'read_bounded_value',
       { rows: [{ value: 'bounded-observation' }], rowCount: 50_000 },
-      { toolRevision: 'read-bounded-value@1', handlerRevision: 'read-bounded-value@1', exposure: 'direct' },
+      {
+        toolRevision: 'read-bounded-value@1', handlerRevision: 'read-bounded-value@1',
+        exposure: 'direct', timeoutMs: 15_000,
+      },
     );
     tools.registerInvocation({
       ...bounded.definition,
