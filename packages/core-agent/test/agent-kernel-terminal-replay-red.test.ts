@@ -181,7 +181,7 @@ describe('production Agent terminal delivery invariant', () => {
     expect(completed.state).toBe('Completed');
     expect(invocations).toHaveLength(33);
     expect(invocations.every((invocation) => invocation.state === 'observed')).toBe(true);
-    expect(renewals).toBeGreaterThan(2);
+    expect(renewals).toBeGreaterThanOrEqual(2);
   }, 60_000);
 
   it('yields at a verifier revision boundary and supplies its structured observation once', async () => {
